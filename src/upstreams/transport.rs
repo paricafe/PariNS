@@ -24,6 +24,39 @@ use tokio_rustls::TlsConnector;
 use super::{Endpoint, Protocol, Settings, valid_address};
 use crate::{protocol, transport::tcp};
 
+// RFC 9111 sections 5.1 and 1.2.2: use the first Age member, ignore
+// malformed values, and saturate a valid integer that exceeds our TTL range.
+pub(super) fn http_age(headers: &http::HeaderMap) -> u32 {
+    let Some(value) = headers.get(http::header::AGE).and_then(|v| v.to_str().ok()) else {
+        return 0;
+    };
+    let value = value
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim_matches([' ', '\t']);
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return 0;
+    }
+    value.bytes().fold(0u32, |age, digit| {
+        age.saturating_mul(10)
+            .saturating_add(u32::from(digit - b'0'))
+    })
+}
+
+// RFC 8484 section 5.1 applies to downstream answers as well as local DNS
+// caching. Change RR TTLs only, not EDNS metadata or SOA RDATA parameters.
+pub(super) fn apply_http_age(response: &mut Message, age: u32) {
+    for record in response
+        .answers
+        .iter_mut()
+        .chain(&mut response.authorities)
+        .chain(&mut response.additionals)
+    {
+        record.ttl = record.ttl.saturating_sub(age);
+    }
+}
+
 pub(super) struct Client {
     pub spec: Endpoint,
     bootstrap: Vec<SocketAddr>,
@@ -31,7 +64,7 @@ pub(super) struct Client {
     tls: Arc<ClientConfig>,
     dot: Option<crate::tls::Upstream>,
     listeners: Vec<SocketAddr>,
-    quic: Mutex<Option<QuicConnection>>,
+    quic: Mutex<Option<Arc<QuicConnection>>>,
     h3: Option<super::h3::Client>,
 }
 
@@ -268,6 +301,7 @@ impl Client {
                         .eq_ignore_ascii_case("application/dns-message")),
                 "invalid DoH content type"
             );
+            let age = http_age(response.headers());
             let mut body = response.into_body();
             let mut bytes = Vec::new();
             while let Some(chunk) = body.data().await {
@@ -284,6 +318,7 @@ impl Client {
                 protocol::matches_response(&outbound, &response) && !response.truncation,
                 "invalid DoH response"
             );
+            apply_http_age(&mut response, age);
             response.metadata.id = query.id;
             Ok(response)
         };
@@ -292,12 +327,12 @@ impl Client {
         tokio::select! { biased; result = &mut transaction => result, result = &mut connection => { result?; transaction.await } }
     }
 
-    async fn quic_connection(&self, address: SocketAddr) -> Result<quinn::Connection> {
+    async fn quic_connection(&self, address: SocketAddr) -> Result<Arc<QuicConnection>> {
         let mut cached = self.quic.lock().await;
         if let Some(current) = cached.as_ref().filter(|c| {
             c.connection.remote_address() == address && c.connection.close_reason().is_none()
         }) {
-            return Ok(current.connection.clone());
+            return Ok(current.clone());
         }
         *cached = None;
         let bind = if address.is_ipv4() {
@@ -318,16 +353,19 @@ impl Client {
         config.transport_config(Arc::new(transport));
         endpoint.set_default_client_config(config);
         let connection = endpoint.connect(address, &self.spec.host)?.await?;
-        *cached = Some(QuicConnection {
+        let connection = Arc::new(QuicConnection {
             endpoint,
-            connection: connection.clone(),
+            connection,
         });
+        *cached = Some(connection.clone());
         Ok(connection)
     }
 
     async fn quic(&self, query: &Message, address: SocketAddr) -> Result<Message> {
         let connection = self.quic_connection(address).await?;
-        let (mut send, mut recv) = connection.open_bi().await?;
+        // Retain the endpoint owner for this entire request. Bootstrap rotation
+        // may replace the cached owner while this stream is still in flight.
+        let (mut send, mut recv) = connection.connection.open_bi().await?;
         let mut outbound = query.clone();
         outbound.metadata.id = 0;
         // EDNS TCP keepalive is hop-specific and prohibited on DoQ (RFC 9250).

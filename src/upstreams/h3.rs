@@ -208,6 +208,7 @@ impl Client {
                     .eq_ignore_ascii_case("application/dns-message")),
             "invalid DoH content type"
         );
+        let age = super::transport::http_age(response.headers());
         let mut bytes = Vec::new();
         while let Some(mut chunk) = stream.0.recv_data().await? {
             ensure!(
@@ -221,6 +222,7 @@ impl Client {
             protocol::matches_response(&outbound, &response) && !response.truncation,
             "invalid DoH response"
         );
+        super::transport::apply_http_age(&mut response, age);
         response.metadata.id = query.id;
         stream.1 = true;
         Ok(response)

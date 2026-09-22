@@ -184,7 +184,9 @@ fn identity(
     std::path::PathBuf,
     Arc<rustls::ServerConfig>,
 ) {
-    let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let generated =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".into(), "resolver.test".into()])
+            .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let ca = directory.path().join("ca.pem");
     std::fs::write(&ca, generated.cert.pem()).unwrap();
@@ -1003,4 +1005,342 @@ fn h3_listener_self_loop_is_checked_only_when_h3_is_enabled() {
     config.upstreams.validate_listeners(&config).unwrap();
     config.upstreams.prefer_h3 = true;
     assert!(config.upstreams.validate_listeners(&config).is_err());
+}
+
+fn age_answer(mut message: Message, negative: bool) -> Message {
+    use hickory_proto::rr::{
+        RData, Record,
+        rdata::{A, SOA},
+    };
+    message.metadata.message_type = MessageType::Response;
+    let name = message.queries[0].name().clone();
+    if negative {
+        message.metadata.response_code = ResponseCode::NXDomain;
+        message.add_authority(Record::from_rdata(
+            name,
+            601,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns.test.").unwrap(),
+                Name::from_ascii("admin.test.").unwrap(),
+                42,
+                900,
+                600,
+                86400,
+                601,
+            )),
+        ));
+    } else {
+        message.add_answer(Record::from_rdata(
+            name.clone(),
+            601,
+            RData::A(A::new(192, 0, 2, 1)),
+        ));
+        message.add_additional(Record::from_rdata(
+            name,
+            602,
+            RData::A(A::new(192, 0, 2, 2)),
+        ));
+    }
+    message
+}
+
+async fn age_upstream(
+    h3: bool,
+    age: Option<&'static str>,
+    negative: bool,
+) -> (
+    tempfile::TempDir,
+    Config,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use bytes::{Buf, Bytes};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (directory, ca, tls) = identity(if h3 { b"h3" } else { b"h2" });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let headers = move || {
+        let mut headers =
+            http::Response::builder().header("content-type", "application/dns-message");
+        if let Some(age) = age {
+            headers = headers.header("age", age);
+        }
+        headers.body(()).unwrap()
+    };
+    let (address, task) = if h3 {
+        let endpoint = h3_endpoint(&tls);
+        let address = endpoint.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let connection = endpoint.accept().await.unwrap().await.unwrap();
+            let mut server = h3::server::builder()
+                .build::<_, Bytes>(h3_quinn::Connection::new(connection.clone()))
+                .await
+                .unwrap();
+            while let Ok(Some(request)) = server.accept().await {
+                let (_, mut stream) = request.resolve_request().await.unwrap();
+                let handler = async {
+                    let mut bytes = Vec::new();
+                    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+                        bytes.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+                    }
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let answer = age_answer(Message::from_vec(&bytes).unwrap(), negative);
+                    stream.send_response(headers()).await.unwrap();
+                    stream
+                        .send_data(Bytes::from(answer.to_vec().unwrap()))
+                        .await
+                        .unwrap();
+                    stream.finish().await.unwrap();
+                };
+                tokio::pin!(handler);
+                tokio::select! { _ = &mut handler => {}, _ = server.accept() => panic!("closed early") }
+            }
+        });
+        (address, task)
+    } else {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let stream = tokio_rustls::TlsAcceptor::from(tls.clone())
+                    .accept(socket)
+                    .await
+                    .unwrap();
+                let mut connection = h2::server::handshake(stream).await.unwrap();
+                let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+                let handler = async {
+                    let mut bytes = Vec::new();
+                    let mut body = request.into_body();
+                    while let Some(chunk) = body.data().await {
+                        let chunk = chunk.unwrap();
+                        bytes.extend_from_slice(&chunk);
+                        body.flow_control().release_capacity(chunk.len()).unwrap();
+                    }
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let answer = age_answer(Message::from_vec(&bytes).unwrap(), negative);
+                    respond
+                        .send_response(headers(), false)
+                        .unwrap()
+                        .send_data(Bytes::from(answer.to_vec().unwrap()), true)
+                        .unwrap();
+                };
+                tokio::pin!(handler);
+                tokio::select! { _ = &mut handler => {}, _ = connection.accept() => panic!("closed early") }
+                while connection.accept().await.is_some() {}
+            }
+        });
+        (address, task)
+    };
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.prefer_h3 = h3;
+    config.cache.negative_ttl_cap_secs = 1000;
+    (directory, config, calls, task)
+}
+
+#[tokio::test]
+async fn doh_age_normalizes_downstream_ttls_and_cache_lifetime_for_h2_and_h3() {
+    use parins::{cache::Cache, ecs::Scope, resolver::Resolver};
+    use std::{sync::atomic::Ordering, time::Instant};
+    for h3 in [false, true] {
+        for negative in [false, true] {
+            for (age, remaining) in [
+                (None, 601),
+                (Some("0"), 601),
+                (Some("600"), 1),
+                (Some("999"), 0),
+                (Some("999999999999999999999999999"), 0),
+                (Some("invalid"), 601),
+                (Some("-1"), 601),
+                (Some("+1"), 601),
+                (Some("1.5"), 601),
+                (Some("600, 999"), 1),
+            ] {
+                let (_dir, config, calls, server) = age_upstream(h3, age, negative).await;
+                let resolver = Resolver::from_config(&config);
+                let mut query = Message::new(123, MessageType::Query, OpCode::Query);
+                query.add_query(Query::query(
+                    Name::from_ascii("age.test.").unwrap(),
+                    RecordType::A,
+                ));
+                let response = resolver
+                    .resolve(&query.to_vec().unwrap(), "127.0.0.1".parse().unwrap())
+                    .await
+                    .unwrap()
+                    .message;
+                let records = if negative {
+                    &response.authorities
+                } else {
+                    &response.answers
+                };
+                assert_eq!(
+                    records[0].ttl, remaining,
+                    "h3={h3} negative={negative} Age={age:?}"
+                );
+                if negative {
+                    let original = age_answer(query.clone(), true);
+                    assert_eq!(
+                        response.authorities[0].data, original.authorities[0].data,
+                        "SOA RDATA is not a record TTL"
+                    );
+                } else {
+                    assert_eq!(
+                        response.additionals[0].ttl,
+                        if remaining == 0 { 0 } else { remaining + 1 }
+                    );
+                }
+                let cache = Cache::new(config.cache.clone());
+                let now = Instant::now();
+                cache.insert(&query, &response, Scope::NoEcs, now);
+                assert_eq!(cache.get(&query, None, now).is_some(), remaining != 0);
+                assert!(
+                    cache
+                        .get(&query, None, now + Duration::from_secs(remaining.into()))
+                        .is_none()
+                );
+                if age == Some("600") {
+                    resolver
+                        .resolve(&query.to_vec().unwrap(), "127.0.0.1".parse().unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        calls.load(Ordering::SeqCst),
+                        1,
+                        "immediate resolver cache hit"
+                    );
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                    resolver
+                        .resolve(&query.to_vec().unwrap(), "127.0.0.1".parse().unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        calls.load(Ordering::SeqCst),
+                        2,
+                        "resolver expires the aged answer after one second"
+                    );
+                }
+                drop(resolver);
+                server.abort();
+                let _ = server.await;
+            }
+        }
+    }
+}
+
+async fn doq_rotation(cancel_old: bool) {
+    use hickory_proto::rr::{
+        RData, Record,
+        rdata::{A, AAAA},
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (_dir, ca, tls) = identity(b"doq");
+    let old_endpoint = h3_endpoint(&tls);
+    let port = old_endpoint.local_addr().unwrap().port();
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from((*tls).clone()).unwrap();
+    let new_endpoint = quinn::Endpoint::server(
+        quinn::ServerConfig::with_crypto(Arc::new(crypto)),
+        format!("[::1]:{port}").parse().unwrap(),
+    )
+    .unwrap();
+    let bootstrap = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(vec![format!("quic://resolver.test:{port}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.bootstrap = vec![bootstrap.local_addr().unwrap()];
+    let rotated = Arc::new(AtomicBool::new(false));
+    let current = rotated.clone();
+    let bootstrap_server = tokio::spawn(async move {
+        for _ in 0..4 {
+            let mut bytes = [0; 65535];
+            let (n, peer) = bootstrap.recv_from(&mut bytes).await.unwrap();
+            let mut response = Message::from_vec(&bytes[..n]).unwrap();
+            response.metadata.message_type = MessageType::Response;
+            let query = &response.queries[0];
+            let data = match (current.load(Ordering::SeqCst), query.query_type()) {
+                (false, RecordType::A) => Some(RData::A(A::new(127, 0, 0, 1))),
+                (true, RecordType::AAAA) => Some(RData::AAAA(AAAA("::1".parse().unwrap()))),
+                _ => None,
+            };
+            if let Some(data) = data {
+                // Zero is a short bootstrap TTL: the very next query must resolve again.
+                response.add_answer(Record::from_rdata(query.name().clone(), 0, data));
+            }
+            bootstrap
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+    });
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let (released, acknowledged) = tokio::sync::oneshot::channel();
+    let old_server = tokio::spawn(async move {
+        let connection = old_endpoint.accept().await.unwrap().await.unwrap();
+        let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+        let frame = recv.read_to_end(65537).await.unwrap();
+        started.send(()).unwrap();
+        tokio::select! {
+            result = wait => { result.unwrap(); },
+            _ = connection.closed() => panic!("address rotation closed an in-flight DoQ owner"),
+        }
+        released.send(()).unwrap();
+        if !cancel_old {
+            let response = verify_forwarded(Message::from_vec(&frame[2..]).unwrap(), &query());
+            write(&mut send, &response.to_vec().unwrap()).await;
+            send.finish().unwrap();
+        }
+        connection.closed().await;
+    });
+    let new_server = tokio::spawn(async move {
+        let connection = new_endpoint.accept().await.unwrap().await.unwrap();
+        let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+        let frame = recv.read_to_end(65537).await.unwrap();
+        let response = verify_forwarded(Message::from_vec(&frame[2..]).unwrap(), &query());
+        write(&mut send, &response.to_vec().unwrap()).await;
+        send.finish().unwrap();
+        connection.closed().await;
+    });
+    let client = client(&config).unwrap();
+    let clone = client.clone();
+    let old_request = tokio::spawn(async move { clone.exchange(&query()).await });
+    timeout(Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    rotated.store(true, Ordering::SeqCst);
+    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    release.send(()).unwrap();
+    acknowledged.await.unwrap();
+    if cancel_old {
+        old_request.abort();
+        assert!(old_request.await.unwrap_err().is_cancelled());
+    } else {
+        assert_eq!(old_request.await.unwrap().unwrap().message.id, 123);
+    }
+    // The retired owner closes as soon as its last request ends, even while
+    // the client (and the new owner) remain alive.
+    timeout(Duration::from_secs(2), old_server)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(client);
+    timeout(Duration::from_secs(2), new_server)
+        .await
+        .unwrap()
+        .unwrap();
+    bootstrap_server.await.unwrap();
+}
+
+#[tokio::test]
+async fn doq_bootstrap_rotation_preserves_old_and_new_requests() {
+    timeout(Duration::from_secs(5), doq_rotation(false))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn doq_rotated_owner_closes_when_last_request_is_cancelled() {
+    timeout(Duration::from_secs(5), doq_rotation(true))
+        .await
+        .unwrap();
 }

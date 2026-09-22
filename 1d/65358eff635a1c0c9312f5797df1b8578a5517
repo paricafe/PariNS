@@ -1,0 +1,30 @@
+src/server.rs
+  s_aa37914330e67a::t_64ae1c78281139 14-20,26,35-41,48-51,53-60,71,75-78,164
+  s_aa37914330e67a::t_32037267804ede 89-93,121-123,131-140,156,163,165-170,172
+tests/server.rs
+  s_aa37914330e67a::t_e5c9c8b92618e8 256-301,303,313,323-324,326
+  s_aa37914330e67a::t_0d2a061a94babe 302,304-312,314-322,325
+parins.example.toml
+  s_aa37914330e67a::t_64ae1c78281139 40-43
+src/config.rs
+  s_aa37914330e67a::t_64ae1c78281139 26-34,111
+  s_aa37914330e67a::t_e4b19348e40a4c 112-114,205
+README.md
+  s_aa37914330e67a::t_a4502f08e8b813 14-15,89-91,121,158,169-200,225
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1d65358eff635a1c0c9312f5797df1b8578a5517",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

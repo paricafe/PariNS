@@ -73,6 +73,18 @@ fn plain_edns(message: &Message) -> bool {
     })
 }
 
+fn superseding_edns(message: &Message) -> bool {
+    message.edns.as_ref().is_none_or(|edns| {
+        edns.version() == 0
+            && edns.options().options.iter().all(|(code, _)| {
+                // EDE (RFC 8914) is diagnostic information, not a transaction-
+                // specific option. It can supersede old knowledge without being
+                // admitted for later replay by plain_edns / prepare_response.
+                matches!(code, EdnsCode::Subnet | EdnsCode::Unknown(15))
+            })
+    })
+}
+
 struct Entry {
     id: u64,
     key: Arc<Key>,
@@ -468,7 +480,7 @@ impl Cache {
         // earlier knowledge. Transient errors and client-specific extensions do not.
         if response.truncation
             || response.signature.is_some()
-            || !plain_edns(response)
+            || !superseding_edns(response)
             || !matches!(
                 response.response_code,
                 ResponseCode::NoError | ResponseCode::NXDomain

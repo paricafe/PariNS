@@ -8,9 +8,10 @@ use std::{
 };
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
+        rdata::opt::EdnsOption,
         rdata::{A, SOA},
     },
 };
@@ -59,6 +60,24 @@ impl Upstream {
                     }
                     4 => protocol::error_response(&query, ResponseCode::ServFail),
                     5 => positive(&query, 0, 42),
+                    6 => with_ede(positive(&query, 0, 42)),
+                    7 => {
+                        let mut reply = protocol::error_response(&query, ResponseCode::NXDomain);
+                        reply.add_authority(Record::from_rdata(
+                            Name::from_ascii("test.").unwrap(),
+                            60,
+                            RData::SOA(SOA::new(
+                                Name::from_ascii("ns.test.").unwrap(),
+                                Name::from_ascii("hostmaster.test.").unwrap(),
+                                1,
+                                60,
+                                60,
+                                3600,
+                                60,
+                            )),
+                        ));
+                        with_ede(reply)
+                    }
                     _ => unreachable!(),
                 };
                 socket
@@ -113,6 +132,15 @@ fn fill(resolver: &Resolver, query: &Message, age: u64) {
         Scope::NoEcs,
         Instant::now() - Duration::from_secs(age),
     );
+}
+
+fn with_ede(mut response: Message) -> Message {
+    response
+        .edns
+        .get_or_insert_with(Edns::new)
+        .options_mut()
+        .insert(EdnsOption::Unknown(15, vec![0, 0]));
+    response
 }
 
 async fn resolve(resolver: &Resolver, query: &Message) -> Message {
@@ -181,6 +209,50 @@ async fn stale_positive_is_failure_only_and_has_bounded_reply_ttl() {
         resolve(&resolver, &query).await.response_code,
         ResponseCode::Refused
     );
+    resolver.shutdown_refresh().await;
+}
+
+#[tokio::test]
+async fn ede_success_prevents_subsequent_servfail_from_resurrecting_stale() {
+    let upstream = Upstream::start().await;
+    let mut config = upstream.config();
+    config.cache.prefetch.enabled = false;
+    let resolver = Resolver::from_config(&config);
+    let mut query = query("ede-stale.test.");
+    query.edns = Some(Edns::new());
+    for mode in [6, 7] {
+        fill(&resolver, &query, 61);
+        upstream.mode.store(mode, SeqCst);
+        let response = resolve(&resolver, &query).await;
+        assert_eq!(
+            response.response_code,
+            if mode == 6 {
+                ResponseCode::NoError
+            } else {
+                ResponseCode::NXDomain
+            }
+        );
+        assert!(
+            response
+                .edns
+                .as_ref()
+                .unwrap()
+                .options()
+                .options
+                .iter()
+                .any(|(code, _)| u16::from(*code) == 15)
+        );
+        upstream.mode.store(1, SeqCst);
+        let response = resolve(&resolver, &query).await;
+        assert_eq!(
+            response.response_code,
+            ResponseCode::ServFail,
+            "EDE success mode {mode} must supersede the old stale answer"
+        );
+        assert!(response.answers.is_empty());
+    }
+    assert_eq!(upstream.count.load(SeqCst), 4);
+    assert_eq!(resolver.cache().snapshot()["stale_hits"], 0);
     resolver.shutdown_refresh().await;
 }
 

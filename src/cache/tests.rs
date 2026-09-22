@@ -561,6 +561,58 @@ fn uncacheable_success_supersedes_old_fresh_and_stale_answers() {
     }
 }
 
+fn with_ede(mut response: Message) -> Message {
+    response
+        .edns
+        .get_or_insert_with(Edns::new)
+        .options_mut()
+        .insert(EdnsOption::Unknown(15, vec![0, 0]));
+    response
+}
+
+#[test]
+fn ede_success_supersedes_fresh_and_stale_without_admitting_diagnostics() {
+    for ttl in [1, 60] {
+        let mut cfg = CacheConfig::default();
+        cfg.stale.enabled = true;
+        let cache = Cache::new(cfg);
+        let mut q = query("ede.test.");
+        q.edns = Some(Edns::new());
+        let now = Instant::now();
+        let later = now + Duration::from_secs(2);
+        let mut negative = protocol::error_response(&q, ResponseCode::NXDomain);
+        negative.add_authority(Record::from_rdata(
+            Name::from_ascii("test.").unwrap(),
+            60,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns.test.").unwrap(),
+                Name::from_ascii("hostmaster.test.").unwrap(),
+                1,
+                60,
+                60,
+                3600,
+                60,
+            )),
+        ));
+        for response in [answer(&q, 2, 0), answer(&q, 2, 60), negative] {
+            cache.insert(&q, &answer(&q, 1, ttl), Scope::NoEcs, now);
+            assert!(cache.lookup(&q, None, later, true).is_some());
+            assert!(!cache.insert_if_epoch(
+                &q,
+                &with_ede(response),
+                Scope::NoEcs,
+                later,
+                cache.epoch(),
+            ));
+            assert!(
+                cache.lookup(&q, None, later, true).is_none(),
+                "old ttl={ttl}"
+            );
+            assert_eq!(cache.snapshot()["entries"], 0);
+        }
+    }
+}
+
 #[test]
 fn success_supersedes_overlaps_but_keeps_disjoint_and_private_namespaces() {
     for (old, new) in [
@@ -599,6 +651,59 @@ fn success_supersedes_overlaps_but_keeps_disjoint_and_private_namespaces() {
 }
 
 #[test]
+fn ede_supersession_keeps_disjoint_scopes_privacy_and_query_semantics() {
+    let mut cfg = CacheConfig::default();
+    cfg.stale.enabled = true;
+    let cache = Cache::new(cfg);
+    let mut q = query("ede-scope.test.");
+    q.edns = Some(Edns::new());
+    let mut other_query = q.clone();
+    other_query.metadata.checking_disabled = true;
+    let now = Instant::now();
+    for scope in [
+        network("192.0.0.0/16"),
+        network("198.51.100.0/24"),
+        network("2001:db8::/32"),
+        Scope::NoEcs,
+        Scope::Privacy { ipv4: true },
+        Scope::Privacy { ipv4: false },
+    ] {
+        cache.insert(&q, &answer(&q, 1, 1), scope, now);
+    }
+    cache.insert(
+        &other_query,
+        &answer(&other_query, 1, 1),
+        network("192.0.0.0/16"),
+        now,
+    );
+    let later = now + Duration::from_secs(2);
+    let mut response = with_ede(answer(&q, 2, 0));
+    response
+        .edns
+        .as_mut()
+        .unwrap()
+        .options_mut()
+        .insert(EdnsOption::Subnet("192.0.2.0/24".parse().unwrap()));
+    assert!(!cache.insert_if_epoch(&q, &response, network("192.0.2.0/24"), later, cache.epoch()));
+    assert!(cache.lookup(&q, ecs("192.0.2.0/24"), later, true).is_none());
+    assert!(
+        cache
+            .lookup(&other_query, ecs("192.0.2.0/24"), later, true)
+            .is_some()
+    );
+    for subnet in [
+        ecs("198.51.100.0/24"),
+        ecs("2001:db8:1::/56"),
+        None,
+        ecs("0.0.0.0/0"),
+        ecs("::/0"),
+    ] {
+        assert!(cache.lookup(&q, subnet, later, true).is_some());
+    }
+    assert_eq!(cache.snapshot()["entries"], 6);
+}
+
+#[test]
 fn failed_truncated_or_client_specific_updates_do_not_supersede() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("retain.test.");
@@ -611,11 +716,20 @@ fn failed_truncated_or_client_specific_updates_do_not_supersede() {
     edns.options_mut()
         .insert(EdnsOption::Unknown(10, vec![1; 8]));
     client_specific.edns = Some(edns);
+    let mut unknown_option = with_ede(answer(&q, 2, 0));
+    unknown_option
+        .edns
+        .as_mut()
+        .unwrap()
+        .options_mut()
+        .insert(EdnsOption::Unknown(65001, vec![1]));
     for response in [
         protocol::error_response(&q, ResponseCode::ServFail),
         protocol::error_response(&q, ResponseCode::Refused),
-        truncated,
-        client_specific,
+        with_ede(protocol::error_response(&q, ResponseCode::ServFail)),
+        with_ede(truncated),
+        with_ede(client_specific),
+        unknown_option,
     ] {
         assert!(!cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
         assert_eq!(
@@ -626,5 +740,12 @@ fn failed_truncated_or_client_specific_updates_do_not_supersede() {
     let old_epoch = cache.epoch();
     cache.invalidate(Some("unrelated.test"), None, None);
     assert!(!cache.insert_if_epoch(&q, &answer(&q, 2, 0), Scope::NoEcs, now, old_epoch));
+    assert!(!cache.insert_if_epoch(
+        &q,
+        &with_ede(answer(&q, 2, 0)),
+        Scope::NoEcs,
+        now,
+        old_epoch
+    ));
     assert!(cache.get(&q, None, now).is_some());
 }

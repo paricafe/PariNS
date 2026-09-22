@@ -138,3 +138,11 @@ circle.blocked-line { fill: #a05217; }
 @media (max-width: 768px) { .sidebar nav { overflow-x: auto; padding-bottom: .25rem; } .nav-button { flex: 0 0 auto; width: auto; white-space: nowrap; gap: .75rem; padding: .6rem .75rem; } .save-bar { position: static; } }
 @media (max-width: 540px) { .settings-fields { grid-template-columns: 1fr; } .range-buttons { gap: 0; } .range-buttons .button { padding: .5rem; } .chart-legend { gap: .75rem; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }
+.cache-table-wrap { overflow-x: auto; max-width: 100%; }
+.cache-table { border-collapse: collapse; width: 100%; font-size: .75rem; }
+.cache-table caption { text-align: left; padding: 1rem 0; }
+.cache-table th, .cache-table td { text-align: left; padding: .5rem; border-bottom: 1px solid var(--line); }
+.cache-rule { min-width: 0; margin-top: 1rem; }
+.cache-rule legend { padding: 0 .5rem; }
+.field select { width: 100%; min-height: 2.5rem; padding: .5rem; border: 1px solid var(--line); border-radius: .375rem; background: var(--surface, white); color: inherit; font: inherit; }
+#cache-inspection { margin-top: 1rem; overflow-wrap: anywhere; }

@@ -7,10 +7,23 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-for (const file of ["settings.js", "charts.js", "session.js"]) vm.runInThisContext(fs.readFileSync(path.join(root, "web", file), "utf8"), { filename: file });
+for (const file of ["settings.js", "charts.js", "session.js", "cache.js"]) vm.runInThisContext(fs.readFileSync(path.join(root, "web", file), "utf8"), { filename: file });
 const S = globalThis.PariSettings, C = globalThis.PariCharts;
 let passed = 0;
 function test(title, run) { run(); passed += 1; console.log(`ok ${passed} - ${title}`); }
+
+const ruleValues = { name: " Example.test ", suffix: "true", qtype: " aaaa ", bypass: "false", max_ttl_secs: "", negative_ttl_cap_secs: "30", prefetch: "", stale: "false" };
+test("cache rule form preserves inherit versus explicit false", () => assert.deepEqual(PariCache.decodeRule(ruleValues), { name: "Example.test", suffix: true, qtype: "AAAA", bypass: false, max_ttl_secs: null, negative_ttl_cap_secs: 30, prefetch: null, stale: false }));
+test("invalid cache rule TTL cannot silently become zero or NaN", () => { for (const value of ["0", "-1", "1.5", "NaN", "86401"]) assert.throws(() => PariCache.decodeRule({ ...ruleValues, max_ttl_secs: value })); });
+test("cache rule needs a domain", () => assert.throws(() => PariCache.decodeRule({ ...ruleValues, name: " " })));
+test("cache numeric controls mirror server bounds", () => {
+  const fields = S.pages.cache.groups.flatMap((group) => group.fields);
+  for (const [path, min, max] of [["cache.negative_percent", 0, 90], ["cache.prefetch.remaining_percent", 1, 90], ["cache.prefetch.max_inflight", 1, 256], ["cache.prefetch.rate_per_sec", 1, 10000], ["cache.stale.retention_secs", 1, 604800]]) {
+    const field = fields.find((field) => field.path === path);
+    assert.deepEqual([field.min, field.max], [min, max]);
+  }
+});
+test("cache rules replace as a whole without touching budgets", () => assert.deepEqual(S.diff({ cache: { max_bytes: 1000, rules: [PariCache.defaults()] } }, { cache: { max_bytes: 1000, rules: [] } }), { cache: { rules: [] } }));
 
 test("equal settings create no patch", () => assert.deepEqual(S.diff({ cache: { enabled: true }, filter: { block_exact: ["a.test"] } }, { cache: { enabled: true }, filter: { block_exact: ["a.test"] } }), {}));
 test("nested patches only contain edited fields", () => assert.deepEqual(S.diff({ cache: { enabled: true, max_bytes: 8388608 }, listen: "127.0.0.1:53" }, { cache: { enabled: false, max_bytes: 8388608 }, listen: "127.0.0.1:53" }), { cache: { enabled: false } }));

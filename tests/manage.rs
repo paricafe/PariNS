@@ -456,9 +456,193 @@ async fn configuration_forms_are_authenticated_read_only_and_apply_with_revision
         .request("GET", "/api/status", Some(&token), None)
         .await
         .expect(200);
-    assert!(next_status["generation"].as_u64().unwrap() > status["generation"].as_u64().unwrap());
+    assert_eq!(
+        next_status["generation"], status["generation"],
+        "cache-only apply keeps listener generation"
+    );
+    assert_eq!(next_status["listen"], status["listen"]);
     assert_dns(server.dns(&token).await).await;
     server.finish().await;
+}
+
+#[tokio::test]
+async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_and_revisioned() {
+    use hickory_proto::rr::{RData, Record, rdata::A};
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let mock = tokio::spawn(async move {
+        let mut bytes = [0; 4096];
+        loop {
+            let (len, peer) = upstream.recv_from(&mut bytes).await.unwrap();
+            let q = protocol::decode(&bytes[..len]).unwrap();
+            let mut r = protocol::error_response(&q, ResponseCode::NoError);
+            r.add_answer(Record::from_rdata(
+                q.queries[0].name().clone(),
+                60,
+                RData::A(A::new(192, 0, 2, 1)),
+            ));
+            upstream.send_to(&r.to_vec().unwrap(), peer).await.unwrap();
+        }
+    });
+    let server = Management::start(&directory).await;
+    for path in ["/api/cache/inspect", "/api/cache/invalidate"] {
+        server
+            .request("POST", path, None, Some(json!({})))
+            .await
+            .expect(401);
+    }
+    let source = configuration().replace("127.0.0.1:9", &upstream_addr.to_string());
+    let token = server.setup(&directory, &source).await;
+    let dns = server.dns(&token).await;
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for name in ["cache.test.", "other.test."] {
+        client
+            .send_to(&query(name).to_vec().unwrap(), dns)
+            .await
+            .unwrap();
+        let mut bytes = [0; 4096];
+        let len = timeout(DEADLINE, client.recv(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(protocol::decode(&bytes[..len]).unwrap().answers.len(), 1);
+    }
+    let status = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert_eq!(status["cache"]["entries"], 2);
+    let inspection = server
+        .request(
+            "POST",
+            "/api/cache/inspect",
+            Some(&token),
+            Some(json!({"name":"CACHE.test"})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(inspection["explanation"]["state"], "fresh");
+    assert_eq!(
+        inspection["inspection"]["variants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let unchanged = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert_eq!(
+        status["cache"], unchanged["cache"],
+        "inspection is non-touching"
+    );
+    for body in [
+        json!({"revision":1,"epoch":inspection["epoch"]}),
+        json!({"revision":1,"epoch":inspection["epoch"],"all":true,"name":"cache.test"}),
+    ] {
+        server
+            .request("POST", "/api/cache/invalidate", Some(&token), Some(body))
+            .await
+            .expect(422);
+    }
+    let selected = json!({"revision":1,"epoch":inspection["epoch"],"name":"cache.test", "qtype":"A", "scope":"no_ecs"});
+    let removed = server
+        .request(
+            "POST",
+            "/api/cache/invalidate",
+            Some(&token),
+            Some(selected.clone()),
+        )
+        .await
+        .expect(200);
+    assert_eq!(removed["removed"], 1);
+    server
+        .request(
+            "POST",
+            "/api/cache/invalidate",
+            Some(&token),
+            Some(selected),
+        )
+        .await
+        .expect(409);
+    let other = server
+        .request(
+            "POST",
+            "/api/cache/inspect",
+            Some(&token),
+            Some(json!({"name":"other.test"})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(other["explanation"]["state"], "fresh");
+    let next = format!(
+        "{source}\n[cache]\nmax_ttl_secs = 30\n[[cache.rules]]\nname = 'other.test'\nbypass = true\n"
+    );
+    assert_eq!(
+        server
+            .request(
+                "POST",
+                "/api/config/validate",
+                Some(&token),
+                Some(json!({"toml":next}))
+            )
+            .await
+            .expect(200)["restart_required"],
+        false
+    );
+    let applied = server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&token),
+            Some(json!({"toml":next,"revision":1})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(applied["restart_required"], false);
+    let after = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert_eq!(after["generation"], status["generation"]);
+    assert_eq!(after["listen"], status["listen"]);
+    assert_eq!(after["cache"]["entries"], 0);
+    let bypass = server
+        .request(
+            "POST",
+            "/api/cache/inspect",
+            Some(&token),
+            Some(json!({"name":"other.test"})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(bypass["explanation"]["state"], "bypass");
+    server
+        .request(
+            "POST",
+            "/api/cache/invalidate",
+            Some(&token),
+            Some(json!({"revision":1,"epoch":0,"all":true})),
+        )
+        .await
+        .expect(409);
+    let rollback = server
+        .request(
+            "POST",
+            "/api/config/rollback",
+            Some(&token),
+            Some(json!({"revision":2})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(rollback["restart_required"], false);
+    assert_dns(dns).await;
+    server.finish().await;
+    mock.abort();
+    let _ = mock.await;
 }
 
 #[tokio::test]

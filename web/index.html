@@ -9,6 +9,7 @@
   <script src="/settings.js" defer></script>
   <script src="/charts.js" defer></script>
   <script src="/session.js" defer></script>
+  <script src="/cache.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -77,10 +78,24 @@
           <p id="config-intro" class="intro"></p>
           <div class="config-tools"><span>统一配置草稿 <span id="config-revision" class="muted"></span></span><div class="button-group"><button id="reload-config" type="button" class="button quiet">重新加载</button><button id="export-config" type="button" class="button quiet">导出草稿</button></div></div>
           <p id="form-help" class="muted small">各页面共享一份草稿。修改表单后生成 TOML 会规范化格式并移除注释；未修改的配置值会保留。监控刷新不会覆盖草稿。</p>
+          <div id="cache-tools" hidden>
+            <section class="panel"><h2>缓存运行状态</h2><p class="muted small">当前缓存代次的统计；命中统计是缓存查找次数，不等同于 DNS 请求数。容量包含已过期但尚未清理的条目。数据每 5 秒刷新。</p><div id="cache-stats"></div><button id="cache-clear-all" class="button secondary" type="button">清空全部缓存…</button></section>
+            <section class="panel"><h2>解释一次缓存查找</h2><p class="muted small">只读检查当前已保存策略，不发送 DNS 请求，不改变命中计数。子网填写实际向上游发送的 ECS 前缀；留空为无 ECS，/0 为隐私命名空间。查询标志需与真实请求一致。</p>
+              <form id="cache-inspect-form"><div class="settings-fields">
+                <div class="field"><label for="cache-name">域名</label><input id="cache-name" required maxlength="254" placeholder="example.com" spellcheck="false"></div>
+                <div class="field"><label for="cache-qtype">记录类型</label><input id="cache-qtype" value="A" required maxlength="16"></div>
+                <div class="field"><label for="cache-subnet">出站 ECS 子网（可选）</label><input id="cache-subnet" placeholder="192.0.2.0/24" spellcheck="false"></div>
+                <div class="field"><label class="toggle-label"><input id="cache-edns" type="checkbox">请求包含 EDNS</label><label class="toggle-label"><input id="cache-do" type="checkbox">DO · DNSSEC 数据</label><label class="toggle-label"><input id="cache-cd" type="checkbox">CD · 禁用校验</label><label class="toggle-label"><input id="cache-rd" type="checkbox" checked>RD · 递归请求</label></div>
+              </div><button class="button secondary" type="submit">检查缓存</button></form>
+              <div id="cache-inspection" role="status" aria-live="polite"><p class="muted">输入域名后查看缓存状态与匹配原因。</p></div>
+              <div class="field"><label for="cache-clear-scope">精确清理的 ECS 范围（空为此域名所有范围）</label><input id="cache-clear-scope" placeholder="no_ecs、privacy_v4、privacy_v6 或返回的 CIDR" spellcheck="false"></div><button id="cache-clear-name" class="button quiet" type="button" disabled>清理已检查域名的此记录类型…</button>
+            </section>
+          </div>
           <div id="settings-forms"></div>
+          <section id="cache-rules-panel" class="panel" hidden><h2>按域名精细控制</h2><p class="muted small">精确匹配优先于后缀；更长的域名优先；指定记录类型优先；其余相同按列表先后。TTL 上限不会延长上游 TTL。规则的开关可覆盖全局默认，但缓存总开关始终优先。修改后需保存才能生效。</p><div id="cache-rules"></div></section>
           <p id="management-tls-help" class="notice" hidden>管理台 HTTPS 证书和监听地址由启动参数控制：--web-listen、--web-cert、--web-key。不能通过此页在线修改，也不会复用 DNS 监听证书。</p>
           <div id="advanced-editor" class="panel editor-panel" hidden><div class="editor-toolbar"><span>parins.toml · 高级编辑</span></div><label for="config-toml" class="sr-only">DNS 完整 TOML 配置</label><textarea id="config-toml" class="code-editor" rows="24" spellcheck="false" aria-describedby="editor-help"></textarea><p id="editor-help" class="muted small">TOML 与表单共享同一份草稿。切回表单时会由服务端解析；无效内容仍保留在这里。文件相对路径基于状态目录；管理账户和会话不在配置中。</p></div>
-          <div class="save-bar"><p class="muted small">保存会短暂重启 DNS 并清空缓存。所有配置页面的修改将一起应用。</p><div class="form-actions"><button id="rollback-config" type="button" class="button secondary" disabled>回滚上一份</button><span class="spacer"></span><button id="validate-config" type="button" class="button secondary">校验</button><button id="preview-config" type="button" class="button secondary">预览变更</button><button id="save-config" type="button" class="button primary" disabled>保存并应用</button></div></div>
+          <div class="save-bar"><p class="muted small">仅修改缓存配置无需重启 DNS，但会清空缓存；其他修改可能重启 DNS。所有页面的修改一起应用，确认前会说明影响。</p><div class="form-actions"><button id="rollback-config" type="button" class="button secondary" disabled>回滚上一份</button><span class="spacer"></span><button id="validate-config" type="button" class="button secondary">校验</button><button id="preview-config" type="button" class="button secondary">预览变更</button><button id="save-config" type="button" class="button primary" disabled>保存并应用</button></div></div>
           <section id="diff-panel" class="panel" hidden aria-labelledby="diff-title"><h2 id="diff-title" tabindex="-1">变更预览</h2><p class="muted small">− 表示旧内容，+ 表示新内容；显示首尾共同内容之间的变更区段。</p><pre id="config-diff" class="diff-output"></pre></section>
         </section>
       </div>

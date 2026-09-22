@@ -1,4 +1,5 @@
 //! Authenticated management plane. DNS forwarding remains in Server/Resolver.
+mod cache;
 mod https;
 mod runtime;
 mod settings;
@@ -311,6 +312,52 @@ async fn api(
         }
         ("GET", "/api/status") => Ok(shared.manager.lock().await.status()),
         ("GET", "/api/stats") => Ok(shared.history.lock().unwrap().view()),
+        ("POST", "/api/cache/inspect") => {
+            let input: cache::Inspect = decode(body)?;
+            let (query, subnet) = input.prepare().map_err(invalid)?;
+            let manager = shared.manager.lock().await;
+            let resolver = manager
+                .resolver()
+                .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
+            let cache = resolver.cache();
+            let now = Instant::now();
+            let name = query.queries[0].name().to_ascii();
+            Ok(json!({
+                "revision": manager.saved.as_ref().map_or(0, |s| s.revision),
+                "epoch": cache.epoch(),
+                "inspection": cache.inspect(&name, Some(query.queries[0].query_type()), now),
+                "explanation": cache.explain(&query, subnet, now),
+            }))
+        }
+        ("POST", "/api/cache/invalidate") => {
+            let input: cache::Invalidate = decode(body)?;
+            let (name, kind, scope) = input.selection().map_err(invalid)?;
+            let _permit =
+                shared.mutation.clone().try_acquire_owned().map_err(|_| {
+                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
+                })?;
+            let manager = shared.manager.lock().await;
+            if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "REVISION",
+                    "Configuration changed; refresh before invalidating",
+                ));
+            }
+            let resolver = manager
+                .resolver()
+                .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
+            let cache = resolver.cache();
+            if cache.epoch() != input.epoch {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "CACHE_EPOCH",
+                    "Cache changed; refresh before invalidating",
+                ));
+            }
+            let removed = cache.invalidate(name.as_deref(), kind, scope);
+            Ok(json!({"removed":removed,"epoch":cache.epoch(),"revision":input.revision}))
+        }
         ("GET", "/api/config") => {
             let manager = shared.manager.lock().await;
             let saved = manager.saved.as_ref().ok_or_else(internal)?;
@@ -334,14 +381,10 @@ async fn api(
         }
         ("POST", "/api/config/validate") => {
             let document: Document = decode(body)?;
-            shared
-                .manager
-                .lock()
-                .await
-                .validate(document.toml)
-                .await
-                .map_err(invalid)?;
-            Ok(json!({"valid":true,"restart_required":true}))
+            let manager = shared.manager.lock().await;
+            let restart_required = !manager.cache_only(&document.toml);
+            manager.validate(document.toml).await.map_err(invalid)?;
+            Ok(json!({"valid":true,"restart_required":restart_required}))
         }
         ("PUT", "/api/config") | ("POST", "/api/config/rollback") => {
             let (toml, revision) = if path.ends_with("rollback") {
@@ -380,8 +423,8 @@ async fn api(
                     ..saved.clone()
                 };
                 let revision = next.revision;
-                manager.apply(next).await.map_err(invalid)?;
-                Ok(json!({"revision":revision,"restart_required":true}))
+                let restarted = manager.apply(next).await.map_err(invalid)?;
+                Ok(json!({"revision":revision,"restart_required":restarted}))
             })
             .await
             .map_err(|_| internal())?
@@ -466,6 +509,10 @@ async fn handle_inner(
             "/charts.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_str!("../../web/charts.js"),
+            )),
+            "/cache.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/cache.js"),
             )),
             _ => None,
         };

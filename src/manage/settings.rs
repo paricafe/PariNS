@@ -67,10 +67,35 @@ fn overlay(target: &mut Value, changes: Map<String, Value>, delete_null: bool) {
                 changes,
                 delete_null,
             ),
+            Value::Array(mut values) if delete_null => {
+                // Config's schema has already accepted these optional nulls.
+                // TOML has no null representation, including within rule arrays.
+                for value in &mut values {
+                    omit_null_fields(value);
+                }
+                target.insert(key, Value::Array(values));
+            }
             value => {
                 target.insert(key, value);
             }
         }
+    }
+}
+
+fn omit_null_fields(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|_, value| !value.is_null());
+            for value in fields.values_mut() {
+                omit_null_fields(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                omit_null_fields(value);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -175,5 +200,20 @@ mod tests {
         assert!(parse(&format!("{BASE}#{}", "x".repeat(MAX_CONFIG))).is_err());
         assert!(change(BASE, json!({"filter_file":"x".repeat(MAX_CONFIG)})).is_err());
         assert_eq!(parse(BASE).unwrap()["toml"], BASE);
+    }
+
+    #[test]
+    fn cache_rule_inheritance_round_trips_through_toml() {
+        let rule = json!({"name":"example.test","suffix":true,"qtype":null,"bypass":false,
+            "max_ttl_secs":null,"negative_ttl_cap_secs":30,"prefetch":null,"stale":false});
+        let result = change(BASE, json!({"cache":{"rules":[rule.clone()]}})).unwrap();
+        assert_eq!(result["settings"]["cache"]["rules"][0], rule);
+        let removed = change(
+            result["toml"].as_str().unwrap(),
+            json!({"cache":{"rules":[]}}),
+        )
+        .unwrap();
+        assert_eq!(removed["settings"]["cache"]["rules"], json!([]));
+        assert!(change(BASE, json!({"cache":{"rules":[{"name":null}]}})).is_err());
     }
 }

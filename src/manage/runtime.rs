@@ -14,6 +14,7 @@ struct Running {
     task: JoinHandle<Result<()>>,
     grace: Duration,
     metrics: Arc<Metrics>,
+    resolver: Arc<crate::resolver::Resolver>,
     listen: SocketAddr,
     started: Instant,
 }
@@ -21,6 +22,7 @@ struct Running {
 impl Running {
     fn start(server: Server, grace: u64, listen: SocketAddr) -> Self {
         let metrics = server.metrics().clone();
+        let resolver = server.resolver().clone();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(server.run(async {
             let _ = stopped.await;
@@ -30,6 +32,7 @@ impl Running {
             task,
             grace: Duration::from_millis(grace + 2000),
             metrics,
+            resolver,
             listen,
             started: Instant::now(),
         }
@@ -80,7 +83,30 @@ impl Manager {
             "listen": running.map(|r| r.listen.to_string()),
             "uptime_seconds": running.map(|r| r.started.elapsed().as_secs()),
             "generation": self.generation,
+            "cache": running.map(|r| r.resolver.cache().snapshot()),
+            "refresh": running.map(|r| r.resolver.refresh_snapshot()),
         })
+    }
+
+    pub fn resolver(&self) -> Option<&Arc<crate::resolver::Resolver>> {
+        self.running
+            .as_ref()
+            .filter(|r| !r.task.is_finished())
+            .map(|r| &r.resolver)
+    }
+
+    /// Compare source documents, not the serialized compiled filter (which is
+    /// deliberately omitted by Config). Any non-cache change needs a restart.
+    pub fn cache_only(&self, next: &str) -> bool {
+        let Some(previous) = self.saved.as_ref().filter(|_| self.resolver().is_some()) else {
+            return false;
+        };
+        let split_cache = |text: &str| -> Option<(toml::Value, Option<toml::Value>)> {
+            let mut value: toml::Value = toml::from_str(text).ok()?;
+            let cache = value.as_table_mut()?.remove("cache");
+            Some((value, cache))
+        };
+        matches!((split_cache(&previous.toml), split_cache(next)), (Some((a, old)), Some((b, new))) if a == b && old != new)
     }
 
     pub fn statistics_snapshot(&self) -> (u64, Option<crate::metrics::Snapshot>) {
@@ -125,8 +151,21 @@ impl Manager {
         }
     }
 
-    pub async fn apply(&mut self, next: Stored) -> Result<()> {
+    /// Returns whether listener restart was necessary.
+    pub async fn apply(&mut self, next: Stored) -> Result<bool> {
         let config = self.validate(next.toml.clone()).await?;
+        if self.cache_only(&next.toml) {
+            // Manager's mutex serializes this transaction. There is no fallible
+            // IO after persist and no await between live swap and revision update.
+            let store = self.store.clone();
+            let saved = next.clone();
+            let resolver = self.resolver().expect("running cache-only target").clone();
+            tokio::task::spawn_blocking(move || store.save(&saved)).await??;
+            resolver.replace_cache(config.cache);
+            self.saved = Some(next);
+            self.last_error = None;
+            return Ok(false);
+        }
         let grace = config.shutdown_grace_ms;
         let previous = self.saved.clone();
         self.stop().await;
@@ -146,7 +185,7 @@ impl Manager {
                 self.running = Some(running);
                 self.saved = Some(next);
                 self.last_error = None;
-                Ok(())
+                Ok(true)
             }
             Err(error) => {
                 if let Some(previous) = previous {

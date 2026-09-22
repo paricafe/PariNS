@@ -3,6 +3,8 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const S = PariSettings, C = PariCharts;
+  const K = PariCache;
+  let readCacheRules = () => [], cacheStatus = null, cacheInspection = null, inspectedQuery = null;
   const state = { template: "", step: 0, original: "", revision: null, backup: false, dirty: false, busy: false, polling: false, settings: null, formDirty: false, settingsStale: false, view: "overview", samples: [], hours: 1, statsUpdated: 0, pendingFocus: null };
   const session = PariSession.createClient({ onUnauthorized: () => { clearStatistics(); page("login"); } });
   const api = session.request;
@@ -167,11 +169,13 @@
 
   function installSettings(settings) {
     state.settings = settings; state.formDirty = false; state.settingsStale = false;
-    S.render($("settings-forms"), settings, () => {
+    const changed = () => {
       state.formDirty = true;
       $("diff-panel").hidden = true;
       updateEditorState();
-    });
+    };
+    S.render($("settings-forms"), settings, changed);
+    readCacheRules = K.rules($("cache-rules"), settings.cache.rules || [], changed);
     displaySettingsPage();
   }
 
@@ -181,13 +185,17 @@
     $("advanced-editor").hidden = !advanced;
     $("form-help").hidden = advanced;
     $("management-tls-help").hidden = state.view !== "security";
+    $("cache-tools").hidden = state.view !== "cache";
+    $("cache-rules-panel").hidden = state.view !== "cache";
     $("config-title").textContent = S.pages[state.view]?.title || "高级配置";
     $("config-intro").textContent = S.pages[state.view]?.intro || "直接编辑完整 TOML。服务端负责解析与校验，未保存内容只留在当前页面。";
   }
 
   async function syncDraft() {
     if (!state.formDirty) return;
-    const changed = S.diff(state.settings, S.read($("settings-forms"), state.settings));
+    const next = S.read($("settings-forms"), state.settings);
+    next.cache.rules = readCacheRules();
+    const changed = S.diff(state.settings, next);
     if (Object.keys(changed).length) {
       const result = await api("config/preview", "POST", { toml: $("config-toml").value, changes: changed });
       $("config-toml").value = result.toml;
@@ -207,6 +215,10 @@
   }
 
   function unavailable() {
+    cacheStatus = null; cacheInspection = null; inspectedQuery = null;
+    K.renderStats($("cache-stats"), null, null);
+    $("cache-clear-all").disabled = true; $("cache-clear-name").disabled = true;
+    $("cache-inspection").replaceChildren();
     $("service-badge").textContent = "连接中断"; $("service-badge").classList.add("stopped");
     $("service-title").textContent = "无法获取最新状态";
     $("service-detail").textContent = "请检查管理服务与网络连接。历史草稿仍保留，旧统计不会显示为在线状态。";
@@ -242,6 +254,13 @@
   }
 
   function renderStatus(data) {
+    cacheStatus = data.running ? data : null;
+    K.renderStats($("cache-stats"), data.running ? data.cache : null, data.refresh);
+    $("cache-clear-all").disabled = !cacheStatus?.cache;
+    if (cacheInspection && (cacheInspection.revision !== data.revision || cacheInspection.epoch !== data.cache?.epoch)) {
+      cacheInspection = null; inspectedQuery = null; $("cache-clear-name").disabled = true;
+      $("cache-inspection").textContent = "缓存策略或失效代次已改变，请重新检查。";
+    }
     $("service-badge").textContent = data.running ? "正在运行" : "未运行";
     $("service-badge").classList.toggle("stopped", !data.running);
     $("service-title").textContent = data.running ? "DNS 服务已启动" : "DNS 服务尚未就绪";
@@ -300,7 +319,7 @@
 
   $("config-toml").addEventListener("input", () => { state.settingsStale = true; updateEditorState(); $("diff-panel").hidden = true; });
   $("preview-config").addEventListener("click", () => void action(async () => { await syncDraft(); preview(); notice("变更预览已生成，尚未保存。"); }));
-  $("validate-config").addEventListener("click", () => void action(async () => { await syncDraft(); await api("config/validate", "POST", { toml: $("config-toml").value }); notice("配置校验通过，尚未应用。保存会重启 DNS 实例并清空内存缓存。"); }));
+  $("validate-config").addEventListener("click", () => void action(async () => { await syncDraft(); const result = await api("config/validate", "POST", { toml: $("config-toml").value }); notice(result.restart_required ? "校验通过。保存将重启 DNS 并清空缓存。" : "校验通过。保存仅切换缓存策略并清空缓存，不重启 DNS 监听。"); }));
   $("reload-config").addEventListener("click", () => {
     const reload = async () => { await loadConfig(); notice("已读取最新保存配置。"); };
     if (state.dirty) confirmAction("放弃未保存修改？", "重新加载会覆盖当前编辑内容。如需保留，请取消并先导出。", "放弃并重新加载", reload);
@@ -309,7 +328,8 @@
   $("save-config").addEventListener("click", () => {
     void action(async () => {
       await syncDraft(); preview(); notice("");
-    confirmAction("保存并重启 DNS？", "配置会在校验后保存，并短暂重启 DNS 实例。正在处理的请求可能中断，内存缓存将清空；旧配置将保留一份用于回滚。", "保存并应用", async () => {
+      const impact = await api("config/validate", "POST", { toml: $("config-toml").value });
+    confirmAction(impact.restart_required ? "保存并重启 DNS？" : "保存缓存策略？", impact.restart_required ? "配置将短暂重启 DNS，正在处理的请求可能中断，缓存将清空；旧配置保留用于回滚。" : "DNS 监听保持运行，旧缓存与后台刷新将失效；新请求使用新策略，旧配置保留用于回滚。", "保存并应用", async () => {
       const toml = $("config-toml").value;
       await api("config", "PUT", { toml, revision: state.revision });
       await loadConfig();
@@ -318,7 +338,7 @@
     });
     });
   });
-  $("rollback-config").addEventListener("click", () => confirmAction("回滚上一份配置？", "上一份配置将替换当前配置并重启 DNS 实例，内存缓存将清空。未保存的编辑会被丢弃。", "确认回滚", async () => {
+  $("rollback-config").addEventListener("click", () => confirmAction("回滚上一份配置？", "上一份配置将替换当前配置，缓存将清空；涉及非缓存设置时重启 DNS。未保存的编辑会被丢弃。", "确认回滚", async () => {
     await api("config/rollback", "POST", { revision: state.revision });
     await loadConfig();
     await status();
@@ -332,12 +352,43 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     notice("已导出当前编辑内容，不包含管理账户或会话令牌。请妥善保管配置中的地址和路径。");
   }));
+  $("cache-inspect-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    void action(async () => {
+      cacheInspection = null; inspectedQuery = null; $("cache-clear-name").disabled = true;
+      $("cache-inspection").textContent = "正在检查…";
+      const query = { name: $("cache-name").value.trim(), qtype: $("cache-qtype").value.trim(), subnet: $("cache-subnet").value.trim() || null, edns: $("cache-edns").checked, dnssec_ok: $("cache-do").checked, checking_disabled: $("cache-cd").checked, recursion_desired: $("cache-rd").checked };
+      try {
+        const result = await api("cache/inspect", "POST", query);
+        cacheInspection = result; inspectedQuery = query; K.renderInspection($("cache-inspection"), result);
+        $("cache-clear-name").disabled = false;
+        notice("检查完成；使用的是已保存配置，不是尚未保存的草稿。");
+      } catch (error) { if (!PariSession.isStale(error)) $("cache-inspection").textContent = "检查未完成，请确认查询条件后重试。"; throw error; }
+    });
+  });
+  async function invalidateCache(input) {
+    const result = await api("cache/invalidate", "POST", input);
+    cacheInspection = null; inspectedQuery = null; $("cache-clear-name").disabled = true;
+    $("cache-inspection").textContent = "清理完成。新查询仍可重新填充缓存。";
+    await status(); notice(`已移除 ${result.removed} 个缓存变体。`);
+  }
+  $("cache-clear-all").addEventListener("click", () => {
+    if (!cacheStatus?.cache) return;
+    const input = { all: true, revision: cacheStatus.revision, epoch: cacheStatus.cache.epoch };
+    confirmAction("清空全部缓存？", "将移除正向、否定及过期结果。旧的进行中请求不能回填；后续请求可能产生更多回源流量。DNS 监听不会停止。", "清空缓存", () => invalidateCache(input));
+  });
+  $("cache-clear-name").addEventListener("click", () => {
+    if (!cacheInspection || !inspectedQuery) return;
+    const input = { name: inspectedQuery.name, qtype: inspectedQuery.qtype, scope: $("cache-clear-scope").value.trim() || null, revision: cacheInspection.revision, epoch: cacheInspection.epoch };
+    confirmAction("清理选定缓存？", `${input.name} / ${input.qtype} / ${input.scope || "所有 ECS 范围"}。包含此条件下所有 EDNS/DO/CD/RD 标志变体；其他域名保留。`, "确认清理", () => invalidateCache(input));
+  });
   $("logout").addEventListener("click", () => {
     const logout = async () => {
       try { await api("logout", "POST", {}); }
       finally {
         changeSession(null); state.original = ""; state.revision = null; state.backup = false; state.settings = null; state.formDirty = false; state.settingsStale = false;
         $("settings-forms").replaceChildren();
+        $("cache-rules").replaceChildren(); readCacheRules = () => [];
         $("config-toml").value = ""; $("config-diff").textContent = ""; updateEditorState();
         page("login");
       }

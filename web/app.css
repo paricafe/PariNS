@@ -104,6 +104,12 @@ dialog .form-actions { justify-content: flex-end; }
 .settings-fields:disabled { opacity: .6; }
 .settings-fields .field { min-width: 0; }
 .settings-fields .wide { grid-column: 1 / -1; }
+.listener-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 7rem; align-items: end; gap: .75rem; }
+.listener-part { min-width: 0; }
+.listener-colon { padding-bottom: .7rem; }
+.listener-endpoint > small { display: block; }
+.listener-endpoint > small[hidden] { display: none; }
+@media (max-width: 540px) { .listener-row { grid-template-columns: minmax(0, 1fr); } .listener-colon { display: none; } }
 .settings-fields textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
 .settings-fields input:disabled, .settings-fields textarea:disabled { background: var(--bg); color: var(--muted); }
 .toggle-label { display: flex; align-items: center; gap: .6rem; min-height: 44px; }

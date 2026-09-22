@@ -64,7 +64,15 @@
     $("navigation").inert = true;
     $("main").setAttribute("aria-busy", "true");
     notice("app.working");
-    try { await work(); } catch (error) { if (!PariSession.isStale(error)) notice(error.key ? error : error.message || "app.offline", true); }
+    try { await work(); } catch (error) {
+      if (!PariSession.isStale(error)) {
+        notice(error.key ? error : error.message || "app.offline", true);
+        if (error.fieldId) {
+          state.view = "security"; displaySettingsPage(); page("config", false);
+          focusAfterAction(error.fieldId);
+        }
+      }
+    }
     finally {
       $("main").inert = false;
       $("navigation").inert = false;
@@ -164,14 +172,14 @@
     updateEditorState();
   }
 
-  function installSettings(settings) {
+  function installSettings(settings, preserveListeners = false) {
     state.settings = settings; state.formDirty = false; state.settingsStale = false;
     const changed = () => {
       state.formDirty = true;
       $("diff-panel").hidden = true;
       updateEditorState();
     };
-    S.render($("settings-forms"), settings, changed);
+    S.render($("settings-forms"), settings, changed, preserveListeners);
     readCacheRules = K.rules($("cache-rules"), settings.cache.rules || [], changed);
     displaySettingsPage();
   }
@@ -197,7 +205,7 @@
     if (Object.keys(changed).length) {
       const result = await api("config/preview", "POST", { toml: $("config-toml").value, changes: changed });
       $("config-toml").value = result.toml;
-      installSettings(result.settings);
+      installSettings(result.settings, true);
     } else state.formDirty = false;
     updateEditorState();
   }

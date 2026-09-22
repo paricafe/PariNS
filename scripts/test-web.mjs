@@ -39,23 +39,177 @@ test("file path values preserve intentional leading and trailing spaces", () => 
   assert.equal(S.valueOf({ value: " " }, { path: "filter_file", type: "nullable" }), " ");
   assert.equal(S.valueOf({ value: "" }, { path: "filter_file", type: "nullable" }), null);
 });
-test("reading one dirty control never reparses or trims untouched paths", () => {
-  const base = { max_inflight: 10, filter_file: " rules.toml ", dot: { listen: "127.0.0.1:853", cert_file: " cert.pem ", key_file: " key.pem " }, upstreams: { servers: ["tls://192.0.2.53:853"], ca_file: " ca.pem " } };
+function settingsForm(base) {
   const controls = new Map();
   for (const group of Object.values(S.pages).flatMap((page) => page.groups)) {
     if (group.optional) { if (!(group.optional in base)) base[group.optional] = null; controls.set(`#enable-${group.optional}`, { checked: base[group.optional] !== null }); }
     for (const field of group.fields) {
       const value = S.get(base, field.path);
+      if (field.type === "endpoint") {
+        for (const [part, display] of Object.entries(S.splitListener(value))) controls.set(`[data-path="${field.path}"][data-part="${part}"]`, {
+          id: `setting-${field.path.replaceAll(".", "-")}-${part}`,
+          value: display, dataset: { initialValue: display }, focus() { throw Error("Settings.read must leave focus to the action owner"); }
+        });
+        continue;
+      }
       const display = value === undefined || value === null ? "" : String(value);
       controls.set(`[data-path="${field.path}"]`, { value: display, checked: Boolean(value), dataset: { initialValue: field.type === "checkbox" ? String(Boolean(value)) : display }, checkValidity: () => true });
     }
   }
+  const form = { querySelector: selector => controls.get(selector), controls };
+  return form;
+}
+test("reading one dirty control never reparses or trims untouched paths", () => {
+  const base = { max_inflight: 10, filter_file: " rules.toml ", dot: { listen: "127.0.0.1:853", cert_file: " cert.pem ", key_file: " key.pem " }, upstreams: { servers: ["tls://192.0.2.53:853"], ca_file: " ca.pem " } };
+  const form = settingsForm(base), { controls } = form;
   controls.get('[data-path="max_inflight"]').value = "11";
-  const result = S.read({ querySelector: (selector) => controls.get(selector) }, base);
+  const result = S.read(form, base);
   assert.deepEqual(S.diff(base, result), { max_inflight: 11 });
   assert.equal(result.dot.cert_file, " cert.pem ");
   assert.equal(result.filter_file, " rules.toml ");
   assert.equal(result.upstreams.ca_file, " ca.pem ");
+});
+test("listener fields split IPv4, IPv6, mapped and numeric-scope addresses without losing semantics", () => {
+  for (const [listen, address, port] of [
+    ["0.0.0.0:853", "0.0.0.0", "853"], ["127.0.0.1:8443", "127.0.0.1", "8443"],
+    ["[::]:853", "::", "853"], ["[2001:db8::1]:443", "2001:db8::1", "443"],
+    ["[::1]:0", "::1", "0"], ["[::ffff:192.0.2.1]:65535", "::ffff:192.0.2.1", "65535"],
+    ["[fe80::1%3]:1", "fe80::1%3", "1"]
+  ]) {
+    assert.deepEqual(S.splitListener(listen), { address, port });
+    assert.equal(S.joinListener(address, port), listen);
+  }
+  assert.deepEqual(S.splitListener(""), { address: "", port: "" });
+});
+test("listener serialization adds one bracket pair and normalizes decimal ports only", () => {
+  for (const port of ["0", "1", "65535", " 00053 "]) {
+    assert.equal(S.joinListener(" [2001:db8::853] ", port), `[2001:db8::853]:${Number(port)}`);
+  }
+  assert.equal(S.joinListener("::ffff:192.0.2.1", "0053"), "[::ffff:192.0.2.1]:53");
+  assert.equal(S.joinListener("fe80::1%3", "853"), "[fe80::1%3]:853");
+});
+test("listener input rejects incomplete structure and non-decimal or out-of-range ports", () => {
+  for (const port of ["", " ", "-1", "+1", "1.5", "1e3", "65536", "0x35", "1 2", "Infinity"]) {
+    assert.throws(() => S.joinListener("::1", port), error => error.key === "settings.listener.port.invalid");
+  }
+  for (const address of ["", " ", "[]", "[::1", "::1]", "[[::1]]", "[::1]:853", "https://127.0.0.1", ":: 1"]) {
+    assert.throws(() => S.joinListener(address, "853"), error => error.key.startsWith("settings.listener.address."));
+  }
+});
+test("all four listener protocols preserve exact untouched baselines and serialize either edited part", () => {
+  for (const protocol of ["dot", "doh", "doq", "doh3"]) {
+    const base = { [protocol]: { listen: "[2001:0db8:0:0::1]:00853", cert_file: "cert.pem", key_file: "key.pem" } };
+    const form = settingsForm(base);
+    const address = form.querySelector(`[data-path="${protocol}.listen"][data-part="address"]`);
+    const port = form.querySelector(`[data-path="${protocol}.listen"][data-part="port"]`);
+    assert.deepEqual(S.diff(base, S.read(form, base)), {});
+    form.querySelector(`[data-path="${protocol}.cert_file"]`).value = "next.pem";
+    assert.deepEqual(S.diff(base, S.read(form, base)), { [protocol]: { cert_file: "next.pem" } });
+    form.querySelector(`[data-path="${protocol}.cert_file"]`).value = "cert.pem";
+    address.value = "::1";
+    assert.deepEqual(S.diff(base, S.read(form, base)), { [protocol]: { listen: "[::1]:853" } });
+    address.value = address.dataset.initialValue; port.value = "65535";
+    assert.deepEqual(S.diff(base, S.read(form, base)), { [protocol]: { listen: "[2001:0db8:0:0::1]:65535" } });
+  }
+});
+test("invalid listener drafts stay raw, identify the offending field, and are skipped while disabled", () => {
+  const base = { dot: { listen: "[::1]:853", cert_file: "cert.pem", key_file: "key.pem" } }, form = settingsForm(base);
+  const address = form.querySelector('[data-path="dot.listen"][data-part="address"]');
+  const port = form.querySelector('[data-path="dot.listen"][data-part="port"]');
+  for (const raw of ["", " ", "65536", "-1", "1.5", "1e3"]) {
+    port.value = raw;
+    for (const validate of [true, false]) assert.throws(() => S.read(form, base, validate), error => error.key === "settings.listener.port.invalid" && error.fieldId === port.id);
+    assert.equal(port.value, raw);
+  }
+  address.value = "[::"; port.value = "1e3";
+  form.querySelector("#enable-dot").checked = false;
+  assert.deepEqual(S.diff(base, S.read(form, base)), { dot: null });
+  assert.equal(address.value, "[::"); assert.equal(port.value, "1e3");
+  form.querySelector("#enable-dot").checked = true;
+  assert.throws(() => S.read(form, base), error => error.key === "settings.listener.address.invalid" && error.fieldId === address.id);
+  assert.equal(address.value, "[::"); assert.equal(port.value, "1e3");
+});
+test("new listeners stay blank until entered and retain the original optional config shape", () => {
+  const base = { dot: null }, form = settingsForm(base);
+  const address = form.querySelector('[data-path="dot.listen"][data-part="address"]');
+  const port = form.querySelector('[data-path="dot.listen"][data-part="port"]');
+  assert.equal(address.value, ""); assert.equal(port.value, "");
+  form.querySelector("#enable-dot").checked = true;
+  assert.throws(() => S.read(form, base), error => error.key === "settings.listener.address.required");
+  address.value = "[::1]"; port.value = "00000";
+  form.querySelector('[data-path="dot.cert_file"]').value = " cert.pem ";
+  form.querySelector('[data-path="dot.key_file"]').value = " key.pem ";
+  assert.deepEqual(S.diff(base, S.read(form, base)), { dot: { listen: "[::1]:0", cert_file: " cert.pem ", key_file: " key.pem " } });
+});
+test("listener rendering preserves raw drafts through toggles, translation and draft-preserving renders", () => {
+  // Only the DOM surface consumed by settings/i18n is needed; browser layout and
+  // native keyboard behavior are verified separately in the real browser.
+  class Element {
+    constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.attrs = {}; this.events = {}; this.value = ""; }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = nodes; }
+    setAttribute(key, value) { this.attrs[key] = value; }
+    getAttribute(key) { return key.startsWith("data-") && !key.startsWith("data-i18n") ? this.dataset[key.slice(5)] : this.attrs[key]; }
+    addEventListener(event, callback) { this.events[event] = callback; }
+    focus() { document.activeElement = this; }
+    matches(selector) {
+      return selector.split(",").some(part => part.startsWith("#") ? this.id === part.slice(1) : [...part.matchAll(/\[([^\]^=]+)(\^?=)?(?:"([^"]*)")?\]/g)].every(([, key, operator, value]) => {
+        const actual = this.getAttribute(key);
+        return operator === "=" ? actual === value : operator === "^=" ? actual?.startsWith(value) : actual !== undefined;
+      }));
+    }
+    querySelectorAll(selector) {
+      const space = selector.indexOf(" ");
+      if (space !== -1) return this.querySelectorAll(selector.slice(0, space)).flatMap(parent => parent.querySelectorAll(selector.slice(space + 1)));
+      return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0]; }
+  }
+  const previous = globalThis.document, container = new Element("div");
+  globalThis.document = { createElement: tag => new Element(tag), documentElement: {}, querySelectorAll: selector => container.querySelectorAll(selector) };
+  try {
+    const base = { dot: { listen: "[::1]:853", cert_file: "cert.pem", key_file: "key.pem" }, doh: null, doq: null, doh3: null };
+    let changes = 0;
+    S.render(container, base, () => { changes += 1; });
+    const parts = container.querySelectorAll('[data-path="dot.listen"]');
+    assert.deepEqual(parts.map(input => input.dataset.part), ["address", "port"]);
+    assert.equal(container.querySelectorAll('[data-part]').length, 8);
+    const [address, port] = parts;
+    assert.equal(port.type, "text"); assert.equal(port.inputMode, "numeric");
+    for (const input of parts) {
+      assert.equal(input.required, true);
+      assert.ok(container.querySelectorAll('[data-i18n]').some(label => label.tag === "label" && label.htmlFor === input.id));
+    }
+    address.value = "[fe80::"; port.value = "1e3"; port.focus();
+    const enabled = container.querySelector("#enable-dot");
+    enabled.checked = false; enabled.events.change();
+    enabled.checked = true; enabled.events.change();
+    assert.equal(address.value, "[fe80::"); assert.equal(port.value, "1e3");
+    for (const locale of ["en", "zh-CN"]) {
+      PariI18n.setLocale(locale);
+      assert.equal(container.querySelectorAll('[data-path="dot.listen"]')[1], port);
+      assert.equal(document.activeElement, port); assert.equal(address.value, "[fe80::"); assert.equal(port.value, "1e3");
+      const label = container.querySelectorAll('[data-i18n]').find(node => node.htmlFor === address.id);
+      assert.equal(label.textContent, PariI18n.t("settings.listener.address.label"));
+    }
+    assert.equal(changes, 2);
+    container.querySelector('[data-path="dot.cert_file"]').value = " changed cert.pem ";
+    container.querySelector('[data-path="dot.key_file"]').value = " changed key.pem ";
+    enabled.checked = false; enabled.events.change();
+    S.render(container, { ...base, dot: null }, () => {}, true);
+    const restored = container.querySelector("#enable-dot");
+    assert.equal(restored.checked, false);
+    restored.checked = true; restored.events.change();
+    assert.equal(container.querySelector('[data-path="dot.listen"][data-part="address"]').value, "[fe80::");
+    assert.equal(container.querySelector('[data-path="dot.listen"][data-part="port"]').value, "1e3");
+    assert.equal(container.querySelector('[data-path="dot.cert_file"]').value, " changed cert.pem ");
+    assert.equal(container.querySelector('[data-path="dot.key_file"]').value, " changed key.pem ");
+    S.render(container, base, () => {});
+    assert.equal(container.querySelector('[data-path="dot.listen"][data-part="address"]').value, "::1");
+    assert.equal(container.querySelector('[data-path="dot.listen"][data-part="port"]').value, "853");
+    assert.equal(container.querySelector('[data-path="dot.cert_file"]').value, "cert.pem");
+    assert.equal(container.querySelector('[data-path="dot.key_file"]').value, "key.pem");
+  } finally { globalThis.document = previous; PariI18n.setLocale("zh-CN"); }
 });
 test("nullable fields clear to null", () => assert.equal(S.valueOf({ value: "  " }, { type: "nullable" }), null));
 test("domain lists preserve ordering and remove blank lines", () => assert.deepEqual(S.valueOf({ value: " a.test \r\n\n b.test\n" }, { type: "lines" }), ["a.test", "b.test"]));

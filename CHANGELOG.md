@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Split encrypted DNS listener forms into listening address and port fields,
+  preserving IPv6, unsaved input and the existing `listen` configuration format.
+
 ## v0.1.1 — 2026-09-22
 
 ### Added

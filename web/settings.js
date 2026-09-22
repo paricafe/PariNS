@@ -69,7 +69,7 @@ globalThis.PariSettings = (() => {
     ]),
     security: page("security", [
       ...["dot", "doh", "doq", "doh3"].map(key => group(key,
-        ["listen", "cert_file", "key_file"].map(name => field(`${key}.${name}`, "text", false, undefined, undefined, `listener.${name}`)), key))
+        ["listen", "cert_file", "key_file"].map(name => field(`${key}.${name}`, name === "listen" ? "endpoint" : "text", false, undefined, undefined, `listener.${name}`)), key))
     ]),
     runtime: page("runtime", [
       group("queryLog", [
@@ -130,7 +130,46 @@ globalThis.PariSettings = (() => {
     I.bind(node, key);
     return node;
   }
-  function render(container, settings, onChange) {
+  function splitListener(value) {
+    if (!value) return { address: "", port: "" };
+    const end = value.lastIndexOf(":");
+    const address = value.slice(0, end);
+    return { address: address.startsWith("[") ? address.slice(1, -1) : address, port: value.slice(end + 1) };
+  }
+  function joinListener(address, port) {
+    address = address.trim(); port = port.trim();
+    if (!address) throw new I.MessageError("settings.listener.address.required");
+    if (address.startsWith("[") && address.endsWith("]") && address.includes(":")) address = address.slice(1, -1);
+    if (/[\s\[\]\/]/.test(address) || !address || (address.includes("%") && !address.includes(":"))) throw new I.MessageError("settings.listener.address.invalid");
+    if (!/^[0-9]+$/.test(port) || Number(port) > 65535) throw new I.MessageError("settings.listener.port.invalid");
+    return `${address.includes(":") ? `[${address}]` : address}:${Number(port)}`;
+  }
+  function listenerControl(descriptor, value, onChange, draft) {
+    const wrap = create("div", "field wide listener-endpoint");
+    const row = create("div", "listener-row");
+    const initial = splitListener(value);
+    const id = `setting-${descriptor.path.replaceAll(".", "-")}`;
+    const help = translated("small", "", "settings.listener.address.help"); help.id = `${id}-help`;
+    const automatic = translated("small", "", "settings.listener.port.automatic"); automatic.id = `${id}-automatic`;
+    for (const part of ["address", "port"]) {
+      if (part === "port") { const colon = create("span", "listener-colon", ":"); colon.setAttribute("aria-hidden", "true"); row.append(colon); }
+      const field = create("div", "listener-part");
+      const input = create("input"); input.type = "text"; input.id = `${id}-${part}`;
+      input.dataset.path = descriptor.path; input.dataset.part = part; input.dataset.initialValue = initial[part];
+      input.value = draft?.[part] ?? initial[part]; input.required = true; input.spellcheck = false; input.autocomplete = "off"; input.setAttribute("autocorrect", "off");
+      input.setAttribute("aria-describedby", part === "address" ? help.id : automatic.id);
+      if (part === "port") input.inputMode = "numeric";
+      const label = translated("label", "", `settings.listener.${part}.label`); label.htmlFor = input.id;
+      input.addEventListener("input", () => { automatic.hidden = !/^0+$/.test(row.querySelector('[data-part="port"]').value.trim()); onChange(); });
+      field.append(label, input); row.append(field);
+    }
+    automatic.hidden = !/^0+$/.test((draft?.port ?? initial.port).trim());
+    wrap.append(row, help, automatic);
+    return wrap;
+  }
+  function render(container, settings, onChange, preserveListeners = false) {
+    const drafts = {};
+    if (preserveListeners) for (const input of container.querySelectorAll('#settings-security [data-path]')) (drafts[input.dataset.path] ||= {})[input.dataset.part || "value"] = input.value;
     container.replaceChildren();
     for (const [page, descriptor] of Object.entries(pages)) {
       const section = create("section"); section.id = `settings-${page}`; section.hidden = true;
@@ -146,6 +185,10 @@ globalThis.PariSettings = (() => {
           enabled.addEventListener("change", () => { fieldset.disabled = !enabled.checked; onChange(); });
         }
         for (const descriptor of item.fields) {
+          if (descriptor.type === "endpoint") {
+            fieldset.append(listenerControl(descriptor, get(settings, descriptor.path), onChange, drafts[descriptor.path]));
+            continue;
+          }
           const wrap = create("div", descriptor.type === "lines" ? "field wide" : "field");
           const id = `setting-${descriptor.path.replaceAll(".", "-")}`;
           const input = create(descriptor.type === "lines" ? "textarea" : descriptor.type === "select" ? "select" : "input"); input.id = id; input.dataset.path = descriptor.path;
@@ -161,6 +204,7 @@ globalThis.PariSettings = (() => {
           if (descriptor.type === "checkbox") input.checked = Boolean(value);
           else input.value = Array.isArray(value) ? value.join("\n") : value ?? "";
           input.dataset.initialValue = descriptor.type === "checkbox" ? String(input.checked) : input.value;
+          if (drafts[descriptor.path]?.value !== undefined) input.value = drafts[descriptor.path].value;
           const label = create("label", descriptor.type === "checkbox" ? "toggle-label" : ""); label.htmlFor = id;
           if (descriptor.type === "checkbox") { label.append(input, translated("span", "", descriptor.labelKey)); wrap.append(label); }
           else { I.bind(label, descriptor.labelKey); wrap.append(label, input); }
@@ -187,6 +231,14 @@ globalThis.PariSettings = (() => {
         if (!result[descriptor.optional]) result[descriptor.optional] = structuredClone(defaults[descriptor.optional]);
       }
       for (const entry of descriptor.fields) {
+        if (entry.type === "endpoint") {
+          const address = container.querySelector(`[data-path="${entry.path}"][data-part="address"]`);
+          const port = container.querySelector(`[data-path="${entry.path}"][data-part="port"]`);
+          if (!newlyEnabled && address.value === address.dataset.initialValue && port.value === port.dataset.initialValue) continue;
+          try { put(result, entry.path, joinListener(address.value, port.value)); }
+          catch (error) { error.fieldId = (error.key === "settings.listener.port.invalid" ? port : address).id; throw error; }
+          continue;
+        }
         const input = container.querySelector(`[data-path="${entry.path}"]`);
         if (input.disabled) continue;
         const displayed = entry.type === "checkbox" ? String(input.checked) : input.value;
@@ -222,5 +274,5 @@ globalThis.PariSettings = (() => {
     if (changes.size) throw new I.MessageError("app.templateInvalid", { key: [...changes.keys()].join(", ") });
     return lines.join("\n");
   }
-  return { pages, defaults, get, put, diff, valueOf, render, read, updateFilterSource, networkTemplate };
+  return { pages, defaults, get, put, diff, valueOf, render, read, updateFilterSource, networkTemplate, splitListener, joinListener };
 })();

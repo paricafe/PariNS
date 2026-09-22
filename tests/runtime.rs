@@ -149,6 +149,102 @@ async fn finish(stop: oneshot::Sender<()>, task: JoinHandle<anyhow::Result<()>>)
 }
 
 #[tokio::test]
+async fn source_budget_is_shared_by_udp_tcp_dot_and_charges_cache_hits() {
+    let cert = Certificate::new();
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(upstream.local_addr().unwrap());
+    config.dot = Some(cert.listener());
+    config.source_limits.enabled = true;
+    config.source_limits.rate_per_sec = 1;
+    config.source_limits.burst = 2;
+    let server = Server::bind(config).await.unwrap();
+    let address = server.local_addr().unwrap();
+    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let metrics = server.metrics().clone();
+    let (stop, task) = run(server);
+    let mock = tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+        let request = protocol::decode(&buffer[..length]).unwrap();
+        upstream
+            .send_to(&answer(&request).to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    });
+    let mut tls = cert.connect(dot).await;
+    let mut tcp = TcpStream::connect(address).await.unwrap();
+    assert_eq!(udp(address, 71).await.answers.len(), 1);
+    write(&mut tcp, &query(72)).await;
+    assert_eq!(read(&mut tcp).await.answers.len(), 1);
+    // Same peer, different connection and protocol: no fresh token bucket.
+    write(&mut tls, &query(73)).await;
+    let denied = read(&mut tls).await;
+    assert_eq!(
+        (denied.id, denied.response_code),
+        (73, ResponseCode::ServFail)
+    );
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(&query(74).to_vec().unwrap(), address)
+        .await
+        .unwrap();
+    let mut buffer = [0; 4096];
+    assert!(
+        timeout(Duration::from_millis(100), socket.recv(&mut buffer))
+            .await
+            .is_err()
+    );
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.counters["source_queries_rejected"], 2);
+    assert_eq!(snapshot.counters["upstream_operations"], 1);
+    assert_eq!(snapshot.counters["cache_hits"], 1);
+    finish(stop, task).await;
+    mock.await.unwrap();
+}
+
+#[tokio::test]
+async fn source_inflight_rejection_does_not_cancel_admitted_udp_query() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(upstream.local_addr().unwrap());
+    config.source_limits.enabled = true;
+    config.source_limits.max_inflight = 1;
+    config.max_inflight = 8;
+    let server = Server::bind(config).await.unwrap();
+    let address = server.local_addr().unwrap();
+    let metrics = server.metrics().clone();
+    let (stop, task) = run(server);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(&query(81).to_vec().unwrap(), address)
+        .await
+        .unwrap();
+    let mut buffer = [0; 4096];
+    let (length, peer) = timeout(WAIT, upstream.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    let request = protocol::decode(&buffer[..length]).unwrap();
+    let mut tcp = TcpStream::connect(address).await.unwrap();
+    write(&mut tcp, &query(82)).await;
+    assert_eq!(read(&mut tcp).await.response_code, ResponseCode::ServFail);
+    assert_eq!(metrics.snapshot().upstream_inflight, 1);
+    upstream
+        .send_to(&answer(&request).to_vec().unwrap(), peer)
+        .await
+        .unwrap();
+    let length = timeout(WAIT, socket.recv(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(protocol::decode(&buffer[..length]).unwrap().id, 81);
+    // The completed query releases source concurrency, and a cache hit is admitted.
+    write(&mut tcp, &query(83)).await;
+    assert_eq!(read(&mut tcp).await.answers.len(), 1);
+    assert_eq!(metrics.snapshot().counters["upstream_operations"], 1);
+    finish(stop, task).await;
+}
+
+#[tokio::test]
 async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     let cert = Certificate::new();
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();

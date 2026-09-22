@@ -123,6 +123,7 @@ async fn real_h2_tls_get_post_errors_and_shutdown() {
     let connections = Arc::new(Semaphore::new(2));
     let queries = Arc::new(Semaphore::new(4));
     let ingress = Ingress {
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
         resolver,
         queries: queries.clone(),
         connections: connections.clone(),
@@ -233,6 +234,7 @@ async fn incomplete_body_expires_and_shutdown_releases_admission() {
     let connections = Arc::new(Semaphore::new(2));
     let queries = Arc::new(Semaphore::new(1));
     let ingress = Ingress {
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
         resolver: Arc::new(Resolver::new(
             "127.0.0.1:9".parse().unwrap(),
             Duration::from_millis(100),
@@ -295,7 +297,16 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = watch::channel(false);
     let queries = Arc::new(Semaphore::new(1));
+    let source_limits = Arc::new(
+        parins::limits::Limiter::new(&parins::limits::Settings {
+            enabled: true,
+            max_inflight: 1,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
     let ingress = Ingress {
+        source_limits: source_limits.clone(),
         resolver: resolver.clone(),
         queries: queries.clone(),
         connections: Arc::new(Semaphore::new(1)),
@@ -342,6 +353,7 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
     assert_eq!(snapshot.counters["cancelled"], 1);
     assert_eq!(snapshot.request_inflight, 0);
     assert_eq!(snapshot.upstream_inflight, 0);
+    assert!(source_limits.try_query(address.ip()).is_ok());
     // No detached shared operation retains the last waiter's UDP socket.
     let _released_socket = UdpSocket::bind(upstream_peer).await.unwrap();
     stop.send(true).unwrap();
@@ -351,5 +363,164 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
         .unwrap()
         .unwrap();
     drop((client, response, sender));
+    let _ = timeout(Duration::from_secs(2), driver).await.unwrap();
+}
+
+#[tokio::test]
+async fn h2_source_limits_cover_pre_tls_admission_and_ignore_forwarded_identity() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let resolver = Arc::new(Resolver::new(
+        upstream.local_addr().unwrap(),
+        Duration::from_secs(2),
+    ));
+    let mock = tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+        let query = protocol::decode(&buffer[..length]).unwrap();
+        let answer = protocol::error_response(&query, ResponseCode::NoError);
+        upstream
+            .send_to(&answer.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+        // Retain the socket: an incorrectly admitted second query cannot get a
+        // successful answer or be confused with the expected rate rejection.
+        upstream
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = watch::channel(false);
+    let connections = Arc::new(Semaphore::new(3));
+    let source_limits = Arc::new(
+        parins::limits::Limiter::new(&parins::limits::Settings {
+            enabled: true,
+            max_connections: 1,
+            burst: 1,
+            rate_per_sec: 1,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let ingress = Ingress {
+        source_limits: source_limits.clone(),
+        resolver: resolver.clone(),
+        queries: Arc::new(Semaphore::new(4)),
+        connections: connections.clone(),
+        stop: stopped,
+        io_timeout: Duration::from_secs(2),
+        shutdown_grace: Duration::from_millis(150),
+        max_streams: 4,
+    };
+    let (server_tls, client_tls) = certificates();
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress));
+    // One raw TCP client already consumes its source's connection budget even
+    // though it has sent no TLS ClientHello. Global capacity still has room.
+    let stalled = TcpStream::connect(address).await.unwrap();
+    timeout(Duration::from_secs(1), async {
+        while connections.available_permits() != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let connector = TlsConnector::from(client_tls);
+    let rejected = timeout(
+        Duration::from_secs(1),
+        connector.connect(
+            "localhost".try_into().unwrap(),
+            TcpStream::connect(address).await.unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(rejected.is_err());
+    assert_eq!(
+        resolver.metrics().snapshot().counters["source_connections_rejected"],
+        1
+    );
+    assert_eq!(connections.available_permits(), 2);
+    drop(stalled);
+    timeout(Duration::from_secs(1), async {
+        while connections.available_permits() != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let tls = connector
+        .connect(
+            "localhost".try_into().unwrap(),
+            TcpStream::connect(address).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let (mut client, connection) = h2::client::handshake(tls).await.unwrap();
+    let driver = tokio::spawn(connection);
+    timeout(Duration::from_millis(900), async {
+        for (index, expected) in [ResponseCode::NoError, ResponseCode::ServFail]
+            .into_iter()
+            .enumerate()
+        {
+            let mut message = protocol::decode(&query()).unwrap();
+            if index == 1 {
+                ecs::set_subnet(
+                    &mut message,
+                    Some(hickory_proto::rr::rdata::opt::ClientSubnet::new(
+                        "203.0.113.0".parse().unwrap(),
+                        24,
+                        0,
+                    )),
+                );
+            }
+            let request = http::Request::builder()
+                .method("POST")
+                .uri("https://localhost/dns-query")
+                .header("content-type", "application/dns-message")
+                .header("x-forwarded-for", format!("203.0.113.{}", index + 1))
+                .header("forwarded", format!("for=203.0.113.{}", index + 1))
+                .body(())
+                .unwrap();
+            let (response, mut sender) = client.send_request(request, false).unwrap();
+            sender
+                .send_data(Bytes::from(message.to_vec().unwrap()), true)
+                .unwrap();
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/dns-message"
+            );
+            let mut body = response.into_body();
+            let mut answer = Vec::new();
+            while let Some(data) = body.data().await {
+                answer.extend_from_slice(&data.unwrap());
+            }
+            let answer = protocol::decode(&answer).unwrap();
+            assert_eq!(answer.id, 123);
+            assert_eq!(answer.response_code, expected);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        resolver.metrics().snapshot().counters["source_queries_rejected"],
+        1
+    );
+    let upstream = timeout(Duration::from_secs(1), mock)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut buffer = [0; 4096];
+    assert!(
+        matches!(upstream.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    stop.send(true).unwrap();
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(connections.available_permits(), 3);
+    assert!(source_limits.try_connection(address.ip()).is_ok());
+    drop(client);
     let _ = timeout(Duration::from_secs(2), driver).await.unwrap();
 }

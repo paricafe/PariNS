@@ -9,7 +9,6 @@ use std::{
 };
 
 use anyhow::Result;
-use hickory_proto::op::ResponseCode;
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{Semaphore, watch},
@@ -201,6 +200,7 @@ impl Server {
             resolver: resolver.clone(),
             queries: queries.clone(),
             connections: connections.clone(),
+            source_limits: Arc::new(crate::limits::Limiter::new(&self.config.source_limits)?),
             stop: stop.clone(),
             io_timeout,
             shutdown_grace: Duration::from_millis(self.config.shutdown_grace_ms),
@@ -248,17 +248,24 @@ impl Server {
                         metrics.inc(Counter::ConnectionsRejected);
                         continue
                     };
-                    let resolver = resolver.clone();
-                    let queries = queries.clone();
-                    let stop = stop.clone();
+                    let Some(source) = ingress.admit_connection(peer.ip()) else {
+                        metrics.inc(Counter::ConnectionsRejected);
+                        continue;
+                    };
+                    let context = ingress.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
-                        serve_tcp(stream, peer.ip(), resolver, queries, stop, io_timeout).await;
+                        let _source = source;
+                        serve_tcp(stream, peer.ip(), context).await;
                     });
                 }
                 received = self.udp.recv_from(&mut buffer) => {
                     let (length, peer) = match received { Ok(value) => value, Err(error) => break Err(error.into()) };
                     metrics.inc(Counter::UdpReceived);
+                    let Some(source) = ingress.admit_query(peer.ip()) else {
+                        metrics.inc(Counter::UdpDropped);
+                        continue;
+                    };
                     let Ok(permit) = queries.clone().try_acquire_owned() else {
                         metrics.inc(Counter::UdpDropped);
                         continue
@@ -268,6 +275,7 @@ impl Server {
                     let resolver = resolver.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
+                        let _source = source;
                         if let Some(reply) = resolver.resolve(&bytes, peer.ip()).await
                             && let Ok(bytes) = protocol::encode_udp(&reply.message, reply.udp_limit)
                         {
@@ -317,34 +325,28 @@ fn emit_metrics(metrics: &Metrics, run_id: u64, started: std::time::Instant, rea
 async fn serve_tcp(
     mut stream: TcpStream,
     peer: std::net::IpAddr,
-    resolver: Arc<Resolver>,
-    queries: Arc<Semaphore>,
-    mut stop: watch::Receiver<bool>,
-    io_timeout: Duration,
+    mut ingress: crate::ingress::Ingress,
 ) {
+    let resolver = &ingress.resolver;
+    let io_timeout = ingress.io_timeout;
     loop {
         let frame = tokio::select! {
             biased;
-            _ = stop.changed() => return,
+            _ = ingress.stop.changed() => return,
             result = timeout(io_timeout, tcp::read_frame(&mut stream)) => result,
         };
         let Ok(Ok(bytes)) = frame else { return };
         resolver.metrics().inc(Counter::TcpReceived);
-        let permit = queries.clone().try_acquire_owned();
-        let response = match permit {
-            Ok(ref _permit) => resolver
+        let source = ingress.admit_query(peer);
+        let permit = ingress.queries.clone().try_acquire_owned();
+        let response = match (source.as_ref(), &permit) {
+            (Some(_), Ok(_)) => resolver
                 .resolve(&bytes, peer)
                 .await
                 .map(|reply| reply.message),
-            Err(_) => {
+            _ => {
                 resolver.metrics().inc(Counter::TcpRejected);
-                match protocol::request(&bytes) {
-                    protocol::Request::Forward(query) => {
-                        Some(protocol::error_response(&query, ResponseCode::ServFail))
-                    }
-                    protocol::Request::Reply(reply) => Some(reply),
-                    protocol::Request::Drop => None,
-                }
+                crate::ingress::rejected_response(&bytes)
             }
         };
         let Some(response) = response else { return };

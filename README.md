@@ -16,6 +16,7 @@ aggregate runtime metrics are available. DoT, DoH (HTTP/2 and HTTP/3), DoQ,
 verified DoT upstreams, file-backed rule/certificate reload, a local metrics
 endpoint and opt-in equivalent-replica hedging are implemented and locally tested.
 Authenticated DoT upstream connections can optionally be reused within a fixed cap.
+Optional source-subnet query-rate and concurrency budgets are shared by all DNS listeners.
 Production deployment and capacity acceptance have not been performed.
 
 ## Development
@@ -89,9 +90,40 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   upstream; the AD bit is cleared in client responses.
 
 The default is local-only. This release is not yet accepted as a production public
-resolver: per-client rate limiting and production capacity validation are not
-implemented. Logs contain startup/shutdown/reload events and
+resolver: production capacity validation and network-level abuse protection are
+not implemented. Logs contain startup/shutdown/reload events and
 optional aggregate metrics, not query names or client IP addresses.
+
+## Optional source budgets
+
+`[source_limits] enabled = true` enables a token bucket and concurrent query/connection
+limits keyed only by the socket peer. Defaults: `rate_per_sec = 100`, `burst = 200`,
+`max_inflight = 32`, `max_connections = 8`, `max_sources = 4096`, `ipv4_prefix = 32`,
+`ipv6_prefix = 64`. IPv4-mapped IPv6 is normalized to IPv4. All six DNS listeners
+share these budgets within one Server; changing source ports, protocols, ECS or
+forwarding headers does not create a new identity. NAT/proxy users share a budget.
+
+Cache hits, filtered queries and coalesced callers still consume query admission.
+UDP source rejection is silent; reliable transports return DNS SERVFAIL for an
+otherwise forwardable query (DoH keeps HTTP 200 with a DNS body). Existing invalid
+request handling is retained. Source connection caps include pending handshakes:
+TCP/TLS is closed and incoming QUIC refused before application handshake work.
+Normal completion, timeout and cancellation release concurrency, not rate tokens.
+Global query/connection limits remain separate and may reject earlier.
+
+State has a hard source-count cap. At capacity, admission scans at most 16 entries
+and only reclaims inactive sources whose tokens have fully replenished. If no
+eligible entry is found, new sources are rejected rather than resetting existing
+token debt. This can conservatively reject a new source while another reclaimable
+entry is outside that scan. IP/subnet state stays in memory until reclamation or
+shutdown and is neither logged nor persisted. Disabled mode stores no source state.
+`source_queries_rejected`, `source_connections_rejected` and `source_table_full`
+are aggregate metrics; table-full is a subset of the corresponding rejections.
+
+These are per-process DNS admission controls, not distributed limits, a bound on
+all HTTP/QUIC parsing work, handshake-attempt rate, bandwidth or a DDoS defense.
+They do not authenticate UDP source IPs. Keep infrastructure firewall/source
+validation and provider protection. Configuration changes require restart.
 
 ## Cache policy
 
@@ -283,6 +315,13 @@ by default and trades additional upstream traffic for latency; measure first.
 
 ## Local acceptance and packaging
 
+The binary uses Tokio's multi-thread runtime, normally one worker per available
+CPU; `TOKIO_WORKER_THREADS=2` can explicitly select two workers. This is not CPU
+affinity or a memory limit. Cache and coalescing state use short shared locks;
+UDP has one receive loop followed by spawned query tasks. More workers do not
+guarantee linear scaling. Default cache byte limits account for payload/key bytes,
+not process RSS. Measure on the target machine before increasing resource budgets.
+
 ```sh
 cargo run --locked --release --example bench -- 1000 32
 cargo run --locked --release --example bench_dot -- 1000 8
@@ -323,6 +362,7 @@ Linux/macOS CI results must be checked separately from local macOS acceptance.
 | `scheduler` | Opt-in equivalent-replica race, shared extra budget, loser cancellation |
 | `tls` / `doh` / `quic` | Authenticated transport, framing, HTTP/stream lifecycle |
 | `ingress` | Shared encrypted-query admission and response serialization |
+| `limits` | Bounded socket-subnet token buckets and RAII query/connection quotas |
 | `admin` | Loopback read-only metrics and process liveness |
 | `transport::tcp` | Length-prefixed framing used on both sides |
 | `server` | Listener ownership, admission budgets, client tasks, shutdown |
@@ -335,7 +375,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 - Explicit emergency-profile product policy and health-driven scheduling.
 - Licensed third-party rule import and additional filtering response modes.
 - DoT pipelining and additional authenticated upstream protocols.
-- Public-service source limits and measured deployment/rollback acceptance.
+- Measured public-service capacity, network abuse protection and deployment/rollback acceptance.
 - Full configuration replacement beyond rule/certificate reload.
 
 The initial design focuses on forwarding to existing resolvers. A standalone

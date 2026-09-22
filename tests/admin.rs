@@ -40,6 +40,7 @@ fn exposition_has_fixed_counters_gauges_and_cumulative_histograms() {
 
 fn ingress(stop: watch::Receiver<bool>) -> Ingress {
     Ingress {
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
         resolver: Arc::new(Resolver::new(
             "127.0.0.1:9".parse().unwrap(),
             Duration::from_millis(100),

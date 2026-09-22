@@ -35,6 +35,8 @@ struct Fixture {
     upstream: JoinHandle<()>,
     calls: Arc<AtomicUsize>,
     connections: Arc<Semaphore>,
+    connection_capacity: usize,
+    source_limits: Arc<parins::limits::Limiter>,
     resolver: Arc<Resolver>,
     queries: Arc<Semaphore>,
 }
@@ -45,6 +47,15 @@ impl Fixture {
     }
 
     async fn with_dropped_first_query(protocol: Protocol, drop_first: bool) -> Self {
+        Self::with_limits(protocol, drop_first, Default::default(), 1).await
+    }
+
+    async fn with_limits(
+        protocol: Protocol,
+        drop_first: bool,
+        settings: parins::limits::Settings,
+        connection_capacity: usize,
+    ) -> Self {
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert = certified.cert.der().clone();
         let key =
@@ -83,10 +94,12 @@ impl Fixture {
             }
         });
         let (stop, receiver) = watch::channel(false);
-        let connections = Arc::new(Semaphore::new(1));
+        let connections = Arc::new(Semaphore::new(connection_capacity));
+        let source_limits = Arc::new(parins::limits::Limiter::new(&settings).unwrap());
         let resolver = Arc::new(Resolver::from_config(&config));
         let queries = Arc::new(Semaphore::new(8));
         let ingress = Ingress {
+            source_limits: source_limits.clone(),
             resolver: resolver.clone(),
             queries: queries.clone(),
             connections: connections.clone(),
@@ -104,6 +117,8 @@ impl Fixture {
             upstream,
             calls,
             connections,
+            connection_capacity,
+            source_limits,
             resolver,
             queries,
         }
@@ -161,7 +176,12 @@ impl Fixture {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(self.connections.available_permits(), 1);
+        assert_eq!(
+            self.connections.available_permits(),
+            self.connection_capacity
+        );
+        // Source admission is released as well as the global semaphore.
+        assert!(self.source_limits.try_connection(self.address.ip()).is_ok());
         self.upstream.abort();
         let _ = self.upstream.await;
     }
@@ -427,7 +447,17 @@ async fn h3_real_get_post_and_http_errors() {
 
 #[tokio::test]
 async fn doq_inflight_stop_sending_cancels_dns_and_preserves_connection() {
-    let fixture = Fixture::with_dropped_first_query(Protocol::Doq, true).await;
+    let fixture = Fixture::with_limits(
+        Protocol::Doq,
+        true,
+        parins::limits::Settings {
+            enabled: true,
+            max_inflight: 1,
+            ..Default::default()
+        },
+        1,
+    )
+    .await;
     let client = fixture.client(Protocol::Doq);
     let connection = client
         .connect(fixture.address, "localhost")
@@ -440,6 +470,12 @@ async fn doq_inflight_stop_sending_cancels_dns_and_preserves_connection() {
     fixture.wait_for_upstream_query().await;
     recv.stop(3u32.into()).unwrap();
     fixture.wait_for_cancelled_query().await;
+    assert!(
+        fixture
+            .source_limits
+            .try_query(fixture.address.ip())
+            .is_ok()
+    );
     // The first query really reached the upstream, but its stream-local
     // cancellation must not poison either the connection or singleflight key.
     let (mut send, mut recv) = connection.open_bi().await.unwrap();
@@ -460,7 +496,18 @@ async fn doq_inflight_stop_sending_cancels_dns_and_preserves_connection() {
 
 #[tokio::test]
 async fn h3_connection_loss_cancels_inflight_dns_before_deadline() {
-    let fixture = Fixture::with_dropped_first_query(Protocol::H3, true).await;
+    let fixture = Fixture::with_limits(
+        Protocol::H3,
+        true,
+        parins::limits::Settings {
+            enabled: true,
+            max_inflight: 1,
+            max_connections: 1,
+            ..Default::default()
+        },
+        1,
+    )
+    .await;
     let client = fixture.client(Protocol::H3);
     let connection = client
         .connect(fixture.address, "localhost")
@@ -486,6 +533,12 @@ async fn h3_connection_loss_cancels_inflight_dns_before_deadline() {
     fixture.wait_for_upstream_query().await;
     connection.close(0x100u32.into(), b"cancel connection");
     fixture.wait_for_cancelled_query().await;
+    assert!(
+        fixture
+            .source_limits
+            .try_query(fixture.address.ip())
+            .is_ok()
+    );
     timeout(Duration::from_millis(200), async {
         while fixture.connections.available_permits() != 1 {
             tokio::task::yield_now().await;
@@ -500,4 +553,174 @@ async fn h3_connection_loss_cancels_inflight_dns_before_deadline() {
         .unwrap();
     fixture.close().await;
     client.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn doq_and_h3_source_rate_budget_returns_dns_servfail_without_upstream_io() {
+    for protocol in [Protocol::Doq, Protocol::H3] {
+        let fixture = Fixture::with_limits(
+            protocol,
+            false,
+            parins::limits::Settings {
+                enabled: true,
+                burst: 1,
+                rate_per_sec: 1,
+                ..Default::default()
+            },
+            2,
+        )
+        .await;
+        let client = fixture.client(protocol);
+        let connection = client
+            .connect(fixture.address, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        // Complete the pair before the one-second token refill. A changed ECS
+        // option (and HTTP forwarding headers) cannot create a new source.
+        timeout(Duration::from_millis(900), async {
+            match protocol {
+                Protocol::Doq => {
+                    for expected in [ResponseCode::NoError, ResponseCode::ServFail] {
+                        let mut message = Message::from_vec(&query(0)).unwrap();
+                        if expected == ResponseCode::ServFail {
+                            parins::ecs::set_subnet(
+                                &mut message,
+                                Some(hickory_proto::rr::rdata::opt::ClientSubnet::new(
+                                    "203.0.113.0".parse().unwrap(),
+                                    24,
+                                    0,
+                                )),
+                            );
+                        }
+                        let wire = message.to_vec().unwrap();
+                        let mut framed = (wire.len() as u16).to_be_bytes().to_vec();
+                        framed.extend(wire);
+                        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+                        send.write_all(&framed).await.unwrap();
+                        send.finish().unwrap();
+                        let answer = recv.read_to_end(65537).await.unwrap();
+                        let answer = Message::from_vec(&answer[2..]).unwrap();
+                        assert_eq!(answer.id, 0);
+                        assert_eq!(answer.response_code, expected);
+                    }
+                }
+                Protocol::H3 => {
+                    let (mut driver, mut sender) =
+                        h3::client::new(h3_quinn::Connection::new(connection.clone()))
+                            .await
+                            .unwrap();
+                    let drive = tokio::spawn(async move {
+                        futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await
+                    });
+                    for (index, expected) in [ResponseCode::NoError, ResponseCode::ServFail]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let mut message = Message::from_vec(&query(index as u16)).unwrap();
+                        if index == 1 {
+                            parins::ecs::set_subnet(
+                                &mut message,
+                                Some(hickory_proto::rr::rdata::opt::ClientSubnet::new(
+                                    "203.0.113.0".parse().unwrap(),
+                                    24,
+                                    0,
+                                )),
+                            );
+                        }
+                        let request = http::Request::builder()
+                            .method("POST")
+                            .uri("https://localhost/dns-query")
+                            .header("content-type", "application/dns-message")
+                            .header("x-forwarded-for", format!("203.0.113.{}", index + 1))
+                            .header("forwarded", format!("for=203.0.113.{}", index + 1))
+                            .body(())
+                            .unwrap();
+                        let mut stream = sender.send_request(request).await.unwrap();
+                        stream
+                            .send_data(Bytes::from(message.to_vec().unwrap()))
+                            .await
+                            .unwrap();
+                        stream.finish().await.unwrap();
+                        let response = stream.recv_response().await.unwrap();
+                        assert_eq!(response.status(), 200);
+                        let mut answer = Vec::new();
+                        while let Some(mut data) = stream.recv_data().await.unwrap() {
+                            let len = data.remaining();
+                            answer.extend_from_slice(&data.copy_to_bytes(len));
+                        }
+                        let answer = Message::from_vec(&answer).unwrap();
+                        assert_eq!(answer.id, index as u16);
+                        assert_eq!(answer.response_code, expected);
+                    }
+                    drive.abort();
+                    let _ = drive.await;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.resolver.metrics().snapshot().counters["source_queries_rejected"],
+            1
+        );
+        assert_eq!(fixture.queries.available_permits(), 8);
+        fixture.close().await;
+        client.close(0u32.into(), b"done");
+    }
+}
+
+#[tokio::test]
+async fn doq_and_h3_source_connection_cap_is_independent_and_reclaimed() {
+    for protocol in [Protocol::Doq, Protocol::H3] {
+        let fixture = Fixture::with_limits(
+            protocol,
+            false,
+            parins::limits::Settings {
+                enabled: true,
+                max_connections: 1,
+                ..Default::default()
+            },
+            3,
+        )
+        .await;
+        let client = fixture.client(protocol);
+        let connection = client
+            .connect(fixture.address, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        let rejected = timeout(
+            Duration::from_secs(1),
+            client.connect(fixture.address, "localhost").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(rejected.is_err());
+        assert_eq!(
+            fixture.resolver.metrics().snapshot().counters["source_connections_rejected"],
+            1
+        );
+        assert_eq!(fixture.connections.available_permits(), 2);
+        connection.close(0u32.into(), b"release source permit");
+        timeout(Duration::from_secs(1), async {
+            while fixture.connections.available_permits() != 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let next = client
+            .connect(fixture.address, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        fixture.close().await;
+        timeout(Duration::from_secs(1), next.closed())
+            .await
+            .unwrap();
+        client.close(0u32.into(), b"done");
+    }
 }

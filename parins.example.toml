@@ -7,6 +7,17 @@ tcp_io_timeout_ms = 5000
 shutdown_grace_ms = 3000
 max_inflight = 256
 max_tcp_connections = 64
+
+# Optional source budgets shared across all DNS listeners (socket peer only).
+# [source_limits]
+# enabled = true
+# rate_per_sec = 100
+# burst = 200
+# max_sources = 4096
+# max_inflight = 32
+# max_connections = 8 # includes pending TLS/QUIC handshakes
+# ipv4_prefix = 32
+# ipv6_prefix = 64 # rotating addresses in a /64 share a budget
 # Optional paths resolve relative to this configuration file.
 # filter_file = "rules.toml" # authoritative instead of the inline [filter]
 # admin_listen = "127.0.0.1:9090" # local /metrics and /healthz only

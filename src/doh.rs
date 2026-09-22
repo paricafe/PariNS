@@ -85,10 +85,15 @@ pub async fn serve(
                     ingress.resolver.metrics().inc(Counter::ConnectionsRejected);
                     continue
                 };
+                let Some(source) = ingress.admit_connection(peer.ip()) else {
+                    ingress.resolver.metrics().inc(Counter::ConnectionsRejected);
+                    continue;
+                };
                 let acceptor = acceptor.clone();
                 let ingress = ingress.clone();
                 connections.spawn(async move {
                     let _permit = permit;
+                    let _source = source;
                     let mut stop = ingress.stop.clone();
                     let tls = tokio::select! {
                         _ = stop.changed() => return,

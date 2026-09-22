@@ -260,10 +260,15 @@ pub async fn serve(
                     ingress.resolver.metrics().inc(Counter::ConnectionsRejected);
                     continue;
                 };
+                let Some(source) = ingress.admit_connection(peer.ip()) else {
+                    ingress.resolver.metrics().inc(Counter::ConnectionsRejected);
+                    continue;
+                };
                 let acceptor = acceptor.clone();
                 let ingress = ingress.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
+                    let _source = source;
                     // Connection admission precedes TLS work, so slow handshakes are bounded too.
                     let _ = connection(stream, peer, acceptor, ingress).await;
                 });

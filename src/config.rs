@@ -19,6 +19,8 @@ pub struct Config {
     pub max_inflight: usize,
     pub max_tcp_connections: usize,
     #[serde(default)]
+    pub source_limits: crate::limits::Settings,
+    #[serde(default)]
     pub ecs: EcsConfig,
     #[serde(default)]
     pub cache: CacheConfig,
@@ -181,6 +183,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.source_limits.validate()?;
         self.upstream_pool.validate()?;
         ensure!(
             !self.upstream_pool.enabled || self.upstream_tls.is_some(),
@@ -275,6 +278,32 @@ mod tests {
     #[test]
     fn example_is_valid() {
         Config::parse(EXAMPLE).unwrap();
+    }
+
+    #[test]
+    fn source_limits_are_opt_in_and_reject_unknown_or_invalid_settings() {
+        assert!(!Config::parse(EXAMPLE).unwrap().source_limits.enabled);
+        assert!(
+            Config::parse(&format!("{EXAMPLE}\n[source_limits]\nenabled = true\n"))
+                .unwrap()
+                .source_limits
+                .enabled
+        );
+        for value in [
+            "rate_per_sec = 0",
+            "burst = 0",
+            "max_sources = 65537",
+            "ipv4_prefix = 33",
+            "ipv6_prefix = 129",
+            "max_inflight = 0",
+            "max_connections = 0",
+            "unknown = 1",
+        ] {
+            assert!(
+                Config::parse(&format!("{EXAMPLE}\n[source_limits]\n{value}\n")).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

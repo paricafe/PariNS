@@ -62,9 +62,15 @@ pub async fn serve(endpoint: Endpoint, protocol: Protocol, ingress: Ingress) -> 
                     incoming.refuse();
                     continue;
                 };
+                let Some(source) = ingress.admit_connection(incoming.remote_address().ip()) else {
+                    ingress.resolver.metrics().inc(crate::metrics::Counter::ConnectionsRejected);
+                    incoming.refuse();
+                    continue;
+                };
                 let context = ingress.clone();
                 connections.spawn(async move {
                     let _permit = permit;
+                    let _source = source;
                     let Ok(Ok(connection)) = timeout(context.io_timeout, incoming).await else { return };
                     match protocol {
                         Protocol::Doq => doq_connection(connection, context).await,

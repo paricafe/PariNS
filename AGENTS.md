@@ -11,8 +11,27 @@ Do not expand it into a full recursive resolver without an explicit design decis
   stage explicit paths; do not include another task's work in a commit.
 - Reviews, explanations, and plans do not authorize implementation. Reuse existing
   authorization, but distinguish committing, pushing, releasing, and deploying.
-- Prefer existing mechanisms and dependencies. Add abstractions, retries, caches,
-  or fallbacks only for a concrete requirement or reachable failure.
+
+## Current-version design and proportional safeguards
+
+- Target the current PariNS design, not backward compatibility with older PariNS
+  versions. Do not retain or add legacy configuration aliases, API adapters,
+  parallel old/new implementations, automatic migrations, or silent legacy fallbacks.
+  When replacing a contract, update its callers, UI, examples, and tests together;
+  remove superseded paths within that change and document required user actions.
+  Reject obsolete input clearly rather than guessing how to translate it.
+- This is a project-version policy, not permission to break supported DNS/transport
+  standards or remove required protocol negotiation and operational fallbacks.
+- Prefer existing mechanisms and dependencies. Before adding validation, guards,
+  retries, fallbacks, or abstractions, identify the concrete requirement or reachable
+  failure, explain why existing guarantees are insufficient, and choose the simplest
+  complete solution. Do not build protection for hypothetical future scenarios.
+- Validate at the owning trust boundary and rely on established internal contracts.
+  Avoid repeated checks across layers, catch-all error suppression, and defensive
+  defaults that conceal broken contracts. Preserve necessary DNS correctness,
+  authentication, TLS verification, resource bounds, and persistence integrity.
+- Apply these rules to the requested change; they do not authorize unrelated
+  compatibility removal or a repository-wide defensive-code cleanup.
 
 ## Ownership
 
@@ -90,6 +109,10 @@ Keep both languages complete; configuration values and raw diagnostics stay inta
 
 Use the toolchain in `rust-toolchain.toml` and locked dependencies. Choose checks
 that cover the changed behavior; `.github/workflows/ci.yml` defines the full CI gate.
+Reuse existing tests and tools. Add tests or verification scripts only for a
+meaningful behavior or regression gap, not duplicate coverage or speculative risks.
+Run the smallest sufficient checks plus required project gates. Stop when acceptance
+criteria pass; expand or repeat verification only for changes, failures, or new evidence.
 
 - Rust: `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   and `cargo test --locked --all-targets`.

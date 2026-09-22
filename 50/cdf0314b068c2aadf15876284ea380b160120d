@@ -1,0 +1,29 @@
+tests/manage.rs
+  s_d595d238bbd4ee::t_3fe90813a083ea 128-131,1009,1048-1062,1065-1066,1079-1080,1087-1088
+  s_d595d238bbd4ee::t_c7ab421e09a9ec 133,151-154,158,1063-1064,1067-1078,1081-1086
+  s_d595d238bbd4ee::t_64843ca54e54b3 1089-1091
+web/locales-console.js
+  s_d595d238bbd4ee::t_91e0915af505e2 9
+src/manage/auth_budget.rs
+  s_d595d238bbd4ee::t_6f7896faeb9b29 85-89,103-106,112-116,129-131,133-143,146-148,156-158,181,184-189,194-197,204-207,213-215
+  s_d595d238bbd4ee::t_efbf5299b732aa 1-84,90-102,107-111,117-128,132,144-145,149-155,159-180,182-183,190-193,198-203,208-212,216-218
+src/manage/mod.rs
+  s_d595d238bbd4ee::t_efbf5299b732aa 2,13,44,187,201,217-222
+  s_d595d238bbd4ee::t_3011b5f82fb0ad 223-224,235,276-280,490-495,519,620-629,631,663,696,701
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "50cdf0314b068c2aadf15876284ea380b160120d",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

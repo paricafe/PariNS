@@ -278,3 +278,93 @@ async fn tcp_fallback_shares_the_udp_deadline() {
     finish(stop, task).await;
     mock.await.unwrap();
 }
+
+#[tokio::test]
+async fn udp_and_tcp_share_the_inflight_budget() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = config(upstream.local_addr().unwrap());
+    cfg.max_inflight = 1;
+    cfg.query_timeout_ms = 1000;
+    let (address, stop, task) = start(cfg).await;
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .send_to(&query().to_vec().unwrap(), address)
+        .await
+        .unwrap();
+    let mut buffer = [0; 4096];
+    let (length, peer) = timeout(Duration::from_secs(1), upstream.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    let pending = protocol::decode(&buffer[..length]).unwrap();
+    let mut tcp = TcpStream::connect(address).await.unwrap();
+    write(&mut tcp, &query()).await;
+    assert_eq!(read(&mut tcp).await.response_code, ResponseCode::ServFail);
+    assert!(
+        matches!(upstream.try_recv(&mut buffer), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    upstream
+        .send_to(&answer(&pending, 1).to_vec().unwrap(), peer)
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(1), client.recv(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    finish(stop, task).await;
+}
+
+#[tokio::test]
+async fn shutdown_grace_cancels_stalled_queries() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = config(upstream.local_addr().unwrap());
+    cfg.query_timeout_ms = 5000;
+    cfg.shutdown_grace_ms = 30;
+    let (address, stop, task) = start(cfg).await;
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .send_to(&query().to_vec().unwrap(), address)
+        .await
+        .unwrap();
+    let mut buffer = [0; 4096];
+    timeout(Duration::from_secs(1), upstream.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    stop.send(()).unwrap();
+    timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let _udp = UdpSocket::bind(address).await.unwrap();
+}
+
+#[tokio::test]
+async fn mismatched_tcp_fallback_response_returns_servfail() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind(upstream).await.unwrap();
+    let mock = tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        let (length, peer) = udp.recv_from(&mut buffer).await.unwrap();
+        let q = protocol::decode(&buffer[..length]).unwrap();
+        let mut truncated = answer(&q, 0);
+        truncated.metadata.truncation = true;
+        udp.send_to(&truncated.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let q = read(&mut stream).await;
+        let mut invalid = answer(&q, 1);
+        invalid.metadata.id = q.id.wrapping_add(1);
+        write(&mut stream, &invalid).await;
+    });
+    let (address, stop, task) = start(config(upstream)).await;
+    assert_eq!(
+        udp_query(address, &query()).await.0.response_code,
+        ResponseCode::ServFail
+    );
+    finish(stop, task).await;
+    mock.await.unwrap();
+}

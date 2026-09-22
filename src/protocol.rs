@@ -194,4 +194,31 @@ mod tests {
         assert_eq!(u16::from(decoded.response_code), 16);
         assert_eq!(decoded.edns.unwrap().version(), 0);
     }
+
+    #[test]
+    fn edns_payload_is_bounded_and_oversize_answers_remain_decodable() {
+        use hickory_proto::rr::{RData, Record, rdata::A};
+        let mut q = query();
+        assert_eq!(udp_limit(&q), 512);
+        let mut edns = Edns::new();
+        edns.set_max_payload(4096).set_dnssec_ok(true);
+        q.edns = Some(edns);
+        q.metadata.checking_disabled = true;
+        assert_eq!(udp_limit(&q), 1232);
+        let mut response = error_response(&q, ResponseCode::NoError);
+        for _ in 0..100 {
+            response.add_answer(Record::from_rdata(
+                q.queries[0].name().clone(),
+                60,
+                RData::A(A::new(192, 0, 2, 1)),
+            ));
+        }
+        let bytes = encode_udp(&response, udp_limit(&q)).unwrap();
+        let truncated = decode(&bytes).unwrap();
+        assert!(bytes.len() <= 1232);
+        assert!(truncated.truncation);
+        assert_eq!(truncated.queries, q.queries);
+        assert!(truncated.checking_disabled);
+        assert!(truncated.edns.unwrap().flags().dnssec_ok);
+    }
 }

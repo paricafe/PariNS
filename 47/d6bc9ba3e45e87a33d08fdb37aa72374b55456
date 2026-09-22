@@ -1,0 +1,51 @@
+tests/manage.rs
+  s_aa37914330e67a::t_3dd1c772d5a3a7 459-463,468-529,533-534,561,584-585,599,602,609-610,614,645-646
+  s_aa37914330e67a::t_646abd1d7d92bf 530-532,535-560,562-583,586-598,600-601,603-608,611-613,615-644,647
+scripts/test-web.mjs
+  s_aa37914330e67a::t_e330b01cbc0556 10,15-18,26
+  s_aa37914330e67a::t_6877e6162612a6 19-25
+  s_aa37914330e67a::t_58cf7908f13aae 27
+src/manage/runtime.rs
+  s_aa37914330e67a::t_4002a6a93dafec 17,25,35,86-87,91,96-100,105,108,110-111,154-155,157-161,163,165-168,188
+  s_aa37914330e67a::t_12d783c3a6112c 92-95,101-103,162,164
+  s_aa37914330e67a::t_93145aa75b53c6 104,106-107,109
+src/manage/settings.rs
+  s_aa37914330e67a::t_cafa1703a35e12 70-77,85-101,204-215
+  s_aa37914330e67a::t_73dc4434771ca1 216-218
+web/cache.js
+  s_aa37914330e67a::t_12d783c3a6112c 57-61
+  s_aa37914330e67a::t_5a2c2e8b4b2a5c 1-56,62-94
+web/index.html
+  s_aa37914330e67a::t_b91a6cfa913147 81-93,95,98
+  s_aa37914330e67a::t_e841dc9343a828 12
+web/app.js
+  s_aa37914330e67a::t_12d783c3a6112c 366,391
+  s_aa37914330e67a::t_e841dc9343a828 6-7,172,176-178,188-189,196-198,218-221,257-263,322,331-332,341,355-365,367-384
+web/app.css
+  s_aa37914330e67a::t_e841dc9343a828 141-148
+web/settings.js
+  s_aa37914330e67a::t_6877e6162612a6 14-16
+src/manage/mod.rs
+  s_aa37914330e67a::t_4002a6a93dafec 315-345,347,352,359
+  s_aa37914330e67a::t_9a024e9cea023f 2,346,348-351,353-358,360,384-387,426-427,513-516
+src/manage/cache.rs
+  s_aa37914330e67a::t_4002a6a93dafec 1-28,31-108
+  s_aa37914330e67a::t_e330b01cbc0556 29-30
+  s_aa37914330e67a::t_3c4ebbfb0d9b58 109-163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "47d6bc9ba3e45e87a33d08fdb37aa72374b55456",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -12,8 +12,10 @@ Early development. UDP/TCP listeners, validated single-upstream forwarding,
 UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
 implemented. Optional peer-derived ECS and bounded subnet-aware response caching
 are supported. Local query-name/CNAME filtering, bounded request coalescing and
-aggregate runtime metrics are available;
-encrypted transports remain planned.
+aggregate runtime metrics are available. DoT, DoH (HTTP/2 and HTTP/3), DoQ,
+verified DoT upstreams, file-backed rule/certificate reload, a local metrics
+endpoint and opt-in equivalent-replica hedging are implemented and locally tested.
+Production deployment and capacity acceptance have not been performed.
 
 ## Development
 
@@ -51,7 +53,7 @@ dig @127.0.0.1 -p 5353 example.com A +tcp
 Use `--config PATH` to select a different configuration file. `listen` selects
 the same address and port for UDP and TCP; port zero selects a shared ephemeral
 port, printed on startup. `upstream` must be a literal IP:port, reachable over
-both UDP and TCP. Do not point it back at PariNS, including through a local
+both UDP and TCP (or TCP/TLS when `upstream_tls` is configured). Do not point it back at PariNS, including through a local
 interface alias that configuration validation cannot identify.
 
 Ctrl-C or SIGTERM (Unix) stops accepting traffic, closes idle TCP clients, and
@@ -67,7 +69,7 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   without EDNS). Larger replies return a question-only TC response; retry over
   TCP for the complete answer. Downstream TCP connections support sequential
   reuse; requests on the same connection are processed in order.
-- `max_inflight` is shared across UDP and TCP queries. At capacity, new UDP
+- `max_inflight` is shared across all DNS transports. At capacity, new UDP
   queries are dropped and valid TCP queries receive SERVFAIL. Excess TCP
   connections are closed. `tcp_io_timeout_ms` bounds each complete frame read
   or write, including idle and partial-frame reads.
@@ -85,9 +87,9 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   release does not perform DNSSEC validation or authenticate the plaintext
   upstream; the AD bit is cleared in client responses.
 
-The default is local-only. This release is not a production public
-resolver: encrypted transports, per-client rate limiting and production capacity
-validation are not yet implemented. Logs contain startup/shutdown events and
+The default is local-only. This release is not yet accepted as a production public
+resolver: per-client rate limiting and production capacity validation are not
+implemented. Logs contain startup/shutdown/reload events and
 optional aggregate metrics, not query names or client IP addresses.
 
 ## Cache policy
@@ -138,8 +140,13 @@ at DNS label boundaries. ASCII case and a final dot are ignored. Any matching
 allow rule wins for that name, regardless of specificity. Names use ASCII
 letters, digits, underscores and hyphens; use punycode for IDNs. Wildcards,
 Adblock syntax, hosts lines, URLs and regex are rejected, including when disabled.
-Limits are 100000 rules and 8 MiB of rule text. Rules compile once at startup;
-changes require a restart. There is no rule download or third-party list import.
+Limits are 100000 rules and 8 MiB of rule text. Set the top-level `filter_file`
+to use a standalone TOML file with these same fields (without `[filter]`). It
+becomes authoritative instead of inline rules and is limited to 8 MiB total.
+On Unix, SIGHUP reloads this file and configured listener certificates. Every
+candidate is checked before publication; errors retain the previous generation.
+Each DNS request keeps its starting policy snapshot. Inline configuration changes
+require restart. There is no rule download or third-party list import.
 
 Query-name filtering runs after protocol/ECS validation and before cache lookup
 for every supported query type (including AAAA, HTTPS and SVCB). Blocking returns
@@ -171,8 +178,10 @@ still receives independent policy checks, ID/question and ECS restoration.
 `Resolver::metrics()` and `Server::metrics()` expose fixed counters, inflight gauges
 and cumulative request/upstream latency histograms. Collection is always active;
 `[metrics] interval_secs = 10` enables periodic and shutdown JSON snapshots on
-stderr. The default `0` disables output. No extra listener or metrics exporter is
-started. Snapshots have `event=parins_metrics`, `entry_point=server`, a per-run
+stderr. The default `0` disables output. An optional top-level `admin_listen`
+starts a loopback-only HTTP endpoint: `GET /metrics` exposes Prometheus counters,
+gauges and histograms (seconds); `GET /healthz` is process liveness, not upstream
+readiness. No administrative writes or query logs are exposed. Snapshots have `event=parins_metrics`, `entry_point=server`, a per-run
 `run_id`, `reason`, `uptime_secs` and `metrics`. Counters reset on restart.
 
 - `requests/completed/cancelled` refer to resolver calls; completed means returned,
@@ -185,7 +194,8 @@ started. Snapshots have `event=parins_metrics`, `entry_point=server`, a per-run
   `upstream_operations` counts whole operations, not packets: TCP fallback and
   ECS retry remain inside one operation. `upstream_failures` counts exchange
   failures/timeouts, not DNS error RCODEs; timeouts are also a subset counter.
-- UDP datagrams/TCP complete frames, admission drops, query rejections and
+- UDP datagrams/TCP complete frames, encrypted DNS messages reaching shared
+  admission (`encrypted_received/rejected`), admission drops, query rejections and
   connection rejections distinguish ingress saturation. Final gauges reach zero
   after orderly drain or cancellation.
 - Latency buckets use inclusive bounds 1/5/10/50/100/500/1000/5000 ms plus infinity
@@ -195,7 +205,80 @@ started. Snapshots have `event=parins_metrics`, `entry_point=server`, a per-run
 
 No query names, client addresses or unbounded labels are emitted. Existing
 startup/shutdown messages remain plain text; select JSON events when ingesting
-metrics. This is not a Prometheus/OpenTelemetry exporter, tracing or alert setup.
+metrics. No OpenTelemetry tracing or alert setup is included.
+
+## Encrypted transports and reload
+
+Uncomment individual `[dot]`, `[doh]`, `[doq]`, `[doh3]` sections in the example.
+Certificate, key, CA and rule paths resolve relative to the configuration file.
+All sockets and certificates must initialize successfully before traffic is served;
+`--check` validates files without opening listeners. PEM private keys and local
+configuration are ignored by Git. Provision certificates outside this repository.
+
+- DoT uses length-prefixed DNS, TLS 1.2/1.3 and sequential connection reuse.
+- DoH uses `/dns-query`, GET with unpadded base64url `dns=`, or POST with
+  `application/dns-message`. HTTP/2 requires `h2` ALPN; HTTP/1 DNS is not supported.
+  Replies use `Cache-Control: no-store` to prevent shared HTTP cache subnet leaks.
+- DoQ uses TLS 1.3 / `doq` ALPN, one zero-ID DNS frame per bidirectional stream,
+  followed by FIN. HTTP/3 uses `h3` ALPN and the same DoH contract, not DoQ framing.
+  QUIC migration and 0-RTT are disabled. Peer identity always comes from the socket;
+  X-Forwarded-For/Forwarded headers are not trusted.
+- Connections/handshakes share `max_tcp_connections`; streams and bodies have
+  finite bounds. Per-connection streams are capped at `min(max_inflight, 1024)`.
+  The legacy `tcp_io_timeout_ms` also bounds encrypted handshakes
+  and complete HTTP/QUIC request work. HTTP/2 headers are limited to 8 KiB;
+  HTTP/3 field sections to 128 KiB; DNS payloads to 65535 bytes. Large DNS GET URLs
+  may exceed header limits; use POST. These budgets are not an RSS guarantee.
+- H2 stream reset, DoQ response cancellation and H3 connection closure cancel
+  their active DNS waiter. H3 **single-stream** cancellation is currently observed
+  on response write or at the finite request deadline: the selected H3 library
+  does not expose an earlier response-stream cancellation notification.
+- Optional `[upstream_tls]` authenticates the fixed upstream IP using `server_name`.
+  `ca_file` replaces built-in WebPKI roots. Certificate failures never downgrade
+  to plaintext. Upstream DoT currently opens a fresh connection per transaction;
+  there is no upstream connection pool or DoH/DoQ upstream client.
+- SIGHUP validates all new rule/certificate candidates before replacing them.
+  Each listener's new full handshakes see its atomic certificate replacement;
+  established connections and resumed sessions may retain previous TLS identity
+  context. Publication is not one global transaction across all listeners and
+  rules. Listener addresses, resource limits, upstream/CA settings and inline
+  configuration require restart, which creates fresh resolver/cache ownership.
+
+## Optional replica scheduling
+
+`[scheduler]` enables exactly one secondary **semantically equivalent** upstream.
+The operator must establish equal ECS, DNSSEC and answer policies. Both replicas
+use the same transport and TLS server name. The primary starts first; after
+`hedge_after_ms`, or an IO error/SERVFAIL, at most one secondary starts.
+`max_extra_inflight` is a process-resolver-wide non-queuing extra-operation budget.
+The first non-SERVFAIL response wins, including NXDOMAIN, NODATA and REFUSED.
+REFUSED remains available for the resolver's bounded anonymous ECS retry.
+The overall query deadline is unchanged and losing futures are dropped, not
+left running in background tasks. Saturation falls back to primary-only behavior.
+
+Changing upstream semantics requires a new Resolver instance (restart in the
+binary), with an independent cache and singleflight table. No automatic
+non-ECS emergency profile or health-based routing is enabled. Hedging is disabled
+by default and trades additional upstream traffic for latency; measure first.
+
+## Local acceptance and packaging
+
+```sh
+cargo run --locked --release --example bench -- 1000 32
+cargo install cargo-audit --version 0.22.2 --locked
+cargo audit --deny warnings
+sh scripts/package.sh
+```
+
+The benchmark runs only synthetic loopback upstreams and emits JSON for warm
+cache, cold single-upstream and cold hedged scenarios. It is a Resolver baseline,
+not network/TLS throughput, RSS measurement or production capacity evidence.
+Packaging creates a host-native archive under `target/packages`, containing no
+keys or private configuration. `deploy/parins.service` is a Linux systemd template,
+not an installed service; review paths, file permissions, firewall and source
+limits before deployment. The template defaults to unprivileged ports. CI runs
+formatting, Clippy, tests, release build, configuration check, audit and packaging;
+Linux/macOS CI results must be checked separately from local macOS acceptance.
 
 ## Module boundaries
 
@@ -210,6 +293,10 @@ metrics. This is not a Prometheus/OpenTelemetry exporter, tracing or alert setup
 | `metrics` | Fixed counters, RAII lifecycle gauges and cumulative latency buckets |
 | `resolver` | Compose policy, ECS, cache, upstream deadline and response restoration |
 | `upstream` | Independent UDP exchange and validated TCP fallback |
+| `scheduler` | Opt-in equivalent-replica race, shared extra budget, loser cancellation |
+| `tls` / `doh` / `quic` | Authenticated transport, framing, HTTP/stream lifecycle |
+| `ingress` | Shared encrypted-query admission and response serialization |
+| `admin` | Loopback read-only metrics and process liveness |
 | `transport::tcp` | Length-prefixed framing used on both sides |
 | `server` | Listener ownership, admission budgets, client tasks, shutdown |
 | `main` | CLI arguments, startup, OS signals |
@@ -218,11 +305,11 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 
 ## Planned scope
 
-- Multiple upstream profiles and explicit cache ownership across configuration updates.
-- Rule-list import, atomic rule updates and additional filtering response modes.
-- Multiple-upstream scheduling and upstream connection reuse.
-- UDP/TCP DNS, DNS over TLS, DNS over HTTPS, and DNS over QUIC.
-- Metrics exporters and atomic configuration and rule updates.
+- Explicit emergency-profile product policy and health-driven scheduling.
+- Licensed third-party rule import and additional filtering response modes.
+- Upstream connection reuse and additional authenticated upstream protocols.
+- Public-service source limits and measured deployment/rollback acceptance.
+- Full configuration replacement beyond rule/certificate reload.
 
 The initial design focuses on forwarding to existing resolvers. A standalone
 iterative resolver is outside the initial scope. The implementation uses Rust,

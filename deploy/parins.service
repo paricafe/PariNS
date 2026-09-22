@@ -1,0 +1,31 @@
+[Unit]
+Description=PariNS DNS forwarder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStartPre=/opt/parins/parins --config /etc/parins/parins.toml --check
+ExecStart=/opt/parins/parins --config /etc/parins/parins.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=65
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0077
+# Defaults use ports above 1024 and loopback. Public/privileged binding needs
+# a reviewed firewall, source limits, certificate ownership and port policy.
+
+[Install]
+WantedBy=multi-user.target

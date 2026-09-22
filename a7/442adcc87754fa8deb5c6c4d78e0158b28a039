@@ -1,0 +1,39 @@
+src/config.rs
+  s_aa37914330e67a::t_c77f01dddae249 22-23
+  s_aa37914330e67a::t_c6386e23e7ccc3 163-164
+src/policy/tests.rs
+  s_aa37914330e67a::t_6ec5899d0f5fc3 23,33-49,67-68,80-88,103
+  s_aa37914330e67a::t_404f566a9e640b 1-22
+  s_aa37914330e67a::t_c6386e23e7ccc3 24-32,50-66,69-79,89-102
+src/policy.rs
+  s_aa37914330e67a::t_c77f01dddae249 1-2,4-21,23-44,59-61,75,80-88,90-94,98-99,101-102,106-107,111-119
+  s_aa37914330e67a::t_404f566a9e640b 3,22,45-58,62-74,76-79,89,95-97,100,103-105,108-110,120-122
+  s_aa37914330e67a::t_8d0891bb1c2cc0 123-125
+src/lib.rs
+  s_aa37914330e67a::t_c77f01dddae249 6
+tests/filter.rs
+  s_aa37914330e67a::t_6ec5899d0f5fc3 1-82
+  s_aa37914330e67a::t_5055f93e1d758e 83-112
+README.md
+  s_aa37914330e67a::t_4556efd1efd00c 14-15,123-149,158
+src/resolver.rs
+  s_aa37914330e67a::t_c77f01dddae249 15,30,40,50,75-79
+parins.example.toml
+  s_aa37914330e67a::t_404f566a9e640b 25-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a7442adcc87754fa8deb5c6c4d78e0158b28a039",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+src/protocol.rs
+  s_aa37914330e67a::t_4af7c52315571a 197-219
+  s_aa37914330e67a::t_3c2359b036d8e8 220-223
+README.md
+  s_aa37914330e67a::t_51203abe5e74b4 31-97
+tests/server.rs
+  s_aa37914330e67a::t_4af7c52315571a 281-341
+  s_aa37914330e67a::t_6cf65fa20f8cbb 342-370
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1993af7f8011551779749fadfd0623ca989c934e",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

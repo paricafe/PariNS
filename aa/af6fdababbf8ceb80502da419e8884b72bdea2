@@ -1,0 +1,21 @@
+web/charts.js
+  s_aa37914330e67a::t_eb6a67a8baa5e9 12-20,63,86
+scripts/test-web.mjs
+  s_aa37914330e67a::t_eb6a67a8baa5e9 65-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "aaaf6fdababbf8ceb80502da419e8884b72bdea2",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

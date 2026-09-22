@@ -37,3 +37,7 @@ enabled = true
 max_groups = 128
 # Includes the first caller. The server max_inflight budget still applies.
 max_waiters = 64
+
+[metrics]
+# 0 disables aggregate JSON stderr output; 1..3600 enables periodic/final snapshots.
+interval_secs = 0

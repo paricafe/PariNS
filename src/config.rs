@@ -23,6 +23,15 @@ pub struct Config {
     pub filter: crate::policy::Policy,
     #[serde(default)]
     pub coalescing: CoalescingConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MetricsConfig {
+    /// Zero disables aggregate stderr output; collection remains available in-process.
+    pub interval_secs: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -99,6 +108,10 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.metrics.interval_secs <= 3600,
+            "metrics.interval_secs must be in 0..=3600"
+        );
         ensure!(
             (1..=65536).contains(&self.coalescing.max_groups)
                 && (1..=65536).contains(&self.coalescing.max_waiters),
@@ -189,6 +202,7 @@ mod tests {
             ("block_suffix = []", "block_sufix = []"),
             ("max_groups = 128", "max_groups = 0"),
             ("max_waiters = 64", "max_waiters = 65537"),
+            ("interval_secs = 0", "interval_secs = 3601"),
             ("ipv4_prefix = 24", "ipv4_prefix = 33"),
             ("ipv6_prefix = 56", "ipv6_prefix = 129"),
             ("max_entries = 4096", "max_entries = 0"),

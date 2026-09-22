@@ -11,7 +11,8 @@ operate.
 Early development. UDP/TCP listeners, validated single-upstream forwarding,
 UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
 implemented. Optional peer-derived ECS and bounded subnet-aware response caching
-are supported. Local query-name and CNAME-chain filtering are available;
+are supported. Local query-name/CNAME filtering, bounded request coalescing and
+aggregate runtime metrics are available;
 encrypted transports remain planned.
 
 ## Development
@@ -85,9 +86,9 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   upstream; the AD bit is cleared in client responses.
 
 The default is local-only. This release is not a production public
-resolver: encrypted transports, per-client rate limiting, operational metrics,
-and production capacity validation are not yet implemented. Logs contain startup
-and shutdown events, not query names or client IP addresses.
+resolver: encrypted transports, per-client rate limiting and production capacity
+validation are not yet implemented. Logs contain startup/shutdown events and
+optional aggregate metrics, not query names or client IP addresses.
 
 ## Cache policy
 
@@ -117,8 +118,7 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   caching. Non-ECS EDNS options (including cookies) also bypass caching to avoid
   replaying client-specific state.
 - Hits restore the current request's ID/question and original ECS, with aged
-  TTLs and normalized EDNS. There is no stale serving, prefetch, persistence,
-  or concurrent-query coalescing in this release.
+  TTLs and normalized EDNS. There is no stale serving, prefetch or persistence.
 
 ## Local filtering
 
@@ -155,7 +155,7 @@ the cache retains the original upstream answer, never a filtered replacement.
 DNAME and HTTPS/SVCB TargetName traversal are not implemented; query-name and
 CNAME checks alone are not a complete DNS/application firewall.
 
-## Module boundaries
+## Request coalescing
 
 Identical eligible cache misses share one upstream operation, keyed by the actual
 outbound ECS subnet and DNS semantics (not the eventual response scope). `[coalescing]`
@@ -166,8 +166,38 @@ Waiters share the first operation's timeout. Cancelling one does not cancel othe
 cancelling the last releases IO without a detached background task. Each caller
 still receives independent policy checks, ID/question and ECS restoration.
 
-`Resolver::metrics()` exposes fixed-cardinality process counters and request/upstream
-latency histograms. No query names or client addresses are used as metric labels.
+## Runtime metrics
+
+`Resolver::metrics()` and `Server::metrics()` expose fixed counters, inflight gauges
+and cumulative request/upstream latency histograms. Collection is always active;
+`[metrics] interval_secs = 10` enables periodic and shutdown JSON snapshots on
+stderr. The default `0` disables output. No extra listener or metrics exporter is
+started. Snapshots have `event=parins_metrics`, `entry_point=server`, a per-run
+`run_id`, `reason`, `uptime_secs` and `metrics`. Counters reset on restart.
+
+- `requests/completed/cancelled` refer to resolver calls; completed means returned,
+  not DNS success or delivery to the client. Response counters classify RCODEs.
+  Admission drops/rejections are separate and do not enter resolver counts.
+- `cache_hits/misses` count the initial lookup (miss includes disabled/bypassed
+  cache); the admission-race recheck may avoid IO without an initial hit.
+  Filtered queries before lookup do not count as hits or misses.
+- `flight_leaders/joined/rejected/bypassed` distinguish sharing from overload.
+  `upstream_operations` counts whole operations, not packets: TCP fallback and
+  ECS retry remain inside one operation. `upstream_failures` counts exchange
+  failures/timeouts, not DNS error RCODEs; timeouts are also a subset counter.
+- UDP datagrams/TCP complete frames, admission drops, query rejections and
+  connection rejections distinguish ingress saturation. Final gauges reach zero
+  after orderly drain or cancellation.
+- Latency buckets use inclusive bounds 1/5/10/50/100/500/1000/5000 ms plus infinity
+  (`upper_bound_micros: null`), with cumulative counts and `sum_micros`. Durations
+  include cancelled operations. Snapshots are concurrent approximations, not
+  transactions; use bucket deltas for approximate percentile analysis.
+
+No query names, client addresses or unbounded labels are emitted. Existing
+startup/shutdown messages remain plain text; select JSON events when ingesting
+metrics. This is not a Prometheus/OpenTelemetry exporter, tracing or alert setup.
+
+## Module boundaries
 
 | Module | Responsibility |
 | --- | --- |
@@ -192,7 +222,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 - Rule-list import, atomic rule updates and additional filtering response modes.
 - Multiple-upstream scheduling and upstream connection reuse.
 - UDP/TCP DNS, DNS over TLS, DNS over HTTPS, and DNS over QUIC.
-- Operational metrics and atomic configuration and rule updates.
+- Metrics exporters and atomic configuration and rule updates.
 
 The initial design focuses on forwarding to existing resolvers. A standalone
 iterative resolver is outside the initial scope. The implementation uses Rust,

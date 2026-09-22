@@ -254,6 +254,77 @@ async fn both_listeners_enforce_query_and_cached_cname_policy() {
 }
 
 #[tokio::test]
+async fn metrics_count_entry_budgets_filtering_and_shutdown_cancellation() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = config(upstream.local_addr().unwrap());
+    cfg.max_inflight = 1;
+    cfg.max_tcp_connections = 1;
+    cfg.query_timeout_ms = 1000;
+    cfg.tcp_io_timeout_ms = 1000;
+    cfg.shutdown_grace_ms = 30;
+    cfg.filter = toml::from_str("enabled=true\nblock_exact=['blocked.test']").unwrap();
+    let server = Server::bind(cfg).await.unwrap();
+    let metrics = server.metrics().clone();
+    let address = server.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let task = tokio::spawn(server.run(async {
+        let _ = stopped.await;
+    }));
+    let mut blocked = query();
+    blocked.queries[0].set_name(Name::from_ascii("blocked.test.").unwrap());
+    assert!(udp_query(address, &blocked).await.0.answers.is_empty());
+    let mut tcp = TcpStream::connect(address).await.unwrap();
+    write(&mut tcp, &blocked).await;
+    assert!(read(&mut tcp).await.answers.is_empty());
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .send_to(&query().to_vec().unwrap(), address)
+        .await
+        .unwrap();
+    let mut buffer = [0; 4096];
+    timeout(Duration::from_secs(1), upstream.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    client
+        .send_to(&query().to_vec().unwrap(), address)
+        .await
+        .unwrap();
+    write(&mut tcp, &query()).await;
+    assert_eq!(read(&mut tcp).await.response_code, ResponseCode::ServFail);
+    let mut excess = TcpStream::connect(address).await.unwrap();
+    let mut byte = [0];
+    let closed = timeout(Duration::from_secs(1), excess.read(&mut byte))
+        .await
+        .unwrap();
+    assert!(matches!(closed, Ok(0) | Err(_)));
+    assert!(
+        timeout(Duration::from_millis(30), client.recv(&mut buffer))
+            .await
+            .is_err()
+    );
+    finish(stop, task).await;
+    let stats = metrics.snapshot();
+    for (name, value) in [
+        ("requests", 3),
+        ("completed", 2),
+        ("cancelled", 1),
+        ("query_blocked", 2),
+        ("udp_received", 3),
+        ("tcp_received", 2),
+        ("udp_dropped", 1),
+        ("tcp_rejected", 1),
+        ("connections_rejected", 1),
+        ("upstream_operations", 1),
+    ] {
+        assert_eq!(stats.counters[name], value, "{name}");
+    }
+    assert_eq!(stats.request_inflight, 0);
+    assert_eq!(stats.upstream_inflight, 0);
+    assert_eq!(stats.request_latency.count, 3);
+}
+
+#[tokio::test]
 async fn malformed_and_unsupported_requests_do_not_reach_upstream() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let (address, stop, task) = start(config(upstream.local_addr().unwrap())).await;

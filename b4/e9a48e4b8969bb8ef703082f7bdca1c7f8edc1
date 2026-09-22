@@ -1,0 +1,20 @@
+README.md
+  s_aa37914330e67a::t_9b6df6e8d44728 53-54,56-62,261-262
+  s_aa37914330e67a::t_ef05842d8f289d 3-25,29-42,45-48,51-52,55,63-79,260,485-496,547-548,561
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b4e9a48e4b8969bb8ef703082f7bdca1c7f8edc1",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

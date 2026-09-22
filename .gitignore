@@ -11,5 +11,6 @@
 *.pem
 *.key
 /parins.toml
+/parins-state/
 .env
 .env.*.local

@@ -28,6 +28,13 @@ jobs:
       - run: cargo test --locked --all-targets
       - run: cargo build --locked --release
       - run: ./target/release/parins --config parins.example.toml --check
+      - name: Installer fixture tests
+        run: |
+          sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/package.sh
+          sh scripts/test-install.sh
+      - name: Linux managed service acceptance
+        if: runner.os == 'Linux'
+        run: sh scripts/test-systemd.sh --ephemeral-ci
       - name: Audit dependencies
         if: runner.os == 'Linux'
         run: |

@@ -17,6 +17,9 @@ verified DoT upstreams, file-backed rule/certificate reload, a local metrics
 endpoint and opt-in equivalent-replica hedging are implemented and locally tested.
 Authenticated DoT upstream connections can optionally be reused within a fixed cap.
 Optional source-subnet query-rate and concurrency budgets are shared by all DNS listeners.
+An embedded management console supports first-run setup, authentication, status,
+TOML editing/validation/application, export, and one-generation rollback. A Linux
+systemd installer is included; the existing file-configured mode remains available.
 Production deployment and capacity acceptance have not been performed.
 
 ## Development
@@ -36,6 +39,85 @@ to your chosen resolver's IP and port. Unknown configuration keys and invalid
 resource limits are rejected at startup.
 
 ## Run
+
+### Managed mode: install, then initialize in the browser
+
+On Linux with systemd, build from this checkout and install the managed service:
+
+```sh
+cargo build --locked --release
+sudo sh scripts/install.sh
+```
+
+Alternatively, build a host-native package with `sh scripts/package.sh`, verify
+its adjacent `.sha256` and extracted `SHA256SUMS`, and run `sudo sh install.sh`
+inside the extracted Linux package. No public release/download endpoint is
+assumed; macOS packages cannot be installed as Linux services. Linux x86_64 and
+aarch64 ELF binaries are accepted, with architecture checked before installation.
+Use `--dry-run` to inspect planned targets without writes.
+
+The installer enables and starts `parins-managed.service`, using
+`/opt/parins-managed/parins` and private state under `/var/lib/parins`. It does not
+stop `systemd-resolved`, change host DNS, open firewall ports, or modify the legacy
+`parins.service`. Re-running upgrades the managed binary/unit while retaining
+state and keeping a private prior binary/unit backup. An installation/startup
+failure attempts to restore the prior service; inspect the reported backup and
+`journalctl -u parins-managed.service` if recovery itself fails.
+
+The first start serves only the console; **DNS starts after successful setup**.
+For a remote VPS, run the tunnel on your own computer:
+
+```sh
+ssh -N -L 3000:127.0.0.1:3000 USER@HOST
+```
+
+Read `sudo cat /var/lib/parins/setup-token` on the server, then open
+<http://127.0.0.1:3000> through that tunnel. Enter the one-time token, choose an
+administrator name and a password of at least 12 bytes, and set the DNS listen
+address and your upstream's literal IP:port. The wizard defaults to loopback DNS;
+set port 53 explicitly if wanted and free. The service has only the capability
+needed to bind low ports. Port conflicts reject setup/application; no conflicting
+service is automatically stopped. Never share the token or put it in a URL.
+
+The console is deliberately **loopback-only** with strict Host/Origin checks;
+use the same local tunnel port (3000), not a public reverse proxy. Passwords use
+Argon2id. Eight-hour bearer sessions remain only in page memory: refreshing
+requires login, and logout revokes the session. There are no external frontend
+assets, cookies, browser-persisted tokens, or query logs.
+
+After setup, the console provides a status/metrics dashboard and a full TOML
+editor with validation, change preview, export, and rollback. Advanced ECS,
+cache, filtering, encrypted listener and budget options use the same canonical
+configuration schema as CLI mode, rather than a second set of UI defaults.
+Applying a configuration drains/restarts DNS and clears its in-memory cache and
+metrics; it is not zero-downtime reload. Binding or persistence failures restore
+the prior configuration when possible, and an unavailable DNS instance is shown
+as an error. Stale edits are rejected by revision; after a disconnected save,
+reload the current configuration to determine its result before retrying.
+
+Managed `state.json` is authoritative: it contains the administrator hash,
+current/previous TOML and revision, protected by 0700/0600 permissions, an
+exclusive process lock and atomic replacement. Exported TOML excludes account
+data. Relative rule/certificate paths resolve against the state directory;
+provision those files separately with permissions readable by the service.
+Do not manually edit live state or use `--config` with `--manage`. Back up the
+whole private state directory while the service is stopped. Managed mode uses
+console reapplication for file/certificate changes, not SIGHUP. Password changes
+and account recovery are not exposed in this first console version; keep your
+password and private state backup safe.
+
+Useful commands:
+
+```sh
+sudo systemctl status parins-managed.service
+sudo journalctl -u parins-managed.service
+sudo systemctl restart parins-managed.service
+sudo systemctl disable --now parins-managed.service  # retains state and backups
+# Local development, no systemd or root:
+./target/release/parins --manage --state-dir parins-state --web-listen 127.0.0.1:3000
+```
+
+### File-configured mode
 
 ```sh
 cargo build --locked --release

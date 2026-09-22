@@ -8,6 +8,7 @@
 .DS_Store
 
 # Local credentials and private runtime configuration.
+/.deploy-private/
 *.pem
 *.key
 /parins.toml

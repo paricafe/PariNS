@@ -1,0 +1,30 @@
+scripts/install.sh
+  s_aa37914330e67a::t_8a9f0d7ca1208a 150
+  s_aa37914330e67a::t_c72b720829a54b 149,151-153
+web/index.html
+  s_aa37914330e67a::t_2a23afb7b17879 34
+scripts/test-install.sh
+  s_aa37914330e67a::t_c72b720829a54b 28-29,35,44-46
+deploy/parins-managed.service
+  s_aa37914330e67a::t_8a9f0d7ca1208a 13
+README.md
+  s_aa37914330e67a::t_e00224374d1f89 68-79,85-86,93-97,102-133,151
+scripts/test-systemd.sh
+  s_aa37914330e67a::t_c72b720829a54b 13,41,54-60,64-69,71-83,89,94,103,105,113-114,149,152-153,156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "622eb8c02c3c99192a4b8f123a9909978f0a0bc6",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+Cargo.toml
+  s_aa37914330e67a::t_0b69ae3ab8dadd 13-16
+Cargo.lock
+  s_aa37914330e67a::t_3fe1d8ab4b76e5 17-28,80-127,140-145,161-178,220-221,234-242,258-267,294-304,453-462,486,577-646,878-883,890-895,981-982,991-992,1008-1018,1151-1160,1175,1342-1352,1450-1455,1647-1673,1693-1698,1729-1734
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "969af59fe583d3e90ab8c465a59e813904801e3a",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

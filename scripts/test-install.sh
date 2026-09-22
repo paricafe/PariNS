@@ -25,11 +25,14 @@ sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary" --dry-run
 [ ! -e "$stage/opt" ]
 mkdir -p "$stage/var/lib/parins" "$stage/etc/systemd/system"
 printf 'private existing state\n' > "$stage/var/lib/parins/state.json"
+printf 'existing private HTTPS identity\n' > "$stage/var/lib/parins/https-identity.pem"
+printf 'existing public HTTPS certificate\n' > "$stage/var/lib/parins/https-cert.pem"
 printf 'legacy service unchanged\n' > "$stage/etc/systemd/system/parins.service"
 chmod 0750 "$stage/etc"
 sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
 cmp "$binary" "$stage/opt/parins-managed/parins"
 cmp "$repo/deploy/parins-managed.service" "$stage/etc/systemd/system/parins-managed.service"
+grep -Fq -- '--web-listen 0.0.0.0:3000' "$stage/etc/systemd/system/parins-managed.service"
 [ "$(mode "$stage/opt/parins-managed/parins")" = 755 ]
 [ "$(mode "$stage/etc/systemd/system/parins-managed.service")" = 644 ]
 [ "$(mode "$stage/etc")" = 750 ]
@@ -38,6 +41,9 @@ printf 'second candidate, must never execute\n' > "$binary"
 sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
 cmp "$binary" "$stage/opt/parins-managed/parins"
 [ "$(sed -n 1p "$stage/var/lib/parins/state.json")" = 'private existing state' ]
+[ "$(sed -n 1p "$stage/var/lib/parins/https-identity.pem")" = 'existing private HTTPS identity' ]
+[ "$(sed -n 1p "$stage/var/lib/parins/https-cert.pem")" = 'existing public HTTPS certificate' ]
+[ "$(mode "$stage/var/lib/parins/https-identity.pem")" = 600 ]
 [ "$(sed -n 1p "$stage/etc/systemd/system/parins.service")" = 'legacy service unchanged' ]
 # Fail the second atomic rename after the binary changed; both old files return.
 cp "$stage/opt/parins-managed/parins" "$fixture/previous-binary"

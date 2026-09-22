@@ -146,7 +146,11 @@ printf 'Installed. Backup: %s\n' "$backup"
 if [ -n "$root" ]; then
     printf '%s\n' 'Staging only: state is untouched and no service or executable was started.'
 else
-    printf '%s\n' 'Console: http://127.0.0.1:3000 (SSH tunnel: ssh -L 3000:127.0.0.1:3000 USER@HOST)' \
+    printf '%s\n' 'Console: https://SERVER_PUBLIC_IP:3000 (listens on 0.0.0.0:3000; HTTPS only)' \
+        'Allow TCP 3000 in the host firewall/cloud security group for your admin IP; no firewall rules are changed here.' \
+        'The initial certificate is self-signed. Verify its fingerprint over SSH before trusting it in your browser.' \
+        'Public certificate: /var/lib/parins/https-cert.pem (safe to export); fingerprint: sudo openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint' \
+        'NEVER export /var/lib/parins/https-identity.pem: it contains the private key.' \
         'Read the one-time setup token locally: sudo cat /var/lib/parins/setup-token' \
         'Open the console to initialize. DNS starts only after setup; no host DNS or firewall was changed.'
 fi

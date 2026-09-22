@@ -65,25 +65,71 @@ failure attempts to restore the prior service; inspect the reported backup and
 `journalctl -u parins-managed.service` if recovery itself fails.
 
 The first start serves only the console; **DNS starts after successful setup**.
-For a remote VPS, run the tunnel on your own computer:
+The CLI and installed service now default to **`0.0.0.0:3000`, HTTPS only**.
+Open `https://SERVER_PUBLIC_IP:3000` after allowing inbound TCP 3000 in the host
+firewall and cloud security group for your intended administrator IPs. The
+installer does not change those rules, configure NAT, or prove Internet routing.
+An upgrade from the original console changes both HTTP to HTTPS and the installed
+service's loopback default to all IPv4 interfaces; keep an explicit loopback
+override if that is what you want.
+
+For IPv6 use `--web-listen '[::]:3000'` and access `https://[SERVER_IPV6]:3000`.
+IPv4 acceptance on an IPv6 socket depends on the operating system; the default
+IPv4 socket does not claim IPv6 coverage. `--web-listen 127.0.0.1:3000` retains
+local-only access. An optional SSH tunnel still works, using HTTPS locally:
 
 ```sh
 ssh -N -L 3000:127.0.0.1:3000 USER@HOST
 ```
 
-Read `sudo cat /var/lib/parins/setup-token` on the server, then open
-<http://127.0.0.1:3000> through that tunnel. Enter the one-time token, choose an
+Read `sudo cat /var/lib/parins/setup-token` on the server. If using the tunnel,
+open <https://127.0.0.1:3000>. Enter the one-time token, choose an
 administrator name and a password of at least 12 bytes, and set the DNS listen
 address and your upstream's literal IP:port. The wizard defaults to loopback DNS;
 set port 53 explicitly if wanted and free. The service has only the capability
 needed to bind low ports. Port conflicts reject setup/application; no conflicting
 service is automatically stopped. Never share the token or put it in a URL.
 
-The console is deliberately **loopback-only** with strict Host/Origin checks;
-use the same local tunnel port (3000), not a public reverse proxy. Passwords use
+The console accepts literal IPv4/IPv6 hosts (including a public IP mapped by NAT)
+at the listening port, plus localhost. It rejects arbitrary domain names, other
+ports and cross-origin browser requests; forwarding headers are not trusted.
+This is direct IP access, not a domain-name/reverse-proxy configuration feature.
+Use the same local tunnel or NAT port (3000). Passwords use
 Argon2id. Eight-hour bearer sessions remain only in page memory: refreshing
 requires login, and logout revokes the session. There are no external frontend
 assets, cookies, browser-persisted tokens, or query logs.
+
+On first start, PariNS generates a self-signed HTTPS identity in
+`/var/lib/parins/https-identity.pem` (certificate **and private key**, 0600) and
+exports only its public certificate to `/var/lib/parins/https-cert.pem`.
+The identity is atomically stored, reused across restart/upgrades and independent
+of DNS certificates/configuration. A corrupt or insecure existing identity fails
+startup instead of silently replacing a certificate you may have pinned.
+
+**Self-signed means encrypted, not automatically trusted.** Verify the certificate
+fingerprint over a trusted channel such as SSH before trusting it in your browser:
+
+```sh
+sudo openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint
+```
+
+Only `https-cert.pem` may be copied to clients; never export `https-identity.pem`.
+The generated certificate is valid for approximately ten years and covers
+localhost, loopback IPs and an explicitly bound IP. With a wildcard bind, PariNS
+cannot infer the public/NAT IP, so direct public access can also show a hostname
+mismatch. For a matching identity, supply a certificate whose IP SAN includes
+the accessed public IP. Custom certificate/key paths must be provided together:
+
+```sh
+./target/release/parins --manage --web-cert /path/to/cert.pem --web-key /path/to/key.pem
+```
+
+There is no automatic renewal/ACME or HTTP fallback/redirect on port 3000.
+Replace an expiring certificate explicitly and restart the process. Custom
+certificates must be readable by the service and do not overwrite the generated
+identity. Certificate changes for the management listener require a full process
+restart, not the DNS configuration's apply button. Existing setup-token and
+administrator state are retained when upgrading from HTTP.
 
 After setup, the console provides a status/metrics dashboard and a full TOML
 editor with validation, change preview, export, and rollback. Advanced ECS,
@@ -102,7 +148,7 @@ data. Relative rule/certificate paths resolve against the state directory;
 provision those files separately with permissions readable by the service.
 Do not manually edit live state or use `--config` with `--manage`. Back up the
 whole private state directory while the service is stopped. Managed mode uses
-console reapplication for file/certificate changes, not SIGHUP. Password changes
+console reapplication for DNS file/certificate changes, not SIGHUP. Password changes
 and account recovery are not exposed in this first console version; keep your
 password and private state backup safe.
 

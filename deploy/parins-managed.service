@@ -10,7 +10,7 @@ DynamicUser=yes
 StateDirectory=parins
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/parins
-ExecStart=/opt/parins-managed/parins --manage --state-dir /var/lib/parins --web-listen 127.0.0.1:3000
+ExecStart=/opt/parins-managed/parins --manage --state-dir /var/lib/parins --web-listen 0.0.0.0:3000
 Restart=on-failure
 RestartSec=2
 # An accepted configuration transaction may drain the old DNS instance before

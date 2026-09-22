@@ -31,7 +31,7 @@
           <ol class="steps" aria-label="初始化进度"><li id="step-label-0" aria-current="step"><span>01</span> 管理员</li><li id="step-label-1"><span>02</span> DNS 网络</li><li id="step-label-2"><span>03</span> 确认配置</li></ol>
           <form id="setup-form" class="panel setup-form">
             <div class="setup-step" id="setup-step-0">
-              <h2>只属于你的管理入口</h2><p class="muted">初始化令牌保存在服务状态目录的 setup-token 文件中，安装程序和日志仅显示其路径。请在服务器本机读取，并通过 SSH 隧道访问管理台。</p>
+              <h2>只属于你的管理入口</h2><p class="muted">初始化令牌保存在服务状态目录的 setup-token 文件中，安装程序和日志仅显示其路径。默认通过 HTTPS 访问；自签证书需核验并信任，公网 IP 还可能出现名称不匹配提示。请限制防火墙允许的管理来源，勿向他人提供令牌。</p>
               <label for="setup-token">初始化令牌</label><input id="setup-token" name="setup-token" type="password" autocomplete="off" required spellcheck="false" aria-describedby="token-help"><small id="token-help">不要将令牌放入 URL、截图或公开日志。</small>
               <label for="setup-username">管理员用户名</label><input id="setup-username" name="username" autocomplete="username" maxlength="64" required>
               <div class="field-pair"><div><label for="setup-password">管理员密码</label><input id="setup-password" name="new-password" type="password" autocomplete="new-password" minlength="12" required aria-describedby="password-help"></div><div><label for="setup-confirm">再次输入密码</label><input id="setup-confirm" name="confirm-password" type="password" autocomplete="new-password" minlength="12" required></div></div><small id="password-help">至少 12 个字符。请使用独立的长密码，并妥善保存。</small>

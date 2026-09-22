@@ -8,8 +8,24 @@ operate.
 
 ## Status
 
-Early design stage. This repository does not yet contain a runnable DNS server.
-Build instructions and configuration examples will be added with the implementation.
+Early development. The Rust project and startup configuration validation are
+available; the DNS forwarding service is being implemented.
+
+## Development
+
+Install Rust with [rustup](https://rust-lang.org/tools/install/). The repository
+pins its toolchain in `rust-toolchain.toml`.
+
+```sh
+cargo run -- --config parins.example.toml --check
+cargo test --locked
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+The example uses loopback addresses and an upstream on port 5354. Set `upstream`
+to your chosen resolver's IP and port. Unknown configuration keys and invalid
+resource limits are rejected at startup.
 
 ## Planned scope
 
@@ -20,8 +36,8 @@ Build instructions and configuration examples will be added with the implementat
 - Operational metrics and atomic configuration and rule updates.
 
 The initial design focuses on forwarding to existing resolvers. A standalone
-iterative resolver is outside the initial scope. Rust is the proposed implementation
-language; the dependency stack has not yet been finalized.
+iterative resolver is outside the initial scope. The implementation uses Rust,
+Tokio for asynchronous IO, and Hickory for DNS message parsing and encoding.
 
 ## Background
 

@@ -1,0 +1,9 @@
+# Local development: run a separate DNS upstream on port 5354,
+# or replace upstream with the IP:port of your chosen resolver.
+listen = "127.0.0.1:5353"
+upstream = "127.0.0.1:5354"
+query_timeout_ms = 2000
+tcp_io_timeout_ms = 5000
+shutdown_grace_ms = 3000
+max_inflight = 256
+max_tcp_connections = 64

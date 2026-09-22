@@ -1,0 +1,38 @@
+README.md
+  s_aa37914330e67a::t_3527c6dd5e7254 20-22,43-120
+  s_aa37914330e67a::t_6f32c0262a6573 121
+scripts/package.sh
+  s_aa37914330e67a::t_3829cccef665ea 17,19,21-22
+scripts/test-install.sh
+  s_aa37914330e67a::t_9e1040390fdebe 42-51
+  s_aa37914330e67a::t_5fcfb14ae59ca7 11,73
+  s_aa37914330e67a::t_3829cccef665ea 1-10,12-41,52-72,74
+scripts/test-systemd.sh
+  s_aa37914330e67a::t_dfc4e4806f677d 1-6,8-117
+  s_aa37914330e67a::t_5c32e6868417f1 7
+deploy/parins-managed.service
+  s_aa37914330e67a::t_e5cf0b87b8de6c 1-15,19-35
+  s_aa37914330e67a::t_b8d359998d9ab9 16-18
+.github/workflows/ci.yml
+  s_aa37914330e67a::t_dfc4e4806f677d 31-37
+scripts/install.sh
+  s_aa37914330e67a::t_3829cccef665ea 95-97,111-118
+  s_aa37914330e67a::t_feef62dec31c30 86-89
+  s_aa37914330e67a::t_e5cf0b87b8de6c 1-85,90-94,98-110,119-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7c5dc35a7838603910bc271eb8413745a3048b40",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

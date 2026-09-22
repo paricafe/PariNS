@@ -1,0 +1,27 @@
+web/cache.js
+  s_d595d238bbd4ee::t_15ec9f6fb013cb 57-69
+web/settings.js
+  s_d595d238bbd4ee::t_15ec9f6fb013cb 239
+scripts/test-web.mjs
+  s_d595d238bbd4ee::t_90adbfa007405e 144-146,168-171,218-243
+  s_d595d238bbd4ee::t_f1a1c0656fcd5a 152
+  s_d595d238bbd4ee::t_0e8fbbf9c56b4e 244-245
+web/app.js
+  s_d595d238bbd4ee::t_15ec9f6fb013cb 71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "abfa53298333848462e91db66c6d904c2ab29594",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

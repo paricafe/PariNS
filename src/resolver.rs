@@ -13,11 +13,43 @@ use crate::{
     cache::Cache,
     config::{CacheConfig, CoalescingConfig, Config, EcsConfig},
     ecs::{self, Context},
-    flight::{Flights, Role},
+    flight::{Answer, Flights, Role},
     metrics::{Counter, Metrics, Timer},
     policy::Policy,
     protocol::{self, Request},
 };
+
+mod refresh;
+pub use refresh::Snapshot as RefreshSnapshot;
+
+struct Generation {
+    cache: Arc<Cache>,
+    flights: Mutex<(u64, Arc<Flights>)>,
+    refresh: Arc<refresh::Refresh>,
+}
+
+impl Generation {
+    fn new(cache: CacheConfig, coalescing: &CoalescingConfig) -> Self {
+        Self {
+            cache: Arc::new(Cache::new(cache)),
+            flights: Mutex::new((0, Arc::new(Flights::new(coalescing.clone())))),
+            refresh: Arc::new(refresh::Refresh::default()),
+        }
+    }
+
+    fn flights(&self, epoch: u64, config: &CoalescingConfig) -> Arc<Flights> {
+        let mut current = self.flights.lock().expect("flight generation poisoned");
+        if current.0 == epoch {
+            return current.1.clone();
+        }
+        let flights = Arc::new(Flights::new(config.clone()));
+        // A request captured before invalidation must not move the registry backwards.
+        if epoch > current.0 {
+            *current = (epoch, flights.clone());
+        }
+        flights
+    }
+}
 
 pub struct Reply {
     pub message: Message,
@@ -28,8 +60,8 @@ pub struct Resolver {
     upstream: crate::scheduler::Client,
     timeout: Duration,
     ecs: EcsConfig,
-    cache: Arc<Mutex<Cache>>,
-    flights: Flights,
+    generation: RwLock<Arc<Generation>>,
+    coalescing: CoalescingConfig,
     metrics: Arc<Metrics>,
     policy: RwLock<Policy>,
 }
@@ -40,8 +72,11 @@ impl Resolver {
             upstream: crate::scheduler::Client::new(upstream, None, None).expect("single upstream"),
             timeout,
             ecs: EcsConfig::default(),
-            cache: Arc::new(Mutex::new(Cache::new(CacheConfig::default()))),
-            flights: Flights::new(CoalescingConfig::default()),
+            generation: RwLock::new(Arc::new(Generation::new(
+                CacheConfig::default(),
+                &CoalescingConfig::default(),
+            ))),
+            coalescing: CoalescingConfig::default(),
             metrics: Arc::new(Metrics::default()),
             policy: RwLock::new(Policy::default()),
         }
@@ -66,8 +101,11 @@ impl Resolver {
             )?,
             timeout: Duration::from_millis(config.query_timeout_ms),
             ecs: config.ecs.clone(),
-            cache: Arc::new(Mutex::new(Cache::new(config.cache.clone()))),
-            flights: Flights::new(config.coalescing.clone()),
+            generation: RwLock::new(Arc::new(Generation::new(
+                config.cache.clone(),
+                &config.coalescing,
+            ))),
+            coalescing: config.coalescing.clone(),
             metrics: Arc::new(Metrics::default()),
             policy: RwLock::new(config.load_policy()?),
         })
@@ -97,10 +135,50 @@ impl Resolver {
         *self.policy.write().expect("policy lock poisoned") = policy;
     }
 
+    pub fn cache(&self) -> Arc<Cache> {
+        self.generation
+            .read()
+            .expect("cache generation poisoned")
+            .cache
+            .clone()
+    }
+
+    /// Cache configuration changes publish a new namespace, without restarting listeners.
+    pub fn replace_cache(&self, config: CacheConfig) {
+        let next = Arc::new(Generation::new(config, &self.coalescing));
+        let mut current = self.generation.write().expect("cache generation poisoned");
+        current.refresh.cancel();
+        *current = next;
+    }
+
+    pub fn refresh_snapshot(&self) -> RefreshSnapshot {
+        self.generation
+            .read()
+            .expect("cache generation poisoned")
+            .refresh
+            .snapshot()
+    }
+
+    pub async fn shutdown_refresh(&self) {
+        let generation = self
+            .generation
+            .read()
+            .expect("cache generation poisoned")
+            .clone();
+        generation.refresh.shutdown().await;
+    }
+
     async fn resolve_inner(&self, bytes: &[u8], peer: IpAddr) -> Option<Reply> {
         // One immutable generation governs this request, including across awaits.
         // The Arc-backed trie clone releases the lock before parsing or network IO.
         let policy = self.policy.read().expect("policy lock poisoned").clone();
+        let generation = self
+            .generation
+            .read()
+            .expect("cache generation poisoned")
+            .clone();
+        let cache = generation.cache.clone();
+        let epoch = cache.epoch();
         let query = match protocol::request(bytes) {
             Request::Drop => return None,
             Request::Reply(message) => {
@@ -112,7 +190,7 @@ impl Resolver {
             Request::Forward(query) => query,
         };
         let udp_limit = protocol::udp_limit(&query);
-        let (mut outbound, context) = match Context::prepare(&query, peer, &self.ecs) {
+        let (outbound, context) = match Context::prepare(&query, peer, &self.ecs) {
             Ok(prepared) => prepared,
             Err(code) => {
                 return Some(Reply {
@@ -127,13 +205,41 @@ impl Resolver {
             context.finish(&query, &mut message, None);
             return Some(Reply { message, udp_limit });
         }
-        let cached = self.cache.lock().expect("cache lock poisoned").get(
-            &query,
-            context.outgoing,
-            Instant::now(),
-        );
-        if let Some((mut message, scope)) = cached {
+        let cached = cache.lookup(&query, context.outgoing, Instant::now(), false);
+        if let Some(hit) = cached {
             self.metrics.inc(Counter::CacheHits);
+            if hit.refresh {
+                let work = Exchange {
+                    upstream: self.upstream.clone(),
+                    timeout: self.timeout,
+                    cache: cache.clone(),
+                    query: query.clone(),
+                    context: context.clone(),
+                    outbound: outbound.clone(),
+                    epoch,
+                    metrics: self.metrics.clone(),
+                };
+                let flights = generation.flights(epoch, &self.coalescing);
+                let metrics = self.metrics.clone();
+                generation
+                    .refresh
+                    .schedule(&outbound, epoch, &cache.config().prefetch, || {
+                        // Explicitly disabling coalescing also disables sharing with
+                        // foreground misses; the refresh owner's own limits still apply.
+                        let joined = flights.join(&outbound, work.run(true).boxed());
+                        metrics.inc(match &joined {
+                            Ok((_, role)) => flight_counter(role),
+                            Err(()) => Counter::FlightRejected,
+                        });
+                        async move {
+                            match joined {
+                                Ok((future, _)) => future.await.admitted,
+                                Err(()) => false,
+                            }
+                        }
+                    });
+            }
+            let (mut message, scope) = (hit.message, hit.scope);
             if policy.apply_response(&query, &mut message) {
                 self.metrics.inc(Counter::ResponseBlocked);
             }
@@ -142,88 +248,45 @@ impl Resolver {
         }
         self.metrics.inc(Counter::CacheMisses);
         let wire_query = outbound.clone();
-        let cache = self.cache.clone();
-        let cache_query = query.clone();
-        let cache_context = context.clone();
-        let metrics = self.metrics.clone();
-        let upstream = self.upstream.clone();
-        let timeout = self.timeout;
-        let work = async move {
-            // Close the cache-miss/admission race if another group completed meanwhile.
-            let cached = cache.lock().expect("cache lock poisoned").get(
-                &cache_query,
-                cache_context.outgoing,
-                Instant::now(),
-            );
-            if let Some((message, scope)) = cached {
-                return Ok((message, Some(scope.prefix_len())));
-            }
-            let _timer = metrics.track(Timer::Upstream);
-            let result = tokio::time::timeout(timeout, async {
-                let mut response = upstream.exchange(&outbound).await?;
-                let retry = response.response_code == ResponseCode::Refused
-                    && cache_context
-                        .outgoing
-                        .is_some_and(|ecs| ecs.source_prefix() > 0);
-                if retry {
-                    metrics.inc(Counter::EcsRetries);
-                    let mut anonymous = cache_context.outgoing.expect("nonzero ECS checked above");
-                    anonymous.set_source_prefix(0);
-                    anonymous.set_addr(if anonymous.addr().is_ipv4() {
-                        "0.0.0.0".parse().unwrap()
-                    } else {
-                        "::".parse().unwrap()
-                    });
-                    ecs::set_subnet(&mut outbound, Some(anonymous));
-                    response = upstream.exchange(&outbound).await?;
-                }
-                Ok::<_, anyhow::Error>((response, retry))
-            })
-            .await;
-            match result {
-                Ok(Ok((response, retry))) => {
-                    if !retry && let Some(scope) = cache_context.cache_scope(&response) {
-                        cache.lock().expect("cache lock poisoned").insert(
-                            &cache_query,
-                            &response,
-                            scope,
-                            Instant::now(),
-                        );
-                    }
-                    let scope = if retry {
-                        None
-                    } else {
-                        ecs::subnet(&response).map(|ecs| ecs.scope_prefix())
-                    };
-                    Ok((response, scope))
-                }
-                Err(_) => {
-                    metrics.inc(Counter::UpstreamTimeouts);
-                    metrics.inc(Counter::UpstreamFailures);
-                    Err(())
-                }
-                Ok(Err(_)) => {
-                    metrics.inc(Counter::UpstreamFailures);
-                    Err(())
-                }
-            }
-        }
-        .boxed();
-        let result = match self.flights.join(&wire_query, work) {
+        let exchange = Exchange {
+            upstream: self.upstream.clone(),
+            timeout: self.timeout,
+            cache: cache.clone(),
+            query: query.clone(),
+            context: context.clone(),
+            outbound,
+            epoch,
+            metrics: self.metrics.clone(),
+        };
+        let work = exchange.run(false).boxed();
+        let flights = generation.flights(epoch, &self.coalescing);
+        let result = match flights.join(&wire_query, work) {
             Ok((future, role)) => {
-                self.metrics.inc(match role {
-                    Role::Bypass => Counter::FlightBypassed,
-                    Role::Leader => Counter::FlightLeaders,
-                    Role::Joined => Counter::FlightJoined,
-                });
+                self.metrics.inc(flight_counter(&role));
                 future.await
             }
             Err(()) => {
                 self.metrics.inc(Counter::FlightRejected);
-                Err(())
+                Answer {
+                    response: Err(()),
+                    stale_eligible: false,
+                    admitted: false,
+                }
             }
         };
-        let (mut message, scope) = result.unwrap_or_else(|()| {
+        // Fallback belongs to each foreground consumer, never to the shared work:
+        // background refresh reports only actual admissions, and stale-hit counts
+        // describe replies even when many callers shared one failed exchange.
+        let response = if result.stale_eligible {
+            cache
+                .lookup(&query, context.outgoing, Instant::now(), true)
+                .map(|hit| (hit.message, Some(hit.scope.prefix_len())))
+                .map(Ok)
+                .unwrap_or(result.response)
+        } else {
+            result.response
+        };
+        let (mut message, scope) = response.unwrap_or_else(|()| {
             (
                 protocol::error_response(&query, ResponseCode::ServFail),
                 None,
@@ -236,5 +299,109 @@ impl Resolver {
         }
         context.finish(&query, &mut message, scope);
         Some(Reply { message, udp_limit })
+    }
+}
+
+fn flight_counter(role: &Role) -> Counter {
+    match role {
+        Role::Bypass => Counter::FlightBypassed,
+        Role::Leader => Counter::FlightLeaders,
+        Role::Joined => Counter::FlightJoined,
+    }
+}
+
+/// Network work is shared by the foreground and refresh paths; only foreground
+/// failures may consult stale data. A privacy retry never uses the original scope.
+struct Exchange {
+    upstream: crate::scheduler::Client,
+    timeout: Duration,
+    cache: Arc<Cache>,
+    query: Message,
+    context: Context,
+    outbound: Message,
+    epoch: u64,
+    metrics: Arc<Metrics>,
+}
+
+impl Exchange {
+    async fn run(mut self, refreshing: bool) -> Answer {
+        // Close miss/admission and scheduled-refresh/replacement races without
+        // counting a second lookup or re-fetching an already renewed entry.
+        if let Some(hit) =
+            self.cache
+                .peek(&self.query, self.context.outgoing, Instant::now(), false)
+            && (!refreshing || !hit.refresh)
+        {
+            return Answer {
+                response: Ok((hit.message, Some(hit.scope.prefix_len()))),
+                stale_eligible: false,
+                admitted: false,
+            };
+        }
+        let _timer = self.metrics.track(Timer::Upstream);
+        let mut retried = false;
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut response = self.upstream.exchange(&self.outbound).await?;
+            if response.response_code == ResponseCode::Refused
+                && self
+                    .context
+                    .outgoing
+                    .is_some_and(|ecs| ecs.source_prefix() > 0)
+            {
+                retried = true;
+                self.metrics.inc(Counter::EcsRetries);
+                let mut anonymous = self.context.outgoing.expect("nonzero ECS checked above");
+                anonymous.set_source_prefix(0);
+                anonymous.set_addr(if anonymous.addr().is_ipv4() {
+                    "0.0.0.0".parse().unwrap()
+                } else {
+                    "::".parse().unwrap()
+                });
+                ecs::set_subnet(&mut self.outbound, Some(anonymous));
+                response = self.upstream.exchange(&self.outbound).await?;
+            }
+            Ok::<_, anyhow::Error>(response)
+        })
+        .await;
+        let failed = match &result {
+            Ok(Ok(response)) => response.response_code == ResponseCode::ServFail,
+            Err(_) => {
+                self.metrics.inc(Counter::UpstreamTimeouts);
+                true
+            }
+            Ok(Err(_)) => true,
+        };
+        if failed {
+            self.metrics.inc(Counter::UpstreamFailures);
+        }
+        match result {
+            Ok(Ok(response)) => {
+                let admitted = !retried
+                    && self.context.cache_scope(&response).is_some_and(|scope| {
+                        self.cache.insert_if_epoch(
+                            &self.query,
+                            &response,
+                            scope,
+                            Instant::now(),
+                            self.epoch,
+                        )
+                    });
+                let scope = if retried {
+                    None
+                } else {
+                    ecs::subnet(&response).map(|ecs| ecs.scope_prefix())
+                };
+                Answer {
+                    response: Ok((response, scope)),
+                    admitted,
+                    stale_eligible: failed && !retried,
+                }
+            }
+            _ => Answer {
+                response: Err(()),
+                admitted: false,
+                stale_eligible: failed && !retried,
+            },
+        }
     }
 }

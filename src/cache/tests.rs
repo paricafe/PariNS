@@ -32,23 +32,20 @@ fn ecs(text: &str) -> Option<ClientSubnet> {
 }
 
 #[test]
-fn subnets_are_independent_and_longest_matching_scope_wins() {
+fn subnets_are_independent_and_new_overlapping_scope_supersedes_old_answer() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("Example.Test.");
     let now = Instant::now();
     cache.insert(&q, &answer(&q, 1, 60), network("192.0.0.0/16"), now);
     cache.insert(&q, &answer(&q, 2, 60), network("192.0.2.0/24"), now);
     cache.insert(&q, &answer(&q, 3, 60), network("198.51.100.0/24"), now);
-    for (subnet, expected) in [
-        ("192.0.2.0/24", 2),
-        ("192.0.3.0/24", 1),
-        ("198.51.100.0/24", 3),
-    ] {
+    for (subnet, expected) in [("192.0.2.0/24", 2), ("198.51.100.0/24", 3)] {
         let (r, _) = cache.get(&q, ecs(subnet), now).unwrap();
         assert_eq!(r.answers[0].data, RData::A(A::new(192, 0, 2, expected)));
     }
     assert!(cache.get(&q, ecs("203.0.113.0/24"), now).is_none());
-    assert_eq!(cache.snapshot()["entries"], 3);
+    assert!(cache.get(&q, ecs("192.0.3.0/24"), now).is_none());
+    assert_eq!(cache.snapshot()["entries"], 2);
 }
 
 #[test]
@@ -323,7 +320,7 @@ fn stale_is_positive_only_bounded_and_never_a_normal_hit() {
 }
 
 #[test]
-fn fresh_broader_scope_is_preferred_to_stale_specific_scope() {
+fn short_specific_answer_does_not_resurrect_superseded_broad_scope() {
     let mut cfg = CacheConfig::default();
     cfg.stale.enabled = true;
     let cache = Cache::new(cfg);
@@ -334,8 +331,8 @@ fn fresh_broader_scope_is_preferred_to_stale_specific_scope() {
     let hit = cache
         .lookup(&q, ecs("192.0.2.0/24"), now + Duration::from_secs(2), true)
         .unwrap();
-    assert!(!hit.stale);
-    assert_eq!(hit.scope, network("192.0.0.0/16"));
+    assert!(hit.stale);
+    assert_eq!(hit.scope, network("192.0.2.0/24"));
 }
 
 #[test]
@@ -527,4 +524,107 @@ fn cache_rules_use_dns_labels_and_equivalent_escaped_names() {
     assert_eq!(cache.invalidate(Some(r"\145xample.test"), None, None), 1);
     let literal_star = query("*.example.test.");
     assert_eq!(cache.explain(&literal_star, None, now)["eligible"], false);
+}
+
+#[test]
+fn uncacheable_success_supersedes_old_fresh_and_stale_answers() {
+    for ttl in [1, 60] {
+        for replacement in 0..3 {
+            let mut cfg = CacheConfig {
+                shards: 1,
+                max_bytes: 4096,
+                ..Default::default()
+            };
+            cfg.stale.enabled = true;
+            let cache = Cache::new(cfg);
+            let q = query("superseded.test.");
+            let now = Instant::now();
+            cache.insert(&q, &answer(&q, 1, ttl), Scope::NoEcs, now);
+            let later = now + Duration::from_secs(2);
+            assert!(cache.lookup(&q, None, later, true).is_some());
+            let response = match replacement {
+                0 => answer(&q, 2, 0),
+                1 => protocol::error_response(&q, ResponseCode::NXDomain),
+                _ => {
+                    let mut response = answer(&q, 2, 60);
+                    response.answers = vec![response.answers[0].clone(); 500];
+                    response
+                }
+            };
+            assert!(!cache.insert_if_epoch(&q, &response, Scope::NoEcs, later, cache.epoch()));
+            assert!(
+                cache.lookup(&q, None, later, true).is_none(),
+                "ttl={ttl}, replacement={replacement}"
+            );
+            assert_eq!(cache.snapshot()["entries"], 0);
+        }
+    }
+}
+
+#[test]
+fn success_supersedes_overlaps_but_keeps_disjoint_and_private_namespaces() {
+    for (old, new) in [
+        ("192.0.0.0/16", "192.0.2.0/24"),
+        ("192.0.2.0/24", "192.0.0.0/16"),
+    ] {
+        let mut cfg = CacheConfig::default();
+        cfg.stale.enabled = true;
+        let cache = Cache::new(cfg);
+        let q = query("overlap.test.");
+        let now = Instant::now();
+        for scope in [
+            network(old),
+            network("198.51.100.0/24"),
+            network("2001:db8::/32"),
+            Scope::NoEcs,
+            Scope::Privacy { ipv4: true },
+            Scope::Privacy { ipv4: false },
+        ] {
+            cache.insert(&q, &answer(&q, 1, 1), scope, now);
+        }
+        let later = now + Duration::from_secs(2);
+        assert!(!cache.insert_if_epoch(&q, &answer(&q, 2, 0), network(new), later, cache.epoch()));
+        assert!(cache.lookup(&q, ecs("192.0.2.0/24"), later, true).is_none());
+        for subnet in [
+            ecs("198.51.100.0/24"),
+            ecs("2001:db8:1::/56"),
+            None,
+            ecs("0.0.0.0/0"),
+            ecs("::/0"),
+        ] {
+            assert!(cache.lookup(&q, subnet, later, true).is_some());
+        }
+        assert_eq!(cache.snapshot()["entries"], 5);
+    }
+}
+
+#[test]
+fn failed_truncated_or_client_specific_updates_do_not_supersede() {
+    let cache = Cache::new(CacheConfig::default());
+    let q = query("retain.test.");
+    let now = Instant::now();
+    cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
+    let mut truncated = answer(&q, 2, 0);
+    truncated.metadata.truncation = true;
+    let mut client_specific = answer(&q, 2, 0);
+    let mut edns = Edns::new();
+    edns.options_mut()
+        .insert(EdnsOption::Unknown(10, vec![1; 8]));
+    client_specific.edns = Some(edns);
+    for response in [
+        protocol::error_response(&q, ResponseCode::ServFail),
+        protocol::error_response(&q, ResponseCode::Refused),
+        truncated,
+        client_specific,
+    ] {
+        assert!(!cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
+        assert_eq!(
+            cache.get(&q, None, now).unwrap().0.answers[0].data,
+            RData::A(A::new(192, 0, 2, 1))
+        );
+    }
+    let old_epoch = cache.epoch();
+    cache.invalidate(Some("unrelated.test"), None, None);
+    assert!(!cache.insert_if_epoch(&q, &answer(&q, 2, 0), Scope::NoEcs, now, old_epoch));
+    assert!(cache.get(&q, None, now).is_some());
 }

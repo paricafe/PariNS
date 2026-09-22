@@ -9,7 +9,13 @@ use hickory_proto::{
 };
 use std::{collections::HashMap, sync::Mutex};
 
-pub type Answer = Result<(Message, Option<u8>), ()>;
+/// Raw shared work result. Per-client stale fallback is intentionally not shared.
+#[derive(Clone)]
+pub struct Answer {
+    pub response: Result<(Message, Option<u8>), ()>,
+    pub stale_eligible: bool,
+    pub admitted: bool,
+}
 type Work = BoxFuture<'static, Answer>;
 pub enum Role {
     Bypass,

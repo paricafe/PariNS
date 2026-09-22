@@ -464,17 +464,25 @@ impl Cache {
         if policy.bypass {
             return false;
         }
-        let Some((stored, lifetime)) = prepare_response(query, response, &policy) else {
+        // Only a complete, transaction-independent successful answer supersedes
+        // earlier knowledge. Transient errors and client-specific extensions do not.
+        if response.truncation
+            || response.signature.is_some()
+            || !plain_edns(response)
+            || !matches!(
+                response.response_code,
+                ResponseCode::NoError | ResponseCode::NXDomain
+            )
+        {
             return false;
-        };
-        let Ok(wire) = stored.to_vec() else {
-            return false;
-        };
-        // Conservative per-variant estimate includes duplicated indices, Arc controls,
-        // HashMap slack and LRU allocation. Live Arc readers retain this charge after eviction.
-        let charge = wire.len() + key.name.len() + size_of::<Entry>() + size_of::<Key>() + 192;
-        let negative = stored.response_code == ResponseCode::NXDomain || stored.answers.is_empty();
-        let part = usize::from(negative);
+        }
+        // Expensive response preparation remains outside the shard lock. Admission
+        // failure is distinct from supersession: TTL=0 is still newer knowledge.
+        let prepared = prepare_response(query, response, &policy).and_then(|(stored, lifetime)| {
+            let negative =
+                stored.response_code == ResponseCode::NXDomain || stored.answers.is_empty();
+            stored.to_vec().ok().map(|wire| (wire, lifetime, negative))
+        });
         let mut shard = self.shards[self.shard(&key)]
             .lock()
             .expect("cache shard poisoned");
@@ -482,19 +490,31 @@ impl Cache {
             shard.counts.rejections += 1;
             return false;
         }
+        shard.prune(&key, now);
+        // A narrower new scope can invalidate part of an older broad answer.
+        // Removing the whole overlapping entry is conservative; retaining it could
+        // resurrect known obsolete data after this answer expires or is uncacheable.
+        let replaced: Vec<_> = shard
+            .buckets
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter(|e| scopes_overlap(e.scope, scope))
+            .map(|e| (usize::from(e.negative), e.id))
+            .collect();
+        for (p, id) in replaced {
+            shard.remove(p, id);
+        }
+        let Some((wire, lifetime, negative)) = prepared else {
+            return false;
+        };
+        // Conservative per-variant estimate includes duplicated indices, Arc controls,
+        // HashMap slack and LRU allocation. Live Arc readers retain this charge after eviction.
+        let charge = wire.len() + key.name.len() + size_of::<Entry>() + size_of::<Key>() + 192;
+        let part = usize::from(negative);
         if charge > shard.partitions[part].max_bytes || shard.partitions[part].max_entries == 0 {
             shard.counts.rejections += 1;
             return false;
-        }
-        shard.prune(&key, now);
-        let replaced = shard.buckets.get(&key).and_then(|entries| {
-            entries
-                .iter()
-                .find(|e| e.scope == scope)
-                .map(|e| (usize::from(e.negative), e.id))
-        });
-        if let Some((p, id)) = replaced {
-            shard.remove(p, id);
         }
         if let Some(ids) = shard.buckets.get(&key)
             && ids.len() >= self.config.max_variants
@@ -704,6 +724,13 @@ fn canonical(name: &str) -> String {
     };
     name.set_fqdn(true);
     name.to_lowercase().to_ascii()
+}
+
+fn scopes_overlap(a: Scope, b: Scope) -> bool {
+    match (a, b) {
+        (Scope::Network(a), Scope::Network(b)) => a.contains(&b.addr()) || b.contains(&a.addr()),
+        _ => a == b,
+    }
 }
 
 fn prepare_response(

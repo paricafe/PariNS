@@ -302,6 +302,7 @@ impl Server {
         .await;
         tasks.shutdown().await;
         adapters.shutdown().await;
+        resolver.shutdown_refresh().await;
         if report {
             emit_metrics(&metrics, run_id, started, "shutdown");
         }

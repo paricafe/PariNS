@@ -1,5 +1,6 @@
 //! Authenticated management plane. DNS forwarding remains in Server/Resolver.
 mod cache;
+mod certificates;
 mod https;
 mod runtime;
 mod settings;
@@ -193,6 +194,14 @@ struct Revision {
     revision: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CertificateImport {
+    revision: u64,
+    certificate_pem: String,
+    private_key_pem: String,
+}
+
 async fn api(
     shared: Arc<Shared>,
     method: &str,
@@ -312,6 +321,65 @@ async fn api(
         }
         ("GET", "/api/status") => Ok(shared.manager.lock().await.status()),
         ("GET", "/api/stats") => Ok(shared.history.lock().unwrap().view()),
+        ("POST", "/api/query-log/list") => {
+            let input: crate::query_log::ListOptions = decode(body)?;
+            input.validate().map_err(invalid)?;
+            let manager = shared.manager.lock().await;
+            let resolver = manager
+                .resolver()
+                .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
+            Ok(
+                json!({"revision": manager.saved.as_ref().map_or(0, |s| s.revision),
+                "page": resolver.query_log().list(input)}),
+            )
+        }
+        ("POST", "/api/query-log/clear") => {
+            let input: Revision = decode(body)?;
+            let _permit =
+                shared.mutation.clone().try_acquire_owned().map_err(|_| {
+                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
+                })?;
+            let manager = shared.manager.lock().await;
+            if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "REVISION",
+                    "Configuration changed; refresh before clearing",
+                ));
+            }
+            let resolver = manager
+                .resolver()
+                .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
+            Ok(json!({"removed": resolver.query_log().clear(), "revision": input.revision}))
+        }
+        ("POST", "/api/certificates/import") => {
+            let input: CertificateImport = decode(body)?;
+            let permit =
+                shared.mutation.clone().try_acquire_owned().map_err(|_| {
+                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
+                })?;
+            tokio::spawn(async move {
+                let _permit = permit;
+                let manager = shared.manager.lock().await;
+                if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
+                    return Err(error(
+                        StatusCode::CONFLICT,
+                        "REVISION",
+                        "Configuration changed; reload before importing",
+                    ));
+                }
+                let store = manager.store.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    certificates::import(&store.dir, &input.certificate_pem, &input.private_key_pem)
+                })
+                .await
+                .map_err(|_| internal())?
+                .map_err(invalid)?;
+                Ok(json!({"identity": result, "revision": input.revision}))
+            })
+            .await
+            .map_err(|_| internal())?
+        }
         ("POST", "/api/cache/inspect") => {
             let input: cache::Inspect = decode(body)?;
             let (query, subnet) = input.prepare().map_err(invalid)?;
@@ -513,6 +581,10 @@ async fn handle_inner(
             "/cache.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_str!("../../web/cache.js"),
+            )),
+            "/query-log.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/query-log.js"),
             )),
             _ => None,
         };

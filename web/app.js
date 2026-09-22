@@ -4,11 +4,12 @@
   const $ = (id) => document.getElementById(id);
   const S = PariSettings, C = PariCharts;
   const K = PariCache;
+  let logPage = null, logRevision = null, logFilter = { search: "", status: null };
   let readCacheRules = () => [], cacheStatus = null, cacheInspection = null, inspectedQuery = null;
   const state = { template: "", step: 0, original: "", revision: null, backup: false, dirty: false, busy: false, polling: false, settings: null, formDirty: false, settingsStale: false, view: "overview", samples: [], hours: 1, statsUpdated: 0, pendingFocus: null };
   const session = PariSession.createClient({ onUnauthorized: () => { clearStatistics(); page("login"); } });
   const api = session.request;
-  const panels = ["loading", "setup", "login", "overview", "config"];
+  const panels = ["loading", "setup", "login", "overview", "logs", "config"];
 
   function focusAfterAction(id) {
     if (state.busy) state.pendingFocus = id;
@@ -25,16 +26,16 @@
 
   function page(name, focus = true) {
     for (const panel of panels) $(`${panel}-panel`).hidden = panel !== name;
-    const authenticated = name === "overview" || name === "config";
+    const authenticated = ["overview", "logs", "config"].includes(name);
     $("navigation").hidden = !authenticated;
     $("logout").hidden = !authenticated;
-    for (const view of ["overview", ...Object.keys(S.pages), "advanced"]) {
-      const active = name === "overview" ? view === "overview" : name === "config" && view === state.view;
+    for (const view of ["overview", "logs", ...Object.keys(S.pages), "advanced"]) {
+      const active = ["overview", "logs"].includes(name) ? view === name : name === "config" && view === state.view;
       $(`nav-${view}`).classList.toggle("active", active);
       if (active) $(`nav-${view}`).setAttribute("aria-current", "page");
       else $(`nav-${view}`).removeAttribute("aria-current");
     }
-    $("page-context").textContent = `管理台 / ${{ loading: "连接服务", setup: "首次初始化", login: "登录", overview: "仪表盘", config: S.pages[state.view]?.title || "高级配置" }[name]}`;
+    $("page-context").textContent = `管理台 / ${{ loading: "连接服务", setup: "首次初始化", login: "登录", overview: "仪表盘", logs: "查询日志", config: S.pages[state.view]?.title || "高级配置" }[name]}`;
     if (focus) focusAfterAction("main");
   }
 
@@ -185,6 +186,7 @@
     $("advanced-editor").hidden = !advanced;
     $("form-help").hidden = advanced;
     $("management-tls-help").hidden = state.view !== "security";
+    $("certificate-import-panel").hidden = state.view !== "security";
     $("cache-tools").hidden = state.view !== "cache";
     $("cache-rules-panel").hidden = state.view !== "cache";
     $("config-title").textContent = S.pages[state.view]?.title || "高级配置";
@@ -205,6 +207,7 @@
   }
 
   async function navigate(view) {
+    if (view === "logs") { state.view = view; page("logs"); await loadLogs(); return; }
     if (view === "overview") { state.view = view; page("overview"); if (state.statsUpdated) C.trend($("activity-chart"), state.samples, state.hours); return; }
     if (view === "advanced") await syncDraft();
     else if (state.settingsStale) {
@@ -230,6 +233,10 @@
   }
 
   function clearStatistics() {
+    logPage = null; logRevision = null;
+    $("logs-results").replaceChildren(); $("logs-summary").textContent = "尚未读取日志。";
+    $("logs-next").disabled = true; $("logs-clear").disabled = true;
+    $("certificate-pem").value = ""; $("private-key-pem").value = "";
     state.samples = []; state.statsUpdated = 0;
     unavailable();
     $("status-revision").textContent = "—";
@@ -397,7 +404,51 @@
     if (state.dirty) confirmAction("退出并放弃修改？", "你有未保存的配置修改。退出后会清除当前草稿，请先导出需要保留的内容。", "退出登录", logout);
     else void action(logout);
   });
-  for (const name of ["overview", ...Object.keys(S.pages), "advanced"]) $(`nav-${name}`).addEventListener("click", () => void action(async () => { await navigate(name); notice(""); }));
+  async function loadLogs(before = null) {
+    $("logs-summary").textContent = "正在读取…";
+    $("logs-next").disabled = true;
+    try {
+      const result = await api("query-log/list", "POST", { ...logFilter, before_id: before, limit: 50 });
+      logPage = result.page; logRevision = result.revision;
+      PariQueryLog.render($("logs-results"), logPage);
+      $("logs-summary").textContent = logPage.enabled ? `本页 ${logPage.entries.length} 条 · 内存保留 ${logPage.total} 条 · ${new Date().toLocaleTimeString("zh-CN")} 更新（手动刷新，不打断详情阅读）` : "记录已关闭。日志设置中的开关保存后生效。";
+      $("logs-next").disabled = !logPage.next_cursor;
+      $("logs-clear").disabled = !logPage.total;
+    } catch (error) {
+      if (!PariSession.isStale(error)) { logPage = null; logRevision = null; $("logs-results").replaceChildren(); $("logs-clear").disabled = true; $("logs-summary").textContent = "读取失败，请重试。"; }
+      throw error;
+    }
+  }
+  $("logs-filter").addEventListener("submit", (event) => {
+    event.preventDefault(); logFilter = { search: $("logs-search").value.trim(), status: $("logs-status").value || null };
+    void action(async () => { await loadLogs(); notice(""); });
+  });
+  $("logs-refresh").addEventListener("click", () => void action(async () => { await loadLogs(); notice(""); }));
+  $("logs-next").addEventListener("click", () => { if (logPage?.next_cursor) void action(async () => { await loadLogs(logPage.next_cursor); notice(""); }); });
+  $("logs-settings").addEventListener("click", () => void action(async () => { await navigate("runtime"); focusAfterAction("setting-query_log-enabled"); notice("查询日志设置在本页首项，修改后请保存并应用。"); }));
+  $("logs-clear").addEventListener("click", () => {
+    if (logRevision === null) return;
+    const revision = logRevision;
+    confirmAction("清空查询日志？", "将删除当前实例内存中的全部查询记录，不能恢复。新的请求仍会继续记录；需要停止记录时请关闭日志设置。", "清空日志", async () => {
+      await api("query-log/clear", "POST", { revision }); await loadLogs(); notice("查询日志已清空。");
+    });
+  });
+  $("certificate-import-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    void action(async () => {
+      const target = $("certificate-target").value;
+      if (!$(`enable-${target}`).checked) throw new Error("请先在下方启用目标 DNS 监听器并填写监听地址。");
+      const certificate_pem = $("certificate-pem").value, private_key_pem = $("private-key-pem").value;
+      // Import before validating empty certificate paths; preserve every other draft control.
+      const result = await api("certificates/import", "POST", { revision: state.revision, certificate_pem, private_key_pem });
+      $("certificate-pem").value = ""; $("private-key-pem").value = "";
+      $(`setting-${target}-cert_file`).value = result.identity.cert_file;
+      $(`setting-${target}-key_file`).value = result.identity.key_file;
+      state.formDirty = true; updateEditorState();
+      notice("证书与私钥匹配，已填入配置草稿。请保存并应用；客户端仍需验证证书信任、域名和有效期。");
+    });
+  });
+  for (const name of ["overview", "logs", ...Object.keys(S.pages), "advanced"]) $(`nav-${name}`).addEventListener("click", () => void action(async () => { await navigate(name); notice(""); }));
   $("open-config").addEventListener("click", () => void action(async () => { await navigate("dns"); notice(""); }));
   $("refresh-status").addEventListener("click", () => void action(async () => { state.statsUpdated = 0; try { await status(); notice(""); } catch (error) { if (!PariSession.isStale(error)) unavailable(); throw error; } }));
   for (const button of document.querySelectorAll("[data-hours]")) button.addEventListener("click", () => {

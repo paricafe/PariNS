@@ -1070,6 +1070,165 @@ async fn request_body_and_configuration_sizes_are_bounded_before_mutation() {
 }
 
 #[tokio::test]
+async fn query_logs_are_authenticated_bounded_and_revision_checked() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let config = format!(
+        "{}\n[query_log]\nenabled=true\nmax_entries=2\nretention_secs=60\n",
+        configuration()
+    );
+    let token = server.setup(&directory, &config).await;
+    server
+        .request("POST", "/api/query-log/list", None, Some(json!({})))
+        .await
+        .expect(401);
+    let address = server.dns(&token).await;
+    for _ in 0..3 {
+        assert_dns(address).await;
+    }
+    let page = server
+        .request(
+            "POST",
+            "/api/query-log/list",
+            Some(&token),
+            Some(json!({"limit":1,"status":null})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(page["revision"], 1);
+    assert_eq!(page["page"]["total"], 2);
+    assert_eq!(page["page"]["entries"][0]["name"], "example.test.");
+    assert_eq!(page["page"]["entries"][0]["status"], "blocked");
+    assert_eq!(page["page"]["entries"][0]["transport"], "udp");
+    let older = server
+        .request(
+            "POST",
+            "/api/query-log/list",
+            Some(&token),
+            Some(json!({"before_id":page["page"]["next_cursor"],"search":"EXAMPLE"})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(older["page"]["entries"].as_array().unwrap().len(), 1);
+    server
+        .request(
+            "POST",
+            "/api/query-log/list",
+            Some(&token),
+            Some(json!({"limit":101})),
+        )
+        .await
+        .expect(422);
+    server
+        .request(
+            "POST",
+            "/api/query-log/list",
+            Some(&token),
+            Some(json!({"status":"unknown"})),
+        )
+        .await
+        .expect(422);
+    server
+        .request(
+            "POST",
+            "/api/query-log/clear",
+            None,
+            Some(json!({"revision":1})),
+        )
+        .await
+        .expect(401);
+    server
+        .request(
+            "POST",
+            "/api/query-log/clear",
+            Some(&token),
+            Some(json!({"revision":0})),
+        )
+        .await
+        .expect(409);
+    let cleared = server
+        .request(
+            "POST",
+            "/api/query-log/clear",
+            Some(&token),
+            Some(json!({"revision":1})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(cleared["removed"], 2);
+    let page = server
+        .request("POST", "/api/query-log/list", Some(&token), Some(json!({})))
+        .await
+        .expect(200);
+    assert_eq!(page["page"]["total"], 0);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn pasted_certificate_is_private_and_applies_via_existing_config_transaction() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let token = server.setup(&directory, &configuration()).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let key = identity.signing_key.serialize_pem();
+    let body = json!({"revision":1,"certificate_pem":identity.cert.pem(),"private_key_pem":key});
+    server
+        .request("POST", "/api/certificates/import", None, Some(body.clone()))
+        .await
+        .expect(401);
+    let mut stale = body.clone();
+    stale["revision"] = json!(0);
+    server
+        .request(
+            "POST",
+            "/api/certificates/import",
+            Some(&token),
+            Some(stale),
+        )
+        .await
+        .expect(409);
+    let imported = server
+        .request("POST", "/api/certificates/import", Some(&token), Some(body))
+        .await
+        .expect(200);
+    assert!(!imported.to_string().contains("PRIVATE KEY"));
+    assert!(imported["identity"]["key_matches"].as_bool().unwrap());
+    let path = imported["identity"]["cert_file"].as_str().unwrap();
+    assert!(Path::new(path).starts_with(std::fs::canonicalize(&directory).unwrap()));
+    let next = format!(
+        "{}\n[dot]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(path),
+        json!(path)
+    );
+    server
+        .request(
+            "POST",
+            "/api/config/validate",
+            Some(&token),
+            Some(json!({"toml":next})),
+        )
+        .await
+        .expect(200);
+    server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&token),
+            Some(json!({"toml":next,"revision":1})),
+        )
+        .await
+        .expect(200);
+    let saved = server.config(&token).await;
+    assert_eq!(saved["revision"], 2);
+    assert!(!saved.to_string().contains(&key));
+    assert_dns(server.dns(&token).await).await;
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn admitted_configuration_transaction_survives_http_disconnect() {
     disconnected_transaction(false).await;
 }

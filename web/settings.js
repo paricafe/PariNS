@@ -4,10 +4,12 @@
 globalThis.PariSettings = (() => {
   const field = (path, label, type = "text", help = "", min, max) => ({ path, label, type, help, min, max });
   const number = (path, label, min, max, help = "") => field(path, label, "number", help, min, max);
+  const select = (path, label, options) => ({ ...field(path, label, "select"), options });
   const group = (title, help, fields, optional) => ({ title, help, fields, optional });
   const pages = {
-    dns: { title: "DNS 设置", intro: "选择请求的入口与上游。地址使用 IP:端口，IPv6 地址请加方括号。", groups: [
-      group("监听与解析", "普通 DNS 同时提供 UDP 和 TCP。不会修改操作系统的 DNS 设置，也不会替你选择公共上游。", [field("listen", "DNS 监听地址", "text", "本机示例 127.0.0.1:5353；局域网可绑定指定网卡地址。开放到外部前限制访问来源。"), field("upstream", "上游 DNS 地址", "text", "输入你选择的 IP:端口。开启上游 TLS 后，此地址用于 DoT 连接；不要指向自身。"), number("query_timeout_ms", "查询总超时（毫秒）", 1, 60000), number("tcp_io_timeout_ms", "TCP 读写超时（毫秒）", 1, 60000)]),
+    dns: { title: "DNS 设置", intro: "选择请求入口，多行填写上游，并选择负载均衡或并发查询。IPv6 地址请加方括号。", groups: [
+      group("多上游解析", "每行一个端点：IP[:端口]、udp://、tcp://、tls://、https://主机/dns-query 或 quic://。行尾可加 weight=2 设置权重。组内上游应有一致的解析、过滤及 ECS 策略；并发模式会把查询发给多个服务商。启用后需关闭旧版副本、上游 TLS 和 TLS 连接池。", [field("upstreams.servers", "上游 DNS（每行一个）", "lines", "例如 udp://192.0.2.53:53 weight=2；加密端点必须通过证书验证。"), select("upstreams.mode", "请求模式", [["weighted", "加权负载均衡 · 按配置权重轮流查询"], ["parallel", "并发请求 · 优先返回可用响应"]]), field("upstreams.bootstrap", "引导 DNS（每行一个 IP:端口）", "lines", "使用域名形式的上游时必填。只用于解析上游主机名；不会使用系统 DNS，也不替你选择第三方。"), number("upstreams.max_parallel", "单次并发上游上限", 1, 32, "并发模式下不能小于上游数量。"), number("upstreams.max_extra_inflight", "全局额外上游并发预算", 1, 65536, "预算耗尽时减少并发，仍遵守查询总超时。"), field("upstreams.ca_file", "自定义上游 CA 文件（可选）", "nullable")], "upstreams"),
+      group("监听与解析", "普通 DNS 同时提供 UDP 和 TCP。不会修改操作系统的 DNS 设置，也不会替你选择公共上游。", [field("listen", "DNS 监听地址", "text", "本机示例 127.0.0.1:5353；局域网可绑定指定网卡地址。开放到外部前限制访问来源。"), field("upstream", "旧版单上游 DNS 地址", "text", "仅在未启用多上游时使用。输入 IP:端口；开启旧版上游 TLS 时用于 DoT。不要指向自身。"), number("query_timeout_ms", "查询总超时（毫秒）", 1, 60000), number("tcp_io_timeout_ms", "TCP 读写超时（毫秒）", 1, 60000)]),
       group("等价上游副本", "仅用于解析策略一致的两个副本：主请求超过等待时间后，才并发请求副本。不是主备切换或多上游负载均衡。TLS 模式下，两副本共享证书服务器名。", [field("scheduler.secondary", "副本地址", "text", "与主上游不同的 IP:端口。"), number("scheduler.hedge_after_ms", "发起副本查询前等待（毫秒）", 1, 60000), number("scheduler.max_extra_inflight", "副本额外并发上限", 1, 65536)], "scheduler")
     ] },
     cache: { title: "缓存与 ECS", intro: "复用有效解析结果，控制内存占用，并明确子网信息的使用边界。", groups: [
@@ -20,11 +22,12 @@ globalThis.PariSettings = (() => {
       group("规则来源", "可在下方直接维护规则，或读取服务器上的规则文件。文件路径不是上传入口；相对路径基于服务状态目录。", [field("filter_file", "外部规则文件（留空使用下方规则）", "nullable", "文件存在时，以文件内的 enabled 和规则为准，下方内置规则不生效。清空路径才会切换回内置规则。")]),
       group("内置域名规则", "每行一个域名，不要填写 URL、通配符或 Adblock 表达式。后缀规则匹配该域名及其子域名。", [field("filter.enabled", "启用内置过滤", "checkbox"), field("filter.block_exact", "精确拦截", "lines", "例如 ads.example.com"), field("filter.block_suffix", "后缀拦截", "lines", "例如 example.com"), field("filter.allow_exact", "精确允许", "lines"), field("filter.allow_suffix", "后缀允许", "lines")])
     ] },
-    security: { title: "安全与加密", intro: "为 DNS 传输配置加密。以下证书路径属于 DNS 服务，与管理台自身的 HTTPS 证书相互独立。", groups: [
+    security: { title: "安全与加密", intro: "为 DNS 传输配置加密。可粘贴 PEM 证书和私钥，或使用服务器已有文件。DNS 证书与管理台 HTTPS 相互独立。", groups: [
       group("上游 TLS（DoT）", "启用后，主上游和副本使用 DNS-over-TLS。必须提供匹配证书的服务器名；CA 留空使用内置可信根证书集。", [field("upstream_tls.server_name", "证书服务器名", "text", "例如 dns.example.com；不是连接 IP，也不是 URL。"), field("upstream_tls.ca_file", "自定义 CA 文件（可选）", "nullable")], "upstream_tls"),
-      ...[["dot", "DNS-over-TLS", "TCP，通常使用 853 端口。"], ["doh", "DNS-over-HTTPS", "TCP，查询路径 /dns-query。"], ["doq", "DNS-over-QUIC", "UDP，通常使用 853 端口。"], ["doh3", "DNS-over-HTTP/3", "UDP，查询路径 /dns-query。"]].map(([key, title, help]) => group(title, `${help} 证书和私钥必须已放在服务器上且 PariNS 可读；这里只填路径，不上传文件。`, [field(`${key}.listen`, "监听地址"), field(`${key}.cert_file`, "证书 PEM 路径"), field(`${key}.key_file`, "私钥 PEM 路径")], key))
+      ...[["dot", "DNS-over-TLS", "TCP，通常使用 853 端口。"], ["doh", "DNS-over-HTTPS", "TCP，查询路径 /dns-query。"], ["doq", "DNS-over-QUIC", "UDP，通常使用 853 端口。"], ["doh3", "DNS-over-HTTP/3", "UDP，查询路径 /dns-query。"]].map(([key, title, help]) => group(title, `${help} 可用上方粘贴入口导入证书，自动填入路径；或填写服务器现有 PEM 文件路径。`, [field(`${key}.listen`, "监听地址"), field(`${key}.cert_file`, "证书 PEM 路径"), field(`${key}.key_file`, "私钥 PEM 路径")], key))
     ] },
     runtime: { title: "运行参数", intro: "为服务器设置有界的并发和资源预算。所有更改会在保存并应用后生效。", groups: [
+      group("查询日志", "默认关闭。启用后在内存中记录客户端 IP、查询域名、答案和实际处理路径，只有登录的管理员可查看。达到容量或保留期限会删除；重启清空，不写入磁盘或聚合指标。", [field("query_log.enabled", "启用逐请求日志", "checkbox"), number("query_log.max_entries", "最多保留条数", 1, 10000), number("query_log.retention_secs", "保留时长（秒）", 1, 604800)]),
       group("全局并发", "限制整个 DNS 实例的资源使用。来源预算单独约束每个客户端子网，但不能代替防火墙访问控制。", [number("max_inflight", "请求并发上限", 1, 65536), number("max_tcp_connections", "TCP 连接上限", 1, 65536), number("shutdown_grace_ms", "平滑停止等待（毫秒）", 1, 60000)]),
       group("来源预算", "按传输连接的真实对端子网分组，不按客户端声明的 ECS 分组。", [field("source_limits.enabled", "启用来源预算", "checkbox"), number("source_limits.rate_per_sec", "每个来源每秒查询预算", 1, 1000000), number("source_limits.burst", "每个来源突发预算", 1, 1000000), number("source_limits.max_sources", "来源表容量", 1, 65536), number("source_limits.ipv4_prefix", "IPv4 分组前缀", 0, 32), number("source_limits.ipv6_prefix", "IPv6 分组前缀", 0, 128), number("source_limits.max_inflight", "每个来源的请求并发", 1, 65536), number("source_limits.max_connections", "每个来源的连接上限", 1, 65536)]),
       group("同类请求合并", "短时间内相同查询共享进行中的上游操作。各请求仍保留独立的响应和时限。", [field("coalescing.enabled", "启用请求合并", "checkbox"), number("coalescing.max_groups", "合并组上限", 1, 65536), number("coalescing.max_waiters", "每组合并等待者上限", 1, 65536)]),
@@ -34,6 +37,7 @@ globalThis.PariSettings = (() => {
   };
   const defaults = { scheduler: { secondary: "", hedge_after_ms: 100, max_extra_inflight: 32 }, upstream_tls: { server_name: "", ca_file: null }, dot: { listen: "", cert_file: "", key_file: "" }, doh: { listen: "", cert_file: "", key_file: "" }, doq: { listen: "", cert_file: "", key_file: "" }, doh3: { listen: "", cert_file: "", key_file: "" } };
   const get = (object, path) => path.split(".").reduce((value, key) => value?.[key], object);
+  defaults.upstreams = { servers: [], mode: "weighted", bootstrap: [], max_parallel: 32, max_extra_inflight: 128, ca_file: null };
   function put(object, path, value) {
     const keys = path.split(".");
     const last = keys.pop();
@@ -83,8 +87,9 @@ globalThis.PariSettings = (() => {
         for (const descriptor of item.fields) {
           const wrap = create("div", descriptor.type === "lines" ? "field wide" : "field");
           const id = `setting-${descriptor.path.replaceAll(".", "-")}`;
-          const input = create(descriptor.type === "lines" ? "textarea" : "input"); input.id = id; input.dataset.path = descriptor.path;
-          if (descriptor.type !== "lines") input.type = descriptor.type === "checkbox" || descriptor.type === "number" ? descriptor.type : "text";
+          const input = create(descriptor.type === "lines" ? "textarea" : descriptor.type === "select" ? "select" : "input"); input.id = id; input.dataset.path = descriptor.path;
+          if (!["lines", "select"].includes(descriptor.type)) input.type = descriptor.type === "checkbox" || descriptor.type === "number" ? descriptor.type : "text";
+          for (const [value, label] of descriptor.options || []) { const option = create("option", "", label); option.value = value; input.append(option); }
           input.spellcheck = false; input.autocomplete = "off";
           if (descriptor.type === "lines") input.rows = 4;
           if (descriptor.min !== undefined) input.min = String(descriptor.min);

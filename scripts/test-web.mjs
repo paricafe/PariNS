@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-for (const file of ["settings.js", "charts.js", "session.js", "cache.js"]) vm.runInThisContext(fs.readFileSync(path.join(root, "web", file), "utf8"), { filename: file });
+for (const file of ["settings.js", "charts.js", "session.js", "cache.js", "query-log.js"]) vm.runInThisContext(fs.readFileSync(path.join(root, "web", file), "utf8"), { filename: file });
 const S = globalThis.PariSettings, C = globalThis.PariCharts;
 let passed = 0;
 function test(title, run) { run(); passed += 1; console.log(`ok ${passed} - ${title}`); }
@@ -63,9 +63,42 @@ test("blank and fractional integer controls fail instead of coercing", () => { f
 test("path access and writes preserve unrelated values", () => { const result = { cache: { enabled: true } }; S.put(result, "cache.max_entries", 12); assert.equal(S.get(result, "cache.max_entries"), 12); assert.equal(result.cache.enabled, true); });
 test("every Config root key has a visual control", () => {
   const roots = new Set(Object.values(S.pages).flatMap((page) => page.groups.flatMap((group) => group.fields.map((field) => field.path.split(".")[0]))));
-  assert.deepEqual([...roots].sort(), ["listen", "upstream", "query_timeout_ms", "tcp_io_timeout_ms", "shutdown_grace_ms", "max_inflight", "max_tcp_connections", "source_limits", "ecs", "cache", "filter", "coalescing", "metrics", "dot", "doh", "doq", "doh3", "upstream_tls", "upstream_pool", "filter_file", "admin_listen", "scheduler"].sort());
+  assert.deepEqual([...roots].sort(), ["listen", "upstream", "upstreams", "query_log", "query_timeout_ms", "tcp_io_timeout_ms", "shutdown_grace_ms", "max_inflight", "max_tcp_connections", "source_limits", "ecs", "cache", "filter", "coalescing", "metrics", "dot", "doh", "doq", "doh3", "upstream_tls", "upstream_pool", "filter_file", "admin_listen", "scheduler"].sort());
 });
 test("all form paths are unique", () => { const paths = Object.values(S.pages).flatMap((page) => page.groups.flatMap((group) => group.fields.map((field) => field.path))); assert.equal(new Set(paths).size, paths.length); });
+test("upstreams preserve newline protocols and explicit weights", () => assert.deepEqual(S.valueOf({ value: " udp://192.0.2.53 weight=2\r\n\nhttps://dns.example/dns-query\n" }, { type: "lines" }), ["udp://192.0.2.53 weight=2", "https://dns.example/dns-query"]));
+test("upstream mode presents both server-supported strategies", () => {
+  const mode = S.pages.dns.groups.flatMap(group => group.fields).find(field => field.path === "upstreams.mode");
+  assert.deepEqual(mode.options.map(option => option[0]), ["weighted", "parallel"]);
+  assert.equal(S.defaults.upstreams.max_parallel, 32);
+});
+test("query log controls have finite retention and capacity", () => {
+  const fields = S.pages.runtime.groups.flatMap(group => group.fields);
+  assert.equal(fields.find(field => field.path === "query_log.max_entries").max, 10000);
+  assert.equal(fields.find(field => field.path === "query_log.retention_secs").max, 604800);
+});
+test("query log renders untrusted fields as text and has distinct disabled and empty states", () => {
+  class Element {
+    constructor(tag) { this.tag = tag; this.children = []; this.textContent = ""; }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = nodes; }
+    setAttribute() {}
+    set innerHTML(_) { throw Error("untrusted HTML insertion"); }
+  }
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new Element(tag) };
+  try {
+    const container = new Element("div");
+    PariQueryLog.render(container, { enabled: false, entries: [] });
+    assert.match(container.children[0].textContent, /尚未启用/);
+    PariQueryLog.render(container, { enabled: true, entries: [] });
+    assert.match(container.children[0].textContent, /没有匹配/);
+    PariQueryLog.render(container, { enabled: true, entries: [{ id: 1, time_ms: 0, name: "<img src=x onerror=alert(1)>", qtype: "A", client: "127.0.0.1", transport: "udp", status: "success", cache: "fresh", duration_ms: 1, answer: [] }] });
+    const rendered = JSON.stringify(container);
+    assert.ok(rendered.includes("<img src=x onerror=alert(1)>"));
+    assert.ok(rendered.includes("缓存命中"));
+  } finally { globalThis.document = previous; }
+});
 
 const now = 200000000;
 const sample = (offset, values = {}) => ({ timestamp_ms: now + offset, elapsed_seconds: 60, running: true, generation: 1, requests: 120, cache_hits: 60, blocked: 0, ...values });

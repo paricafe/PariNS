@@ -1,8 +1,11 @@
 use hickory_proto::{
     op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RecordType},
+    rr::{
+        Name, RData, Record, RecordType,
+        rdata::{A, CNAME},
+    },
 };
-use parins::{config::Config, ecs, resolver::Resolver};
+use parins::{config::Config, ecs, protocol, resolver::Resolver};
 use tokio::net::UdpSocket;
 
 fn config(address: std::net::SocketAddr, rules: &str) -> Config {
@@ -15,7 +18,9 @@ fn config(address: std::net::SocketAddr, rules: &str) -> Config {
 
 fn query(name: &str, kind: RecordType) -> Message {
     let mut q = Message::new(27, MessageType::Query, OpCode::Query);
-    q.add_query(Query::query(Name::from_ascii(name).unwrap(), kind));
+    let mut name = Name::from_ascii(name).unwrap();
+    name.set_fqdn(true);
+    q.add_query(Query::query(name, kind));
     q.metadata.recursion_desired = true;
     q.metadata.checking_disabled = true;
     let mut edns = Edns::new();
@@ -109,4 +114,118 @@ async fn filtering_cannot_bypass_protocol_or_ecs_validation() {
         resolve(&resolver, &q).await.response_code,
         ResponseCode::FormErr
     );
+}
+
+#[tokio::test]
+async fn cname_blocking_applies_to_cold_and_warm_independent_subnet_answers() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(
+        upstream.local_addr().unwrap(),
+        "block_suffix = ['ads.test']\nallow_exact = ['alias.test']",
+    );
+    config.ecs.enabled = true;
+    let resolver = Resolver::from_config(&config);
+    let mock = tokio::spawn(async move {
+        for network in ["192.0.2.0", "192.0.3.0"] {
+            let mut buffer = [0; 4096];
+            let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+            let q = protocol::decode(&buffer[..length]).unwrap();
+            let mut subnet = ecs::subnet(&q).unwrap();
+            assert_eq!(subnet.addr().to_string(), network);
+            subnet.set_scope_prefix(24);
+            let mut reply = protocol::error_response(&q, ResponseCode::NoError);
+            reply.metadata.authentic_data = true;
+            reply.metadata.authoritative = true;
+            for (owner, target) in [("middle.test", "ads.test"), ("alias.test", "middle.test")] {
+                reply.add_answer(Record::from_rdata(
+                    Name::from_ascii(owner).unwrap(),
+                    60,
+                    RData::CNAME(CNAME(Name::from_ascii(target).unwrap())),
+                ));
+            }
+            let address = Record::from_rdata(
+                Name::from_ascii("ads.test").unwrap(),
+                60,
+                RData::A(A::new(192, 0, 2, 99)),
+            );
+            reply.answers.push(address.clone());
+            reply.authorities.push(address.clone());
+            reply.additionals.push(address);
+            ecs::set_subnet(&mut reply, Some(subnet));
+            upstream
+                .send_to(&reply.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+        // Closing the mock proves any further cache miss cannot get a valid answer.
+    });
+    for (id, peer) in [
+        (1, "192.0.2.10"),
+        (2, "192.0.2.11"),
+        (3, "192.0.3.10"),
+        (4, "192.0.3.11"),
+    ] {
+        let mut q = query(
+            if id % 2 == 0 {
+                "ALIAS.Test."
+            } else {
+                "alias.test"
+            },
+            RecordType::A,
+        );
+        q.metadata.id = id;
+        ecs::set_subnet(&mut q, Some(format!("{peer}/32").parse().unwrap()));
+        let reply = resolver
+            .resolve(&q.to_vec().unwrap(), peer.parse().unwrap())
+            .await
+            .unwrap()
+            .message;
+        assert_blocked(&q, &reply);
+        let returned = ecs::subnet(&reply).unwrap();
+        assert_eq!(returned.addr().to_string(), peer);
+        assert_eq!(
+            (returned.source_prefix(), returned.scope_prefix()),
+            (32, 24)
+        );
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(1), mock)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn allow_exception_reaches_upstream_and_keeps_normal_cache_behavior() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let resolver = Resolver::from_config(&config(
+        upstream.local_addr().unwrap(),
+        "block_suffix = ['test']\nallow_suffix = ['safe.test']",
+    ));
+    let mock = tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+        let q = protocol::decode(&buffer[..length]).unwrap();
+        let mut reply = protocol::error_response(&q, ResponseCode::NoError);
+        reply.add_answer(Record::from_rdata(
+            q.queries[0].name().clone(),
+            60,
+            RData::A(A::new(192, 0, 2, 1)),
+        ));
+        upstream
+            .send_to(&reply.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    });
+    for id in [1, 2] {
+        let mut q = query("www.safe.test", RecordType::A);
+        q.metadata.id = id;
+        let reply = resolve(&resolver, &q).await;
+        assert_eq!(reply.id, id);
+        assert_eq!(reply.answers.len(), 1);
+        assert_eq!(reply.answers[0].data, RData::A(A::new(192, 0, 2, 1)));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(1), mock)
+        .await
+        .unwrap()
+        .unwrap();
 }

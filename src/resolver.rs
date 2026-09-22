@@ -82,6 +82,7 @@ impl Resolver {
             context.outgoing,
             Instant::now(),
         ) {
+            self.policy.apply_response(&query, &mut message);
             context.finish(&query, &mut message, Some(scope.prefix_len()));
             return Some(Reply { message, udp_limit });
         }
@@ -125,6 +126,9 @@ impl Resolver {
                 None,
             ),
         };
+        // Cache retains the original upstream response; policy applies equally
+        // on misses and hits and never inserts its synthesized answer.
+        self.policy.apply_response(&query, &mut message);
         context.finish(&query, &mut message, scope);
         Some(Reply { message, udp_limit })
     }

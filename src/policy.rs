@@ -1,9 +1,15 @@
 //! Immutable local filtering policy. No IO, cache ownership, or upstream state.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Result, ensure};
-use hickory_proto::{op::Message, rr::Name};
+use hickory_proto::{
+    op::{Message, ResponseCode},
+    rr::{Name, RData},
+};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Default)]
@@ -118,6 +124,39 @@ impl Policy {
 
     pub fn blocks_query(&self, query: &Message) -> bool {
         query.queries.first().is_some_and(|q| self.blocks(q.name()))
+    }
+
+    /// Only follow answer CNAMEs reachable from the original question and class.
+    /// A name's allow exception never skips checks on a different chain target.
+    pub fn apply_response(&self, query: &Message, response: &mut Message) {
+        if !self.enabled {
+            return;
+        }
+        let Some(question) = query.queries.first() else {
+            return;
+        };
+        let mut links: HashMap<&Name, Vec<&Name>> = HashMap::new();
+        for rr in &response.answers {
+            if rr.dns_class == question.query_class()
+                && let RData::CNAME(target) = &rr.data
+            {
+                links.entry(&rr.name).or_default().push(&target.0);
+            }
+        }
+        let mut pending = vec![question.name()];
+        let mut visited = HashSet::new();
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name) {
+                continue;
+            }
+            if self.blocks(name) {
+                *response = crate::protocol::error_response(query, ResponseCode::NoError);
+                return;
+            }
+            if let Some(targets) = links.get(name) {
+                pending.extend(targets.iter().copied());
+            }
+        }
     }
 }
 

@@ -1,4 +1,25 @@
 use super::*;
+use hickory_proto::{
+    op::{MessageType, OpCode, Query},
+    rr::{DNSClass, Record, RecordType, rdata::CNAME},
+};
+
+fn query() -> Message {
+    let mut q = Message::new(7, MessageType::Query, OpCode::Query);
+    q.add_query(Query::query(
+        Name::from_ascii("alias.test").unwrap(),
+        RecordType::A,
+    ));
+    q
+}
+
+fn cname(owner: &str, target: &str) -> Record {
+    Record::from_rdata(
+        Name::from_ascii(owner).unwrap(),
+        60,
+        RData::CNAME(CNAME(Name::from_ascii(target).unwrap())),
+    )
+}
 
 fn policy(rules: &str) -> Policy {
     toml::from_str(&format!("enabled = true\n{rules}")).unwrap()
@@ -100,4 +121,49 @@ fn rule_count_and_text_budgets_fail_before_compilation() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn cname_chain_is_order_independent_and_allow_does_not_exempt_other_targets() {
+    let p = policy("block_suffix = ['test']\nallow_exact = ['alias.test', 'middle.test']");
+    let q = query();
+    let mut reply = crate::protocol::error_response(&q, ResponseCode::NoError);
+    reply.answers = vec![
+        cname("MIDDLE.test", "ads.test"),
+        cname("alias.TEST", "middle.test"),
+    ];
+    reply.authorities.push(cname("test", "ads.test"));
+    reply.additionals.push(cname("test", "ads.test"));
+    reply.metadata.authentic_data = true;
+    reply.metadata.authoritative = true;
+    reply.metadata.truncation = true;
+    p.apply_response(&q, &mut reply);
+    assert!(
+        reply.answers.is_empty() && reply.authorities.is_empty() && reply.additionals.is_empty()
+    );
+    assert!(!reply.authentic_data && !reply.authoritative && !reply.truncation);
+    assert_eq!(reply.queries, q.queries);
+}
+
+#[test]
+fn unrelated_names_wrong_class_and_cycles_do_not_cause_false_blocks() {
+    let p = policy("block_suffix = ['ads.test']");
+    let q = query();
+    let mut reply = crate::protocol::error_response(&q, ResponseCode::NoError);
+    let mut wrong_class = cname("alias.test", "ads.test");
+    wrong_class.dns_class = DNSClass::CH;
+    reply.answers = vec![
+        cname("alias.test", "loop.test"),
+        cname("loop.test", "alias.test"),
+        cname("unrelated.test", "ads.test"),
+        wrong_class,
+    ];
+    reply.additionals.push(cname("alias.test", "ads.test"));
+    let before = reply.to_vec().unwrap();
+    p.apply_response(&q, &mut reply);
+    assert_eq!(reply.to_vec().unwrap(), before);
+    // An additional branch to a blocked target must still be checked, even in a loop.
+    reply.answers.push(cname("loop.test", "ads.test"));
+    p.apply_response(&q, &mut reply);
+    assert!(reply.answers.is_empty());
 }

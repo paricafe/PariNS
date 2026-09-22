@@ -2,7 +2,10 @@ use std::{net::SocketAddr, time::Duration};
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RData, Record, RecordType, rdata::A},
+    rr::{
+        Name, RData, Record, RecordType,
+        rdata::{A, CNAME},
+    },
 };
 use parins::{config::Config, ecs, protocol, server::Server};
 use tokio::{
@@ -194,6 +197,60 @@ async fn both_listeners_derive_ecs_from_the_socket_peer() {
     assert!(tcp.edns.is_none());
     finish(stop, task).await;
     mock.await.unwrap();
+}
+
+#[tokio::test]
+async fn both_listeners_enforce_query_and_cached_cname_policy() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = config(upstream.local_addr().unwrap());
+    cfg.filter =
+        toml::from_str("enabled = true\nblock_exact = ['example.test', 'ads.test']").unwrap();
+    let (address, stop, task) = start(cfg).await;
+    let mut tcp = TcpStream::connect(address).await.unwrap();
+    let direct = udp_query(address, &query()).await.0;
+    assert_eq!(direct.response_code, ResponseCode::NoError);
+    assert!(direct.answers.is_empty());
+    write(&mut tcp, &query()).await;
+    let direct = read(&mut tcp).await;
+    assert_eq!(direct.response_code, ResponseCode::NoError);
+    assert!(direct.answers.is_empty());
+    let mut buffer = [0; 4096];
+    assert_eq!(
+        upstream.try_recv(&mut buffer).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    let mock = tokio::spawn(async move {
+        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+        let q = protocol::decode(&buffer[..length]).unwrap();
+        let mut reply = answer(&q, 0);
+        reply.add_answer(Record::from_rdata(
+            q.queries[0].name().clone(),
+            60,
+            RData::CNAME(CNAME(Name::from_ascii("ads.test").unwrap())),
+        ));
+        reply.add_answer(Record::from_rdata(
+            Name::from_ascii("ads.test").unwrap(),
+            60,
+            RData::A(A::new(192, 0, 2, 99)),
+        ));
+        upstream
+            .send_to(&reply.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    });
+    let mut alias = query();
+    alias.queries[0].set_name(Name::from_ascii("alias.test").unwrap());
+    let cold = udp_query(address, &alias).await.0;
+    assert_eq!(cold.response_code, ResponseCode::NoError);
+    assert!(cold.answers.is_empty());
+    mock.await.unwrap();
+    alias.metadata.id += 1;
+    write(&mut tcp, &alias).await;
+    let hit = read(&mut tcp).await;
+    assert_eq!(hit.id, alias.id);
+    assert_eq!(hit.response_code, ResponseCode::NoError);
+    assert!(hit.answers.is_empty());
+    finish(stop, task).await;
 }
 
 #[tokio::test]

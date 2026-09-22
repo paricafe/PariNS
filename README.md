@@ -11,7 +11,7 @@ operate.
 Early development. UDP/TCP listeners, validated single-upstream forwarding,
 UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
 implemented. Optional peer-derived ECS and bounded subnet-aware response caching
-are supported. Local query-name filtering is available; CNAME filtering and
+are supported. Local query-name and CNAME-chain filtering are available;
 encrypted transports remain planned.
 
 ## Development
@@ -147,6 +147,14 @@ NOERROR with empty RR sections, no AA/AD/TC flags and no synthetic SOA. These
 answers are not inserted into PariNS's cache and do not specify a downstream
 negative-cache TTL. Unsupported ANY/AXFR/IXFR queries still receive REFUSED.
 
+Answer CNAME chains are followed from the original question by owner and class,
+independent of record order, with cycle detection. Allowing the query name does
+not exempt a different blocked target. Unrelated answer/additional names do not
+trigger a block. This check runs on both upstream responses and cache hits;
+the cache retains the original upstream answer, never a filtered replacement.
+DNAME and HTTPS/SVCB TargetName traversal are not implemented; query-name and
+CNAME checks alone are not a complete DNS/application firewall.
+
 ## Module boundaries
 
 | Module | Responsibility |
@@ -155,8 +163,8 @@ negative-cache TTL. Unsupported ANY/AXFR/IXFR queries still receive REFUSED.
 | `protocol` | DNS parsing, request rules, response correlation, UDP encoding |
 | `ecs` | Peer provenance, subnet selection, wire validation, scope and client echo |
 | `cache` | Independent subnet answers, TTL/negative policy, bounded LRU eviction |
-| `policy` | Immutable local rules, label-boundary matching and allow precedence |
-| `resolver` | Compose ECS, cache, upstream deadline, retry and response restoration |
+| `policy` | Immutable local rules, label matching, allow precedence, CNAME filtering |
+| `resolver` | Compose policy, ECS, cache, upstream deadline and response restoration |
 | `upstream` | Independent UDP exchange and validated TCP fallback |
 | `transport::tcp` | Length-prefixed framing used on both sides |
 | `server` | Listener ownership, admission budgets, client tasks, shutdown |
@@ -167,7 +175,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 ## Planned scope
 
 - Multiple upstream profiles and explicit cache ownership across configuration updates.
-- Domain filtering with configurable responses, including NOERROR/NODATA.
+- Rule-list import, atomic rule updates and additional filtering response modes.
 - Bounded upstream scheduling, connection reuse, and query coalescing.
 - UDP/TCP DNS, DNS over TLS, DNS over HTTPS, and DNS over QUIC.
 - Operational metrics and atomic configuration and rule updates.

@@ -1,6 +1,8 @@
 //! Authenticated management plane. DNS forwarding remains in Server/Resolver.
 mod https;
 mod runtime;
+mod settings;
+mod stats;
 mod store;
 
 use anyhow::Result;
@@ -39,6 +41,7 @@ struct Shared {
     sessions: Mutex<Vec<Session>>,
     logins: Mutex<VecDeque<Instant>>,
     mutation: Arc<Semaphore>,
+    history: Mutex<stats::History>,
     address: SocketAddr,
 }
 
@@ -307,12 +310,27 @@ async fn api(
             Ok(json!({"ok":true}))
         }
         ("GET", "/api/status") => Ok(shared.manager.lock().await.status()),
+        ("GET", "/api/stats") => Ok(shared.history.lock().unwrap().view()),
         ("GET", "/api/config") => {
             let manager = shared.manager.lock().await;
             let saved = manager.saved.as_ref().ok_or_else(internal)?;
             Ok(
                 json!({"toml":saved.toml,"revision":saved.revision,"has_backup":saved.previous.is_some()}),
             )
+        }
+        ("POST", "/api/config/parse") => {
+            let document: Document = decode(body)?;
+            tokio::task::spawn_blocking(move || settings::parse(&document.toml))
+                .await
+                .map_err(|_| internal())?
+                .map_err(invalid)
+        }
+        ("POST", "/api/config/preview") => {
+            let request = decode(body)?;
+            tokio::task::spawn_blocking(move || settings::preview(request))
+                .await
+                .map_err(|_| internal())?
+                .map_err(invalid)
         }
         ("POST", "/api/config/validate") => {
             let document: Document = decode(body)?;
@@ -502,6 +520,7 @@ pub async fn serve(
         sessions: Mutex::new(Vec::new()),
         logins: Mutex::new(VecDeque::new()),
         mutation: Arc::new(Semaphore::new(1)),
+        history: Mutex::new(stats::History::default()),
         address,
     });
     let router = Router::new().fallback(handle).with_state(shared.clone());
@@ -513,10 +532,23 @@ pub async fn serve(
     }
     let permits = Arc::new(Semaphore::new(32));
     let mut tasks = JoinSet::new();
+    let mut samples = tokio::time::interval(Duration::from_secs(stats::INTERVAL));
+    samples.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(shutdown);
     let result = loop {
         tokio::select! {
             _ = &mut shutdown => break Ok(()),
+            _ = samples.tick() => {
+                // A configuration transaction may drain DNS for seconds. Skip
+                // this tick instead of blocking management accepts or shutdown.
+                if let Ok(manager) = manager.try_lock() {
+                    let (generation, snapshot) = manager.statistics_snapshot();
+                    let timestamp_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+                        .as_millis().min(u64::MAX as u128) as u64;
+                    shared.history.lock().unwrap().record(Instant::now(), timestamp_ms, generation, snapshot);
+                }
+            },
             _ = tasks.join_next(), if !tasks.is_empty() => {},
             incoming = listener.accept() => {
                 let (stream,_) = match incoming {

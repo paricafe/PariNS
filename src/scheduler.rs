@@ -6,10 +6,10 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Result, ensure};
 use hickory_proto::op::{Message, ResponseCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{sync::Semaphore, time::sleep};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub secondary: SocketAddr,

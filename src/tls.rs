@@ -15,7 +15,7 @@ use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
@@ -30,14 +30,14 @@ mod pool;
 pub use pool::PoolSettings;
 type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsFiles {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenerConfig {
     pub listen: SocketAddr,
@@ -45,7 +45,7 @@ pub struct ListenerConfig {
     pub files: TlsFiles,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientSettings {
     pub server_name: String,

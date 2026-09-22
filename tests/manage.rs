@@ -335,6 +335,133 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
 }
 
 #[tokio::test]
+async fn configuration_forms_are_authenticated_read_only_and_apply_with_revision() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let source = configuration();
+    server
+        .request("GET", "/api/stats", None, None)
+        .await
+        .expect(401);
+    for (path, body) in [
+        ("/api/config/parse", json!({"toml": source})),
+        (
+            "/api/config/preview",
+            json!({"toml": source, "changes": {}}),
+        ),
+    ] {
+        server
+            .request("POST", path, None, Some(body))
+            .await
+            .expect(401);
+    }
+    let token = server.setup(&directory, &source).await;
+    let stats = server
+        .request("GET", "/api/stats", Some(&token), None)
+        .await
+        .expect(200);
+    assert_eq!(stats["interval_seconds"], 60);
+    assert_eq!(stats["retention_seconds"], 86400);
+    assert!(stats["samples"].is_array());
+    let status = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert!(status["generation"].as_u64().unwrap() > 0);
+    assert!(status["uptime_seconds"].is_u64());
+    let before = std::fs::read(directory.join("state.json")).unwrap();
+    let saved = server.config(&token).await;
+    let parsed = server
+        .request(
+            "POST",
+            "/api/config/parse",
+            Some(&token),
+            Some(json!({"toml": source})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(parsed["toml"], source);
+    assert_eq!(
+        parsed["settings"]["filter"]["block_exact"],
+        json!(["example.test"])
+    );
+    assert_eq!(parsed["settings"]["cache"]["enabled"], true);
+    let preview = server
+        .request(
+            "POST",
+            "/api/config/preview",
+            Some(&token),
+            Some(json!({"toml": source, "changes": {"cache": {"enabled": false}}})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(preview["settings"]["cache"]["enabled"], false);
+    assert_eq!(
+        preview["settings"]["filter"]["block_exact"],
+        json!(["example.test"])
+    );
+    assert_eq!(std::fs::read(directory.join("state.json")).unwrap(), before);
+    assert_eq!(server.config(&token).await, saved);
+    for (body, status) in [
+        (json!({"toml": source, "changes": []}), 400),
+        (json!({"toml": source, "changes": {}, "revision": 1}), 400),
+        (json!({"toml": source, "changes": {"typo": true}}), 422),
+    ] {
+        server
+            .request("POST", "/api/config/preview", Some(&token), Some(body))
+            .await
+            .expect(status);
+    }
+    let no_file = server
+        .request(
+            "POST",
+            "/api/config/preview",
+            Some(&token),
+            Some(json!({"toml": source, "changes": {"filter_file": "missing-rules.toml"}})),
+        )
+        .await
+        .expect(200);
+    server
+        .request(
+            "POST",
+            "/api/config/validate",
+            Some(&token),
+            Some(json!({"toml": no_file["toml"]})),
+        )
+        .await
+        .expect(422);
+    server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&token),
+            Some(json!({"toml": preview["toml"], "revision": 0})),
+        )
+        .await
+        .expect(409);
+    server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&token),
+            Some(json!({"toml": preview["toml"], "revision": saved["revision"]})),
+        )
+        .await
+        .expect(200);
+    let applied = server.config(&token).await;
+    assert_eq!(applied["revision"], 2);
+    assert_eq!(applied["toml"], preview["toml"]);
+    let next_status = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert!(next_status["generation"].as_u64().unwrap() > status["generation"].as_u64().unwrap());
+    assert_dns(server.dns(&token).await).await;
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn ipv4_wildcard_supports_public_ip_origin_without_bypassing_authentication() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");

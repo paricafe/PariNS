@@ -6,9 +6,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -24,7 +24,8 @@ pub struct Config {
     pub ecs: EcsConfig,
     #[serde(default)]
     pub cache: CacheConfig,
-    #[serde(default)]
+    // Compiled policy is projected from source rules by management, not its trie.
+    #[serde(default, skip_serializing)]
     pub filter: crate::policy::Policy,
     #[serde(default)]
     pub coalescing: CoalescingConfig,
@@ -50,14 +51,14 @@ pub struct Config {
     pub scheduler: Option<crate::scheduler::Settings>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
     /// Zero disables aggregate stderr output; collection remains available in-process.
     pub interval_secs: u64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CoalescingConfig {
     pub enabled: bool,
@@ -75,7 +76,7 @@ impl Default for CoalescingConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
     pub enabled: bool,
@@ -99,7 +100,7 @@ impl Default for CacheConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EcsConfig {
     pub enabled: bool,

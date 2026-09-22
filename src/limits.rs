@@ -14,12 +14,12 @@ use std::{
 
 use anyhow::ensure;
 use ipnet::IpNet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const TOKEN: u64 = 1_000_000_000;
 const RECLAIM_SCAN: usize = 16;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub enabled: bool,

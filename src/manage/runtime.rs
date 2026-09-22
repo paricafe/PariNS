@@ -2,7 +2,11 @@
 use super::store::{Store, Stored};
 use crate::{config::Config, metrics::Metrics, server::Server};
 use anyhow::{Result, anyhow, ensure};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
 
 struct Running {
@@ -11,6 +15,7 @@ struct Running {
     grace: Duration,
     metrics: Arc<Metrics>,
     listen: SocketAddr,
+    started: Instant,
 }
 
 impl Running {
@@ -26,6 +31,7 @@ impl Running {
             grace: Duration::from_millis(grace + 2000),
             metrics,
             listen,
+            started: Instant::now(),
         }
     }
 
@@ -43,6 +49,7 @@ pub(super) struct Manager {
     pub saved: Option<Stored>,
     running: Option<Running>,
     pub last_error: Option<String>,
+    generation: u64,
 }
 
 impl Manager {
@@ -53,6 +60,7 @@ impl Manager {
             saved,
             running: None,
             last_error: None,
+            generation: 0,
         };
         if let Some(saved) = this.saved.clone() {
             this.restore(&saved.toml).await;
@@ -70,7 +78,19 @@ impl Manager {
             "revision": self.saved.as_ref().map_or(0, |s| s.revision),
             "metrics": running.map(|r| r.metrics.snapshot()),
             "listen": running.map(|r| r.listen.to_string()),
+            "uptime_seconds": running.map(|r| r.started.elapsed().as_secs()),
+            "generation": self.generation,
         })
+    }
+
+    pub fn statistics_snapshot(&self) -> (u64, Option<crate::metrics::Snapshot>) {
+        (
+            self.generation,
+            self.running
+                .as_ref()
+                .filter(|r| !r.task.is_finished())
+                .map(|r| r.metrics.snapshot()),
+        )
     }
 
     pub async fn validate(&self, toml: String) -> Result<Config> {
@@ -95,6 +115,7 @@ impl Manager {
         .await;
         match result {
             Ok(running) => {
+                self.generation = self.generation.saturating_add(1);
                 self.running = Some(running);
                 self.last_error = None;
             }
@@ -121,6 +142,7 @@ impl Manager {
         .await;
         match result {
             Ok(running) => {
+                self.generation = self.generation.saturating_add(1);
                 self.running = Some(running);
                 self.saved = Some(next);
                 self.last_error = None;

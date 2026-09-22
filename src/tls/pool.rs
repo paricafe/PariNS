@@ -7,12 +7,12 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 use super::ClientStream;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PoolSettings {
     pub enabled: bool,

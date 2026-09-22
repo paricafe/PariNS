@@ -1,0 +1,143 @@
+name: Release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Version and native toolchain
+        id: version
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$version" ]]; then
+            echo 'Tag does not match Cargo.toml' >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools binutils
+          rustup target add "$TARGET"
+      - run: cargo fmt --check
+      - name: Clippy and tests on the release target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo clippy --locked --target "$TARGET" --all-targets -- -D warnings
+          cargo test --locked --target "$TARGET" --all-targets
+      - name: Installer and bootstrap fixture tests
+        run: |
+          sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh
+          sh scripts/test-install.sh
+          sh scripts/test-bootstrap.sh
+      - name: Dependency audit
+        if: matrix.arch == 'x86_64'
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --deny warnings
+      - name: Web management checks
+        run: |
+          for file in web/*.js; do node --check "$file"; done
+          node --test scripts/test-web.mjs
+      - name: Build and verify static release package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          sh scripts/package.sh --version "$VERSION" --target "$TARGET"
+          archive="parins-$VERSION-linux-$ARCH"
+          (cd target/packages && sha256sum --check "$archive.tar.gz.sha256")
+          mkdir -p target/release-acceptance
+          tar -xzf "target/packages/$archive.tar.gz" -C target/release-acceptance
+          sh scripts/test-systemd.sh --ephemeral-ci --package "$PWD/target/release-acceptance/$archive"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            target/packages/parins-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            target/packages/parins-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: target/release-assets
+      - name: Publish only the fully verified tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
+          test "$GITHUB_REF_NAME" = "$version"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # API errors fail closed; an existing draft or release must never be overwritten.
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')
+          if printf '%s\n' "$existing" | grep -Fxq "$version"; then
+            echo "Release $version already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+          cd target/release-assets
+          for arch in x86_64 aarch64; do
+            sha256sum --check "parins-$version-linux-$arch.tar.gz.sha256"
+          done
+          cp ../../scripts/bootstrap.sh bootstrap.sh
+          # A failed asset upload can leave a draft, but never a publicly available partial release.
+          gh release create "$version" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "PariNS $version" --notes-file ../../CHANGELOG.md \
+            "parins-$version-linux-x86_64.tar.gz" "parins-$version-linux-x86_64.tar.gz.sha256" \
+            "parins-$version-linux-aarch64.tar.gz" "parins-$version-linux-aarch64.tar.gz.sha256" bootstrap.sh
+          gh release edit "$version" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+      - name: Verify the public quick-start download chain
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          script=$(mktemp)
+          curl --proto '=https' --proto-redir '=https' --fail --location \
+            --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/bootstrap.sh" -o "$script"
+          sh "$script" --root "$stage"
+          test -x "$stage/opt/parins-managed/parins"
+          "$stage/opt/parins-managed/parins" --version

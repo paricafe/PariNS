@@ -153,4 +153,13 @@ else
         'NEVER export /var/lib/parins/https-identity.pem: it contains the private key.' \
         'Read the one-time setup token locally: sudo cat /var/lib/parins/setup-token' \
         'Open the console to initialize. DNS starts only after setup; no host DNS or firewall was changed.'
+    if command -v openssl >/dev/null 2>&1 && [ -f /var/lib/parins/https-cert.pem ]; then
+        openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint || true
+    fi
+    # Local interface addresses are useful hints, not a claim about public NAT.
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 -o address show scope global | awk '{split($4, address, "/"); printf "Local interface console: https://%s:3000\n", address[1]}'
+    fi
+    printf '%s\n' 'Check service: sudo systemctl status parins-managed.service' \
+        'View logs: sudo journalctl -u parins-managed.service -n 50 --no-pager'
 fi

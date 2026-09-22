@@ -30,8 +30,13 @@ jobs:
       - run: ./target/release/parins --config parins.example.toml --check
       - name: Installer fixture tests
         run: |
-          sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/package.sh
+          sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh
           sh scripts/test-install.sh
+          sh scripts/test-bootstrap.sh
+      - name: Web management checks
+        run: |
+          for file in web/*.js; do node --check "$file"; done
+          node --test scripts/test-web.mjs
       - name: Linux managed service acceptance
         if: runner.os == 'Linux'
         run: sh scripts/test-systemd.sh --ephemeral-ci

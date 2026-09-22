@@ -10,6 +10,30 @@ umask 077
     exit 1
 }
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+shift
+binary="$repo/target/release/parins"
+installer="$repo/scripts/install.sh"
+package= binary_override=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --binary-path|--package)
+            [ "$#" -ge 2 ] || { printf 'Missing value for %s\n' "$1" >&2; exit 1; }
+            case "$1" in
+                --binary-path) binary=$2; binary_override=true ;;
+                --package) package=$2 ;;
+            esac
+            shift 2 ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
+    esac
+done
+if [ -n "$package" ]; then
+    ! "$binary_override" || { printf '%s\n' '--package and --binary-path are mutually exclusive' >&2; exit 1; }
+    package=$(CDPATH= cd -- "$package" && pwd -P)
+    binary="$package/parins"
+    installer="$package/install.sh"
+    (cd "$package" && sha256sum --check SHA256SUMS)
+fi
+[ -f "$binary" ] && [ -f "$installer" ]
 for command in sudo systemctl systemd-analyze curl jq openssl python3 ip ss sha256sum; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
 done
@@ -48,8 +72,9 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 sudo chmod go-w /opt
 install_service() {
-    sudo sh "$repo/scripts/install.sh" --binary "$repo/target/release/parins"
+    sudo sh "$installer" --binary "$binary"
     sudo systemctl is-active --quiet parins-managed.service
+    sudo cmp "$binary" /opt/parins-managed/parins
 }
 https() { curl --fail --silent --show-error --noproxy '*' --cacert "$fixture/https-cert.pem" "$@"; }
 session() { https --max-time 5 https://127.0.0.1:3000/api/session; }

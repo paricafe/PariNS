@@ -18,15 +18,16 @@ provider or hosted service.
   caching, bounded LRU eviction, and in-flight request coalescing. ECS is opt-in.
 - **Local filtering:** exact-name and suffix rules, allow exceptions, and CNAME
   response checks; no external rule service is required.
-- **Web management:** first-run setup, administrator authentication, status and
-  metrics, TOML validation/editing, export, and one-generation rollback.
+- **Web management:** first-run setup, administrator authentication, visual
+  statistics with 24-hour aggregate history, grouped configuration forms and
+  advanced TOML editing, validation, export, and one-generation rollback.
 - **Self-hosted operations:** persistent self-signed HTTPS by default, optional
   custom certificates, a Linux systemd installer, aggregate metrics, and
   configurable resource and source-subnet budgets.
 
 ## Status
 
-Early development. The features above are implemented, with automated Linux and
+Early release (v0.1.0). The features above are implemented, with automated Linux and
 macOS tests and isolated Linux systemd installation checks. Production deployment
 and target-machine capacity acceptance have not been performed.
 
@@ -38,34 +39,64 @@ deploying.
 
 ## Quick start
 
-Install Rust with [rustup](https://rust-lang.org/tools/install/); the repository
-pins its toolchain in `rust-toolchain.toml`. Build and start the management console:
+### 1. Install on Linux
+
+Requires a Linux x86_64 or ARM64 host running systemd, `curl`, `tar`, a SHA256
+utility (`sha256sum` or `shasum`), and root/sudo access. **No Rust, Git, Node.js,
+or container runtime is needed.** Static Linux binaries are provided in
+[Releases](https://github.com/paricafe/PariNS/releases).
 
 ```sh
-git clone https://github.com/paricafe/PariNS.git
-cd PariNS
-cargo build --locked --release
-./target/release/parins --manage
+curl --proto '=https' --proto-redir '=https' -fL \
+  https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh \
+  -o parins-install.sh && sudo sh parins-install.sh
 ```
 
-Open `https://SERVER_IP:3000` (or <https://127.0.0.1:3000> on the same machine).
-The console listens on all IPv4 interfaces by default. Verify the generated
-self-signed certificate before trusting it. Read its fingerprint on the host
-(over a trusted SSH connection when remote):
+The script detects the CPU architecture, downloads the release over HTTPS,
+checks the archive and its contents against SHA256 manifests, installs the
+binary, and starts `parins-managed.service`. You may inspect `parins-install.sh`
+before running it. SHA256 detects corruption; it is not an independent signature
+or a substitute for trusting the release publisher.
+
+### 2. Open the setup wizard
+
+Open `https://SERVER_IP:3000` (or <https://127.0.0.1:3000> on the server itself).
+Allow inbound TCP 3000 only from your administrator IPs. The installer prints
+local interface URLs; a VPS behind NAT may need its provider-assigned public IP.
+Verify the self-signed certificate fingerprint over a trusted SSH connection:
 
 ```sh
-openssl x509 -in parins-state/https-cert.pem -noout -sha256 -fingerprint
+sudo openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint
+sudo cat /var/lib/parins/setup-token
 ```
 
-See the certificate limitations below, including public-IP name matching.
-Restrict inbound TCP 3000 to your administrator IPs when accessing remotely.
+Enter the token, create an administrator, and choose your DNS upstream's actual
+IP:port. The wizard starts with `127.0.0.1:5353` for local testing. For LAN clients,
+choose the server's LAN IP on port 53 and allow those clients through your firewall.
+Port 53 must be free; conflicting DNS services are not stopped automatically.
+DNS starts after setup succeeds. Self-signed certificates need explicit trust and
+may also have a public-IP name mismatch; see [Managed mode](#managed-mode-install-then-initialize-in-the-browser)
+for certificate, tunnel, and custom-certificate options.
 
-Read the token from `parins-state/setup-token`, then use the setup wizard to
-create an administrator and choose the DNS listen address and upstream IP:port.
-DNS starts only after setup succeeds. For local-only management, add
-`--web-listen 127.0.0.1:3000`.
+### 3. Use your DNS server
 
-For a persistent Linux service, follow [Managed mode](#managed-mode-install-then-initialize-in-the-browser).
+Point your devices or router to the DNS listen IP selected in the wizard.
+Most device DNS settings require port 53. To check the initial loopback setup:
+
+```sh
+dig @127.0.0.1 -p 5353 example.com A
+sudo systemctl status parins-managed.service
+```
+
+The installer does not change your host/router DNS or firewall. Use the dashboard
+to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
+needed. To upgrade, rerun the installer; existing account, configuration and HTTPS
+identity are preserved. Pin a version with `sudo sh parins-install.sh --version v0.1.0`.
+Use `--dry-run` to download/verify and inspect targets without installing a service.
+
+For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`
+from the release page, verify `sha256sum --check FILE.tar.gz.sha256`, extract it,
+then run `sha256sum --check SHA256SUMS` and `sudo sh install.sh` inside the package.
 For a headless deployment without the console, use [File-configured mode](#file-configured-mode).
 
 ## Deployment choices
@@ -82,17 +113,20 @@ For a headless deployment without the console, use [File-configured mode](#file-
 
 ### Managed mode: install, then initialize in the browser
 
-On Linux with systemd, build from this checkout and install the managed service:
+The Quick Start installs a prebuilt release. If you prefer to build from source,
+install Rust with [rustup](https://rust-lang.org/tools/install/) and run:
 
 ```sh
+git clone https://github.com/paricafe/PariNS.git
+cd PariNS
 cargo build --locked --release
 sudo sh scripts/install.sh
 ```
 
 Alternatively, build a host-native package with `sh scripts/package.sh`, verify
 its adjacent `.sha256` and extracted `SHA256SUMS`, and run `sudo sh install.sh`
-inside the extracted Linux package. No public release/download endpoint is
-assumed; macOS packages cannot be installed as Linux services. Linux x86_64 and
+inside the extracted Linux package. macOS packages cannot be installed as Linux
+services. Linux x86_64 and
 aarch64 ELF binaries are accepted, with architecture checked before installation.
 Use `--dry-run` to inspect planned targets without writes.
 
@@ -171,10 +205,20 @@ identity. Certificate changes for the management listener require a full process
 restart, not the DNS configuration's apply button. Existing setup-token and
 administrator state are retained when upgrading from HTTP.
 
-After setup, the console provides a status/metrics dashboard and a full TOML
-editor with validation, change preview, export, and rollback. Advanced ECS,
-cache, filtering, encrypted listener and budget options use the same canonical
-configuration schema as CLI mode, rather than a second set of UI defaults.
+After setup, the console provides visual traffic statistics, grouped settings
+forms, and an advanced TOML editor with validation, change preview, export, and
+rollback. DNS, ECS, cache, filtering, encrypted listeners and resource budgets
+use the same canonical configuration schema as CLI mode. Form changes are merged
+by the server into the current draft, preserving unedited settings; TOML comments
+and formatting may be normalized. File-backed filtering is clearly separated
+from inline rules.
+
+The dashboard shows instance counters, cache/blocking rates, average latency,
+response codes, latency distribution, and up to 24 hours of aggregate trends.
+History is sampled once per minute, bounded to 1440 points in memory, and cleared
+when the management process restarts. DNS instance restarts appear as gaps rather
+than negative rates. No query names or client IPs are collected for these charts;
+there are no per-domain/client rankings or query logs.
 Applying a configuration drains/restarts DNS and clears its in-memory cache and
 metrics; it is not zero-downtime reload. Binding or persistence failures restore
 the prior configuration when possible, and an unavailable DNS instance is shown

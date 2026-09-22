@@ -1,0 +1,34 @@
+rust-toolchain.toml
+  s_aa37914330e67a::t_caf70e8a938b4e 1-4
+src/main.rs
+  s_aa37914330e67a::t_caf70e8a938b4e 1-31
+  s_aa37914330e67a::t_0ea4d36b03740e 32-36
+src/config.rs
+  s_aa37914330e67a::t_caf70e8a938b4e 1-87
+src/lib.rs
+  s_aa37914330e67a::t_caf70e8a938b4e 1-3
+Cargo.toml
+  s_aa37914330e67a::t_caf70e8a938b4e 1-20
+README.md
+  s_aa37914330e67a::t_0f96c9b6f950f2 11-28,39-40
+parins.example.toml
+  s_aa37914330e67a::t_caf70e8a938b4e 1-9
+Cargo.lock
+  s_aa37914330e67a::t_63fa54b14d036c 1-1071
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6d15f359f2861526fb0e935755b4296d32f4c908",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

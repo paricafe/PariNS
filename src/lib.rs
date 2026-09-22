@@ -4,4 +4,5 @@ pub mod config;
 pub mod protocol;
 pub mod resolver;
 pub mod server;
+mod transport;
 mod upstream;

@@ -8,8 +8,9 @@ operate.
 
 ## Status
 
-Early development. Single-upstream UDP forwarding and configuration validation
-are available. TCP support and complete lifecycle handling are in progress.
+Early development. UDP/TCP listeners, validated single-upstream forwarding,
+UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
+implemented. ECS-aware caching, filtering, and encrypted transports remain planned.
 
 ## Development
 

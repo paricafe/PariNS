@@ -31,7 +31,6 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.listen.port() != 0, "listen port must be nonzero");
         ensure!(self.upstream.port() != 0, "upstream port must be nonzero");
         ensure!(
             !self.upstream.ip().is_unspecified() && !self.upstream.ip().is_multicast(),
@@ -40,6 +39,8 @@ impl Config {
         ensure!(
             self.listen != self.upstream
                 && !(self.listen.ip().is_unspecified()
+                    && self.upstream.ip().is_loopback()
+                    && self.listen.is_ipv4() == self.upstream.is_ipv4()
                     && self.listen.port() == self.upstream.port()),
             "upstream must not point to the listener"
         );
@@ -69,6 +70,15 @@ mod tests {
     #[test]
     fn example_is_valid() {
         Config::parse(EXAMPLE).unwrap();
+    }
+
+    #[test]
+    fn wildcard_listener_allows_remote_upstream_on_the_same_port() {
+        let text = EXAMPLE
+            .replace("127.0.0.1:5353", "0.0.0.0:53")
+            .replace("127.0.0.1:5354", "192.0.2.53:53");
+        Config::parse(&text).unwrap();
+        assert!(Config::parse(&text.replace("192.0.2.53:53", "127.0.0.1:53")).is_err());
     }
 
     #[test]

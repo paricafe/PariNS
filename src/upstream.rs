@@ -2,11 +2,12 @@
 
 use std::net::SocketAddr;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, ensure};
 use hickory_proto::op::Message;
-use tokio::net::UdpSocket;
+use tokio::net::{TcpStream, UdpSocket};
 
 use crate::protocol::{self, MAX_MESSAGE};
+use crate::transport::tcp;
 
 pub async fn exchange(query: &Message, address: SocketAddr) -> Result<Message> {
     let bind = if address.is_ipv4() {
@@ -29,7 +30,15 @@ pub async fn exchange(query: &Message, address: SocketAddr) -> Result<Message> {
             continue;
         }
         if response.truncation {
-            bail!("upstream requires TCP (not implemented yet)");
+            // The resolver's existing deadline also covers connect, write, and read.
+            let mut stream = TcpStream::connect(address).await?;
+            tcp::write_frame(&mut stream, &outbound.to_vec()?).await?;
+            response = protocol::decode(&tcp::read_frame(&mut stream).await?)?;
+            ensure!(
+                protocol::matches_response(&outbound, &response),
+                "unrelated upstream TCP response"
+            );
+            ensure!(!response.truncation, "truncated upstream TCP response");
         }
         response.metadata.id = query.id;
         return Ok(response);

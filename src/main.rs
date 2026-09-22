@@ -33,10 +33,25 @@ async fn main() -> Result<()> {
         println!("configuration valid");
         return Ok(());
     }
-    parins::server::run(config, async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            eprintln!("failed to wait for shutdown signal: {error}");
-        }
-    })
-    .await
+    let server = parins::server::Server::bind(config).await?;
+    eprintln!("PariNS listening on {} (UDP/TCP)", server.local_addr()?);
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    server
+        .run(async {
+            #[cfg(unix)]
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    if let Err(error) = result { eprintln!("shutdown signal error: {error}"); }
+                }
+                _ = terminate.recv() => {}
+            }
+            #[cfg(not(unix))]
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                eprintln!("shutdown signal error: {error}");
+            }
+        })
+        .await?;
+    eprintln!("PariNS stopped");
+    Ok(())
 }

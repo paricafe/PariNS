@@ -107,7 +107,7 @@
     state.step = step;
     for (let index = 0; index < 3; index += 1) {
       $(`setup-step-${index}`).hidden = index !== step;
-      for (const input of $(`setup-step-${index}`).querySelectorAll("input, textarea")) input.disabled = index !== step;
+      for (const input of $(`setup-step-${index}`).querySelectorAll("input, textarea, select")) input.disabled = index !== step;
       if (index === step) $(`step-label-${index}`).setAttribute("aria-current", "step");
       else $(`step-label-${index}`).removeAttribute("aria-current");
     }
@@ -122,20 +122,6 @@
     return match && Number(match[3]) > 0 && Number(match[3]) <= 65535 && (match[1] ? match[1].includes(":") : match[2].split(".").every((part) => Number(part) <= 255));
   }
 
-  // Only replace uniquely identified root keys before the first active TOML table.
-  function networkTemplate(template, listen, upstream) {
-    const lines = template.split("\n");
-    const section = lines.findIndex((line) => /^\s*\[/.test(line));
-    const end = section < 0 ? lines.length : section;
-    for (const [key, value] of [["listen", listen], ["upstream", upstream]]) {
-      const matches = [];
-      for (let index = 0; index < end; index += 1) if (new RegExp(`^\\s*${key}\\s*=`).test(lines[index])) matches.push(index);
-      if (matches.length !== 1) throw new I.MessageError("app.templateInvalid", { key });
-      lines[matches[0]] = `${key} = ${JSON.stringify(value)}`;
-    }
-    return lines.join("\n");
-  }
-
   $("setup-next").addEventListener("click", () => {
     notice("");
     if (!$("setup-form").reportValidity()) return;
@@ -144,10 +130,11 @@
     }
     if (state.step === 1) {
       const listen = $("setup-listen").value.trim();
-      const upstream = $("setup-upstream").value.trim();
-      if (!socketAddress(listen) || !socketAddress(upstream)) { notice("app.addressFormat", true); return; }
-      if (listen === upstream) { notice("app.selfUpstream", true); return; }
-      try { $("setup-toml").value = networkTemplate(state.template, listen, upstream); }
+      if (!socketAddress(listen)) { notice("app.addressFormat", true); return; }
+      const servers = S.valueOf($("setup-upstream"), { type: "lines" });
+      const bootstrap = S.valueOf($("setup-bootstrap"), { type: "lines" });
+      if (!servers.length) { notice("settings.validation.required", true); return; }
+      try { $("setup-toml").value = S.networkTemplate(state.template, listen, { servers, bootstrap, mode: $("setup-upstream-mode").value, prefer_h3: $("setup-prefer-h3").checked }); }
       catch (error) { notice(error, true); return; }
     }
     showStep(state.step + 1);
@@ -172,19 +159,19 @@
     state.revision = config.revision;
     state.backup = config.has_backup;
     $("config-toml").value = config.toml;
-    installSettings(parsed.settings);
+    installSettings(parsed.settings, parsed.legacy_upstream);
     $("diff-panel").hidden = true;
     updateEditorState();
   }
 
-  function installSettings(settings) {
+  function installSettings(settings, legacyUpstream = false) {
     state.settings = settings; state.formDirty = false; state.settingsStale = false;
     const changed = () => {
       state.formDirty = true;
       $("diff-panel").hidden = true;
       updateEditorState();
     };
-    S.render($("settings-forms"), settings, changed);
+    S.render($("settings-forms"), settings, changed, legacyUpstream);
     readCacheRules = K.rules($("cache-rules"), settings.cache.rules || [], changed);
     displaySettingsPage();
   }
@@ -210,7 +197,7 @@
     if (Object.keys(changed).length) {
       const result = await api("config/preview", "POST", { toml: $("config-toml").value, changes: changed });
       $("config-toml").value = result.toml;
-      installSettings(result.settings);
+      installSettings(result.settings, result.legacy_upstream);
     } else state.formDirty = false;
     updateEditorState();
   }
@@ -221,7 +208,7 @@
     if (view === "advanced") await syncDraft();
     else if (state.settingsStale) {
       const parsed = await api("config/parse", "POST", { toml: $("config-toml").value });
-      installSettings(parsed.settings);
+      installSettings(parsed.settings, parsed.legacy_upstream);
     }
     state.view = view; displaySettingsPage(); page("config");
   }

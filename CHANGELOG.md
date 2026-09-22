@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Unified upstream DNS settings and first-run setup: one list for one or more
+  servers, with legacy single-upstream controls removed from the console.
+  Existing configurations still load; simple UDP settings migrate on upstream
+  edits, while legacy TLS/hedging needs an explicit replacement.
+- Optional HTTP/3 preference for HTTPS upstreams, with reusable QUIC connections,
+  bounded attempts, verified HTTP/2 fallback and a cooldown after H3 failure.
 - Simplified Chinese/English console switcher with a local language preference,
   clearer instructions and translated forms, query details, charts and messages.
   Switching languages preserves unsaved drafts and expanded query details.

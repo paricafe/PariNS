@@ -26,19 +26,16 @@ globalThis.PariSettings = (() => {
       group("upstreams", [
         field("upstreams.servers", "lines", true),
         select("upstreams.mode", ["weighted", "parallel"]),
+        field("upstreams.prefer_h3", "checkbox", true),
         field("upstreams.bootstrap", "lines", true),
         number("upstreams.max_parallel", 1, 32, true),
         number("upstreams.max_extra_inflight", 1, 65536, true),
         field("upstreams.ca_file", "nullable")
-      ], "upstreams"),
-      group("listeners", [
-        field("listen", "text", true), field("upstream", "text", true),
-        number("query_timeout_ms", 1, 60000), number("tcp_io_timeout_ms", 1, 60000)
       ]),
-      group("replica", [
-        field("scheduler.secondary", "text", true),
-        number("scheduler.hedge_after_ms", 1, 60000), number("scheduler.max_extra_inflight", 1, 65536)
-      ], "scheduler")
+      group("listeners", [
+        field("listen", "text", true),
+        number("query_timeout_ms", 1, 60000), number("tcp_io_timeout_ms", 1, 60000)
+      ])
     ]),
     cache: page("cache", [
       group("cache", [
@@ -68,9 +65,6 @@ globalThis.PariSettings = (() => {
       ])
     ]),
     security: page("security", [
-      group("upstreamTls", [
-        field("upstream_tls.server_name", "text", true), field("upstream_tls.ca_file", "nullable")
-      ], "upstream_tls"),
       ...["dot", "doh", "doq", "doh3"].map(key => group(key,
         ["listen", "cert_file", "key_file"].map(name => field(`${key}.${name}`, "text", false, undefined, undefined, `listener.${name}`)), key))
     ]),
@@ -90,18 +84,14 @@ globalThis.PariSettings = (() => {
       group("coalescing", [
         field("coalescing.enabled", "checkbox"), number("coalescing.max_groups", 1, 65536), number("coalescing.max_waiters", 1, 65536)
       ]),
-      group("upstreamPool", [
-        field("upstream_pool.enabled", "checkbox"), number("upstream_pool.max_connections", 1, 256),
-        number("upstream_pool.idle_timeout_ms", 1, 600000)
-      ]),
       group("metrics", [
         number("metrics.interval_secs", 0, 3600, true), field("admin_listen", "nullable", true)
       ])
     ])
   };
-  const defaults = { scheduler: { secondary: "", hedge_after_ms: 100, max_extra_inflight: 32 }, upstream_tls: { server_name: "", ca_file: null }, dot: { listen: "", cert_file: "", key_file: "" }, doh: { listen: "", cert_file: "", key_file: "" }, doq: { listen: "", cert_file: "", key_file: "" }, doh3: { listen: "", cert_file: "", key_file: "" } };
+  const defaults = { dot: { listen: "", cert_file: "", key_file: "" }, doh: { listen: "", cert_file: "", key_file: "" }, doq: { listen: "", cert_file: "", key_file: "" }, doh3: { listen: "", cert_file: "", key_file: "" } };
   const get = (object, path) => path.split(".").reduce((value, key) => value?.[key], object);
-  defaults.upstreams = { servers: [], mode: "weighted", bootstrap: [], max_parallel: 32, max_extra_inflight: 128, ca_file: null };
+  defaults.upstreams = { servers: [], mode: "weighted", prefer_h3: false, bootstrap: [], max_parallel: 32, max_extra_inflight: 128, ca_file: null };
   function put(object, path, value) {
     const keys = path.split(".");
     const last = keys.pop();
@@ -138,12 +128,13 @@ globalThis.PariSettings = (() => {
     I.bind(node, key);
     return node;
   }
-  function render(container, settings, onChange) {
+  function render(container, settings, onChange, legacyUpstream = false) {
     container.replaceChildren();
     for (const [page, descriptor] of Object.entries(pages)) {
       const section = create("section"); section.id = `settings-${page}`; section.hidden = true;
       for (const item of descriptor.groups) {
         const card = create("section", "panel settings-card"); card.append(translated("h2", "", item.titleKey), translated("p", "muted small", item.helpKey));
+        if (legacyUpstream && item.fields.some(entry => entry.path === "upstreams.servers")) card.append(translated("p", "notice", "settings.upstreams.migration"));
         const fieldset = create("fieldset", "settings-fields");
         const legend = translated("legend", "sr-only", item.titleKey); fieldset.append(legend);
         if (item.optional) {
@@ -164,7 +155,7 @@ globalThis.PariSettings = (() => {
           if (descriptor.min !== undefined) input.min = String(descriptor.min);
           if (descriptor.max !== undefined) input.max = String(descriptor.max);
           if (descriptor.type === "number") input.step = "1";
-          if (!["checkbox", "nullable", "lines"].includes(descriptor.type)) input.required = true;
+          if (!["checkbox", "nullable", "lines"].includes(descriptor.type) || descriptor.path === "upstreams.servers") input.required = true;
           const value = get(settings, descriptor.path) ?? get(defaults, descriptor.path);
           if (descriptor.type === "checkbox") input.checked = Boolean(value);
           else input.value = Array.isArray(value) ? value.join("\n") : value ?? "";
@@ -199,6 +190,7 @@ globalThis.PariSettings = (() => {
         if (input.disabled) continue;
         const displayed = entry.type === "checkbox" ? String(input.checked) : input.value;
         if (!newlyEnabled && displayed === input.dataset.initialValue) continue;
+        if (entry.path.startsWith("upstreams.") && !result.upstreams) result.upstreams = structuredClone(defaults.upstreams);
         if (validate && !input.checkValidity()) {
           const validity = input.validity || {};
           const advice = entry.type === "number" && (validity.badInput || validity.stepMismatch) ? "integer"
@@ -215,5 +207,20 @@ globalThis.PariSettings = (() => {
     }
     return result;
   }
-  return { pages, defaults, get, put, diff, valueOf, render, read, updateFilterSource };
+  // Only edit known template keys in their owning tables; never interpolate TOML syntax.
+  function networkTemplate(template, listen, upstreams) {
+    const lines = template.split("\n");
+    const changes = new Map([["listen", listen], ...Object.entries(upstreams).map(([key, value]) => [`upstreams.${key}`, value])]);
+    let table = "";
+    for (let index = 0; index < lines.length; index += 1) {
+      const header = /^\s*\[([^\]]+)\]\s*$/.exec(lines[index]);
+      if (header) { table = header[1]; continue; }
+      const match = /^\s*(\w+)\s*=/.exec(lines[index]);
+      const path = match && (table ? `${table}.${match[1]}` : match[1]);
+      if (changes.has(path)) { lines[index] = `${match[1]} = ${JSON.stringify(changes.get(path))}`; changes.delete(path); }
+    }
+    if (changes.size) throw new I.MessageError("app.templateInvalid", { key: [...changes.keys()].join(", ") });
+    return lines.join("\n");
+  }
+  return { pages, defaults, get, put, diff, valueOf, render, read, updateFilterSource, networkTemplate };
 })();

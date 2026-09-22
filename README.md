@@ -271,7 +271,7 @@ sudo systemctl disable --now parins-managed.service  # retains state and backups
 ```sh
 cargo build --locked --release
 cp parins.example.toml parins.toml
-# Edit parins.toml and set upstream to your chosen resolver's IP:port.
+# Edit parins.toml and set upstreams.servers to your chosen resolver(s).
 ./target/release/parins --check
 ./target/release/parins
 ```
@@ -285,8 +285,9 @@ dig @127.0.0.1 -p 5353 example.com A +tcp
 
 Use `--config PATH` to select a different configuration file. `listen` selects
 the same address and port for UDP and TCP; port zero selects a shared ephemeral
-port, printed on startup. `upstream` must be a literal IP:port, reachable over
-both UDP and TCP (or TCP/TLS when `upstream_tls` is configured). Do not point it back at PariNS, including through a local
+port, printed on startup. Set `[upstreams].servers` to one or more endpoints
+(see [Upstream DNS settings](#upstream-dns-settings-unreleased)). UDP endpoints
+must also support TCP for truncated answers. Do not point them back at PariNS, including through a local
 interface alias that configuration validation cannot identify.
 
 Ctrl-C or SIGTERM (Unix) stops accepting traffic, closes idle TCP clients, and
@@ -294,7 +295,7 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
 
 ## Behavior and limits
 
-- Cache misses use an upstream UDP transaction with an independent socket and random
+- UDP upstream cache misses use a transaction with an independent socket and random
   ID. Only responses matching the upstream endpoint, ID, opcode, and question
   are accepted. Upstream truncation triggers TCP fallback under the same
   `query_timeout_ms` deadline. Failures return SERVFAIL.
@@ -606,9 +607,11 @@ the same file. Remove unused files manually only after checking current/rollback
 configurations. Management HTTPS certificates remain independently configured
 through startup flags; this form configures DNS listeners, not the console.
 
-## Multiple upstreams (unreleased)
+## Upstream DNS settings (unreleased)
 
-Enable **Multiple upstreams** in DNS settings; enter one endpoint per line.
+**Upstream DNS settings** is the sole visual upstream editor, for one or more
+servers. Enter one endpoint per line. The first-run wizard on main uses the same
+list, query modes, explicit bootstrap and H3 preference; v0.1.0 has the older wizard.
 Supported syntax is IP with optional port, `udp://`, `tcp://`, `tls://`,
 `https://host/dns-query`, and `quic://`; bracket IPv6 literals. A trailing
 `weight=N` (1..1000) sets a static weight. This is smooth weighted round-robin,
@@ -620,11 +623,10 @@ deadline. At saturation, fewer parallel requests run. Weighting selects one
 endpoint per operation; it does not promise retries/failover on failure.
 
 ```toml
-# Existing root `upstream` remains for legacy configuration compatibility.
-# It is not contacted while [upstreams] is present.
 [upstreams]
 servers = ["udp://192.0.2.53:53 weight=2", "tcp://192.0.2.54:53 weight=1"]
 mode = "weighted" # or "parallel"
+prefer_h3 = false # HTTPS only; opt in to HTTP/3 with verified HTTP/2 fallback
 bootstrap = [] # hostname endpoints require explicit DNS IP:port entries
 max_parallel = 32 # parallel mode must cover all configured servers (max 32)
 max_extra_inflight = 128
@@ -634,7 +636,16 @@ max_extra_inflight = 128
 The example addresses are documentation-only: replace them with your actual
 resolvers. Hostnames require explicit bootstrap servers; system DNS is never
 used for bootstrap. Encrypted transports validate certificate identity and never
-downgrade to plaintext. DoH uses HTTP/2 and POST, not HTTP/3. Unsupported schemes,
+downgrade to plaintext. DoH uses POST over HTTP/2 by default. Enable **Prefer
+HTTP/3 for HTTPS upstreams** (`prefer_h3 = true`) to try QUIC on the same host,
+port and path first, then fall back to verified HTTP/2 on failure or timeout.
+The H3 attempt has a budget of at most 250 ms (half the configured query timeout
+if shorter), inside the original query deadline. Connections are reused; failed
+H3 attempts trigger a 30-second per-endpoint cooldown before retrying H3. Normal
+DNS error replies still follow the selected upstream scheduling policy. This
+does not discover alternate ports through Alt-Svc or HTTPS/SVCB records. Direct
+HTTPS-origin probing and TCP fallback follow [RFC 9114 §3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-3.1).
+Unsupported schemes,
 credentials, URL query strings, fragments and duplicate endpoints are rejected.
 Do not combine `[upstreams]` with legacy `[scheduler]`, `[upstream_tls]` or an
 enabled `[upstream_pool]`. All pool endpoints should have equivalent resolution,
@@ -642,6 +653,19 @@ filtering and ECS policies because they share the resolver cache. There is no
 domain-routing syntax or DNSCrypt support. Do not point endpoints/bootstrap back
 at PariNS (including NAT aliases); direct matching listeners are rejected, but
 arbitrary network hairpin routes cannot be inferred by local validation.
+
+### Existing configuration migration
+
+New configurations need only `[upstreams]`; a root `upstream` is no longer
+required. Existing root `upstream` configurations still load. A plain UDP
+single upstream appears as a one-entry list; editing that list or its options
+migrates it to `[upstreams]` when saved. Unrelated edits preserve the old path.
+Legacy TLS, connection-pool and delayed-replica configurations keep their
+existing behavior and remain accessible in Advanced settings. The console
+shows a migration notice: enter complete replacement upstream settings and
+review TLS hostnames, CA trust and query mode before saving. This explicitly
+replaces the legacy fields; fixed-IP/SNI overrides and delayed hedging are not
+silently translated into a different scheduling or identity policy.
 
 ### Client request forwarding
 
@@ -703,8 +727,8 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-The example uses loopback addresses and an upstream on port 5354. Set `upstream`
-to your chosen resolver's IP and port before sending queries. Unknown configuration
+The example uses loopback addresses and an upstream on port 5354. Set
+`upstreams.servers` to your chosen resolver(s) before sending queries. Unknown configuration
 keys and invalid resource limits are rejected at startup.
 
 The binary uses Tokio's multi-thread runtime, normally one worker per available
@@ -776,7 +800,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 
 - Explicit emergency-profile product policy and health-driven scheduling.
 - Licensed third-party rule import and additional filtering response modes.
-- DoT pipelining and HTTP/3 upstream clients.
+- DoT pipelining and alternate HTTP/3 endpoint discovery.
 - Measured public-service capacity, network abuse protection and deployment/rollback acceptance.
 - Zero-downtime full configuration replacement; console application currently restarts DNS.
 

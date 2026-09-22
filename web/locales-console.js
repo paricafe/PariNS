@@ -183,7 +183,7 @@ PariI18n.register("ui", {
   "pagesLabel": ["页面","Pages"],
   "setupProgress": ["设置进度","Setup progress"],
   "trendRange": ["趋势时间范围","Chart time range"],
-  "upstreamPlaceholder": ["例如 192.0.2.53:53","For example, 192.0.2.53:53"],
+  "upstreamPlaceholder": ["例如 udp://192.0.2.53:53","For example, udp://192.0.2.53:53"],
   "scopePlaceholder": ["no_ecs、privacy_v4、privacy_v6 或 CIDR","no_ecs, privacy_v4, privacy_v6 or CIDR"],
   "language": ["界面语言","Interface language"],
 });

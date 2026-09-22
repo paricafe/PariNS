@@ -63,9 +63,9 @@ test("checkboxes use checked, not their text value", () => assert.equal(S.valueO
 test("numeric zero remains valid for prefix and metrics fields", () => assert.equal(S.valueOf({ value: "0" }, { type: "number" }), 0));
 test("blank and fractional integer controls fail instead of coercing", () => { for (const value of ["", " ", "1.5", "NaN", "9007199254740993"]) assert.throws(() => S.valueOf({ value }, { type: "number", label: "数量" })); });
 test("path access and writes preserve unrelated values", () => { const result = { cache: { enabled: true } }; S.put(result, "cache.max_entries", 12); assert.equal(S.get(result, "cache.max_entries"), 12); assert.equal(result.cache.enabled, true); });
-test("every Config root key has a visual control", () => {
+test("current Config sections have visual controls and legacy upstream controls are removed", () => {
   const roots = new Set(Object.values(S.pages).flatMap((page) => page.groups.flatMap((group) => group.fields.map((field) => field.path.split(".")[0]))));
-  assert.deepEqual([...roots].sort(), ["listen", "upstream", "upstreams", "query_log", "query_timeout_ms", "tcp_io_timeout_ms", "shutdown_grace_ms", "max_inflight", "max_tcp_connections", "source_limits", "ecs", "cache", "filter", "coalescing", "metrics", "dot", "doh", "doq", "doh3", "upstream_tls", "upstream_pool", "filter_file", "admin_listen", "scheduler"].sort());
+  assert.deepEqual([...roots].sort(), ["listen", "upstreams", "query_log", "query_timeout_ms", "tcp_io_timeout_ms", "shutdown_grace_ms", "max_inflight", "max_tcp_connections", "source_limits", "ecs", "cache", "filter", "coalescing", "metrics", "dot", "doh", "doq", "doh3", "filter_file", "admin_listen"].sort());
 });
 test("all form paths are unique", () => { const paths = Object.values(S.pages).flatMap((page) => page.groups.flatMap((group) => group.fields.map((field) => field.path))); assert.equal(new Set(paths).size, paths.length); });
 test("upstreams preserve newline protocols and explicit weights", () => assert.deepEqual(S.valueOf({ value: " udp://192.0.2.53 weight=2\r\n\nhttps://dns.example/dns-query\n" }, { type: "lines" }), ["udp://192.0.2.53 weight=2", "https://dns.example/dns-query"]));
@@ -73,6 +73,20 @@ test("upstream mode presents both server-supported strategies", () => {
   const mode = S.pages.dns.groups.flatMap(group => group.fields).find(field => field.path === "upstreams.mode");
   assert.deepEqual(mode.options.map(option => option[0]), ["weighted", "parallel"]);
   assert.equal(S.defaults.upstreams.max_parallel, 32);
+  assert.equal(S.pages.dns.groups[0].optional, undefined);
+  assert.equal(S.defaults.upstreams.prefer_h3, false);
+  assert.equal(S.pages.dns.groups[0].fields.find(field => field.path === "upstreams.prefer_h3").type, "checkbox");
+});
+test("setup generates the canonical upstream table and preserves unrelated defaults", () => {
+  const template = fs.readFileSync(path.join(root, "parins.example.toml"), "utf8");
+  const result = S.networkTemplate(template, "[::1]:1053", { servers: ["https://dns.example/dns-query", "udp://192.0.2.53 weight=2"], bootstrap: ["192.0.2.53:53"], mode: "parallel", prefer_h3: true });
+  assert.match(result, /^listen = "\[::1\]:1053"$/m);
+  assert.match(result, /^servers = \["https:\/\/dns.example\/dns-query","udp:\/\/192.0.2.53 weight=2"\]$/m);
+  assert.match(result, /^prefer_h3 = true$/m);
+  assert.match(result, /^bootstrap = \["192.0.2.53:53"\]$/m);
+  assert.doesNotMatch(result, /^upstream\s*=/m);
+  assert.ok(result.includes("max_entries = 4096"));
+  assert.throws(() => S.networkTemplate("listen = \"127.0.0.1:53\"", "127.0.0.1:1053", { servers: [] }));
 });
 test("query log controls have finite retention and capacity", () => {
   const fields = S.pages.runtime.groups.flatMap(group => group.fields);

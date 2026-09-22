@@ -77,6 +77,12 @@ Keep both languages complete; configuration values and raw diagnostics stay inta
 - Pool endpoints share cache semantics: require equivalent policies, explicit
   hostname bootstrap and authenticated encrypted transports. Parallel losers must
   cancel with the caller; failed DNS responses must not preempt usable answers.
+- `[upstreams]` is the canonical upstream configuration. Keep legacy TLS/SNI and
+  hedging semantics until an explicit replacement; unrelated form edits must not
+  migrate legacy settings. The console exposes only the canonical editor.
+- H3 preference applies only to HTTPS endpoints, within the resolver deadline.
+  Preserve verified H2 fallback, bounded cooldown and reusable connection ownership;
+  cancelling a request must release its stream without breaking other requests.
 - Do not change host DNS, firewall rules, certificate trust, or system services as
   a side effect of development tests. Use isolated fixtures for local acceptance.
 

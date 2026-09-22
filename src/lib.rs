@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod doh;
 pub mod ecs;
 mod flight;
 pub mod ingress;

@@ -1,42 +1,82 @@
 # PariNS
 
-An ECS-aware caching and filtering DNS forwarder for Pari Public DNS.
+Self-hosted DNS with subnet-aware caching, local filtering, encrypted transports,
+and an integrated HTTPS management console.
 
-PariNS aims to bring client-subnet-aware caching, domain filtering, upstream
-selection, and encrypted DNS transports into a single service that is easy to
-operate.
+PariNS is a standalone Rust service for running your own DNS forwarder on a local
+machine, home network, private network, or VPS. Choose your upstream resolver,
+configure your own filtering and cache policies, and manage the service through
+the browser or a TOML configuration file. It is not tied to a particular DNS
+provider or hosted service.
+
+## Features
+
+- **DNS transports:** UDP, TCP, DoT, DoH over HTTP/2 and HTTP/3, and DoQ listeners.
+- **Upstream forwarding:** UDP with TCP fallback, or authenticated DoT with
+  optional bounded connection reuse and equivalent-replica hedging.
+- **Subnet-aware caching:** independent ECS subnet answers, TTL and negative
+  caching, bounded LRU eviction, and in-flight request coalescing. ECS is opt-in.
+- **Local filtering:** exact-name and suffix rules, allow exceptions, and CNAME
+  response checks; no external rule service is required.
+- **Web management:** first-run setup, administrator authentication, status and
+  metrics, TOML validation/editing, export, and one-generation rollback.
+- **Self-hosted operations:** persistent self-signed HTTPS by default, optional
+  custom certificates, a Linux systemd installer, aggregate metrics, and
+  configurable resource and source-subnet budgets.
 
 ## Status
 
-Early development. UDP/TCP listeners, validated single-upstream forwarding,
-UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
-implemented. Optional peer-derived ECS and bounded subnet-aware response caching
-are supported. Local query-name/CNAME filtering, bounded request coalescing and
-aggregate runtime metrics are available. DoT, DoH (HTTP/2 and HTTP/3), DoQ,
-verified DoT upstreams, file-backed rule/certificate reload, a local metrics
-endpoint and opt-in equivalent-replica hedging are implemented and locally tested.
-Authenticated DoT upstream connections can optionally be reused within a fixed cap.
-Optional source-subnet query-rate and concurrency budgets are shared by all DNS listeners.
-An embedded management console supports first-run setup, authentication, status,
-TOML editing/validation/application, export, and one-generation rollback. A Linux
-systemd installer is included; the existing file-configured mode remains available.
-Production deployment and capacity acceptance have not been performed.
+Early development. The features above are implemented, with automated Linux and
+macOS tests and isolated Linux systemd installation checks. Production deployment
+and target-machine capacity acceptance have not been performed.
 
-## Development
+PariNS forwards to existing resolvers; it is not an authoritative DNS server or
+a standalone iterative resolver, and does not perform DNSSEC validation. DNS
+listener certificates are configured separately from the management console's
+self-signed certificate. See [Behavior and limits](#behavior-and-limits) before
+deploying.
 
-Install Rust with [rustup](https://rust-lang.org/tools/install/). The repository
-pins its toolchain in `rust-toolchain.toml`.
+## Quick start
+
+Install Rust with [rustup](https://rust-lang.org/tools/install/); the repository
+pins its toolchain in `rust-toolchain.toml`. Build and start the management console:
 
 ```sh
-cargo run -- --config parins.example.toml --check
-cargo test --locked
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
+git clone https://github.com/paricafe/PariNS.git
+cd PariNS
+cargo build --locked --release
+./target/release/parins --manage
 ```
 
-The example uses loopback addresses and an upstream on port 5354. Set `upstream`
-to your chosen resolver's IP and port. Unknown configuration keys and invalid
-resource limits are rejected at startup.
+Open `https://SERVER_IP:3000` (or <https://127.0.0.1:3000> on the same machine).
+The console listens on all IPv4 interfaces by default. Verify the generated
+self-signed certificate before trusting it. Read its fingerprint on the host
+(over a trusted SSH connection when remote):
+
+```sh
+openssl x509 -in parins-state/https-cert.pem -noout -sha256 -fingerprint
+```
+
+See the certificate limitations below, including public-IP name matching.
+Restrict inbound TCP 3000 to your administrator IPs when accessing remotely.
+
+Read the token from `parins-state/setup-token`, then use the setup wizard to
+create an administrator and choose the DNS listen address and upstream IP:port.
+DNS starts only after setup succeeds. For local-only management, add
+`--web-listen 127.0.0.1:3000`.
+
+For a persistent Linux service, follow [Managed mode](#managed-mode-install-then-initialize-in-the-browser).
+For a headless deployment without the console, use [File-configured mode](#file-configured-mode).
+
+## Deployment choices
+
+- **Local machine:** keep DNS and management bound to loopback.
+- **Home or private network:** bind DNS to a LAN address and allow only intended
+  clients through the firewall; configure those clients or your router to use it.
+- **VPS or remote clients:** configure encrypted DNS listeners and their
+  certificates, restrict DNS and management access at the network boundary, and
+  measure capacity on the target host. Installing PariNS does not automatically
+  make an unrestricted public resolver safe to operate.
 
 ## Run
 
@@ -217,8 +257,9 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   release does not perform DNSSEC validation or authenticate the plaintext
   upstream; the AD bit is cleared in client responses.
 
-The default is local-only. This release is not yet accepted as a production public
-resolver: production capacity validation and network-level abuse protection are
+The example and setup wizard default to loopback **DNS**; the management console
+defaults separately to `0.0.0.0:3000` over HTTPS. This release is not yet accepted
+as a production public resolver: production capacity validation and network-level abuse protection are
 not implemented. Logs contain startup/shutdown/reload events and
 optional aggregate metrics, not query names or client IP addresses.
 
@@ -441,7 +482,18 @@ binary), with an independent cache and singleflight table. No automatic
 non-ECS emergency profile or health-based routing is enabled. Hedging is disabled
 by default and trades additional upstream traffic for latency; measure first.
 
-## Local acceptance and packaging
+## Development, testing and packaging
+
+```sh
+cargo run --locked -- --config parins.example.toml --check
+cargo test --locked --all-targets
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+The example uses loopback addresses and an upstream on port 5354. Set `upstream`
+to your chosen resolver's IP and port before sending queries. Unknown configuration
+keys and invalid resource limits are rejected at startup.
 
 The binary uses Tokio's multi-thread runtime, normally one worker per available
 CPU; `TOKIO_WORKER_THREADS=2` can explicitly select two workers. This is not CPU
@@ -492,6 +544,8 @@ Linux/macOS CI results must be checked separately from local macOS acceptance.
 | `ingress` | Shared encrypted-query admission and response serialization |
 | `limits` | Bounded socket-subnet token buckets and RAII query/connection quotas |
 | `admin` | Loopback read-only metrics and process liveness |
+| `manage` | HTTPS API, authentication, private state, and transactional DNS configuration changes |
+| `web` | Embedded setup wizard, dashboard, and configuration editor |
 | `transport::tcp` | Length-prefixed framing used on both sides |
 | `server` | Listener ownership, admission budgets, client tasks, shutdown |
 | `main` | CLI arguments, startup, OS signals |
@@ -504,18 +558,11 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 - Licensed third-party rule import and additional filtering response modes.
 - DoT pipelining and additional authenticated upstream protocols.
 - Measured public-service capacity, network abuse protection and deployment/rollback acceptance.
-- Full configuration replacement beyond rule/certificate reload.
+- Zero-downtime full configuration replacement; console application currently restarts DNS.
 
 The initial design focuses on forwarding to existing resolvers. A standalone
 iterative resolver is outside the initial scope. The implementation uses Rust,
 Tokio for asynchronous IO, and Hickory for DNS message parsing and encoding.
-
-## Background
-
-PariNS grows out of the operational experience described in
-[Pari Public DNS 更新](https://flymc.cc/posts/brand-new-paridns/).
-
-Pari Public DNS is the public service; PariNS is the server software.
 
 ## License
 

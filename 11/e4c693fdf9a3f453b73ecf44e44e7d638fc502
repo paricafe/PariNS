@@ -1,0 +1,43 @@
+tests/resolver.rs
+  s_aa37914330e67a::t_37dc6c9d6f1b43 1-38,43-44,49-52,61-76,80-95,100-104,107-108
+  s_aa37914330e67a::t_6d66a54d048fa4 39-42,45-48,53-60,77-79,96-99,105-106
+src/main.rs
+  s_aa37914330e67a::t_3dcf4c231ef4ed 6-7,31,36-40
+  s_aa37914330e67a::t_6f6afccb66147e 41
+Cargo.toml
+  s_aa37914330e67a::t_3dcf4c231ef4ed 14
+src/protocol.rs
+  s_aa37914330e67a::t_6d66a54d048fa4 37-41,49-52,55-62,65-68,84-86,92-94,109-112,124-127,138-141,150-152,155-157,160-162,182-184,189-191,193-194
+  s_aa37914330e67a::t_3dcf4c231ef4ed 1-36,42-48,53-54,63-64,69-83,87-91,95-108,113-123,128-137,142-149,153-154,158-159,163-181,185-188,192,195-197
+src/server.rs
+  s_aa37914330e67a::t_3dcf4c231ef4ed 1-46
+  s_aa37914330e67a::t_dd908e8303c3fb 47-50
+src/upstream.rs
+  s_aa37914330e67a::t_3dcf4c231ef4ed 1-27
+  s_aa37914330e67a::t_d411b12f4ba22e 28-37
+src/lib.rs
+  s_aa37914330e67a::t_3dcf4c231ef4ed 4-7
+README.md
+  s_aa37914330e67a::t_68c293e6f6f3cd 11-12
+src/resolver.rs
+  s_aa37914330e67a::t_3dcf4c231ef4ed 1-38
+  s_aa37914330e67a::t_93fc1a2006b1c1 39-49
+Cargo.lock
+  s_aa37914330e67a::t_af3b93810b71bf 41,136-137,157,385,450
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "11e4c693fdf9a3f453b73ecf44e44e7d638fc502",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

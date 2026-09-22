@@ -12,6 +12,7 @@ publish = false
 anyhow = "1"
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 ipnet = "2"
+lru = "0.18.4"
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }

@@ -4,7 +4,7 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{Name, RData, Record, RecordType, rdata::A},
 };
-use parins::{config::Config, protocol, server::Server};
+use parins::{config::Config, ecs, protocol, server::Server};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -111,7 +111,8 @@ async fn udp_truncation_tcp_fallback_and_connection_reuse() {
     let upstream = listener.local_addr().unwrap();
     let udp = UdpSocket::bind(upstream).await.unwrap();
     let mock = tokio::spawn(async move {
-        for _ in 0..3 {
+        // The two downstream TCP requests reuse the full response cached by UDP.
+        {
             let mut buffer = [0; 4096];
             let (length, peer) = udp.recv_from(&mut buffer).await.unwrap();
             let q = protocol::decode(&buffer[..length]).unwrap();
@@ -156,6 +157,43 @@ async fn udp_truncation_tcp_fallback_and_connection_reuse() {
     );
     let _udp = UdpSocket::bind(address).await.unwrap();
     let _tcp = TcpListener::bind(address).await.unwrap();
+}
+
+#[tokio::test]
+async fn both_listeners_derive_ecs_from_the_socket_peer() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = config(upstream.local_addr().unwrap());
+    cfg.ecs.enabled = true;
+    // Exercise the peer handoff from each listener independently.
+    cfg.cache.enabled = false;
+    let mock = tokio::spawn(async move {
+        for _ in 0..2 {
+            let mut buffer = [0; 4096];
+            let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+            let query = protocol::decode(&buffer[..length]).unwrap();
+            let sent = ecs::subnet(&query).unwrap();
+            assert_eq!(sent.addr().to_string(), "127.0.0.0");
+            assert_eq!(sent.source_prefix(), 24);
+            assert_eq!(sent.scope_prefix(), 0);
+            let mut response = answer(&query, 1);
+            ecs::set_subnet(&mut response, Some(sent));
+            upstream
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+    });
+    let (address, stop, task) = start(cfg).await;
+    let udp = udp_query(address, &query()).await.0;
+    assert_eq!(udp.answers.len(), 1);
+    assert!(udp.edns.is_none());
+    let mut client = TcpStream::connect(address).await.unwrap();
+    write(&mut client, &query()).await;
+    let tcp = read(&mut client).await;
+    assert_eq!(tcp.answers.len(), 1);
+    assert!(tcp.edns.is_none());
+    finish(stop, task).await;
+    mock.await.unwrap();
 }
 
 #[tokio::test]

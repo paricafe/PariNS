@@ -13,3 +13,12 @@ max_tcp_connections = 64
 enabled = false
 ipv4_prefix = 24
 ipv6_prefix = 56
+
+[cache]
+enabled = true
+max_entries = 4096
+# Serialized answers + charged key bytes, not total process RSS.
+max_bytes = 8388608
+max_variants = 64
+max_ttl_secs = 3600
+negative_ttl_cap_secs = 300

@@ -10,8 +10,8 @@ operate.
 
 Early development. UDP/TCP listeners, validated single-upstream forwarding,
 UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
-implemented. Optional peer-derived ECS is supported; caching, filtering, and
-encrypted transports remain planned.
+implemented. Optional peer-derived ECS and bounded subnet-aware response caching
+are supported; filtering and encrypted transports remain planned.
 
 ## Development
 
@@ -57,7 +57,7 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
 
 ## Behavior and limits
 
-- One upstream UDP transaction per query, with an independent socket and random
+- Cache misses use an upstream UDP transaction with an independent socket and random
   ID. Only responses matching the upstream endpoint, ID, opcode, and question
   are accepted. Upstream truncation triggers TCP fallback under the same
   `query_timeout_ms` deadline. Failures return SERVFAIL.
@@ -79,14 +79,45 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   refused. Trusted forwarding of third-party subnets is not implemented.
   Downstream ECS echoes the original client option and is omitted if the client
   did not supply one. A nonzero ECS REFUSED triggers one anonymous `/0` retry
-  within the original deadline. Answers are not yet cached. This
+  within the original deadline; that retry's result is not cached. This
   release does not perform DNSSEC validation or authenticate the plaintext
   upstream; the AD bit is cleared in client responses.
 
-The default is local-only. This first increment is not a production public
+The default is local-only. This release is not a production public
 resolver: encrypted transports, per-client rate limiting, operational metrics,
 and production capacity validation are not yet implemented. Logs contain startup
 and shutdown events, not query names or client IP addresses.
+
+## Cache policy
+
+Caching is enabled by default; ECS remains opt-in (`[ecs] enabled = true`).
+The implementation is PariNS-owned Rust code, not an embedded resolver cache:
+Hickory decodes/encodes DNS, `ipnet` represents subnets, and `lru` manages eviction.
+Subnet reuse follows [RFC 7871](https://www.rfc-editor.org/rfc/rfc7871.html),
+and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/rfc2308.html).
+
+- Each normalized name/type/class and DO/CD/RD/EDNS combination owns separate
+  subnet answers. The longest covering upstream **scope** wins, provided the
+  query's source prefix is sufficient. Different subnets cannot overwrite one
+  another. IPv4, IPv6, no-ECS, and explicit privacy `/0` are isolated; a normal
+  scope `/0` answer may be shared across ordinary queries of its address family.
+- Defaults: 4096 answers, 8 MiB of serialized-answer and key bytes, 64 subnet
+  variants per query. These are configurable under `[cache]`; the byte limit is
+  not an RSS limit. Eviction is LRU across query buckets and within each bucket.
+  Each resolver instance owns its cache and immutable upstream configuration.
+- This is a whole-response cache, not an RRset cache. All section TTLs age;
+  the earliest RR expiry invalidates the answer. Positive TTLs are capped at
+  3600 seconds by default. NXDOMAIN/NODATA require a covering SOA and use the
+  minimum of SOA TTL, SOA MINIMUM, and the 300-second negative cap.
+  Negative answers remain query-type-specific; CNAME plus negative answers
+  are not cached. These are conservative limits, not full RFC cache conformance.
+- Truncated answers, errors such as SERVFAIL/REFUSED, zero TTL, missing SOA for
+  negative answers, missing expected ECS, and scope longer than source bypass
+  caching. Non-ECS EDNS options (including cookies) also bypass caching to avoid
+  replaying client-specific state.
+- Hits restore the current request's ID/question and original ECS, with aged
+  TTLs and normalized EDNS. There is no stale serving, prefetch, persistence,
+  or concurrent-query coalescing in this release.
 
 ## Module boundaries
 
@@ -94,7 +125,9 @@ and shutdown events, not query names or client IP addresses.
 | --- | --- |
 | `config` | Parse and validate startup configuration |
 | `protocol` | DNS parsing, request rules, response correlation, UDP encoding |
-| `resolver` | Shared query path, total upstream deadline, SERVFAIL and AD policy |
+| `ecs` | Peer provenance, subnet selection, wire validation, scope and client echo |
+| `cache` | Independent subnet answers, TTL/negative policy, bounded LRU eviction |
+| `resolver` | Compose ECS, cache, upstream deadline, retry and response restoration |
 | `upstream` | Independent UDP exchange and validated TCP fallback |
 | `transport::tcp` | Length-prefixed framing used on both sides |
 | `server` | Listener ownership, admission budgets, client tasks, shutdown |
@@ -104,7 +137,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 
 ## Planned scope
 
-- ECS-aware response caching with explicit isolation between upstream profiles.
+- Multiple upstream profiles and explicit cache ownership across configuration updates.
 - Domain filtering with configurable responses, including NOERROR/NODATA.
 - Bounded upstream scheduling, connection reuse, and query coalescing.
 - UDP/TCP DNS, DNS over TLS, DNS over HTTPS, and DNS over QUIC.

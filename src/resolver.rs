@@ -2,13 +2,15 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use hickory_proto::op::{Message, ResponseCode};
 
 use crate::{
-    config::{Config, EcsConfig},
+    cache::Cache,
+    config::{CacheConfig, Config, EcsConfig},
     ecs::{self, Context},
     protocol::{self, Request},
     upstream,
@@ -23,6 +25,7 @@ pub struct Resolver {
     upstream: SocketAddr,
     timeout: Duration,
     ecs: EcsConfig,
+    cache: Mutex<Cache>,
 }
 
 impl Resolver {
@@ -31,6 +34,7 @@ impl Resolver {
             upstream,
             timeout,
             ecs: EcsConfig::default(),
+            cache: Mutex::new(Cache::new(CacheConfig::default())),
         }
     }
 
@@ -39,6 +43,7 @@ impl Resolver {
             upstream: config.upstream,
             timeout: Duration::from_millis(config.query_timeout_ms),
             ecs: config.ecs.clone(),
+            cache: Mutex::new(Cache::new(config.cache.clone())),
         }
     }
 
@@ -63,6 +68,14 @@ impl Resolver {
                 });
             }
         };
+        if let Some((mut message, scope)) = self.cache.lock().expect("cache lock poisoned").get(
+            &query,
+            context.outgoing,
+            Instant::now(),
+        ) {
+            context.finish(&query, &mut message, Some(scope.prefix_len()));
+            return Some(Reply { message, udp_limit });
+        }
         let result = tokio::time::timeout(self.timeout, async {
             let mut response = upstream::exchange(&outbound, self.upstream).await?;
             let retry = response.response_code == ResponseCode::Refused
@@ -83,6 +96,14 @@ impl Resolver {
         .await;
         let (mut message, scope) = match result {
             Ok(Ok((response, retry))) => {
+                if !retry && let Some(scope) = context.cache_scope(&response) {
+                    self.cache.lock().expect("cache lock poisoned").insert(
+                        &query,
+                        &response,
+                        scope,
+                        Instant::now(),
+                    );
+                }
                 let scope = if retry {
                     None
                 } else {

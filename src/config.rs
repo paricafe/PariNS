@@ -17,6 +17,32 @@ pub struct Config {
     pub max_tcp_connections: usize,
     #[serde(default)]
     pub ecs: EcsConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub max_entries: usize,
+    pub max_bytes: usize,
+    pub max_variants: usize,
+    pub max_ttl_secs: u32,
+    pub negative_ttl_cap_secs: u32,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries: 4096,
+            max_bytes: 8 * 1024 * 1024,
+            max_variants: 64,
+            max_ttl_secs: 3600,
+            negative_ttl_cap_secs: 300,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,6 +77,24 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=262_144).contains(&self.cache.max_entries),
+            "cache.max_entries must be in 1..=262144"
+        );
+        ensure!(
+            (512..=1_073_741_824).contains(&self.cache.max_bytes),
+            "cache.max_bytes must be in 512..=1073741824"
+        );
+        ensure!(
+            (1..=256).contains(&self.cache.max_variants)
+                && self.cache.max_variants <= self.cache.max_entries,
+            "invalid cache.max_variants"
+        );
+        ensure!(
+            (1..=86400).contains(&self.cache.max_ttl_secs)
+                && (1..=86400).contains(&self.cache.negative_ttl_cap_secs),
+            "cache TTL caps must be in 1..=86400"
+        );
         ensure!(
             self.ecs.ipv4_prefix <= 32 && self.ecs.ipv6_prefix <= 128,
             "invalid ECS prefix limit"
@@ -114,6 +158,17 @@ mod tests {
             ("127.0.0.1:5354", "0.0.0.0:5354"),
             ("127.0.0.1:5354", "resolver.example:53"),
             ("max_inflight", "max_inflght"),
+            ("ipv4_prefix = 24", "ipv4_prefix = 33"),
+            ("ipv6_prefix = 56", "ipv6_prefix = 129"),
+            ("max_entries = 4096", "max_entries = 0"),
+            ("max_entries = 4096", "max_entries = 63"),
+            ("max_bytes = 8388608", "max_bytes = 511"),
+            ("max_variants = 64", "max_variants = 257"),
+            ("max_ttl_secs = 3600", "max_ttl_secs = 0"),
+            (
+                "negative_ttl_cap_secs = 300",
+                "negative_ttl_cap_secs = 86401",
+            ),
         ] {
             assert!(Config::parse(&EXAMPLE.replace(from, to)).is_err(), "{to}");
         }

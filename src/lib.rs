@@ -7,6 +7,7 @@ pub mod doh;
 pub mod ecs;
 mod flight;
 pub mod ingress;
+pub mod limits;
 pub mod metrics;
 pub mod policy;
 pub mod protocol;

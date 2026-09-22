@@ -9,6 +9,15 @@ globalThis.PariCharts = (() => {
       breakBefore: index === 0 || !all[index - 1].running || sample.generation !== all[index - 1].generation || sample.timestamp_ms - all[index - 1].timestamp_ms > 90000
     }));
   }
+  function isolatedPoints(points) {
+    return points.filter((point, index) => {
+      if (point.value === null) return false;
+      const previous = points[index - 1], next = points[index + 1];
+      const connectedBefore = previous && previous.value !== null && !point.breakBefore;
+      const connectedAfter = next && next.value !== null && !next.breakBefore;
+      return !connectedBefore && !connectedAfter;
+    });
+  }
   function histogram(buckets) {
     let previous = 0, lower = 0;
     return buckets.map((bucket) => {
@@ -51,7 +60,7 @@ globalThis.PariCharts = (() => {
         d += `${pen && !point.breakBefore ? "L" : "M"}${x(point.time).toFixed(2)},${y(point.value).toFixed(2)} `; pen = true;
       }
       svg.append(svgNode("path", { d, class: trace.className, fill: "none", "stroke-width": 2 }));
-      if (trace.points.length < 3) for (const point of trace.points.filter((point) => point.value !== null)) svg.append(svgNode("circle", { cx: x(point.time), cy: y(point.value), r: 3, class: trace.className }));
+      for (const point of isolatedPoints(trace.points)) svg.append(svgNode("circle", { cx: x(point.time), cy: y(point.value), r: 3, class: trace.className }));
     }
     for (const [time, anchor] of [[start, "start"], [now, "end"]]) { const label = svgNode("text", { x: x(time), y: 227, "text-anchor": anchor, class: "chart-label" }); label.textContent = new Date(time).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }); svg.append(label); }
     container.append(svg);
@@ -74,5 +83,5 @@ globalThis.PariCharts = (() => {
     }
     table.append(body); container.append(table);
   }
-  return { format, series, histogram, trend, table };
+  return { format, series, isolatedPoints, histogram, trend, table };
 })();

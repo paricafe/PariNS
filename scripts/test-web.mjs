@@ -62,6 +62,18 @@ test("generation changes break paths without losing valid interval count", () =>
 test("stopped and zero-duration intervals remain gaps", () => assert.deepEqual(C.series([sample(-120000, { running: false }), sample(-60000, { elapsed_seconds: 0 })], "requests", 1, now).map((point) => point.value), [null, null]));
 test("a stopped predecessor breaks the next line", () => assert.equal(C.series([sample(-120000, { running: false }), sample(-60000)], "requests", 1, now)[1].breakBefore, true));
 test("a missing time window breaks the line", () => assert.equal(C.series([sample(-240000), sample(-60000)], "requests", 1, now)[1].breakBefore, true));
+test("one valid point surrounded by two gaps always gets a marker", () => {
+  const points = C.series([sample(-180000, { running: false }), sample(-120000), sample(-60000, { running: false })], "requests", 1, now);
+  assert.deepEqual(C.isolatedPoints(points), [points[1]]);
+});
+test("the first isolated point after a restart gets a marker", () => {
+  const points = C.series([sample(-180000), sample(-120000), sample(-60000, { generation: 2 })], "requests", 1, now);
+  assert.deepEqual(C.isolatedPoints(points), [points[2]]);
+});
+test("connected zero-valued points need no isolated markers", () => {
+  const points = C.series([sample(-120000, { requests: 0 }), sample(-60000, { requests: 0 })], "requests", 1, now);
+  assert.deepEqual(C.isolatedPoints(points), []);
+});
 test("time selection omits old or future samples", () => assert.equal(C.series([sample(-3600001), sample(-1000), sample(1000)], "requests", 1, now).length, 1));
 test("histogram converts cumulative buckets into disjoint counts", () => assert.deepEqual(C.histogram([{ upper_bound_micros: 1000, count: 2 }, { upper_bound_micros: 5000, count: 5 }, { upper_bound_micros: null, count: 6 }]), [{ label: "≤ 1 ms", count: 2 }, { label: "> 1–5 ms", count: 3 }, { label: "> 5 ms", count: 1 }]));
 test("missing counter is not displayed as zero", () => assert.equal(C.format(undefined), "—"));

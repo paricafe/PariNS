@@ -10,6 +10,10 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
+axum = { version = "0.8", default-features = false, features = ["json", "http1", "tokio"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 base64 = "0.22"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }

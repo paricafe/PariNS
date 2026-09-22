@@ -77,7 +77,8 @@ impl Upstream {
 
     fn config(&self) -> Config {
         let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-        config.upstream = self.address;
+        config.upstreams = None;
+        config.upstream = Some(self.address);
         config.ecs.enabled = false;
         config.query_timeout_ms = 60;
         config.cache.stale.enabled = true;
@@ -330,7 +331,8 @@ async fn invalidation_and_reconfiguration_do_not_join_or_refill_old_flights() {
     for replace in [false, true] {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-        config.upstream = socket.local_addr().unwrap();
+        config.upstreams = None;
+        config.upstream = Some(socket.local_addr().unwrap());
         config.ecs.enabled = false;
         config.query_timeout_ms = 2000;
         let resolver = Arc::new(Resolver::from_config(&config));
@@ -438,7 +440,8 @@ async fn foreground_shares_pending_prefetch_across_expiry_and_falls_back_per_cal
     for (fail, cancel_background) in [(false, false), (true, false), (false, true)] {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-        config.upstream = socket.local_addr().unwrap();
+        config.upstreams = None;
+        config.upstream = Some(socket.local_addr().unwrap());
         config.ecs.enabled = false;
         config.query_timeout_ms = 2000;
         config.cache.prefetch.enabled = true;

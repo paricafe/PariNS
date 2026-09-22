@@ -581,3 +581,433 @@ async fn doh_rejects_redirect_wrong_content_type_and_oversize_body() {
         task.await.unwrap();
     }
 }
+
+fn h3_endpoint(tls: &rustls::ServerConfig) -> quinn::Endpoint {
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls.clone()).unwrap();
+    quinn::Endpoint::server(
+        quinn::ServerConfig::with_crypto(Arc::new(crypto)),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap()
+}
+
+async fn dual_endpoint(tls: &rustls::ServerConfig) -> (quinn::Endpoint, TcpListener) {
+    for _ in 0..32 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls.clone()).unwrap();
+        match quinn::Endpoint::server(
+            quinn::ServerConfig::with_crypto(Arc::new(crypto)),
+            listener.local_addr().unwrap(),
+        ) {
+            Ok(endpoint) => return (endpoint, listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("bind QUIC: {error}"),
+        }
+    }
+    panic!("no available dual TCP/UDP test port")
+}
+
+async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
+    use bytes::{Buf, Bytes};
+    let connection = endpoint.accept().await.unwrap().await.unwrap();
+    let mut server = h3::server::builder()
+        .build::<_, Bytes>(h3_quinn::Connection::new(connection.clone()))
+        .await
+        .unwrap();
+    let mut handlers = tokio::task::JoinSet::new();
+    let mut count = 0;
+    loop {
+        tokio::select! {
+            _ = connection.closed() => break,
+            result = handlers.join_next(), if !handlers.is_empty() => { result.unwrap().unwrap(); },
+            request = server.accept() => {
+                let Ok(Some(request)) = request else { break };
+                count += 1;
+                handlers.spawn(async move {
+                    let (request, mut stream) = request.resolve_request().await.unwrap();
+                    assert_eq!(request.method(), "POST");
+                    assert_eq!(request.uri().path(), "/dns-query");
+                    let mut body = Vec::new();
+                    while let Some(mut bytes) = stream.recv_data().await.unwrap() {
+                        body.extend_from_slice(&bytes.copy_to_bytes(bytes.remaining()));
+                    }
+                    let received = Message::from_vec(&body).unwrap();
+                    assert_eq!(received.id, 0);
+                    let mut response = verify_forwarded(received, &query());
+                    if case == 4 { response.metadata.truncation = true; }
+                    if case == 5 { response.metadata.id = 99; }
+                    if case == 6 { response.queries.clear(); }
+                    if case == 7 {
+                        stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+                        return;
+                    }
+                    if case == 8 { tokio::time::sleep(Duration::from_millis(350)).await; }
+                    if case == 10 { response.metadata.response_code = ResponseCode::ServFail; }
+                    let mut headers = http::Response::builder()
+                        .status(if case == 1 { 302 } else { 200 })
+                        .header("content-type", if case == 2 { "text/plain" } else { "application/dns-message" });
+                    if case == 9 { headers = headers.header("x-large", "a".repeat(17 * 1024)); }
+                    let headers = headers.body(()).unwrap();
+                    if stream.send_response(headers).await.is_err() { return; }
+                    let bytes = if case == 3 { vec![0; 65536] } else { response.to_vec().unwrap() };
+                    if stream.send_data(Bytes::from(bytes)).await.is_ok() {
+                        let _ = stream.finish().await;
+                    }
+                });
+            }
+        }
+    }
+    while let Some(result) = handlers.join_next().await {
+        result.unwrap();
+    }
+    count
+}
+
+async fn serve_h2(listener: TcpListener, tls: Arc<rustls::ServerConfig>, count: usize) {
+    for _ in 0..count {
+        let (socket, _) = listener.accept().await.unwrap();
+        let stream = tokio_rustls::TlsAcceptor::from(tls.clone())
+            .accept(socket)
+            .await
+            .unwrap();
+        let mut connection = h2::server::handshake(stream).await.unwrap();
+        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+        let handler = async move {
+            let mut bytes = Vec::new();
+            let mut body = request.into_body();
+            while let Some(data) = body.data().await {
+                let data = data.unwrap();
+                bytes.extend_from_slice(&data);
+                body.flow_control().release_capacity(data.len()).unwrap();
+            }
+            let response = verify_forwarded(Message::from_vec(&bytes).unwrap(), &query());
+            respond
+                .send_response(
+                    http::Response::builder()
+                        .header("content-type", "application/dns-message")
+                        .body(())
+                        .unwrap(),
+                    false,
+                )
+                .unwrap()
+                .send_data(bytes::Bytes::from(response.to_vec().unwrap()), true)
+                .unwrap();
+        };
+        tokio::pin!(handler);
+        tokio::select! { _ = &mut handler => {}, _ = connection.accept() => panic!("closed early") }
+        while connection.accept().await.is_some() {}
+    }
+}
+
+#[tokio::test]
+async fn h3_preferred_reuses_connection_concurrently_preserves_edns_and_closes_on_drop() {
+    let (_dir, ca, tls) = identity(b"h3");
+    let endpoint = h3_endpoint(&tls);
+    let mut config = config(
+        vec![format!("https://{}", endpoint.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    let settings = config.upstreams.as_mut().unwrap();
+    settings.ca_file = Some(ca);
+    settings.prefer_h3 = true;
+    let server = tokio::spawn(serve_h3(endpoint, 0));
+    let client = Client::from_config(&config).unwrap();
+    let q = query();
+    let (a, b, c) = tokio::join!(
+        client.exchange(&q),
+        client.exchange(&q),
+        client.exchange(&q)
+    );
+    for response in [a, b, c] {
+        assert_eq!(response.unwrap().id, 123);
+    }
+    drop(client);
+    assert_eq!(
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
+    let (_dir, ca, tls) = identity(b"h2");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // A bound silent UDP port simulates a firewall dropping QUIC packets.
+    let silent = UdpSocket::bind(address).await.unwrap();
+    let peers = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let received = peers.clone();
+    let blackhole = tokio::spawn(async move {
+        loop {
+            let (_, peer) = silent.recv_from(&mut [0; 65535]).await.unwrap();
+            received.lock().unwrap().insert(peer);
+        }
+    });
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.query_timeout_ms = 80;
+    let settings = config.upstreams.as_mut().unwrap();
+    settings.ca_file = Some(ca);
+    settings.prefer_h3 = true;
+    let server = tokio::spawn(serve_h2(listener, tls, 2));
+    let client = Client::from_config(&config).unwrap();
+    let start = tokio::time::Instant::now();
+    assert_eq!(
+        timeout(Duration::from_secs(2), client.exchange(&query()))
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        123
+    );
+    assert!(start.elapsed() >= Duration::from_millis(40));
+    assert_eq!(client.exchange(&query()).await.unwrap().id, 123);
+    assert_eq!(
+        peers.lock().unwrap().len(),
+        1,
+        "cooldown avoids another QUIC handshake"
+    );
+    blackhole.abort();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn h3_preference_off_uses_h2_without_quic_packets() {
+    let (_dir, ca, tls) = identity(b"h2");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind(address).await.unwrap();
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.as_mut().unwrap().ca_file = Some(ca);
+    let server = tokio::spawn(serve_h2(listener, tls, 1));
+    Client::from_config(&config)
+        .unwrap()
+        .exchange(&query())
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(20), udp.recv_from(&mut [0; 1500]))
+            .await
+            .is_err()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
+    let (_dir, _ca, tls) = identity(b"h3");
+    let (endpoint, listener) = dual_endpoint(&tls).await;
+    let address = endpoint.local_addr().unwrap();
+    let mut h2_tls = (*tls).clone();
+    h2_tls.alpn_protocols = vec![b"h2".to_vec()];
+    let quic_server = tokio::spawn(async move {
+        assert!(endpoint.accept().await.unwrap().await.is_err());
+    });
+    let tcp_server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        assert!(
+            tokio_rustls::TlsAcceptor::from(Arc::new(h2_tls))
+                .accept(socket)
+                .await
+                .is_err()
+        );
+    });
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.as_mut().unwrap().prefer_h3 = true;
+    assert!(
+        timeout(
+            Duration::from_secs(2),
+            Client::from_config(&config).unwrap().exchange(&query())
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+    timeout(Duration::from_secs(2), quic_server)
+        .await
+        .unwrap()
+        .unwrap();
+    tcp_server.await.unwrap();
+}
+
+#[tokio::test]
+async fn h3_invalid_response_falls_back_to_verified_h2() {
+    for case in 1..=9 {
+        let (_dir, ca, tls) = identity(b"h3");
+        let (endpoint, listener) = dual_endpoint(&tls).await;
+        let address = endpoint.local_addr().unwrap();
+        let mut h2_tls = (*tls).clone();
+        h2_tls.alpn_protocols = vec![b"h2".to_vec()];
+        let quic_server = tokio::spawn(serve_h3(endpoint, case));
+        let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 1));
+        let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+        let settings = config.upstreams.as_mut().unwrap();
+        settings.ca_file = Some(ca);
+        settings.prefer_h3 = true;
+        let client = Client::from_config(&config).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), client.exchange(&query()))
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            123,
+            "case {case}"
+        );
+        drop(client);
+        assert_eq!(
+            timeout(Duration::from_secs(2), quic_server)
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        tcp_server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn h3_valid_dns_failure_is_not_a_transport_failure() {
+    let (_dir, ca, tls) = identity(b"h3");
+    let endpoint = h3_endpoint(&tls);
+    let mut config = config(
+        vec![format!("https://{}", endpoint.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    let settings = config.upstreams.as_mut().unwrap();
+    settings.ca_file = Some(ca);
+    settings.prefer_h3 = true;
+    let server = tokio::spawn(serve_h3(endpoint, 10));
+    let client = Client::from_config(&config).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            client.exchange(&query()).await.unwrap().response_code,
+            ResponseCode::ServFail
+        );
+    }
+    drop(client);
+    assert_eq!(
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() {
+    use bytes::{Buf, Bytes};
+    let (_dir, ca, tls) = identity(b"h3");
+    let endpoint = h3_endpoint(&tls);
+    let mut config = config(
+        vec![format!("https://{}", endpoint.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    let settings = config.upstreams.as_mut().unwrap();
+    settings.ca_file = Some(ca);
+    settings.prefer_h3 = true;
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let connection = endpoint.accept().await.unwrap().await.unwrap();
+        let mut server = h3::server::builder()
+            .build::<_, Bytes>(h3_quinn::Connection::new(connection.clone()))
+            .await
+            .unwrap();
+        let (_, mut stalled) = server
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .resolve_request()
+            .await
+            .unwrap();
+        while stalled.recv_data().await.unwrap().is_some() {}
+        started.send(()).unwrap();
+        let (_, mut stream) = server
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .resolve_request()
+            .await
+            .unwrap();
+        let handler = async move {
+            let mut body = Vec::new();
+            while let Some(mut bytes) = stream.recv_data().await.unwrap() {
+                body.extend_from_slice(&bytes.copy_to_bytes(bytes.remaining()));
+            }
+            let response = verify_forwarded(Message::from_vec(&body).unwrap(), &query());
+            stream
+                .send_response(
+                    http::Response::builder()
+                        .header("content-type", "application/dns-message")
+                        .body(())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            stream
+                .send_data(Bytes::from(response.to_vec().unwrap()))
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+        };
+        tokio::pin!(handler);
+        tokio::select! { _ = &mut handler => {}, _ = server.accept() => panic!("unexpected connection close") }
+        // STOP_SENDING propagated for the cancelled request, without closing the connection.
+        assert!(
+            stalled
+                .send_response(http::Response::builder().body(()).unwrap())
+                .await
+                .is_err()
+        );
+        connection.closed().await;
+    });
+    let client = Client::from_config(&config).unwrap();
+    let clone = client.clone();
+    let stalled = tokio::spawn(async move { clone.exchange(&query()).await });
+    timeout(Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    stalled.abort();
+    assert!(stalled.await.unwrap_err().is_cancelled());
+    assert_eq!(client.exchange(&query()).await.unwrap().id, 123);
+    drop(client);
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn h3_listener_self_loop_is_checked_only_when_h3_is_enabled() {
+    let mut config = config(vec!["https://127.0.0.1:4443".into()], Mode::Weighted);
+    config.doh3 = Some(parins::tls::ListenerConfig {
+        listen: "0.0.0.0:4443".parse().unwrap(),
+        files: parins::tls::TlsFiles {
+            cert_file: "unused.pem".into(),
+            key_file: "unused.key".into(),
+        },
+    });
+    let settings = config.upstreams.as_mut().unwrap();
+    assert!(!settings.prefer_h3);
+    config
+        .upstreams
+        .as_ref()
+        .unwrap()
+        .validate_listeners(&config)
+        .unwrap();
+    config.upstreams.as_mut().unwrap().prefer_h3 = true;
+    assert!(
+        config
+            .upstreams
+            .as_ref()
+            .unwrap()
+            .validate_listeners(&config)
+            .is_err()
+    );
+}

@@ -77,7 +77,8 @@ impl Certificate {
 fn config(upstream: SocketAddr) -> Config {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     config.listen.set_port(0);
-    config.upstream = upstream;
+    config.upstreams = None;
+    config.upstream = Some(upstream);
     config.query_timeout_ms = 1000;
     config.tcp_io_timeout_ms = 1000;
     config.shutdown_grace_ms = 200;
@@ -389,6 +390,13 @@ fn relative_runtime_paths_and_check_resolve_against_configuration_directory() {
         "filter_file = 'rules.toml'\n{}\n[dot]\nlisten = '127.0.0.1:0'\ncert_file = 'cert.pem'\nkey_file = 'key.pem'\n[upstream_tls]\nserver_name = 'localhost'\nca_file = 'cert.pem'\n",
         include_str!("../parins.example.toml")
     );
+    let mut legacy: toml::Value = toml::from_str(&text).unwrap();
+    legacy.as_table_mut().unwrap().remove("upstreams");
+    legacy.as_table_mut().unwrap().insert(
+        "upstream".into(),
+        toml::Value::String("127.0.0.1:5354".into()),
+    );
+    let text = toml::to_string(&legacy).unwrap();
     std::fs::write(&path, text).unwrap();
     let config = Config::load(&path).unwrap();
     assert_eq!(

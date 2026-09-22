@@ -453,7 +453,8 @@ async fn resolver_query_deadline_includes_pool_wait_without_opening_an_extra_con
     let cert = Certificate::new();
     let mut peer = Peer::new(&cert).await;
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstream = peer.address;
+    config.upstreams = None;
+    config.upstream = Some(peer.address);
     config.upstream_tls = Some(cert.settings());
     config.upstream_pool = pool(1);
     config.query_timeout_ms = 100;

@@ -10,7 +10,8 @@ use tokio::net::UdpSocket;
 
 fn config(address: std::net::SocketAddr, rules: &str) -> Config {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstream = address;
+    config.upstreams = None;
+    config.upstream = Some(address);
     config.query_timeout_ms = 100;
     config.filter = toml::from_str(&format!("enabled = true\n{rules}")).unwrap();
     config

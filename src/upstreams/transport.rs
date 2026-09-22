@@ -32,6 +32,7 @@ pub(super) struct Client {
     dot: Option<crate::tls::Upstream>,
     listeners: Vec<SocketAddr>,
     quic: Mutex<Option<QuicConnection>>,
+    h3: Option<super::h3::Client>,
 }
 
 struct QuicConnection {
@@ -50,6 +51,7 @@ impl Client {
         settings: &Settings,
         pool: &crate::tls::PoolSettings,
         listeners: Vec<SocketAddr>,
+        query_timeout: Duration,
     ) -> Result<Self> {
         let mut roots = RootCertStore::empty();
         if let Some(path) = &settings.ca_file {
@@ -81,6 +83,8 @@ impl Client {
                 )
             })
             .transpose()?;
+        let h3 = (settings.prefer_h3 && spec.protocol == Protocol::Https)
+            .then(|| super::h3::Client::new(tls.clone(), query_timeout));
         Ok(Self {
             spec,
             bootstrap: settings.bootstrap.clone(),
@@ -89,6 +93,7 @@ impl Client {
             dot,
             listeners,
             quic: Mutex::new(None),
+            h3,
         })
     }
 
@@ -188,7 +193,15 @@ impl Client {
                         .exchange(query, address)
                         .await
                 }
-                Protocol::Https => self.https(query, address).await,
+                Protocol::Https => {
+                    if let Some(h3) = &self.h3
+                        && let Ok(response) = h3.exchange(&self.spec, query, address).await
+                    {
+                        Ok(response)
+                    } else {
+                        self.https(query, address).await
+                    }
+                }
                 Protocol::Quic => self.quic(query, address).await,
             };
             match response {

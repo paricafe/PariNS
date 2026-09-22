@@ -1,9 +1,6 @@
 # Local development: run a separate DNS upstream on port 5354,
-# or replace upstream with the IP:port of your chosen resolver.
+# or replace upstreams.servers with your chosen resolver(s).
 listen = "127.0.0.1:5353"
-upstream = "127.0.0.1:5354"
-# For multiple/protocol-specific upstreams use [upstreams] below; the legacy
-# root upstream is then ignored. Never point either path back to PariNS.
 query_timeout_ms = 2000
 tcp_io_timeout_ms = 5000
 shutdown_grace_ms = 3000
@@ -42,23 +39,17 @@ max_tcp_connections = 64
 # cert_file = "server.pem"
 # key_file = "server.key"
 
-# Authenticate the fixed `upstream` IP over DoT; no plaintext downgrade.
-# [upstream_tls]
-# server_name = "resolver.example"
+# One or more equivalent upstreams; never point back to a PariNS listener.
+# Supports IP[:port], udp://, tcp://, tls://, https://host/dns-query, quic://.
+# Append weight=N to an endpoint for weighted balancing.
+[upstreams]
+servers = ["udp://127.0.0.1:5354"]
+mode = "weighted" # or parallel (first NOERROR/NXDOMAIN; errors are fallback)
+prefer_h3 = false # HTTPS only: prefer HTTP/3, fall back to verified HTTP/2
+bootstrap = [] # hostname URLs require explicit bootstrap IP:port addresses
+max_parallel = 32
+max_extra_inflight = 128
 # ca_file = "private-ca.pem" # omit for built-in WebPKI roots
-
-# Optional reusable authenticated DoT connections; requires upstream_tls.
-# [upstream_pool]
-# enabled = true
-# max_connections = 8 # shared across both replicas of this resolver
-# idle_timeout_ms = 30000 # expired connections discarded on next checkout
-
-# Opt-in ONLY for replicas with equivalent ECS/DNSSEC/answer policies.
-# Threshold is an operator choice informed by measured latency, not auto-tuning.
-# [scheduler]
-# secondary = "127.0.0.1:5355"
-# hedge_after_ms = 50
-# max_extra_inflight = 32
 
 # Opt in only when the upstream supports ECS and this privacy policy is desired.
 [ecs]
@@ -123,11 +114,3 @@ interval_secs = 0
 enabled = false
 max_entries = 1000
 retention_secs = 86400
-
-# Mutually exclusive with scheduler/upstream_tls/enabled upstream_pool.
-# [upstreams]
-# servers = ["udp://127.0.0.1:5354 weight=2", "tcp://127.0.0.1:5355 weight=1"]
-# mode = "weighted" # or parallel (first NOERROR/NXDOMAIN; errors are fallback)
-# bootstrap = [] # hostname URLs require explicit bootstrap IP:port addresses
-# max_parallel = 32
-# max_extra_inflight = 128

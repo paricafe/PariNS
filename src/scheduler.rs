@@ -4,7 +4,7 @@
 //! choosing a winner or dropping the request immediately cancels the loser.
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use hickory_proto::op::{Message, ResponseCode};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::Semaphore, time::sleep};
@@ -54,7 +54,7 @@ struct Replica {
 
 #[derive(Clone)]
 pub struct Client {
-    primary: SocketAddr,
+    primary: Option<SocketAddr>,
     tls: Option<crate::tls::Upstream>,
     replica: Option<Replica>,
     pool: Option<Arc<crate::upstreams::Pool>>,
@@ -70,14 +70,14 @@ impl Client {
     pub fn from_config(config: &crate::config::Config) -> Result<Self> {
         if let Some(settings) = &config.upstreams {
             return Ok(Self {
-                primary: config.upstream,
+                primary: None,
                 tls: None,
                 replica: None,
                 pool: Some(Arc::new(crate::upstreams::Pool::new(settings, config)?)),
             });
         }
         Self::new(
-            config.upstream,
+            config.upstream.context("legacy upstream is required")?,
             config
                 .upstream_tls
                 .as_ref()
@@ -102,7 +102,7 @@ impl Client {
             None => None,
         };
         Ok(Self {
-            primary,
+            primary: Some(primary),
             tls,
             replica,
             pool: None,
@@ -128,7 +128,7 @@ impl Client {
                 ),
             })
         };
-        let primary = attempt(self.primary);
+        let primary = attempt(self.primary.context("legacy upstream is required")?);
         let Some(replica) = &self.replica else {
             return primary.await;
         };

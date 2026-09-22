@@ -41,7 +41,8 @@ fn answer(query: &Message, count: usize) -> Message {
 fn config(upstream: SocketAddr) -> Config {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     config.listen.set_port(0);
-    config.upstream = upstream;
+    config.upstreams = None;
+    config.upstream = Some(upstream);
     config.query_timeout_ms = 200;
     config.tcp_io_timeout_ms = 100;
     config.shutdown_grace_ms = 300;

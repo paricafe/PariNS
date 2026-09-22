@@ -128,7 +128,8 @@ async fn scenario(name: &str, queries: usize, concurrency: usize) -> Result<()> 
     };
     let outcome = async {
         let mut config = Config::parse(include_str!("../parins.example.toml"))?;
-        config.upstream = primary.address;
+        config.upstreams = None;
+        config.upstream = Some(primary.address);
         config.query_timeout_ms = 2000;
         config.coalescing.max_groups = concurrency;
         config.scheduler = hedged.then_some(Settings {

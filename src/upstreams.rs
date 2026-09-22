@@ -15,6 +15,7 @@ use hickory_proto::op::{Message, ResponseCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
+mod h3;
 mod transport;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub struct Settings {
     pub max_parallel: usize,
     pub max_extra_inflight: usize,
     pub ca_file: Option<PathBuf>,
+    pub prefer_h3: bool,
 }
 
 impl Default for Settings {
@@ -45,6 +47,7 @@ impl Default for Settings {
             max_parallel: 32,
             max_extra_inflight: 128,
             ca_file: None,
+            prefer_h3: false,
         }
     }
 }
@@ -100,7 +103,7 @@ impl Settings {
             if let Ok(ip) = spec.host.parse::<IpAddr>() {
                 not_self(
                     SocketAddr::new(ip, spec.port),
-                    &listeners(config, spec.protocol),
+                    &listeners(config, spec.protocol, self.prefer_h3),
                 )?;
             }
         }
@@ -111,11 +114,21 @@ impl Settings {
     }
 }
 
-fn listeners(config: &crate::config::Config, protocol: Protocol) -> Vec<SocketAddr> {
+fn listeners(
+    config: &crate::config::Config,
+    protocol: Protocol,
+    prefer_h3: bool,
+) -> Vec<SocketAddr> {
     match protocol {
         Protocol::Udp | Protocol::Tcp => vec![config.listen],
         Protocol::Tls => config.dot.as_ref().map(|v| v.listen).into_iter().collect(),
-        Protocol::Https => config.doh.as_ref().map(|v| v.listen).into_iter().collect(),
+        Protocol::Https => config
+            .doh
+            .as_ref()
+            .map(|v| v.listen)
+            .into_iter()
+            .chain(config.doh3.as_ref().filter(|_| prefer_h3).map(|v| v.listen))
+            .collect(),
         Protocol::Quic => config.doq.as_ref().map(|v| v.listen).into_iter().collect(),
     }
 }
@@ -261,8 +274,14 @@ impl Pool {
             .iter()
             .map(|line| {
                 let spec = Endpoint::parse(line)?;
-                let bound = listeners(config, spec.protocol);
-                transport::Client::new(spec, settings, &config.upstream_pool, bound)
+                let bound = listeners(config, spec.protocol, settings.prefer_h3);
+                transport::Client::new(
+                    spec,
+                    settings,
+                    &config.upstream_pool,
+                    bound,
+                    std::time::Duration::from_millis(config.query_timeout_ms),
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {

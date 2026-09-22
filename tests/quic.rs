@@ -75,7 +75,8 @@ impl Fixture {
         roots.add(cert).unwrap();
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-        config.upstream = udp.local_addr().unwrap();
+        config.upstreams = None;
+        config.upstream = Some(udp.local_addr().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
         let upstream_calls = calls.clone();
         let upstream = tokio::spawn(async move {

@@ -97,7 +97,8 @@ fn certificates() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
 async fn real_h2_tls_get_post_errors_and_shutdown() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstream = upstream.local_addr().unwrap();
+    config.upstreams = None;
+    config.upstream = Some(upstream.local_addr().unwrap());
     config.ecs.enabled = true;
     let resolver = Arc::new(Resolver::from_config(&config));
     let mock = tokio::spawn(async move {

@@ -121,8 +121,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read config {}", path.display()))?;
-        let mut config = Self::parse(&text)?;
         let base = path.parent().unwrap_or(Path::new("."));
+        Self::parse_in(&text, base)
+    }
+
+    /// Parse a managed configuration with paths relative to its private state directory.
+    pub fn parse_in(text: &str, base: &Path) -> Result<Self> {
+        let mut config = Self::parse(text)?;
         if let Some(file) = &mut config.filter_file
             && file.is_relative()
         {

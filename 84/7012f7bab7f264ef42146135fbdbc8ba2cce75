@@ -1,0 +1,46 @@
+scripts/package.sh
+  s_aa37914330e67a::t_f32f33bfbf4d5b 2,5-21,23-50,53,56
+  s_aa37914330e67a::t_6d588da0601b84 22
+scripts/install.sh
+  s_aa37914330e67a::t_c3410bf8c8d813 156-164
+Cargo.toml
+  s_aa37914330e67a::t_cd5a401bd43e74 7
+CHANGELOG.md
+  s_aa37914330e67a::t_cd5a401bd43e74 1-13,18-54
+  s_aa37914330e67a::t_4b7f505ee359f6 14-17,55-56
+scripts/test-systemd.sh
+  s_aa37914330e67a::t_f32f33bfbf4d5b 13-36,75,77
+.github/workflows/release.yml
+  s_aa37914330e67a::t_566d7a3e10a112 142-143
+  s_aa37914330e67a::t_c3410bf8c8d813 68-71
+  s_aa37914330e67a::t_134d7ef0a4333d 1-28,31-41,43-67,72-112,114-132
+  s_aa37914330e67a::t_6d588da0601b84 29-30,42,113
+  s_aa37914330e67a::t_4b7f505ee359f6 133-141
+.github/workflows/ci.yml
+  s_aa37914330e67a::t_c3410bf8c8d813 33,35-39
+README.md
+  s_aa37914330e67a::t_48485233f24d6d 30,42-47,50-52,55-66,69-70,73-79,81,83-99,116-117,120-121,128-129,208-221
+  s_aa37914330e67a::t_8117dba3ddb18d 21-23
+scripts/test-bootstrap.sh
+  s_aa37914330e67a::t_073359fce81f83 127-128,131-132
+  s_aa37914330e67a::t_ab83dd89e3461e 1-126,129-130,133-147
+scripts/bootstrap.sh
+  s_aa37914330e67a::t_c11048a95beeba 95,99-102,107,115
+  s_aa37914330e67a::t_57b65a3b1496b8 1-94,96-98,103-106,108-114,116-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "847012f7bab7f264ef42146135fbdbc8ba2cce75",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -6,6 +6,9 @@
   <meta name="color-scheme" content="light">
   <title>PariNS · 管理台</title>
   <link rel="stylesheet" href="/app.css">
+  <script src="/settings.js" defer></script>
+  <script src="/charts.js" defer></script>
+  <script src="/session.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -15,8 +18,13 @@
       <a class="brand" href="/" aria-label="PariNS 管理台首页"><span class="brand-mark" aria-hidden="true">P</span><span>PariNS<small>DNS CONTROL</small></span></a>
       <p class="sidebar-caption">轻量 · 可控 · 可观测</p>
       <nav id="navigation" hidden aria-label="页面">
-        <button type="button" id="nav-overview" class="nav-button active" aria-current="page">运行概览 <span aria-hidden="true">↗</span></button>
-        <button type="button" id="nav-config" class="nav-button">配置管理 <span aria-hidden="true">≡</span></button>
+        <button type="button" id="nav-overview" class="nav-button active" aria-current="page">仪表盘 <span aria-hidden="true">◷</span></button>
+        <button type="button" id="nav-dns" class="nav-button">DNS 设置 <span aria-hidden="true">↗</span></button>
+        <button type="button" id="nav-cache" class="nav-button">缓存与 ECS <span aria-hidden="true">▤</span></button>
+        <button type="button" id="nav-filters" class="nav-button">过滤规则 <span aria-hidden="true">⊘</span></button>
+        <button type="button" id="nav-security" class="nav-button">安全与加密 <span aria-hidden="true">◇</span></button>
+        <button type="button" id="nav-runtime" class="nav-button">运行参数 <span aria-hidden="true">≡</span></button>
+        <button type="button" id="nav-advanced" class="nav-button">高级配置 <span aria-hidden="true">{ }</span></button>
       </nav>
       <div class="sidebar-footer"><span class="small-dot" aria-hidden="true"></span> 独立 DNS 转发服务<br><span>配置由本机 PariNS 管理</span></div>
     </aside>
@@ -55,17 +63,24 @@
         </section>
 
         <section id="overview-panel" hidden>
-          <div class="heading-row"><div><p class="eyebrow">SERVICE OVERVIEW</p><h1>运行概览</h1></div><button id="refresh-status" class="button secondary" type="button">刷新状态</button></div>
+          <div class="heading-row"><div><p class="eyebrow">DNS AT A GLANCE</p><h1>仪表盘</h1></div><button id="refresh-status" class="button secondary" type="button">刷新状态</button></div>
           <div class="service-strip"><div><span id="service-badge" class="badge">读取中</span><h2 id="service-title">正在获取 DNS 服务状态</h2><p id="service-detail" class="muted">运行指标会每 5 秒自动更新。</p></div><div class="revision">配置版本<strong id="status-revision">—</strong></div></div>
           <div id="service-error" class="notice error" role="status" hidden></div>
-          <dl class="metrics"><div><dt>累计请求</dt><dd id="metric-requests">—</dd><small>当前 DNS 实例</small></div><div><dt>缓存命中率</dt><dd id="metric-cache">—</dd><small>命中 / 缓存查找</small></div><div><dt>处理中</dt><dd id="metric-inflight">—</dd><small>当前请求并发</small></div><div><dt>上游失败</dt><dd id="metric-failures">—</dd><small>累计失败操作</small></div></dl>
-          <div class="panel"><div class="heading-row"><h2>配置与维护</h2><button id="open-config" type="button" class="button secondary">管理配置 →</button></div><p class="muted">先校验，再预览修改。保存会短暂重启 DNS 实例并清空内存缓存；管理台保持可用。只保留上一份配置用于回滚。</p><div class="detail-row"><span>统计范围</span><span>实例内聚合计数，不记录查询域名</span></div><div class="detail-row"><span>最近刷新</span><span id="last-updated">尚未刷新</span></div></div>
+          <dl class="metrics"><div><dt>累计请求</dt><dd id="metric-requests">—</dd><small>当前 DNS 实例</small></div><div><dt>已拦截</dt><dd id="metric-blocked">—</dd><small>查询与响应策略拦截</small></div><div><dt>缓存命中率</dt><dd id="metric-cache">—</dd><small>命中 / 缓存查找</small></div><div><dt>平均处理耗时</dt><dd id="metric-latency">—</dd><small>计时请求平均值 · 毫秒</small></div></dl>
+          <section class="panel" aria-labelledby="trend-title"><div class="heading-row"><div><h2 id="trend-title">解析活动</h2><p class="muted small">每分钟采样 · 每秒平均次数 · 仅保留最近 24 小时内存统计</p></div><div class="range-buttons" role="group" aria-label="趋势时间范围"><button type="button" class="button quiet active" data-hours="1" aria-pressed="true">1 小时</button><button type="button" class="button quiet" data-hours="6" aria-pressed="false">6 小时</button><button type="button" class="button quiet" data-hours="24" aria-pressed="false">24 小时</button></div></div><div class="chart-legend"><span class="request-key">实线 · 请求</span><span class="cache-key">虚线 · 缓存命中</span><span class="blocked-key">点线 · 拦截</span></div><div id="activity-chart" class="activity-chart"><p class="chart-empty">正在读取采样…</p></div></section>
+          <div class="dashboard-columns"><section class="panel"><h2>响应结果</h2><p class="muted small">当前实例已生成响应的分类</p><div id="response-chart"></div></section><section class="panel"><h2>请求耗时分布</h2><p class="muted small">各区间不重复计数，包含取消请求的计时</p><div id="latency-chart"></div></section></div>
+          <section class="panel"><div class="heading-row"><h2>实例与维护</h2><button id="open-config" type="button" class="button secondary">DNS 设置 →</button></div><div class="detail-row"><span>DNS 监听</span><span id="status-listen">—</span></div><div class="detail-row"><span>实例运行时长</span><span id="status-uptime">—</span></div><div class="detail-row"><span>当前请求并发</span><span id="metric-inflight">—</span></div><div class="detail-row"><span>上游失败操作</span><span id="metric-failures">—</span></div><div class="detail-row"><span>统计范围</span><span>当前实例累计；不记录查询域名或客户端 IP，没有查询日志或热门域名排行。</span></div><div class="detail-row"><span>最近刷新</span><span id="last-updated">尚未刷新</span></div></section>
         </section>
 
         <section id="config-panel" hidden>
-          <div class="heading-row"><div><p class="eyebrow">CONFIGURATION</p><h1>配置管理</h1></div><span id="edit-state" class="badge">未修改</span></div>
-          <p class="intro">完整 TOML 是配置的唯一来源。校验不会应用修改；保存或回滚会重启 DNS 实例。</p>
-          <div class="panel editor-panel"><div class="editor-toolbar"><span>parins.toml <span id="config-revision" class="muted"></span></span><div class="button-group"><button id="reload-config" type="button" class="button quiet">重新加载</button><button id="export-config" type="button" class="button quiet">导出当前编辑内容</button></div></div><label for="config-toml" class="sr-only">DNS 完整 TOML 配置</label><textarea id="config-toml" class="code-editor" rows="24" spellcheck="false" aria-describedby="editor-help"></textarea><p id="editor-help" class="muted small">监控刷新不会覆盖编辑内容。文件路径由服务端解析；管理账户和会话信息不包含在此配置中。</p><div class="form-actions"><button id="rollback-config" type="button" class="button secondary" disabled>回滚上一份配置</button><span class="spacer"></span><button id="validate-config" type="button" class="button secondary">校验配置</button><button id="preview-config" type="button" class="button secondary">预览变更</button><button id="save-config" type="button" class="button primary" disabled>保存并应用</button></div></div>
+          <div class="heading-row"><div><p class="eyebrow">CONFIGURATION</p><h1 id="config-title">DNS 设置</h1></div><span id="edit-state" class="badge">未修改</span></div>
+          <p id="config-intro" class="intro"></p>
+          <div class="config-tools"><span>统一配置草稿 <span id="config-revision" class="muted"></span></span><div class="button-group"><button id="reload-config" type="button" class="button quiet">重新加载</button><button id="export-config" type="button" class="button quiet">导出草稿</button></div></div>
+          <p id="form-help" class="muted small">各页面共享一份草稿。修改表单后生成 TOML 会规范化格式并移除注释；未修改的配置值会保留。监控刷新不会覆盖草稿。</p>
+          <div id="settings-forms"></div>
+          <p id="management-tls-help" class="notice" hidden>管理台 HTTPS 证书和监听地址由启动参数控制：--web-listen、--web-cert、--web-key。不能通过此页在线修改，也不会复用 DNS 监听证书。</p>
+          <div id="advanced-editor" class="panel editor-panel" hidden><div class="editor-toolbar"><span>parins.toml · 高级编辑</span></div><label for="config-toml" class="sr-only">DNS 完整 TOML 配置</label><textarea id="config-toml" class="code-editor" rows="24" spellcheck="false" aria-describedby="editor-help"></textarea><p id="editor-help" class="muted small">TOML 与表单共享同一份草稿。切回表单时会由服务端解析；无效内容仍保留在这里。文件相对路径基于状态目录；管理账户和会话不在配置中。</p></div>
+          <div class="save-bar"><p class="muted small">保存会短暂重启 DNS 并清空缓存。所有配置页面的修改将一起应用。</p><div class="form-actions"><button id="rollback-config" type="button" class="button secondary" disabled>回滚上一份</button><span class="spacer"></span><button id="validate-config" type="button" class="button secondary">校验</button><button id="preview-config" type="button" class="button secondary">预览变更</button><button id="save-config" type="button" class="button primary" disabled>保存并应用</button></div></div>
           <section id="diff-panel" class="panel" hidden aria-labelledby="diff-title"><h2 id="diff-title" tabindex="-1">变更预览</h2><p class="muted small">− 表示旧内容，+ 表示新内容；显示首尾共同内容之间的变更区段。</p><pre id="config-diff" class="diff-output"></pre></section>
         </section>
       </div>

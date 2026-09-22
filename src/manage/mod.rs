@@ -455,6 +455,18 @@ async fn handle_inner(
                 "text/javascript; charset=utf-8",
                 include_str!("../../web/app.js"),
             )),
+            "/session.js" => Some((
+                "application/javascript; charset=utf-8",
+                include_str!("../../web/session.js"),
+            )),
+            "/settings.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/settings.js"),
+            )),
+            "/charts.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/charts.js"),
+            )),
             _ => None,
         };
         if let Some((kind, text)) = asset {

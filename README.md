@@ -12,8 +12,9 @@ provider or hosted service.
 ## Features
 
 - **DNS transports:** UDP, TCP, DoT, DoH over HTTP/2 and HTTP/3, and DoQ listeners.
-- **Upstream forwarding:** UDP with TCP fallback, or authenticated DoT with
-  optional bounded connection reuse and equivalent-replica hedging.
+- **Upstream forwarding:** UDP/TCP, authenticated DoT, DoH (HTTP/2), and DoQ;
+  multiline upstream pools with weighted round-robin or bounded parallel racing.
+  Legacy DoT connection reuse and equivalent-replica hedging remain supported.
 - **Subnet-aware caching:** concurrent shards, independent ECS variants,
   positive/negative budgets, domain policies, optional prefetch and failure-only
   stale answers, and in-flight request coalescing. ECS is opt-in.
@@ -32,7 +33,7 @@ Early release (v0.1.0). The features above are implemented, with automated Linux
 macOS tests and isolated Linux systemd installation checks. Production deployment
 and target-machine capacity acceptance have not been performed.
 
-The expanded cache controls described below are **unreleased changes on main**,
+The expanded cache controls, query logs, upstream pools and PEM import are **unreleased changes on main**,
 not part of the v0.1.0 download. Build from source to try them; the one-click
 installer continues to install the latest published release.
 
@@ -223,7 +224,8 @@ response codes, latency distribution, and up to 24 hours of aggregate trends.
 History is sampled once per minute, bounded to 1440 points in memory, and cleared
 when the management process restarts. DNS instance restarts appear as gaps rather
 than negative rates. No query names or client IPs are collected for these charts;
-there are no per-domain/client rankings or query logs.
+there are no per-domain/client rankings. The separate opt-in query log described
+below records per-request data; aggregate charts remain free of query identities.
 Changing only the cache section publishes new cache/refresh state without
 restarting DNS listeners or resetting instance metrics; existing cache contents
 are deliberately cleared. Other changes, and reapplying an unchanged document,
@@ -551,13 +553,100 @@ configuration are ignored by Git. Provision certificates outside this repository
 - Optional `[upstream_tls]` authenticates the fixed upstream IP using `server_name`.
   `ca_file` replaces built-in WebPKI roots. Certificate failures never downgrade
   to plaintext. Upstream DoT opens a fresh connection per transaction by default;
-  optional bounded reuse is described below. There is no DoH/DoQ upstream client.
+  optional bounded reuse is described below. For DoH/DoQ clients and multiple
+  endpoints, use the new upstream pool described below.
 - SIGHUP validates all new rule/certificate candidates before replacing them.
   Each listener's new full handshakes see its atomic certificate replacement;
   established connections and resumed sessions may retain previous TLS identity
   context. Publication is not one global transaction across all listeners and
   rules. Listener addresses, resource limits, upstream/CA settings and inline
   configuration require restart, which creates fresh resolver/cache ownership.
+
+## Query logs and certificate paste (unreleased)
+
+The **Query log** page provides manual refresh, search, status filtering,
+newest-first cursor pagination, and explicit clearing. Enable it under Runtime
+settings (disabled by default):
+
+```toml
+[query_log]
+enabled = true
+max_entries = 1000 # 1..10000
+retention_secs = 86400 # 1..604800
+```
+
+Logs contain client IP, name/type, transport, response code, duration, actual
+cache/filter path, winning upstream (if any), input/output ECS and EDNS flags,
+and bounded answer details (16 records, capped strings). They are authenticated,
+memory-only, periodically expired, and cleared on DNS restart. Requests cancelled
+after entering the resolver are recorded as dropped; malformed transport requests
+that never reach the DNS resolver are not DNS query entries. Background prefetch
+is not counted as a client request. Clearing rejects old in-flight log writes;
+future requests can create new entries. No query data is emitted to metrics or
+stderr. Treat logs as private browsing metadata, not a durable audit database.
+
+Under **Security and encryption**, enable the target DNS listener and paste its
+PEM certificate chain and private key. Import validates key matching, accepts up
+to 64 KiB per field, and stores a private immutable combined identity (0700
+directory, 0600 file). Only file references return to the draft; keys are never
+returned by the API or included in TOML/export. Save/apply uses the existing
+configuration transaction. Certificate expiry, hostname and trust must still be
+checked by clients. At most 32 identities are retained; normalized repeats reuse
+the same file. Remove unused files manually only after checking current/rollback
+configurations. Management HTTPS certificates remain independently configured
+through startup flags; this form configures DNS listeners, not the console.
+
+## Multiple upstreams (unreleased)
+
+Enable **Multiple upstreams** in DNS settings; enter one endpoint per line.
+Supported syntax is IP with optional port, `udp://`, `tcp://`, `tls://`,
+`https://host/dns-query`, and `quic://`; bracket IPv6 literals. A trailing
+`weight=N` (1..1000) sets a static weight. This is smooth weighted round-robin,
+not AdGuard Home's adaptive latency/failure weighting. Parallel mode starts all
+configured endpoints when the global extra-operation budget allows, returning
+the first NOERROR/NXDOMAIN response and cancelling remaining requests. DNS errors
+are held as fallback while other requests remain pending; all share the caller's
+deadline. At saturation, fewer parallel requests run. Weighting selects one
+endpoint per operation; it does not promise retries/failover on failure.
+
+```toml
+# Existing root `upstream` remains for legacy configuration compatibility.
+# It is not contacted while [upstreams] is present.
+[upstreams]
+servers = ["udp://192.0.2.53:53 weight=2", "tcp://192.0.2.54:53 weight=1"]
+mode = "weighted" # or "parallel"
+bootstrap = [] # hostname endpoints require explicit DNS IP:port entries
+max_parallel = 32 # parallel mode must cover all configured servers (max 32)
+max_extra_inflight = 128
+# ca_file = "private-ca.pem" # otherwise built-in WebPKI roots
+```
+
+The example addresses are documentation-only: replace them with your actual
+resolvers. Hostnames require explicit bootstrap servers; system DNS is never
+used for bootstrap. Encrypted transports validate certificate identity and never
+downgrade to plaintext. DoH uses HTTP/2 and POST, not HTTP/3. Unsupported schemes,
+credentials, URL query strings, fragments and duplicate endpoints are rejected.
+Do not combine `[upstreams]` with legacy `[scheduler]`, `[upstream_tls]` or an
+enabled `[upstream_pool]`. All pool endpoints should have equivalent resolution,
+filtering and ECS policies because they share the resolver cache. There is no
+domain-routing syntax or DNSCrypt support. Do not point endpoints/bootstrap back
+at PariNS (including NAT aliases); direct matching listeners are rejected, but
+arbitrary network hairpin routes cannot be inferred by local validation.
+
+### Client request forwarding
+
+Forwarding preserves the question and EDNS options, DO/CD/RD flags and payload
+advertisement, with deliberate exceptions: transaction IDs are hop-local; DoQ
+requires ID zero and removes TCP keepalive. ECS is policy-controlled, not blindly
+copied: disabled ECS removes the client subnet; enabled ECS validates it against
+the socket peer and caps the prefix (explicit /0 remains private). Invalid or
+spoofed subnets are rejected. ECS privacy retry and response normalization remain
+in effect; AD is cleared because PariNS does not validate DNSSEC. Requests with
+non-ECS EDNS options bypass shared cache and request coalescing. These boundaries
+follow [RFC 6891](https://www.rfc-editor.org/rfc/rfc6891),
+[RFC 7871](https://www.rfc-editor.org/rfc/rfc7871) and
+[RFC 9250](https://www.rfc-editor.org/rfc/rfc9250); forwarding is not byte-for-byte
+packet replay.
 
 ## Optional DoT upstream reuse
 
@@ -677,7 +766,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 
 - Explicit emergency-profile product policy and health-driven scheduling.
 - Licensed third-party rule import and additional filtering response modes.
-- DoT pipelining and additional authenticated upstream protocols.
+- DoT pipelining and HTTP/3 upstream clients.
 - Measured public-service capacity, network abuse protection and deployment/rollback acceptance.
 - Zero-downtime full configuration replacement; console application currently restarts DNS.
 

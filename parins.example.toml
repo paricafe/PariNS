@@ -2,6 +2,8 @@
 # or replace upstream with the IP:port of your chosen resolver.
 listen = "127.0.0.1:5353"
 upstream = "127.0.0.1:5354"
+# For multiple/protocol-specific upstreams use [upstreams] below; the legacy
+# root upstream is then ignored. Never point either path back to PariNS.
 query_timeout_ms = 2000
 tcp_io_timeout_ms = 5000
 shutdown_grace_ms = 3000
@@ -115,3 +117,17 @@ max_waiters = 64
 [metrics]
 # 0 disables aggregate JSON stderr output; 1..3600 enables periodic/final snapshots.
 interval_secs = 0
+
+# Opt-in private browsing metadata, bounded in memory and lost on DNS restart.
+[query_log]
+enabled = false
+max_entries = 1000
+retention_secs = 86400
+
+# Mutually exclusive with scheduler/upstream_tls/enabled upstream_pool.
+# [upstreams]
+# servers = ["udp://127.0.0.1:5354 weight=2", "tcp://127.0.0.1:5355 weight=1"]
+# mode = "weighted" # or parallel (first NOERROR/NXDOMAIN; errors are fallback)
+# bootstrap = [] # hostname URLs require explicit bootstrap IP:port addresses
+# max_parallel = 32
+# max_extra_inflight = 128

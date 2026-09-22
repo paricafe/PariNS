@@ -22,7 +22,8 @@ Do not expand it into a full recursive resolver without an explicit design decis
 | `src/protocol.rs`, `src/ecs.rs` | DNS protocol checks, ECS validation, scope, and response normalization. |
 | `src/cache.rs` | Cache eligibility, semantic keys, TTLs, budgets, eviction, policy matching, inspection, and invalidation. No network IO. |
 | `src/resolver.rs`, `src/flight.rs`, `src/resolver/refresh.rs` | Resolution orchestration, shared upstream work, bounded refresh, and stale fallback. |
-| `src/upstream.rs`, `src/scheduler.rs` | Upstream exchange and scheduling; preserve resolver deadlines and cancellation. |
+| `src/upstream.rs`, `src/upstreams/`, `src/upstreams.rs`, `src/scheduler.rs` | Upstream protocol exchange, explicit bootstrap, and scheduling; preserve resolver deadlines and cancellation. |
+| `src/query_log.rs` | Opt-in bounded per-request history, retention, pagination and clear epochs; never an aggregate metrics label store. |
 | `src/server.rs` and listener/transport modules | Listener lifecycle, transport framing, connection limits, and shutdown. |
 | `src/policy.rs`, `src/limits.rs` | Filtering decisions and source resource budgets, respectively. |
 | `src/manage/` | Authenticated management APIs, configuration transactions, persistence, and managed runtime ownership. |
@@ -66,6 +67,11 @@ than implementing different rules for file mode, management APIs, and the browse
 - Preserve HTTPS and certificate verification. Never commit credentials, private
   keys, runtime state, or private configuration. Do not add sensitive logging by
   default; query/client data needs explicit privacy and retention decisions.
+- Pasted DNS identities must be validated before private persistence; return only
+  file references, never private keys. Console TLS and DNS TLS remain independent.
+- Pool endpoints share cache semantics: require equivalent policies, explicit
+  hostname bootstrap and authenticated encrypted transports. Parallel losers must
+  cancel with the caller; failed DNS responses must not preempt usable answers.
 - Do not change host DNS, firewall rules, certificate trust, or system services as
   a side effect of development tests. Use isolated fixtures for local acceptance.
 

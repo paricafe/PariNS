@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Opt-in bounded query log with per-request answers, client/transport, actual
+  upstream/cache/filter paths, ECS flags, search, pagination and clearing.
+- Multiline UDP/TCP/DoT/DoH/DoQ upstream pools with static weighted round-robin
+  or bounded parallel racing; explicit hostname bootstrap and verified TLS.
+- PEM certificate/key paste for encrypted DNS listeners: validate key matching,
+  store privately and return only file references to the configuration draft.
+- Removed the management-page footer slogan; added forwarding regressions for
+  client EDNS options, ECS and DNS flags across the supported upstream protocols.
 - Concurrent cache shards with response construction outside shard
   locks, individual ECS-variant LRU eviction and positive/negative budgets.
 - Domain/type policies, explicit bypass and TTL caps, opt-in bounded prefetch

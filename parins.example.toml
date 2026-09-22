@@ -51,6 +51,12 @@ max_parallel = 32
 max_extra_inflight = 128
 # ca_file = "private-ca.pem" # omit for built-in WebPKI roots
 
+# Optional authenticated DoT connection reuse, independently per tls:// endpoint.
+[upstreams.dot_pool]
+enabled = false
+max_connections = 8
+idle_timeout_ms = 30000
+
 # Opt in only when the upstream supports ECS and this privacy policy is desired.
 [ecs]
 enabled = false

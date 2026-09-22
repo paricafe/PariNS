@@ -12,11 +12,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
-    /// Compatibility for configurations predating `[upstreams]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream: Option<SocketAddr>,
-    #[serde(default)]
-    pub upstreams: Option<crate::upstreams::Settings>,
+    pub upstreams: crate::upstreams::Settings,
     #[serde(default)]
     pub query_log: crate::query_log::Settings,
     pub query_timeout_ms: u64,
@@ -46,15 +42,9 @@ pub struct Config {
     #[serde(default)]
     pub doh3: Option<crate::tls::ListenerConfig>,
     #[serde(default)]
-    pub upstream_tls: Option<crate::tls::ClientSettings>,
-    #[serde(default)]
-    pub upstream_pool: crate::tls::PoolSettings,
-    #[serde(default)]
     pub filter_file: Option<PathBuf>,
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
-    #[serde(default)]
-    pub scheduler: Option<crate::scheduler::Settings>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -220,18 +210,7 @@ impl Config {
                 }
             }
         }
-        if let Some(file) = config
-            .upstream_tls
-            .as_mut()
-            .and_then(|settings| settings.ca_file.as_mut())
-            && file.is_relative()
-        {
-            *file = base.join(&*file);
-        }
-        if let Some(file) = config
-            .upstreams
-            .as_mut()
-            .and_then(|settings| settings.ca_file.as_mut())
+        if let Some(file) = config.upstreams.ca_file.as_mut()
             && file.is_relative()
         {
             *file = base.join(&*file);
@@ -248,12 +227,7 @@ impl Config {
         {
             crate::tls::server_config(&listener.files, &[])?;
         }
-        if let Some(settings) = &self.upstream_tls {
-            crate::tls::Upstream::new(settings)?;
-        }
-        if self.upstreams.is_some() {
-            crate::scheduler::Client::from_config(self)?;
-        }
+        crate::upstreams::Pool::new(&self.upstreams, self)?;
         Ok(())
     }
 
@@ -271,33 +245,10 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.upstreams.is_some() || self.upstream.is_some(),
-            "configure at least one server in upstreams.servers"
-        );
         self.query_log.validate()?;
-        if let Some(settings) = &self.upstreams {
-            settings.validate()?;
-            settings.validate_listeners(self)?;
-            ensure!(
-                self.scheduler.is_none()
-                    && self.upstream_tls.is_none()
-                    && !self.upstream_pool.enabled,
-                "upstreams cannot be combined with legacy scheduler, upstream_tls or upstream_pool"
-            );
-        }
+        self.upstreams.validate()?;
+        self.upstreams.validate_listeners(self)?;
         self.source_limits.validate()?;
-        self.upstream_pool.validate()?;
-        ensure!(
-            !self.upstream_pool.enabled || self.upstream_tls.is_some(),
-            "upstream_pool requires upstream_tls"
-        );
-        if let Some(settings) = &self.scheduler {
-            settings.validate(
-                self.upstream
-                    .context("legacy scheduler requires upstream")?,
-            )?;
-        }
         if let Some(address) = self.admin_listen {
             ensure!(address.ip().is_loopback(), "admin_listen must be loopback");
         }
@@ -379,38 +330,6 @@ impl Config {
             self.ecs.ipv4_prefix <= 32 && self.ecs.ipv6_prefix <= 128,
             "invalid ECS prefix limit"
         );
-        if let Some(upstream) = self.upstream {
-            ensure!(upstream.port() != 0, "upstream port must be nonzero");
-            let ip = upstream.ip().to_canonical();
-            ensure!(
-                !ip.is_unspecified()
-                    && !ip.is_multicast()
-                    && !matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast()),
-                "upstream must be a unicast IP address"
-            );
-        }
-        let listener = if self.upstreams.is_some() {
-            None
-        } else if self.upstream_tls.is_some() {
-            self.dot.as_ref().map(|listener| listener.listen)
-        } else {
-            Some(self.listen)
-        };
-        if let Some(listener) = listener {
-            for address in self
-                .upstream
-                .into_iter()
-                .chain(self.scheduler.as_ref().map(|s| s.secondary))
-            {
-                let local = listener.ip().to_canonical();
-                let upstream = address.ip().to_canonical();
-                ensure!(
-                    listener.port() != address.port()
-                        || !(local == upstream || local.is_unspecified() && upstream.is_loopback()),
-                    "upstream replica must not point to a matching DNS listener"
-                );
-            }
-        }
         for (name, value) in [
             ("query_timeout_ms", self.query_timeout_ms),
             ("tcp_io_timeout_ms", self.tcp_io_timeout_ms),
@@ -434,33 +353,25 @@ mod tests {
 
     const EXAMPLE: &str = include_str!("../parins.example.toml");
 
-    fn legacy_config() -> Config {
-        let mut config = Config::parse(EXAMPLE).unwrap();
-        config.upstreams = None;
-        config.upstream = Some("127.0.0.1:5354".parse().unwrap());
-        config
-    }
-
     #[test]
     fn example_is_valid() {
         Config::parse(EXAMPLE).unwrap();
     }
 
     #[test]
-    fn upstreams_replaces_required_legacy_endpoint() {
+    fn upstreams_is_required_and_removed_fields_are_rejected() {
         let base = "listen='127.0.0.1:5353'\nquery_timeout_ms=1000\ntcp_io_timeout_ms=1000\nshutdown_grace_ms=500\nmax_inflight=128\nmax_tcp_connections=32\n";
         assert!(Config::parse(base).is_err());
-        let legacy = Config::parse(&format!("{base}upstream='1.1.1.1:53'\n")).unwrap();
-        assert!(legacy.upstream.is_some() && legacy.upstreams.is_none());
+        assert!(Config::parse(&format!("{base}upstream='1.1.1.1:53'\n")).is_err());
         let canonical = format!("{base}[upstreams]\nservers=['udp://1.1.1.1:53']\n");
         let config = Config::parse(&canonical).unwrap();
-        assert!(config.upstream.is_none() && config.upstreams.is_some());
-        assert!(crate::scheduler::Client::from_config(&config).is_ok());
-        assert!(Config::parse(&format!("upstream='9.9.9.9:53'\n{canonical}")).is_ok());
+        assert_eq!(config.upstreams.servers, ["udp://1.1.1.1:53"]);
+        assert!(crate::upstreams::Pool::new(&config.upstreams, &config).is_ok());
+        assert!(Config::parse(&format!("upstream='9.9.9.9:53'\n{canonical}")).is_err());
         assert!(Config::parse(&format!("{base}[upstreams]\nservers=[]\n")).is_err());
-        assert!(
-            Config::parse(&format!("{base}[upstream_tls]\nserver_name='localhost'\n")).is_err()
-        );
+        for section in ["upstream_tls", "upstream_pool", "scheduler"] {
+            assert!(Config::parse(&format!("{canonical}\n[{section}]\n")).is_err());
+        }
     }
 
     #[test]
@@ -490,44 +401,42 @@ mod tests {
     }
 
     #[test]
-    fn upstream_pool_is_opt_in_requires_tls_and_has_finite_limits() {
-        let mut config = legacy_config();
-        assert!(!config.upstream_pool.enabled);
-        config.upstream_pool.enabled = true;
-        assert!(config.validate().is_err());
-        config.upstream_tls = Some(crate::tls::ClientSettings {
-            server_name: "localhost".into(),
-            ca_file: None,
-        });
+    fn dot_pool_is_opt_in_and_has_finite_limits() {
+        let mut config = Config::parse(EXAMPLE).unwrap();
+        assert!(!config.upstreams.dot_pool.enabled);
+        config.upstreams.servers = vec!["tls://127.0.0.1:853".into()];
+        config.upstreams.dot_pool.enabled = true;
         assert!(config.validate().is_ok());
         for value in [0, 257] {
-            config.upstream_pool.max_connections = value;
+            config.upstreams.dot_pool.max_connections = value;
             assert!(config.validate().is_err());
         }
-        config.upstream_pool.max_connections = 8;
+        config.upstreams.dot_pool.max_connections = 8;
         for value in [0, 600001] {
-            config.upstream_pool.idle_timeout_ms = value;
+            config.upstreams.dot_pool.idle_timeout_ms = value;
             assert!(config.validate().is_err());
         }
-        assert!(Config::parse(&format!("{EXAMPLE}\n[upstream_pool]\nunknown = true\n")).is_err());
+        let mut document: toml::Value = toml::from_str(EXAMPLE).unwrap();
+        document["upstreams"]["dot_pool"]
+            .as_table_mut()
+            .unwrap()
+            .insert("unknown".into(), toml::Value::Boolean(true));
+        let error = Config::parse(&toml::to_string(&document).unwrap()).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `unknown`"));
     }
 
     #[test]
-    fn every_replica_is_checked_for_plain_and_tls_listener_loops() {
-        let mut cfg = legacy_config();
-        cfg.scheduler = Some(crate::scheduler::Settings {
-            secondary: cfg.listen,
-            hedge_after_ms: 10,
-            max_extra_inflight: 1,
-        });
+    fn every_endpoint_is_checked_for_plain_and_tls_listener_loops() {
+        let mut cfg = Config::parse(EXAMPLE).unwrap();
+        cfg.upstreams.servers = vec![
+            "udp://127.0.0.1:5354".into(),
+            format!("udp://{}", cfg.listen),
+        ];
         assert!(cfg.validate().is_err());
-        cfg.scheduler = None;
+        cfg.upstreams.servers.pop();
         cfg.listen = "[::]:5354".parse().unwrap();
         assert!(cfg.validate().is_err());
-        cfg.upstream_tls = Some(crate::tls::ClientSettings {
-            server_name: "localhost".into(),
-            ca_file: None,
-        });
+        cfg.upstreams.servers = vec!["tls://127.0.0.1:5354".into()];
         cfg.dot = Some(crate::tls::ListenerConfig {
             listen: "[::ffff:127.0.0.1]:5354".parse().unwrap(),
             files: crate::tls::TlsFiles {
@@ -538,11 +447,7 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.dot.as_mut().unwrap().listen.set_port(8530);
         assert!(cfg.validate().is_ok());
-        cfg.scheduler = Some(crate::scheduler::Settings {
-            secondary: "127.0.0.1:8530".parse().unwrap(),
-            hedge_after_ms: 10,
-            max_extra_inflight: 1,
-        });
+        cfg.upstreams.servers.push("tls://127.0.0.1:8530".into());
         assert!(cfg.validate().is_err());
     }
 

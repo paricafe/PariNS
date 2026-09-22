@@ -30,17 +30,17 @@ test("cache rules replace as a whole without touching budgets", () => assert.dee
 test("equal settings create no patch", () => assert.deepEqual(S.diff({ cache: { enabled: true }, filter: { block_exact: ["a.test"] } }, { cache: { enabled: true }, filter: { block_exact: ["a.test"] } }), {}));
 test("nested patches only contain edited fields", () => assert.deepEqual(S.diff({ cache: { enabled: true, max_bytes: 8388608 }, listen: "127.0.0.1:53" }, { cache: { enabled: false, max_bytes: 8388608 }, listen: "127.0.0.1:53" }), { cache: { enabled: false } }));
 test("optional sections are explicitly removed with null", () => assert.deepEqual(S.diff({ dot: { listen: "[::]:853", cert_file: "cert.pem", key_file: "key.pem" } }, { dot: null }), { dot: null }));
-test("new optional sections retain the full required shape", () => assert.deepEqual(S.diff({ upstream_tls: null }, { upstream_tls: { server_name: "dns.example", ca_file: null } }), { upstream_tls: { server_name: "dns.example", ca_file: null } }));
+test("new optional sections retain the full required shape", () => assert.deepEqual(S.diff({ dot: null }, { dot: { listen: "127.0.0.1:853", cert_file: "cert.pem", key_file: "key.pem" } }), { dot: { listen: "127.0.0.1:853", cert_file: "cert.pem", key_file: "key.pem" } }));
 test("existing optional sections patch only the changed path", () => assert.deepEqual(S.diff({ dot: { listen: "[::]:853", cert_file: "cert.pem", key_file: "key.pem" } }, { dot: { listen: "[::]:853", cert_file: "next.pem", key_file: "key.pem" } }), { dot: { cert_file: "next.pem" } }));
 test("arrays are replacements, not object-index patches", () => assert.deepEqual(S.diff({ filter: { block_suffix: ["a.test", "b.test"] } }, { filter: { block_suffix: [] } }), { filter: { block_suffix: [] } }));
 test("unchanged relative file paths are not rewritten", () => assert.deepEqual(S.diff({ filter_file: "rules/local.toml", max_inflight: 10 }, { filter_file: "rules/local.toml", max_inflight: 11 }), { max_inflight: 11 }));
 test("file path values preserve intentional leading and trailing spaces", () => {
-  for (const path of ["filter_file", "dot.cert_file", "dot.key_file", "upstream_tls.ca_file"]) assert.equal(S.valueOf({ value: " cert.pem " }, { path, type: "nullable" }), " cert.pem ");
+  for (const path of ["filter_file", "dot.cert_file", "dot.key_file", "upstreams.ca_file"]) assert.equal(S.valueOf({ value: " cert.pem " }, { path, type: "nullable" }), " cert.pem ");
   assert.equal(S.valueOf({ value: " " }, { path: "filter_file", type: "nullable" }), " ");
   assert.equal(S.valueOf({ value: "" }, { path: "filter_file", type: "nullable" }), null);
 });
 test("reading one dirty control never reparses or trims untouched paths", () => {
-  const base = { max_inflight: 10, filter_file: " rules.toml ", dot: { listen: "127.0.0.1:853", cert_file: " cert.pem ", key_file: " key.pem " }, upstream_tls: { server_name: "dns.test", ca_file: " ca.pem " } };
+  const base = { max_inflight: 10, filter_file: " rules.toml ", dot: { listen: "127.0.0.1:853", cert_file: " cert.pem ", key_file: " key.pem " }, upstreams: { servers: ["tls://192.0.2.53:853"], ca_file: " ca.pem " } };
   const controls = new Map();
   for (const group of Object.values(S.pages).flatMap((page) => page.groups)) {
     if (group.optional) { if (!(group.optional in base)) base[group.optional] = null; controls.set(`#enable-${group.optional}`, { checked: base[group.optional] !== null }); }
@@ -55,7 +55,7 @@ test("reading one dirty control never reparses or trims untouched paths", () => 
   assert.deepEqual(S.diff(base, result), { max_inflight: 11 });
   assert.equal(result.dot.cert_file, " cert.pem ");
   assert.equal(result.filter_file, " rules.toml ");
-  assert.equal(result.upstream_tls.ca_file, " ca.pem ");
+  assert.equal(result.upstreams.ca_file, " ca.pem ");
 });
 test("nullable fields clear to null", () => assert.equal(S.valueOf({ value: "  " }, { type: "nullable" }), null));
 test("domain lists preserve ordering and remove blank lines", () => assert.deepEqual(S.valueOf({ value: " a.test \r\n\n b.test\n" }, { type: "lines" }), ["a.test", "b.test"]));
@@ -72,10 +72,9 @@ test("upstreams preserve newline protocols and explicit weights", () => assert.d
 test("upstream mode presents both server-supported strategies", () => {
   const mode = S.pages.dns.groups.flatMap(group => group.fields).find(field => field.path === "upstreams.mode");
   assert.deepEqual(mode.options.map(option => option[0]), ["weighted", "parallel"]);
-  assert.equal(S.defaults.upstreams.max_parallel, 32);
   assert.equal(S.pages.dns.groups[0].optional, undefined);
-  assert.equal(S.defaults.upstreams.prefer_h3, false);
   assert.equal(S.pages.dns.groups[0].fields.find(field => field.path === "upstreams.prefer_h3").type, "checkbox");
+  assert.equal(S.pages.dns.groups[0].fields.find(field => field.path === "upstreams.dot_pool.max_connections").max, 256);
 });
 test("setup generates the canonical upstream table and preserves unrelated defaults", () => {
   const template = fs.readFileSync(path.join(root, "parins.example.toml"), "utf8");

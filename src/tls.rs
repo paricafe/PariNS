@@ -190,7 +190,7 @@ impl Upstream {
         };
         let mut slot = pool.checkout(address).await;
         // Never leave a borrowed/partially consumed stream in shared state. A
-        // cancelled query or hedge drops it along with this guard, leaving None.
+        // cancelled query drops it along with this guard, leaving None.
         let cached = slot
             .take()
             .filter(|idle| idle.address == address && idle.returned.elapsed() < pool.idle_timeout);

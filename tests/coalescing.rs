@@ -27,8 +27,7 @@ fn query(id: u16, peer: &str) -> Vec<u8> {
 
 fn config(socket: &UdpSocket) -> Config {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(socket.local_addr().unwrap());
+    config.upstreams.servers = vec![socket.local_addr().unwrap().to_string()];
     config.ecs.enabled = true;
     config.query_timeout_ms = 200;
     config

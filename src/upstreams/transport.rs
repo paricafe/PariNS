@@ -49,7 +49,6 @@ impl Client {
     pub fn new(
         spec: Endpoint,
         settings: &Settings,
-        pool: &crate::tls::PoolSettings,
         listeners: Vec<SocketAddr>,
         query_timeout: Duration,
     ) -> Result<Self> {
@@ -79,7 +78,7 @@ impl Client {
                         server_name: spec.host.clone(),
                         ca_file: settings.ca_file.clone(),
                     },
-                    pool,
+                    &settings.dot_pool,
                 )
             })
             .transpose()?;
@@ -180,7 +179,7 @@ impl Client {
         Ok(addresses)
     }
 
-    pub async fn exchange(&self, query: &Message) -> Result<crate::scheduler::Exchange> {
+    pub async fn exchange(&self, query: &Message) -> Result<super::Exchange> {
         let mut error = anyhow::anyhow!("no upstream address");
         for address in self.addresses().await? {
             let response = match self.spec.protocol {
@@ -206,7 +205,7 @@ impl Client {
             };
             match response {
                 Ok(message) => {
-                    return Ok(crate::scheduler::Exchange {
+                    return Ok(super::Exchange {
                         message,
                         upstream: self.spec.label.clone(),
                     });

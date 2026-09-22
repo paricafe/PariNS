@@ -14,7 +14,7 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{Name, RData, Record, RecordType, rdata::A},
 };
-use parins::{config::Config, protocol, resolver::Resolver, scheduler::Settings};
+use parins::{config::Config, protocol, resolver::Resolver, upstreams::Mode};
 use serde_json::json;
 use tokio::{
     net::UdpSocket,
@@ -114,8 +114,8 @@ async fn resolve(resolver: &Resolver, query: Message) -> Result<()> {
 
 async fn scenario(name: &str, queries: usize, concurrency: usize) -> Result<()> {
     let warm = name == "warm-cache";
-    let hedged = name == "cold-hedged";
-    // Identical artificial primary latency makes cold-single vs cold-hedged a
+    let parallel = name == "cold-parallel";
+    // Identical artificial primary latency makes cold-single vs cold-parallel a
     // scheduler comparison. The warm scenario times cache reads after priming.
     let delay_ms = if warm { 0 } else { 20 };
     let primary = Mock::start(delay_ms, concurrency).await?;
@@ -128,15 +128,14 @@ async fn scenario(name: &str, queries: usize, concurrency: usize) -> Result<()> 
     };
     let outcome = async {
         let mut config = Config::parse(include_str!("../parins.example.toml"))?;
-        config.upstreams = None;
-        config.upstream = Some(primary.address);
+        config.upstreams.servers = vec![primary.address.to_string()];
         config.query_timeout_ms = 2000;
         config.coalescing.max_groups = concurrency;
-        config.scheduler = hedged.then_some(Settings {
-            secondary: secondary.address,
-            hedge_after_ms: 5,
-            max_extra_inflight: concurrency,
-        });
+        if parallel {
+            config.upstreams.servers.push(secondary.address.to_string());
+            config.upstreams.mode = Mode::Parallel;
+            config.upstreams.max_extra_inflight = concurrency;
+        }
         config.validate()?;
         let resolver = Arc::new(Resolver::try_from_config(&config)?);
         if warm {
@@ -190,7 +189,7 @@ async fn scenario(name: &str, queries: usize, concurrency: usize) -> Result<()> 
                 "qps": queries as f64 / elapsed.as_secs_f64(),
                 "p50_us": percentile(50), "p95_us": percentile(95), "p99_us": percentile(99),
                 "errors": errors, "primary_delay_ms": delay_ms,
-                "secondary_delay_ms": 2, "hedge_after_ms": if hedged { Some(5) } else { None },
+                "secondary_delay_ms": 2,
                 "upstream_primary": primary.count.load(Ordering::Relaxed) - before_primary,
                 "upstream_secondary": secondary.count.load(Ordering::Relaxed) - before_secondary,
                 "cache_hits": after.counters["cache_hits"] - before.counters["cache_hits"],
@@ -235,7 +234,7 @@ async fn main() -> Result<()> {
         (1..=256).contains(&concurrency),
         "concurrency must be in 1..=256"
     );
-    for name in ["warm-cache", "cold-single", "cold-hedged"] {
+    for name in ["warm-cache", "cold-single", "cold-parallel"] {
         scenario(name, queries, concurrency).await?;
     }
     Ok(())

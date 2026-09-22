@@ -55,8 +55,7 @@ impl Upstream {
 
     fn resolver(&self) -> Resolver {
         let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-        config.upstreams = None;
-        config.upstream = Some(self.address);
+        config.upstreams.servers = vec![self.address.to_string()];
         config.ecs.enabled = true;
         config.query_timeout_ms = 200;
         Resolver::from_config(&config)

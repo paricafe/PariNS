@@ -1,7 +1,7 @@
 //! Shared query semantics and one deadline for the complete upstream operation.
 
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
@@ -17,7 +17,7 @@ use crate::{
     metrics::{Counter, Metrics, Timer},
     policy::Policy,
     protocol::{self, Request},
-    query_log::{Entry, QueryLog, Settings, Trace},
+    query_log::{Entry, QueryLog, Trace},
 };
 
 mod refresh;
@@ -58,7 +58,7 @@ pub struct Reply {
 }
 
 pub struct Resolver {
-    upstream: crate::scheduler::Client,
+    upstream: Arc<crate::upstreams::Pool>,
     timeout: Duration,
     ecs: EcsConfig,
     generation: RwLock<Arc<Generation>>,
@@ -69,29 +69,13 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub fn new(upstream: SocketAddr, timeout: Duration) -> Self {
-        Self {
-            upstream: crate::scheduler::Client::new(upstream, None, None).expect("single upstream"),
-            timeout,
-            ecs: EcsConfig::default(),
-            generation: RwLock::new(Arc::new(Generation::new(
-                CacheConfig::default(),
-                &CoalescingConfig::default(),
-            ))),
-            coalescing: CoalescingConfig::default(),
-            metrics: Arc::new(Metrics::default()),
-            policy: RwLock::new(Policy::default()),
-            query_log: Arc::new(QueryLog::new(Settings::default())),
-        }
-    }
-
     pub fn from_config(config: &Config) -> Self {
         Self::try_from_config(config).expect("validated resolver configuration")
     }
 
     pub fn try_from_config(config: &Config) -> anyhow::Result<Self> {
         Ok(Self {
-            upstream: crate::scheduler::Client::from_config(config)?,
+            upstream: Arc::new(crate::upstreams::Pool::new(&config.upstreams, config)?),
             timeout: Duration::from_millis(config.query_timeout_ms),
             ecs: config.ecs.clone(),
             generation: RwLock::new(Arc::new(Generation::new(
@@ -360,7 +344,7 @@ fn flight_counter(role: &Role) -> Counter {
 /// Network work is shared by the foreground and refresh paths; only foreground
 /// failures may consult stale data. A privacy retry never uses the original scope.
 struct Exchange {
-    upstream: crate::scheduler::Client,
+    upstream: Arc<crate::upstreams::Pool>,
     timeout: Duration,
     cache: Arc<Cache>,
     query: Message,
@@ -392,7 +376,7 @@ impl Exchange {
         let mut retried = false;
         let mut endpoint = None;
         let result = tokio::time::timeout(self.timeout, async {
-            let exchange = self.upstream.exchange_traced(&self.outbound).await?;
+            let exchange = self.upstream.exchange(&self.outbound).await?;
             endpoint = Some(exchange.upstream);
             let mut response = exchange.message;
             if response.response_code == ResponseCode::Refused
@@ -412,7 +396,7 @@ impl Exchange {
                 });
                 ecs::set_subnet(&mut self.outbound, Some(anonymous));
                 endpoint = None;
-                let exchange = self.upstream.exchange_traced(&self.outbound).await?;
+                let exchange = self.upstream.exchange(&self.outbound).await?;
                 endpoint = Some(exchange.upstream);
                 response = exchange.message;
             }

@@ -7,8 +7,7 @@ use hickory_proto::{
 };
 use parins::{
     config::Config,
-    scheduler::Client,
-    upstreams::{Mode, Settings},
+    upstreams::{Mode, Pool, Settings},
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -20,11 +19,11 @@ use tokio::{
 fn config(servers: Vec<String>, mode: Mode) -> Config {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     config.listen = "127.0.0.1:1053".parse().unwrap();
-    config.upstreams = Some(Settings {
+    config.upstreams = Settings {
         servers,
         mode,
         ..Settings::default()
-    });
+    };
     config
 }
 
@@ -50,6 +49,10 @@ fn query() -> Message {
         .insert(EdnsOption::Unknown(65001, vec![1, 2, 3]));
     query.edns = Some(edns);
     query
+}
+
+fn client(config: &Config) -> anyhow::Result<Arc<Pool>> {
+    Pool::new(&config.upstreams, config).map(Arc::new)
 }
 
 fn verify_forwarded(mut received: Message, expected: &Message) -> Message {
@@ -101,13 +104,13 @@ async fn udp() -> (SocketAddr, tokio::task::JoinHandle<usize>) {
 async fn weighted_distribution_and_udp_preserve_edns() {
     let (a, ta) = udp().await;
     let (b, tb) = udp().await;
-    let client = Client::from_config(&config(
+    let client = client(&config(
         vec![format!("udp://{a} weight=3"), format!("{b} weight=1")],
         Mode::Weighted,
     ))
     .unwrap();
     for _ in 0..40 {
-        assert_eq!(client.exchange(&query()).await.unwrap().id, 123);
+        assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
     }
     assert_eq!(ta.await.unwrap(), 30);
     assert_eq!(tb.await.unwrap(), 10);
@@ -116,7 +119,7 @@ async fn weighted_distribution_and_udp_preserve_edns() {
 #[tokio::test]
 async fn tcp_preserves_edns() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = Client::from_config(&config(
+    let client = client(&config(
         vec![format!("tcp://{}", listener.local_addr().unwrap())],
         Mode::Weighted,
     ))
@@ -129,7 +132,7 @@ async fn tcp_preserves_edns() {
         );
         write(&mut stream, &response.to_vec().unwrap()).await;
     });
-    assert_eq!(client.exchange(&query()).await.unwrap().id, 123);
+    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
     task.await.unwrap();
 }
 
@@ -144,8 +147,8 @@ async fn parallel_servfail_cannot_win_and_loser_is_cancelled() {
         .map(|s| format!("udp://{}", s.local_addr().unwrap()))
         .collect();
     let winner = sockets[1].local_addr().unwrap();
-    let client = Client::from_config(&config(servers, Mode::Parallel)).unwrap();
-    let task = tokio::spawn(async move { client.exchange_traced(&query()).await.unwrap() });
+    let client = client(&config(servers, Mode::Parallel)).unwrap();
+    let task = tokio::spawn(async move { client.exchange(&query()).await.unwrap() });
     let mut loser = None;
     for (i, socket) in sockets.iter().enumerate() {
         let mut bytes = [0; 65535];
@@ -208,7 +211,7 @@ async fn dot_authenticated_and_edns_preserved() {
         vec![format!("tls://{}", listener.local_addr().unwrap())],
         Mode::Weighted,
     );
-    config.upstreams.as_mut().unwrap().ca_file = Some(ca);
+    config.upstreams.ca_file = Some(ca);
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = tokio_rustls::TlsAcceptor::from(tls)
@@ -222,11 +225,12 @@ async fn dot_authenticated_and_edns_preserved() {
         write(&mut stream, &response.to_vec().unwrap()).await;
     });
     assert_eq!(
-        Client::from_config(&config)
+        client(&config)
             .unwrap()
             .exchange(&query())
             .await
             .unwrap()
+            .message
             .id,
         123
     );
@@ -244,7 +248,7 @@ async fn doh_authenticated_and_edns_preserved() {
         )],
         Mode::Weighted,
     );
-    config.upstreams.as_mut().unwrap().ca_file = Some(ca);
+    config.upstreams.ca_file = Some(ca);
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let stream = tokio_rustls::TlsAcceptor::from(tls)
@@ -279,11 +283,12 @@ async fn doh_authenticated_and_edns_preserved() {
         while connection.accept().await.is_some() {}
     });
     assert_eq!(
-        Client::from_config(&config)
+        client(&config)
             .unwrap()
             .exchange(&query())
             .await
             .unwrap()
+            .message
             .id,
         123
     );
@@ -303,7 +308,7 @@ async fn doq_authenticated_preserves_edns_except_prohibited_keepalive() {
         vec![format!("quic://{}", endpoint.local_addr().unwrap())],
         Mode::Weighted,
     );
-    config.upstreams.as_mut().unwrap().ca_file = Some(ca);
+    config.upstreams.ca_file = Some(ca);
     let task = tokio::spawn(async move {
         let connection = endpoint.accept().await.unwrap().await.unwrap();
         for _ in 0..2 {
@@ -323,10 +328,10 @@ async fn doq_authenticated_preserves_edns_except_prohibited_keepalive() {
         .unwrap()
         .options_mut()
         .insert(EdnsOption::Unknown(11, Vec::new()));
-    let client = Client::from_config(&config).unwrap();
+    let client = client(&config).unwrap();
     let (first, second) = tokio::join!(client.exchange(&q), client.exchange(&q));
-    assert_eq!(first.unwrap().id, 123);
-    assert_eq!(second.unwrap().id, 123);
+    assert_eq!(first.unwrap().message.id, 123);
+    assert_eq!(second.unwrap().message.id, 123);
     drop(client);
     task.await.unwrap();
 }
@@ -344,7 +349,7 @@ async fn bootstrap_resolved_self_loop_is_rejected_before_dns_send() {
         Mode::Weighted,
     );
     config.listen = listener.local_addr().unwrap();
-    config.upstreams.as_mut().unwrap().bootstrap = vec![bootstrap.local_addr().unwrap()];
+    config.upstreams.bootstrap = vec![bootstrap.local_addr().unwrap()];
     let task = tokio::spawn(async move {
         let mut bytes = [0; 65535];
         let (n, peer) = bootstrap.recv_from(&mut bytes).await.unwrap();
@@ -361,7 +366,7 @@ async fn bootstrap_resolved_self_loop_is_rejected_before_dns_send() {
             .unwrap();
     });
     assert!(
-        Client::from_config(&config)
+        client(&config)
             .unwrap()
             .exchange(&query())
             .await
@@ -395,13 +400,7 @@ async fn encrypted_upstreams_reject_untrusted_certificate() {
                     .is_err()
             );
         });
-        assert!(
-            Client::from_config(&config)
-                .unwrap()
-                .exchange(&query())
-                .await
-                .is_err()
-        );
+        assert!(client(&config).unwrap().exchange(&query()).await.is_err());
         task.await.unwrap();
     }
 }
@@ -416,7 +415,7 @@ async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
         vec![format!("udp://resolver.test:{}", address.port())],
         Mode::Weighted,
     );
-    config.upstreams.as_mut().unwrap().bootstrap = vec![bootstrap_address];
+    config.upstreams.bootstrap = vec![bootstrap_address];
     let task = tokio::spawn(async move {
         for _ in 0..2 {
             let mut bytes = [0; 65535];
@@ -449,7 +448,7 @@ async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
             .is_err()
         );
     });
-    let client = Client::from_config(&config).unwrap();
+    let client = client(&config).unwrap();
     for _ in 0..2 {
         client.exchange(&query()).await.unwrap();
     }
@@ -461,12 +460,12 @@ async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
 fn rejects_direct_bootstrap_and_mapped_self_loops() {
     for server in ["udp://127.0.0.1:1053", "tcp://[::ffff:127.0.0.1]:1053"] {
         let config = config(vec![server.into()], Mode::Weighted);
-        assert!(Client::from_config(&config).is_err());
+        assert!(client(&config).is_err());
     }
     let mut config = config(vec!["udp://resolver.test".into()], Mode::Weighted);
     config.listen = "0.0.0.0:1053".parse().unwrap();
-    config.upstreams.as_mut().unwrap().bootstrap = vec!["127.0.0.1:1053".parse().unwrap()];
-    assert!(Client::from_config(&config).is_err());
+    config.upstreams.bootstrap = vec!["127.0.0.1:1053".parse().unwrap()];
+    assert!(client(&config).is_err());
 }
 
 #[tokio::test]
@@ -480,8 +479,8 @@ async fn parallel_extra_budget_is_released_when_caller_cancels() {
         ],
         Mode::Parallel,
     );
-    config.upstreams.as_mut().unwrap().max_extra_inflight = 1;
-    let client = Client::from_config(&config).unwrap();
+    config.upstreams.max_extra_inflight = 1;
+    let client = client(&config).unwrap();
     for _ in 0..2 {
         let clone = client.clone();
         let task = tokio::spawn(async move { clone.exchange(&query()).await });
@@ -516,7 +515,7 @@ async fn parallel_refused_formerr_notimp_wait_for_valid_answer() {
             ],
             Mode::Parallel,
         );
-        let client = Client::from_config(&config).unwrap();
+        let client = client(&config).unwrap();
         let task = tokio::spawn(async move { client.exchange(&query()).await.unwrap() });
         let mut bytes = [0; 65535];
         let (n, peer) = a.recv_from(&mut bytes).await.unwrap();
@@ -528,7 +527,10 @@ async fn parallel_refused_formerr_notimp_wait_for_valid_answer() {
         let (n, peer) = b.recv_from(&mut bytes).await.unwrap();
         let response = verify_forwarded(Message::from_vec(&bytes[..n]).unwrap(), &query());
         b.send_to(&response.to_vec().unwrap(), peer).await.unwrap();
-        assert_eq!(task.await.unwrap().response_code, ResponseCode::NoError);
+        assert_eq!(
+            task.await.unwrap().message.response_code,
+            ResponseCode::NoError
+        );
     }
 }
 
@@ -541,7 +543,7 @@ async fn doh_rejects_redirect_wrong_content_type_and_oversize_body() {
             vec![format!("https://{}", listener.local_addr().unwrap())],
             Mode::Weighted,
         );
-        config.upstreams.as_mut().unwrap().ca_file = Some(ca);
+        config.upstreams.ca_file = Some(ca);
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let stream = tokio_rustls::TlsAcceptor::from(tls)
@@ -573,7 +575,7 @@ async fn doh_rejects_redirect_wrong_content_type_and_oversize_body() {
         });
         let result = timeout(
             Duration::from_secs(2),
-            Client::from_config(&config).unwrap().exchange(&query()),
+            client(&config).unwrap().exchange(&query()),
         )
         .await
         .unwrap();
@@ -707,11 +709,11 @@ async fn h3_preferred_reuses_connection_concurrently_preserves_edns_and_closes_o
         vec![format!("https://{}", endpoint.local_addr().unwrap())],
         Mode::Weighted,
     );
-    let settings = config.upstreams.as_mut().unwrap();
+    let settings = &mut config.upstreams;
     settings.ca_file = Some(ca);
     settings.prefer_h3 = true;
     let server = tokio::spawn(serve_h3(endpoint, 0));
-    let client = Client::from_config(&config).unwrap();
+    let client = client(&config).unwrap();
     let q = query();
     let (a, b, c) = tokio::join!(
         client.exchange(&q),
@@ -719,7 +721,7 @@ async fn h3_preferred_reuses_connection_concurrently_preserves_edns_and_closes_o
         client.exchange(&q)
     );
     for response in [a, b, c] {
-        assert_eq!(response.unwrap().id, 123);
+        assert_eq!(response.unwrap().message.id, 123);
     }
     drop(client);
     assert_eq!(
@@ -748,22 +750,23 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
     });
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
     config.query_timeout_ms = 80;
-    let settings = config.upstreams.as_mut().unwrap();
+    let settings = &mut config.upstreams;
     settings.ca_file = Some(ca);
     settings.prefer_h3 = true;
     let server = tokio::spawn(serve_h2(listener, tls, 2));
-    let client = Client::from_config(&config).unwrap();
+    let client = client(&config).unwrap();
     let start = tokio::time::Instant::now();
     assert_eq!(
         timeout(Duration::from_secs(2), client.exchange(&query()))
             .await
             .unwrap()
             .unwrap()
+            .message
             .id,
         123
     );
     assert!(start.elapsed() >= Duration::from_millis(40));
-    assert_eq!(client.exchange(&query()).await.unwrap().id, 123);
+    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
     assert_eq!(
         peers.lock().unwrap().len(),
         1,
@@ -780,13 +783,9 @@ async fn h3_preference_off_uses_h2_without_quic_packets() {
     let address = listener.local_addr().unwrap();
     let udp = UdpSocket::bind(address).await.unwrap();
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
-    config.upstreams.as_mut().unwrap().ca_file = Some(ca);
+    config.upstreams.ca_file = Some(ca);
     let server = tokio::spawn(serve_h2(listener, tls, 1));
-    Client::from_config(&config)
-        .unwrap()
-        .exchange(&query())
-        .await
-        .unwrap();
+    client(&config).unwrap().exchange(&query()).await.unwrap();
     assert!(
         timeout(Duration::from_millis(20), udp.recv_from(&mut [0; 1500]))
             .await
@@ -815,11 +814,11 @@ async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
         );
     });
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
-    config.upstreams.as_mut().unwrap().prefer_h3 = true;
+    config.upstreams.prefer_h3 = true;
     assert!(
         timeout(
             Duration::from_secs(2),
-            Client::from_config(&config).unwrap().exchange(&query())
+            client(&config).unwrap().exchange(&query())
         )
         .await
         .unwrap()
@@ -843,15 +842,16 @@ async fn h3_invalid_response_falls_back_to_verified_h2() {
         let quic_server = tokio::spawn(serve_h3(endpoint, case));
         let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 1));
         let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
-        let settings = config.upstreams.as_mut().unwrap();
+        let settings = &mut config.upstreams;
         settings.ca_file = Some(ca);
         settings.prefer_h3 = true;
-        let client = Client::from_config(&config).unwrap();
+        let client = client(&config).unwrap();
         assert_eq!(
             timeout(Duration::from_secs(2), client.exchange(&query()))
                 .await
                 .unwrap()
                 .unwrap()
+                .message
                 .id,
             123,
             "case {case}"
@@ -876,14 +876,19 @@ async fn h3_valid_dns_failure_is_not_a_transport_failure() {
         vec![format!("https://{}", endpoint.local_addr().unwrap())],
         Mode::Weighted,
     );
-    let settings = config.upstreams.as_mut().unwrap();
+    let settings = &mut config.upstreams;
     settings.ca_file = Some(ca);
     settings.prefer_h3 = true;
     let server = tokio::spawn(serve_h3(endpoint, 10));
-    let client = Client::from_config(&config).unwrap();
+    let client = client(&config).unwrap();
     for _ in 0..2 {
         assert_eq!(
-            client.exchange(&query()).await.unwrap().response_code,
+            client
+                .exchange(&query())
+                .await
+                .unwrap()
+                .message
+                .response_code,
             ResponseCode::ServFail
         );
     }
@@ -906,7 +911,7 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
         vec![format!("https://{}", endpoint.local_addr().unwrap())],
         Mode::Weighted,
     );
-    let settings = config.upstreams.as_mut().unwrap();
+    let settings = &mut config.upstreams;
     settings.ca_file = Some(ca);
     settings.prefer_h3 = true;
     let (started, ready) = tokio::sync::oneshot::channel();
@@ -966,7 +971,7 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
         );
         connection.closed().await;
     });
-    let client = Client::from_config(&config).unwrap();
+    let client = client(&config).unwrap();
     let clone = client.clone();
     let stalled = tokio::spawn(async move { clone.exchange(&query()).await });
     timeout(Duration::from_secs(2), ready)
@@ -975,7 +980,7 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
         .unwrap();
     stalled.abort();
     assert!(stalled.await.unwrap_err().is_cancelled());
-    assert_eq!(client.exchange(&query()).await.unwrap().id, 123);
+    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
     drop(client);
     timeout(Duration::from_secs(2), server)
         .await
@@ -993,21 +998,9 @@ fn h3_listener_self_loop_is_checked_only_when_h3_is_enabled() {
             key_file: "unused.key".into(),
         },
     });
-    let settings = config.upstreams.as_mut().unwrap();
+    let settings = &mut config.upstreams;
     assert!(!settings.prefer_h3);
-    config
-        .upstreams
-        .as_ref()
-        .unwrap()
-        .validate_listeners(&config)
-        .unwrap();
-    config.upstreams.as_mut().unwrap().prefer_h3 = true;
-    assert!(
-        config
-            .upstreams
-            .as_ref()
-            .unwrap()
-            .validate_listeners(&config)
-            .is_err()
-    );
+    config.upstreams.validate_listeners(&config).unwrap();
+    config.upstreams.prefer_h3 = true;
+    assert!(config.upstreams.validate_listeners(&config).is_err());
 }

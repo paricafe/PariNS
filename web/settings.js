@@ -30,7 +30,10 @@ globalThis.PariSettings = (() => {
         field("upstreams.bootstrap", "lines", true),
         number("upstreams.max_parallel", 1, 32, true),
         number("upstreams.max_extra_inflight", 1, 65536, true),
-        field("upstreams.ca_file", "nullable")
+        field("upstreams.ca_file", "nullable"),
+        field("upstreams.dot_pool.enabled", "checkbox", true),
+        number("upstreams.dot_pool.max_connections", 1, 256, true),
+        number("upstreams.dot_pool.idle_timeout_ms", 1, 600000)
       ]),
       group("listeners", [
         field("listen", "text", true),
@@ -91,7 +94,6 @@ globalThis.PariSettings = (() => {
   };
   const defaults = { dot: { listen: "", cert_file: "", key_file: "" }, doh: { listen: "", cert_file: "", key_file: "" }, doq: { listen: "", cert_file: "", key_file: "" }, doh3: { listen: "", cert_file: "", key_file: "" } };
   const get = (object, path) => path.split(".").reduce((value, key) => value?.[key], object);
-  defaults.upstreams = { servers: [], mode: "weighted", prefer_h3: false, bootstrap: [], max_parallel: 32, max_extra_inflight: 128, ca_file: null };
   function put(object, path, value) {
     const keys = path.split(".");
     const last = keys.pop();
@@ -128,13 +130,12 @@ globalThis.PariSettings = (() => {
     I.bind(node, key);
     return node;
   }
-  function render(container, settings, onChange, legacyUpstream = false) {
+  function render(container, settings, onChange) {
     container.replaceChildren();
     for (const [page, descriptor] of Object.entries(pages)) {
       const section = create("section"); section.id = `settings-${page}`; section.hidden = true;
       for (const item of descriptor.groups) {
         const card = create("section", "panel settings-card"); card.append(translated("h2", "", item.titleKey), translated("p", "muted small", item.helpKey));
-        if (legacyUpstream && item.fields.some(entry => entry.path === "upstreams.servers")) card.append(translated("p", "notice", "settings.upstreams.migration"));
         const fieldset = create("fieldset", "settings-fields");
         const legend = translated("legend", "sr-only", item.titleKey); fieldset.append(legend);
         if (item.optional) {
@@ -190,7 +191,6 @@ globalThis.PariSettings = (() => {
         if (input.disabled) continue;
         const displayed = entry.type === "checkbox" ? String(input.checked) : input.value;
         if (!newlyEnabled && displayed === input.dataset.initialValue) continue;
-        if (entry.path.startsWith("upstreams.") && !result.upstreams) result.upstreams = structuredClone(defaults.upstreams);
         if (validate && !input.checkValidity()) {
           const validity = input.validity || {};
           const advice = entry.type === "number" && (validity.badInput || validity.stepMismatch) ? "integer"

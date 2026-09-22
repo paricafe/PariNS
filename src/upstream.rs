@@ -23,17 +23,6 @@ pub async fn exchange_tcp(query: &Message, address: SocketAddr) -> Result<Messag
     Ok(response)
 }
 
-pub async fn exchange_with_tls(
-    query: &Message,
-    address: SocketAddr,
-    tls: Option<&crate::tls::Upstream>,
-) -> Result<Message> {
-    match tls {
-        Some(client) => client.exchange(query, address).await,
-        None => exchange(query, address).await,
-    }
-}
-
 pub async fn exchange(query: &Message, address: SocketAddr) -> Result<Message> {
     let bind = if address.is_ipv4() {
         "0.0.0.0:0"

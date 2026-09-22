@@ -236,7 +236,7 @@ impl Drop for Management {
 }
 
 fn configuration() -> String {
-    "listen = \"127.0.0.1:0\"\nupstream = \"127.0.0.1:9\"\nquery_timeout_ms = 200\ntcp_io_timeout_ms = 500\nshutdown_grace_ms = 200\nmax_inflight = 16\nmax_tcp_connections = 8\n[filter]\nenabled = true\nblock_exact = [\"example.test\"]\n".to_owned()
+    "listen = \"127.0.0.1:0\"\nquery_timeout_ms = 200\ntcp_io_timeout_ms = 500\nshutdown_grace_ms = 200\nmax_inflight = 16\nmax_tcp_connections = 8\n[upstreams]\nservers = [\"127.0.0.1:9\"]\n[filter]\nenabled = true\nblock_exact = [\"example.test\"]\n".to_owned()
 }
 
 fn query(name: &str) -> Message {

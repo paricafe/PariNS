@@ -1,3 +1,5 @@
+mod common;
+
 use std::{sync::Arc, time::Duration};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -97,8 +99,7 @@ fn certificates() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
 async fn real_h2_tls_get_post_errors_and_shutdown() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(upstream.local_addr().unwrap());
+    config.upstreams.servers = vec![upstream.local_addr().unwrap().to_string()];
     config.ecs.enabled = true;
     let resolver = Arc::new(Resolver::from_config(&config));
     let mock = tokio::spawn(async move {
@@ -236,7 +237,7 @@ async fn incomplete_body_expires_and_shutdown_releases_admission() {
     let queries = Arc::new(Semaphore::new(1));
     let ingress = Ingress {
         source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
-        resolver: Arc::new(Resolver::new(
+        resolver: Arc::new(common::resolver(
             "127.0.0.1:9".parse().unwrap(),
             Duration::from_millis(100),
         )),
@@ -290,7 +291,7 @@ async fn incomplete_body_expires_and_shutdown_releases_admission() {
 #[tokio::test]
 async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let resolver = Arc::new(Resolver::new(
+    let resolver = Arc::new(common::resolver(
         upstream.local_addr().unwrap(),
         Duration::from_secs(10),
     ));
@@ -370,7 +371,7 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
 #[tokio::test]
 async fn h2_source_limits_cover_pre_tls_admission_and_ignore_forwarded_identity() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let resolver = Arc::new(Resolver::new(
+    let resolver = Arc::new(common::resolver(
         upstream.local_addr().unwrap(),
         Duration::from_secs(2),
     ));

@@ -118,9 +118,10 @@ session | jq -e '.setup_required == true' >/dev/null
 
 # No public DNS, certificate authorities or external APIs: blocked .invalid queries are
 # answered locally on a kernel-assigned high port, with a loopback-only upstream.
-printf '%s\n' 'listen = "127.0.0.1:0"' 'upstream = "127.0.0.1:9"' \
+printf '%s\n' 'listen = "127.0.0.1:0"' \
     'query_timeout_ms = 100' 'tcp_io_timeout_ms = 1000' 'shutdown_grace_ms = 1000' \
     'max_inflight = 16' 'max_tcp_connections = 8' \
+    '[upstreams]' 'servers = ["udp://127.0.0.1:9"]' \
     '[filter]' 'enabled = true' 'block_exact = ["ci.invalid"]' > "$fixture/candidate.toml"
 openssl rand -hex 24 | jq -Rs '{username:"ci-admin",password:rtrimstr("\n")}' > "$fixture/credentials.json"
 jq --rawfile toml "$fixture/candidate.toml" '. + {toml:$toml}' "$fixture/credentials.json" > "$fixture/setup.json"

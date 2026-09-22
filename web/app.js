@@ -159,19 +159,19 @@
     state.revision = config.revision;
     state.backup = config.has_backup;
     $("config-toml").value = config.toml;
-    installSettings(parsed.settings, parsed.legacy_upstream);
+    installSettings(parsed.settings);
     $("diff-panel").hidden = true;
     updateEditorState();
   }
 
-  function installSettings(settings, legacyUpstream = false) {
+  function installSettings(settings) {
     state.settings = settings; state.formDirty = false; state.settingsStale = false;
     const changed = () => {
       state.formDirty = true;
       $("diff-panel").hidden = true;
       updateEditorState();
     };
-    S.render($("settings-forms"), settings, changed, legacyUpstream);
+    S.render($("settings-forms"), settings, changed);
     readCacheRules = K.rules($("cache-rules"), settings.cache.rules || [], changed);
     displaySettingsPage();
   }
@@ -197,7 +197,7 @@
     if (Object.keys(changed).length) {
       const result = await api("config/preview", "POST", { toml: $("config-toml").value, changes: changed });
       $("config-toml").value = result.toml;
-      installSettings(result.settings, result.legacy_upstream);
+      installSettings(result.settings);
     } else state.formDirty = false;
     updateEditorState();
   }
@@ -208,7 +208,7 @@
     if (view === "advanced") await syncDraft();
     else if (state.settingsStale) {
       const parsed = await api("config/parse", "POST", { toml: $("config-toml").value });
-      installSettings(parsed.settings, parsed.legacy_upstream);
+      installSettings(parsed.settings);
     }
     state.view = view; displaySettingsPage(); page("config");
   }

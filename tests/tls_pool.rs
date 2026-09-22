@@ -36,7 +36,9 @@ struct Certificate {
 
 impl Certificate {
     fn new() -> Self {
-        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let generated =
+            rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+                .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let files = TlsFiles {
             cert_file: directory.path().join("cert.pem"),
@@ -229,7 +231,7 @@ async fn sequential_clones_reuse_authenticated_connection_and_restore_each_id() 
 }
 
 #[tokio::test]
-async fn disabled_pool_and_legacy_constructor_always_open_fresh_connections() {
+async fn disabled_pool_and_default_constructor_always_open_fresh_connections() {
     let cert = Certificate::new();
     for upstream in [
         Upstream::new(&cert.settings()).unwrap(),
@@ -453,10 +455,9 @@ async fn resolver_query_deadline_includes_pool_wait_without_opening_an_extra_con
     let cert = Certificate::new();
     let mut peer = Peer::new(&cert).await;
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(peer.address);
-    config.upstream_tls = Some(cert.settings());
-    config.upstream_pool = pool(1);
+    config.upstreams.servers = vec![format!("tls://{}", peer.address)];
+    config.upstreams.ca_file = Some(cert.files.cert_file.clone());
+    config.upstreams.dot_pool = pool(1);
     config.query_timeout_ms = 100;
     config.cache.enabled = false;
     config.coalescing.enabled = false;

@@ -204,8 +204,7 @@ fn mismatched_responses_and_ambiguous_cache_scopes_are_distinct() {
 async fn refused_nonzero_ecs_retries_anonymously_once() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(upstream.local_addr().unwrap());
+    config.upstreams.servers = vec![upstream.local_addr().unwrap().to_string()];
     config.ecs.enabled = true;
     let resolver = Resolver::from_config(&config);
     let mock = tokio::spawn(async move {

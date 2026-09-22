@@ -9,7 +9,7 @@ use parins::{
     config::Config,
     ecs, protocol,
     server::Server,
-    tls::{self, ClientSettings, ListenerConfig, TlsFiles},
+    tls::{self, ListenerConfig, TlsFiles},
 };
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use tokio::{
@@ -77,8 +77,7 @@ impl Certificate {
 fn config(upstream: SocketAddr) -> Config {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     config.listen.set_port(0);
-    config.upstreams = None;
-    config.upstream = Some(upstream);
+    config.upstreams.servers = vec![upstream.to_string()];
     config.query_timeout_ms = 1000;
     config.tcp_io_timeout_ms = 1000;
     config.shutdown_grace_ms = 200;
@@ -323,6 +322,27 @@ async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext()
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream = listener.local_addr().unwrap();
     let plaintext_trap = UdpSocket::bind(upstream).await.unwrap();
+    let bootstrap = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let bootstrap_address = bootstrap.local_addr().unwrap();
+    let bootstrap_task = tokio::spawn(async move {
+        for _ in 0..4 {
+            let mut bytes = [0; 4096];
+            let (length, peer) = bootstrap.recv_from(&mut bytes).await.unwrap();
+            let query = Message::from_vec(&bytes[..length]).unwrap();
+            let mut response = protocol::error_response(&query, ResponseCode::NoError);
+            if query.queries[0].query_type() == RecordType::A {
+                response.add_answer(Record::from_rdata(
+                    query.queries[0].name().clone(),
+                    60,
+                    RData::A(A::new(127, 0, 0, 1)),
+                ));
+            }
+            bootstrap
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+    });
     let acceptor = TlsAcceptor::from(tls::server_config(&cert.files, &[b"dot"]).unwrap());
     let mock = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -337,10 +357,9 @@ async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext()
         ("wrong.test", ResponseCode::ServFail),
     ] {
         let mut config = config(upstream);
-        config.upstream_tls = Some(ClientSettings {
-            server_name: name.into(),
-            ca_file: Some(cert.files.cert_file.clone()),
-        });
+        config.upstreams.servers = vec![format!("tls://{name}:{}", upstream.port())];
+        config.upstreams.bootstrap = vec![bootstrap_address];
+        config.upstreams.ca_file = Some(cert.files.cert_file.clone());
         let server = Server::bind(config).await.unwrap();
         let address = server.local_addr().unwrap();
         let (stop, task) = run(server);
@@ -348,6 +367,7 @@ async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext()
         finish(stop, task).await;
     }
     timeout(WAIT, mock).await.unwrap().unwrap();
+    timeout(WAIT, bootstrap_task).await.unwrap().unwrap();
     assert_eq!(
         plaintext_trap.try_recv(&mut [0; 4096]).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
@@ -387,16 +407,15 @@ fn relative_runtime_paths_and_check_resolve_against_configuration_directory() {
     )
     .unwrap();
     let text = format!(
-        "filter_file = 'rules.toml'\n{}\n[dot]\nlisten = '127.0.0.1:0'\ncert_file = 'cert.pem'\nkey_file = 'key.pem'\n[upstream_tls]\nserver_name = 'localhost'\nca_file = 'cert.pem'\n",
+        "filter_file = 'rules.toml'\n{}\n[dot]\nlisten = '127.0.0.1:0'\ncert_file = 'cert.pem'\nkey_file = 'key.pem'\n",
         include_str!("../parins.example.toml")
     );
-    let mut legacy: toml::Value = toml::from_str(&text).unwrap();
-    legacy.as_table_mut().unwrap().remove("upstreams");
-    legacy.as_table_mut().unwrap().insert(
-        "upstream".into(),
-        toml::Value::String("127.0.0.1:5354".into()),
-    );
-    let text = toml::to_string(&legacy).unwrap();
+    let mut source: toml::Value = toml::from_str(&text).unwrap();
+    source["upstreams"]
+        .as_table_mut()
+        .unwrap()
+        .insert("ca_file".into(), toml::Value::String("cert.pem".into()));
+    let text = toml::to_string(&source).unwrap();
     std::fs::write(&path, text).unwrap();
     let config = Config::load(&path).unwrap();
     assert_eq!(
@@ -404,10 +423,7 @@ fn relative_runtime_paths_and_check_resolve_against_configuration_directory() {
         cert.directory.path().join("rules.toml")
     );
     assert_eq!(config.dot.unwrap().files.cert_file, cert.files.cert_file);
-    assert_eq!(
-        config.upstream_tls.unwrap().ca_file.unwrap(),
-        cert.files.cert_file
-    );
+    assert_eq!(config.upstreams.ca_file.unwrap(), cert.files.cert_file);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_parins"))
         .args(["--config", path.to_str().unwrap(), "--check"])
         .output()

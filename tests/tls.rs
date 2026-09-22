@@ -1,3 +1,5 @@
+mod common;
+
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use hickory_proto::{
@@ -7,7 +9,6 @@ use hickory_proto::{
 use parins::{
     ingress::Ingress,
     protocol,
-    resolver::Resolver,
     tls::{self, ClientSettings, TlsFiles, Upstream},
 };
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
@@ -185,7 +186,7 @@ async fn listener(
     let connections = Arc::new(Semaphore::new(slots));
     let ingress = Ingress {
         source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
-        resolver: Arc::new(Resolver::new(
+        resolver: Arc::new(common::resolver(
             "127.0.0.1:9".parse().unwrap(),
             Duration::from_millis(100),
         )),

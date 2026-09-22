@@ -36,6 +36,7 @@ pub struct Settings {
     pub max_extra_inflight: usize,
     pub ca_file: Option<PathBuf>,
     pub prefer_h3: bool,
+    pub dot_pool: crate::tls::PoolSettings,
 }
 
 impl Default for Settings {
@@ -48,12 +49,14 @@ impl Default for Settings {
             max_extra_inflight: 128,
             ca_file: None,
             prefer_h3: false,
+            dot_pool: crate::tls::PoolSettings::default(),
         }
     }
 }
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        self.dot_pool.validate()?;
         ensure!(
             (1..=32).contains(&self.servers.len()),
             "upstreams.servers requires 1..=32 entries"
@@ -257,6 +260,12 @@ fn valid_address(address: SocketAddr) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+pub struct Exchange {
+    pub message: Message,
+    pub upstream: String,
+}
+
 pub struct Pool {
     endpoints: Vec<transport::Client>,
     settings: Settings,
@@ -278,7 +287,6 @@ impl Pool {
                 transport::Client::new(
                     spec,
                     settings,
-                    &config.upstream_pool,
                     bound,
                     std::time::Duration::from_millis(config.query_timeout_ms),
                 )
@@ -293,7 +301,7 @@ impl Pool {
         })
     }
 
-    pub async fn exchange(&self, query: &Message) -> Result<crate::scheduler::Exchange> {
+    pub async fn exchange(&self, query: &Message) -> Result<Exchange> {
         if self.settings.mode == Mode::Weighted {
             // Smooth weighted round-robin: no long runs from large weights.
             let index = {

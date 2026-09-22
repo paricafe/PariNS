@@ -16,7 +16,7 @@ use super::ClientStream;
 #[serde(default, deny_unknown_fields)]
 pub struct PoolSettings {
     pub enabled: bool,
-    /// Across both replicas and every clone of one TLS upstream profile.
+    /// Per TLS endpoint, shared across its resolved addresses and client clones.
     pub max_connections: usize,
     /// Checked on checkout, without an idle reaper task.
     pub idle_timeout_ms: u64,
@@ -36,11 +36,11 @@ impl PoolSettings {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=256).contains(&self.max_connections),
-            "upstream_pool.max_connections must be in 1..=256"
+            "upstreams.dot_pool.max_connections must be in 1..=256"
         );
         ensure!(
             (1..=600_000).contains(&self.idle_timeout_ms),
-            "upstream_pool.idle_timeout_ms must be in 1..=600000"
+            "upstreams.dot_pool.idle_timeout_ms must be in 1..=600000"
         );
         Ok(())
     }

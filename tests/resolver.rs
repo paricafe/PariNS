@@ -1,10 +1,12 @@
+mod common;
+
 use std::time::Duration;
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{Name, RData, Record, RecordType, rdata::A},
 };
-use parins::{protocol, resolver::Resolver};
+use parins::protocol;
 use tokio::net::UdpSocket;
 
 fn query(name: &str) -> Message {
@@ -28,7 +30,7 @@ fn answer(query: &Message) -> Message {
 #[tokio::test]
 async fn ignores_unrelated_responses_and_restores_client_id() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let resolver = Resolver::new(upstream.local_addr().unwrap(), Duration::from_secs(1));
+    let resolver = common::resolver(upstream.local_addr().unwrap(), Duration::from_secs(1));
     let task = tokio::spawn(async move {
         let mut buffer = [0; 4096];
         let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
@@ -74,7 +76,7 @@ async fn ignores_unrelated_responses_and_restores_client_id() {
 #[tokio::test]
 async fn silent_upstream_returns_servfail_within_deadline() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let resolver = Resolver::new(upstream.local_addr().unwrap(), Duration::from_millis(40));
+    let resolver = common::resolver(upstream.local_addr().unwrap(), Duration::from_millis(40));
     let request = query("timeout.test.").to_vec().unwrap();
     let reply = tokio::time::timeout(
         Duration::from_secs(1),
@@ -90,7 +92,7 @@ async fn silent_upstream_returns_servfail_within_deadline() {
 #[tokio::test]
 async fn concurrent_identical_ids_do_not_cross_queries() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let resolver = Resolver::new(upstream.local_addr().unwrap(), Duration::from_secs(1));
+    let resolver = common::resolver(upstream.local_addr().unwrap(), Duration::from_secs(1));
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
         let mut buffer = [0; 4096];

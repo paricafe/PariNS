@@ -42,8 +42,7 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
             .unwrap();
     });
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(address);
+    config.upstreams.servers = vec![address.to_string()];
     config.ecs.enabled = true;
     config.query_log.enabled = true;
     config.filter = toml::from_str("enabled = true\nblock_suffix = ['blocked.test']").unwrap();
@@ -142,8 +141,7 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
 async fn response_detail_is_bounded_and_inflight_clear_does_not_refill() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(socket.local_addr().unwrap());
+    config.upstreams.servers = vec![socket.local_addr().unwrap().to_string()];
     config.query_log.enabled = true;
     config.ecs.enabled = false;
     let resolver = Resolver::from_config(&config);
@@ -207,8 +205,7 @@ async fn stale_fallback_records_actual_failed_exchange_and_cached_answer() {
             .unwrap();
     });
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(address);
+    config.upstreams.servers = vec![address.to_string()];
     config.query_log.enabled = true;
     config.ecs.enabled = false;
     config.cache.stale.enabled = true;
@@ -252,8 +249,7 @@ async fn servfail_and_timeout_keep_trace_factual() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(address);
+    config.upstreams.servers = vec![address.to_string()];
     config.query_log.enabled = true;
     config.ecs.enabled = true;
     config.query_timeout_ms = 30;
@@ -303,8 +299,7 @@ async fn servfail_and_timeout_keep_trace_factual() {
 async fn cancelled_foreground_is_logged_once_unless_cleared_while_pending() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.upstreams = None;
-    config.upstream = Some(socket.local_addr().unwrap());
+    config.upstreams.servers = vec![socket.local_addr().unwrap().to_string()];
     config.query_log.enabled = true;
     let resolver = std::sync::Arc::new(Resolver::from_config(&config));
     for clear in [false, true] {

@@ -1,0 +1,20 @@
+examples/bench_cache.rs
+  s_aa37914330e67a::t_fc0a7e22d083ce 1-151
+  s_aa37914330e67a::t_8c7e5306d42d16 152-273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1a5f809a3d0cc3c2b9cc147fa689c444ec6bb6b5",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

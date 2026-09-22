@@ -14,8 +14,9 @@ provider or hosted service.
 - **DNS transports:** UDP, TCP, DoT, DoH over HTTP/2 and HTTP/3, and DoQ listeners.
 - **Upstream forwarding:** UDP with TCP fallback, or authenticated DoT with
   optional bounded connection reuse and equivalent-replica hedging.
-- **Subnet-aware caching:** independent ECS subnet answers, TTL and negative
-  caching, bounded LRU eviction, and in-flight request coalescing. ECS is opt-in.
+- **Subnet-aware caching:** concurrent shards, independent ECS variants,
+  positive/negative budgets, domain policies, optional prefetch and failure-only
+  stale answers, and in-flight request coalescing. ECS is opt-in.
 - **Local filtering:** exact-name and suffix rules, allow exceptions, and CNAME
   response checks; no external rule service is required.
 - **Web management:** first-run setup, administrator authentication, visual
@@ -30,6 +31,10 @@ provider or hosted service.
 Early release (v0.1.0). The features above are implemented, with automated Linux and
 macOS tests and isolated Linux systemd installation checks. Production deployment
 and target-machine capacity acceptance have not been performed.
+
+The expanded cache controls described below are **unreleased changes on main**,
+not part of the v0.1.0 download. Build from source to try them; the one-click
+installer continues to install the latest published release.
 
 PariNS forwards to existing resolvers; it is not an authoritative DNS server or
 a standalone iterative resolver, and does not perform DNSSEC validation. DNS
@@ -219,8 +224,10 @@ History is sampled once per minute, bounded to 1440 points in memory, and cleare
 when the management process restarts. DNS instance restarts appear as gaps rather
 than negative rates. No query names or client IPs are collected for these charts;
 there are no per-domain/client rankings or query logs.
-Applying a configuration drains/restarts DNS and clears its in-memory cache and
-metrics; it is not zero-downtime reload. Binding or persistence failures restore
+Changing only the cache section publishes new cache/refresh state without
+restarting DNS listeners or resetting instance metrics; existing cache contents
+are deliberately cleared. Other changes, and reapplying an unchanged document,
+drain/restart DNS and clear cache/metrics. Binding or persistence failures restore
 the prior configuration when possible, and an unavailable DNS instance is shown
 as an error. Stale edits are rejected by revision; after a disconnected save,
 reload the current configuration to determine its result before retrying.
@@ -348,13 +355,25 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
 
 - Each normalized name/type/class and DO/CD/RD/EDNS combination owns separate
   subnet answers. The longest covering upstream **scope** wins, provided the
-  query's source prefix is sufficient. Different subnets cannot overwrite one
-  another. IPv4, IPv6, no-ECS, and explicit privacy `/0` are isolated; a normal
+  query's source prefix is sufficient. Disjoint subnets cannot overwrite one
+  another. Successful responses conservatively replace overlapping scopes so a
+  superseded broad answer cannot revive after a narrow answer expires, even when
+  the new response has TTL zero or cannot be admitted. This can cause neighboring
+  clients to miss a previously broad entry. IPv4, IPv6, no-ECS, and privacy `/0`
+  are isolated; a normal
   scope `/0` answer may be shared across ordinary queries of its address family.
-- Defaults: 4096 answers, 8 MiB of serialized-answer and key bytes, 64 subnet
-  variants per query. These are configurable under `[cache]`; the byte limit is
-  not an RSS limit. Eviction is LRU across query buckets and within each bucket.
-  Each resolver instance owns its cache and immutable upstream configuration.
+- Defaults: 4096 answers, 8 MiB charged bytes, 64 subnet variants per query,
+  four concurrent shards and a 20% negative-cache reservation. Each shard has
+  separate positive/negative entry and byte budgets; unused partitions are not
+  borrowed. Tiny capacities can round negative capacity down to zero. Eviction
+  removes individual variants, not entire query buckets. Negative churn cannot
+  evict positive entries. Serialized response decoding and TTL restoration run
+  outside the shard lock.
+- Byte charge includes serialized data and conservative per-entry metadata,
+  including entries temporarily retained by readers after eviction. It is not
+  process RSS: allocator slack and empty index capacity are not tracked. Fixed
+  shard partitions may reach capacity before the aggregate limit. Resolver/cache
+  generations never share entries across upstream configurations.
 - This is a whole-response cache, not an RRset cache. All section TTLs age;
   the earliest RR expiry invalidates the answer. Positive TTLs are capped at
   3600 seconds by default. NXDOMAIN/NODATA require a covering SOA and use the
@@ -366,7 +385,57 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   caching. Non-ECS EDNS options (including cookies) also bypass caching to avoid
   replaying client-specific state.
 - Hits restore the current request's ID/question and original ECS, with aged
-  TTLs and normalized EDNS. There is no stale serving, prefetch or persistence.
+  TTLs and normalized EDNS. There is no disk persistence or local DNSSEC validation.
+- `[[cache.rules]]` selects exact names before suffixes, then most labels,
+  record-type-specific before wildcard type, then first declaration. DNS labels
+  (including escaped labels) determine boundaries; suffix includes the named
+  domain itself. Rules can bypass caching, set TTL caps and override prefetch/stale
+  defaults. No minimum TTL is forced. The global cache switch always wins.
+- Prefetch is disabled by default. Hot positive records near expiration may
+  trigger bounded, deduplicated background refresh. Limits cover concurrent work,
+  starts per second and failure backoff. Refresh tasks are cancelled on cache
+  replacement and shutdown; they do not survive their owning generation. With
+  coalescing enabled, foreground misses can join pending refreshes across expiry;
+  explicitly disabling coalescing permits independent foreground operations.
+- Stale serving is disabled by default. When enabled, normal upstream resolution
+  runs first; timeout, transport failure or SERVFAIL may fall back to a retained
+  positive answer. REFUSED, negative answers and ECS privacy-retry results are not
+  stale fallback sources. Retention and returned TTL are separate (defaults 300s
+  and 30s); this trades freshness for availability, as in
+  [RFC 8767](https://www.rfc-editor.org/rfc/rfc8767.html).
+- The cache page shows charged usage and fresh/stale/miss/bypass/eviction counters,
+  explains a name/type/outgoing-subnet/flag lookup without contacting upstream,
+  and clears all entries or an exact name/type/scope selection. Inspections are
+  bounded to 256 variants and do not affect recency or hit counts. Clearing
+  advances an epoch so older in-flight queries cannot refill cleared state;
+  new queries may repopulate it. These authenticated operations expose no query log.
+
+Example opt-in policy (also editable through the console):
+
+```toml
+[cache.prefetch]
+enabled = true
+min_hits = 3
+remaining_percent = 10
+max_inflight = 2
+rate_per_sec = 10
+backoff_secs = 5
+
+[cache.stale]
+enabled = false
+retention_secs = 300
+reply_ttl_secs = 30
+
+[[cache.rules]]
+name = "dynamic.example"
+suffix = true
+max_ttl_secs = 60
+stale = false
+
+[[cache.rules]]
+name = "uncached.example"
+bypass = true
+```
 
 ## Local filtering
 
@@ -543,12 +612,13 @@ The binary uses Tokio's multi-thread runtime, normally one worker per available
 CPU; `TOKIO_WORKER_THREADS=2` can explicitly select two workers. This is not CPU
 affinity or a memory limit. Cache and coalescing state use short shared locks;
 UDP has one receive loop followed by spawned query tasks. More workers do not
-guarantee linear scaling. Default cache byte limits account for payload/key bytes,
+guarantee linear scaling. Cache byte limits use conservative entry charges,
 not process RSS. Measure on the target machine before increasing resource budgets.
 
 ```sh
 cargo run --locked --release --example bench -- 1000 32
 cargo run --locked --release --example bench_dot -- 1000 8
+cargo run --locked --release --example bench_cache -- --seconds 1 --repeats 3
 cargo install cargo-audit --version 0.22.2 --locked
 cargo audit --deny warnings
 sh scripts/package.sh
@@ -563,6 +633,13 @@ delay. JSON includes checked answers, errors, connection/handshake counts and
 latency percentiles. Full handshakes are counted separately from TLS session
 resumption; compare repeated runs with the same query count and concurrency.
 These transport microbenchmarks are not production capacity guarantees.
+`bench_cache` separately measures hot-key, multi-key, ECS and negative churn with
+1/2/4 OS workers; fixed workloads check IDs, questions, TTLs and scopes. It reports
+sampled p99 and correctness failures. Repeat under a quiet host and compare the
+same workload (`--case Multi --workers 2` selects a case; `PARINS_BENCH_SHARDS=4`
+selects shards). Positive/negative partition changes affect hit rates, so churn
+throughput alone is not an equal-work speed comparison. These are cache operations,
+not wire DNS QPS or proof of capacity on a 2-vCPU/4-GiB VPS.
 Packaging creates a host-native archive under `target/packages`, containing no
 keys or private configuration. `deploy/parins.service` is a Linux systemd template,
 not an installed service; review paths, file permissions, firewall and source

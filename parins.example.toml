@@ -67,11 +67,35 @@ ipv6_prefix = 56
 [cache]
 enabled = true
 max_entries = 4096
-# Serialized answers + charged key bytes, not total process RSS.
+# Serialized answers + conservative entry metadata, not total process RSS.
 max_bytes = 8388608
 max_variants = 64
 max_ttl_secs = 3600
 negative_ttl_cap_secs = 300
+shards = 4
+negative_percent = 20
+
+[cache.prefetch]
+enabled = false
+min_hits = 3
+remaining_percent = 10
+max_inflight = 2
+rate_per_sec = 10
+backoff_secs = 5
+
+[cache.stale]
+enabled = false
+retention_secs = 300
+reply_ttl_secs = 30
+
+# Optional per-domain policies; exact before suffix, then most labels, qtype,
+# then first declaration. Missing optional fields inherit global cache settings.
+# [[cache.rules]]
+# name = "dynamic.example"
+# suffix = true
+# qtype = "A"
+# max_ttl_secs = 60
+# stale = false
 
 # Local ASCII names only; suffix includes the name itself and its subdomains.
 # Any matching allow wins for that name, but not for a different CNAME target.

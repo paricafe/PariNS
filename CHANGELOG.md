@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Concurrent cache shards with response construction outside shard
+  locks, individual ECS-variant LRU eviction and positive/negative budgets.
+- Domain/type policies, explicit bypass and TTL caps, opt-in bounded prefetch
+  and failure-only positive stale responses; both remain disabled by default.
+- Authenticated cache usage, lookup explanation, and exact name/type/scope or
+  whole-cache invalidation, with epochs rejecting old in-flight fills.
+- Visual rule editing and cache controls; cache-only configuration updates and
+  rollback preserve DNS listeners while replacing cache/refresh state.
+- Reproducible cache contention benchmarks and lifecycle/management regressions.
+
+Byte accounting now includes conservative per-entry metadata; the same byte
+budget may hold fewer responses. Budgets are partitioned, not a process RSS cap.
+No new release is published by this change.
+
 ## v0.1.0 — 2026-09-22
 
 First public release of PariNS, a self-hosted caching and filtering DNS forwarder.

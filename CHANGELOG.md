@@ -4,6 +4,14 @@
 
 - Split encrypted DNS listener forms into listening address and port fields,
   preserving IPv6, unsaved input and the existing `listen` configuration format.
+- Isolate management login/setup attempt limits by socket peer, with bounded
+  source tracking and a separate password-hashing concurrency budget.
+- Invalidate overlapping obsolete cached answers when a new successful response
+  carries EDE diagnostics, without caching those diagnostics for replay.
+- Account for HTTP Age in DoH HTTP/2 and HTTP/3 answers and cache lifetimes.
+- Keep in-flight DoQ queries alive when bootstrap rotates an upstream address.
+- Preserve invalid cache-rule TTL drafts instead of treating incomplete numeric
+  input as clearing an override; focus the affected field with a translated error.
 
 ## v0.1.1 — 2026-09-22
 

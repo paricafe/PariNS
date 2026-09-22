@@ -57,6 +57,8 @@ Console translations live in `web/locales-*.js`; `web/i18n.js` updates text and
 accessible labels in place. Language changes must preserve controls, drafts and
 session ownership. Persist only the locale preference, never credentials or drafts.
 Keep both languages complete; configuration values and raw diagnostics stay intact.
+Read native numeric-control validity before interpreting an empty value as an
+optional override; incomplete edits must remain drafts and identify their field.
 
 ## DNS and cache invariants
 
@@ -72,6 +74,8 @@ Keep both languages complete; configuration values and raw diagnostics stay inta
 - Invalidation and cache replacement must prevent older in-flight work from
   refilling invalidated state. Newer successful answers must not resurrect older
   overlapping answers merely because the newer answer cannot be cached.
+  Known EDE diagnostics may establish supersession without being admitted for
+  cache replay; client-specific options retain their existing isolation.
 - Inspection and explanation are read-only: no upstream requests, recency changes,
   or hit-counter updates. Filtering must not contaminate cached upstream answers.
 
@@ -85,6 +89,9 @@ Keep both languages complete; configuration values and raw diagnostics stay inta
   and negative budgets; document capacity/utilization trade-offs when changing them.
 - Management mutations must retain authentication, Host/Origin checks, and relevant
   revision/epoch checks. Preserve atomic persistence and failure recovery.
+- Authentication attempt budgets use the socket peer, never forwarding headers.
+  Bound and reclaim source state separately from global password-hash concurrency;
+  blocking hash work owns its permit until it finishes, even after caller cancellation.
 - Cache-only configuration changes should not restart DNS listeners. Validate and
   persist before publishing replacement state; do not promise cache retention after
   arbitrary policy changes. Report restart requirements accurately for other changes.
@@ -102,6 +109,9 @@ Keep both languages complete; configuration values and raw diagnostics stay inta
 - H3 preference applies only to HTTPS endpoints, within the resolver deadline.
   Preserve verified H2 fallback, bounded cooldown and reusable connection ownership;
   cancelling a request must release its stream without breaking other requests.
+- DoH transports normalize HTTP Age into RR TTLs before handing answers to Resolver;
+  cache code has no HTTP policy. DoQ in-flight requests retain their endpoint owner
+  independently of the current bootstrap-address cache entry.
 - Do not change host DNS, firewall rules, certificate trust, or system services as
   a side effect of development tests. Use isolated fixtures for local acceptance.
 

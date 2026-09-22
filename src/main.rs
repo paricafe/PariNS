@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use parins::config::Config;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut path = PathBuf::from("parins.toml");
     let mut check = false;
@@ -27,10 +28,15 @@ fn main() -> Result<()> {
             _ => bail!("unknown argument: {arg}"),
         }
     }
-    let _config = Config::load(&path)?;
+    let config = Config::load(&path)?;
     if check {
         println!("configuration valid");
         return Ok(());
     }
-    bail!("DNS service is not implemented yet; use --check to validate configuration")
+    parins::server::run(config, async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("failed to wait for shutdown signal: {error}");
+        }
+    })
+    .await
 }

@@ -8,8 +8,8 @@ operate.
 
 ## Status
 
-Early development. The Rust project and startup configuration validation are
-available; the DNS forwarding service is being implemented.
+Early development. Single-upstream UDP forwarding and configuration validation
+are available. TCP support and complete lifecycle handling are in progress.
 
 ## Development
 

@@ -5,9 +5,11 @@ import fs from "node:fs";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import "./test-i18n.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-for (const file of ["settings.js", "charts.js", "session.js", "cache.js", "query-log.js"]) vm.runInThisContext(fs.readFileSync(path.join(root, "web", file), "utf8"), { filename: file });
+for (const file of ["i18n.js", "locales-console.js", "locales-settings.js", "locales-views.js", "settings.js", "charts.js", "session.js", "cache.js", "query-log.js"]) vm.runInThisContext(fs.readFileSync(path.join(root, "web", file), "utf8"), { filename: file });
+PariI18n.setLocale("zh-CN");
 const S = globalThis.PariSettings, C = globalThis.PariCharts;
 let passed = 0;
 function test(title, run) { run(); passed += 1; console.log(`ok ${passed} - ${title}`); }
@@ -90,9 +92,9 @@ test("query log renders untrusted fields as text and has distinct disabled and e
   try {
     const container = new Element("div");
     PariQueryLog.render(container, { enabled: false, entries: [] });
-    assert.match(container.children[0].textContent, /尚未启用/);
+    assert.match(container.children[0].textContent, /日志设置/);
     PariQueryLog.render(container, { enabled: true, entries: [] });
-    assert.match(container.children[0].textContent, /没有匹配/);
+    assert.match(container.children[0].textContent, /暂无匹配/);
     PariQueryLog.render(container, { enabled: true, entries: [{ id: 1, time_ms: 0, name: "<img src=x onerror=alert(1)>", qtype: "A", client: "127.0.0.1", transport: "udp", status: "success", cache: "fresh", duration_ms: 1, answer: [] }] });
     const rendered = JSON.stringify(container);
     assert.ok(rendered.includes("<img src=x onerror=alert(1)>"));
@@ -177,7 +179,20 @@ await asyncTest("a current 401 clears only the session that made the request", a
 await asyncTest("authorization is captured at dispatch and conflicts keep the session", async () => {
   let sent;
   const client = P.createClient({ fetcher: async (_path, options) => { sent = options.headers.Authorization; return response(409, {}); } });
-  client.setToken("current"); await assert.rejects(client.request("config", "PUT", {}), /配置版本已变化/);
+  client.setToken("current"); await assert.rejects(client.request("config", "PUT", {}), /配置已更新/);
   assert.equal(sent, "Bearer current"); assert.equal(client.token, "current");
+});
+await asyncTest("API errors use stable codes and follow the selected language", async () => {
+  for (const [code, status] of [["LOGIN_FAILED", 401], ["BUSY", 409], ["CACHE_EPOCH", 409], ["INVALID_CONFIG", 422]]) {
+    const client = P.createClient({ fetcher: async () => response(status, { error: { code, message: "technical detail" } }) });
+    PariI18n.setLocale("en");
+    let failure;
+    try { await client.request("config"); } catch (error) { failure = error; }
+    assert.equal(failure.key, `api.${code}`);
+    assert.doesNotMatch(failure.message, /[\u3400-\u9fff]/u);
+    PariI18n.setLocale("zh-CN");
+    assert.match(PariI18n.t(failure.key, failure.params), /[\u3400-\u9fff]/u);
+    if (code === "INVALID_CONFIG") assert.ok(PariI18n.t(failure.key, failure.params).includes("technical detail"));
+  }
 });
 console.log(`Passed ${passed} web contract tests.`);

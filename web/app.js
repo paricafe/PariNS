@@ -2,7 +2,16 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const S = PariSettings, C = PariCharts;
+  const I = PariI18n, S = PariSettings, C = PariCharts;
+  const message = (key, params) => ({ key, params });
+  const display = (value) => value?.key ? I.t(value.key, value.params) : I.messages[value] ? I.t(value) : String(value ?? "");
+  function text(id, value) {
+    const node = $(id);
+    if (value?.key) I.bind(node, value.key, value.params);
+    else if (I.messages[value]) I.bind(node, value);
+    else { I.clear(node); node.textContent = value?.message || value || ""; }
+  }
+  let lastStatus = null, lastStatusTime = null;
   const K = PariCache;
   let logPage = null, logRevision = null, logFilter = { search: "", status: null };
   let readCacheRules = () => [], cacheStatus = null, cacheInspection = null, inspectedQuery = null;
@@ -19,7 +28,7 @@
   function changeSession(token) { session.setToken(token); clearStatistics(); }
 
   function notice(message, error = false) {
-    $("notice").textContent = message;
+    text("notice", message);
     $("notice").classList.toggle("error", error);
     $("notice").hidden = !message;
   }
@@ -35,17 +44,17 @@
       if (active) $(`nav-${view}`).setAttribute("aria-current", "page");
       else $(`nav-${view}`).removeAttribute("aria-current");
     }
-    $("page-context").textContent = `管理台 / ${{ loading: "连接服务", setup: "首次初始化", login: "登录", overview: "仪表盘", logs: "查询日志", config: S.pages[state.view]?.title || "高级配置" }[name]}`;
+    text("page-context", message("app.context", () => ({ page: display({ loading: "app.connecting", setup: "app.setup", login: "app.login", overview: "app.overview", logs: "app.logs", config: S.pages[state.view]?.title || "app.advanced" }[name]) })));
     if (focus) focusAfterAction("main");
   }
 
   function updateEditorState() {
     state.dirty = state.formDirty || $("config-toml").value !== state.original;
-    $("edit-state").textContent = state.dirty ? "有未保存修改" : "未修改";
+    text("edit-state", state.dirty ? "app.dirty" : "app.saved");
     $("save-config").disabled = state.busy || state.revision === null;
-    $("save-config").textContent = state.dirty ? "保存并应用" : "重新应用当前配置";
+    text("save-config", state.dirty ? "app.save" : "app.reapply");
     $("rollback-config").disabled = state.busy || !state.backup;
-    $("config-revision").textContent = state.revision === null ? "" : `· 版本 ${state.revision}`;
+    text("config-revision", state.revision === null ? "" : message("app.revision", { revision: state.revision }));
   }
 
   async function action(work) {
@@ -54,8 +63,8 @@
     $("main").inert = true;
     $("navigation").inert = true;
     $("main").setAttribute("aria-busy", "true");
-    notice("正在处理，请稍候…");
-    try { await work(); } catch (error) { if (!PariSession.isStale(error)) notice(error.message || "无法连接管理服务，请稍后重试。", true); }
+    notice("app.working");
+    try { await work(); } catch (error) { if (!PariSession.isStale(error)) notice(error.key ? error : error.message || "app.offline", true); }
     finally {
       $("main").inert = false;
       $("navigation").inert = false;
@@ -68,9 +77,9 @@
   }
 
   function confirmAction(title, description, label, work) {
-    $("confirm-title").textContent = title;
-    $("confirm-description").textContent = description;
-    $("confirm-action").textContent = label;
+    text("confirm-title", title);
+    text("confirm-description", description);
+    text("confirm-action", label);
     const dialog = $("confirm-dialog");
     dialog.returnValue = "cancel";
     dialog.addEventListener("close", () => { if (dialog.returnValue === "confirm") void action(work); }, { once: true });
@@ -89,7 +98,7 @@
       } else page("login");
       notice("");
     } catch (error) {
-      notice(error.message || "无法连接管理服务。请确认 PariNS 正在运行。", true);
+      notice(error.key ? error : error.message || "app.startFailed", true);
       $("retry-start").hidden = false;
     } finally { $("loading-panel").setAttribute("aria-busy", "false"); }
   }
@@ -121,7 +130,7 @@
     for (const [key, value] of [["listen", listen], ["upstream", upstream]]) {
       const matches = [];
       for (let index = 0; index < end; index += 1) if (new RegExp(`^\\s*${key}\\s*=`).test(lines[index])) matches.push(index);
-      if (matches.length !== 1) throw new Error(`配置模板的顶层 ${key} 不唯一，无法安全生成配置。`);
+      if (matches.length !== 1) throw new I.MessageError("app.templateInvalid", { key });
       lines[matches[0]] = `${key} = ${JSON.stringify(value)}`;
     }
     return lines.join("\n");
@@ -131,15 +140,15 @@
     notice("");
     if (!$("setup-form").reportValidity()) return;
     if (state.step === 0 && $("setup-password").value !== $("setup-confirm").value) {
-      notice("两次输入的密码不一致。", true); $("setup-confirm").focus(); return;
+      notice("app.passwordMismatch", true); $("setup-confirm").focus(); return;
     }
     if (state.step === 1) {
       const listen = $("setup-listen").value.trim();
       const upstream = $("setup-upstream").value.trim();
-      if (!socketAddress(listen) || !socketAddress(upstream)) { notice("监听地址和上游地址必须使用 IP:端口；IPv6 地址请加方括号。", true); return; }
-      if (listen === upstream) { notice("上游不能指向自己的监听地址。", true); return; }
+      if (!socketAddress(listen) || !socketAddress(upstream)) { notice("app.addressFormat", true); return; }
+      if (listen === upstream) { notice("app.selfUpstream", true); return; }
       try { $("setup-toml").value = networkTemplate(state.template, listen, upstream); }
-      catch (error) { notice(error.message, true); return; }
+      catch (error) { notice(error, true); return; }
     }
     showStep(state.step + 1);
   });
@@ -152,7 +161,7 @@
       changeSession(result.token);
       for (const id of ["setup-token", "setup-password", "setup-confirm"]) $(id).value = "";
       await enterConsole();
-      notice("初始化已保存。请在运行概览确认 DNS 状态；系统 DNS 设置未修改。");
+      notice("app.setupSaved");
     });
   });
 
@@ -189,8 +198,8 @@
     $("certificate-import-panel").hidden = state.view !== "security";
     $("cache-tools").hidden = state.view !== "cache";
     $("cache-rules-panel").hidden = state.view !== "cache";
-    $("config-title").textContent = S.pages[state.view]?.title || "高级配置";
-    $("config-intro").textContent = S.pages[state.view]?.intro || "直接编辑完整 TOML。服务端负责解析与校验，未保存内容只留在当前页面。";
+    text("config-title", S.pages[state.view]?.titleKey || "app.advanced");
+    text("config-intro", S.pages[state.view]?.introKey || "app.advancedIntro");
   }
 
   async function syncDraft() {
@@ -218,30 +227,31 @@
   }
 
   function unavailable() {
+    lastStatus = null; lastStatusTime = null;
     cacheStatus = null; cacheInspection = null; inspectedQuery = null;
     K.renderStats($("cache-stats"), null, null);
     $("cache-clear-all").disabled = true; $("cache-clear-name").disabled = true;
-    $("cache-inspection").replaceChildren();
-    $("service-badge").textContent = "连接中断"; $("service-badge").classList.add("stopped");
-    $("service-title").textContent = "无法获取最新状态";
-    $("service-detail").textContent = "请检查管理服务与网络连接。历史草稿仍保留，旧统计不会显示为在线状态。";
-    for (const id of ["metric-requests", "metric-blocked", "metric-cache", "metric-latency", "metric-inflight", "metric-failures", "status-listen", "status-uptime"]) $(id).textContent = "—";
+    I.clear($("cache-inspection")); $("cache-inspection").replaceChildren();
+    text("service-badge", "app.disconnected"); $("service-badge").classList.add("stopped");
+    text("service-title", "app.statusUnavailable");
+    text("service-detail", "app.connectionHelp");
+    for (const id of ["metric-requests", "metric-blocked", "metric-cache", "metric-latency", "metric-inflight", "metric-failures", "status-listen", "status-uptime"]) text(id, "—");
     $("activity-chart").replaceChildren();
-    const note = document.createElement("p"); note.className = "chart-empty"; note.textContent = "统计暂时不可用，恢复连接后自动更新。"; $("activity-chart").append(note);
+    const note = document.createElement("p"); note.className = "chart-empty"; I.bind(note, "app.statsUnavailable"); $("activity-chart").append(note);
     C.table($("response-chart"), [], true); C.table($("latency-chart"), [], true);
     state.statsUpdated = 0;
   }
 
   function clearStatistics() {
     logPage = null; logRevision = null;
-    $("logs-results").replaceChildren(); $("logs-summary").textContent = "尚未读取日志。";
+    $("logs-results").replaceChildren(); text("logs-summary", "app.logsUnread");
     $("logs-next").disabled = true; $("logs-clear").disabled = true;
     $("certificate-pem").value = ""; $("private-key-pem").value = "";
     state.samples = []; state.statsUpdated = 0;
     unavailable();
-    $("status-revision").textContent = "—";
-    $("last-updated").textContent = "尚未刷新";
-    $("service-error").textContent = ""; $("service-error").hidden = true;
+    text("status-revision", "—");
+    text("last-updated", "app.notUpdated");
+    text("service-error", ""); $("service-error").hidden = true;
   }
 
   async function status() {
@@ -261,37 +271,44 @@
   }
 
   function renderStatus(data) {
+    lastStatus = data; lastStatusTime = Date.now();
     cacheStatus = data.running ? data : null;
     K.renderStats($("cache-stats"), data.running ? data.cache : null, data.refresh);
     $("cache-clear-all").disabled = !cacheStatus?.cache;
     if (cacheInspection && (cacheInspection.revision !== data.revision || cacheInspection.epoch !== data.cache?.epoch)) {
       cacheInspection = null; inspectedQuery = null; $("cache-clear-name").disabled = true;
-      $("cache-inspection").textContent = "缓存策略或失效代次已改变，请重新检查。";
+      text("cache-inspection", "app.cacheChanged");
     }
-    $("service-badge").textContent = data.running ? "正在运行" : "未运行";
+    text("service-badge", data.running ? "app.running" : "app.stopped");
     $("service-badge").classList.toggle("stopped", !data.running);
-    $("service-title").textContent = data.running ? "DNS 服务已启动" : "DNS 服务尚未就绪";
-    $("service-detail").textContent = data.running ? "服务正在接受请求。运行状态不代表上游网络一定可达。" : "请查看下方错误或检查配置；管理台仍可用于修正设置。";
-    $("status-revision").textContent = String(data.revision);
-    $("service-error").textContent = data.last_error || "";
+    text("service-title", data.running ? "app.started" : "app.notStarted");
+    text("service-detail", data.running ? "app.runningHelp" : "app.stoppedHelp");
+    text("status-revision", String(data.revision));
+    text("service-error", data.last_error ? message("api.INVALID_CONFIG", { detail: data.last_error }) : "");
     $("service-error").hidden = !data.last_error;
     const counters = data.running ? data.metrics?.counters : undefined;
     const format = C.format;
-    $("metric-requests").textContent = format(counters?.requests);
-    $("metric-blocked").textContent = counters ? format(counters.query_blocked + counters.response_blocked) : "—";
-    $("metric-inflight").textContent = data.running ? format(data.metrics?.request_inflight) : "—";
-    $("metric-failures").textContent = format(counters?.upstream_failures);
+    text("metric-requests", format(counters?.requests));
+    text("metric-blocked", counters ? format(counters.query_blocked + counters.response_blocked) : "—");
+    text("metric-inflight", data.running ? format(data.metrics?.request_inflight) : "—");
+    text("metric-failures", format(counters?.upstream_failures));
     const lookups = (counters?.cache_hits || 0) + (counters?.cache_misses || 0);
-    $("metric-cache").textContent = lookups ? `${((counters.cache_hits / lookups) * 100).toFixed(1)}%` : "—";
+    text("metric-cache", lookups ? `${((counters.cache_hits / lookups) * 100).toFixed(1)}%` : "—");
     const latency = data.running ? data.metrics?.request_latency : null;
-    $("metric-latency").textContent = latency?.count ? (latency.sum_micros / latency.count / 1000).toFixed(2) : "—";
-    $("status-listen").textContent = data.listen || "未配置";
+    text("metric-latency", latency?.count ? (latency.sum_micros / latency.count / 1000).toFixed(2) : "—");
+    text("status-listen", data.listen || "app.notConfigured");
     const uptime = data.uptime_seconds;
-    $("status-uptime").textContent = data.running && Number.isFinite(uptime) ? `${Math.floor(uptime / 86400)} 天 ${Math.floor(uptime / 3600) % 24} 小时 ${Math.floor(uptime / 60) % 60} 分` : "—";
-    C.table($("response-chart"), [["responses_noerror", "NOERROR · 成功"], ["responses_nxdomain", "NXDOMAIN · 不存在"], ["responses_servfail", "SERVFAIL · 失败"], ["responses_refused", "REFUSED · 拒绝"], ["responses_other", "其他响应"]].map(([key, label]) => ({ label, count: counters?.[key] || 0 })), !counters);
-    C.table($("latency-chart"), latency ? C.histogram(latency.buckets) : [], !latency);
-    $("last-updated").textContent = new Date().toLocaleTimeString("zh-CN");
+    text("status-uptime", data.running && Number.isFinite(uptime) ? message("app.uptime", { days: Math.floor(uptime / 86400), hours: Math.floor(uptime / 3600) % 24, minutes: Math.floor(uptime / 60) % 60 }) : "—");
+    renderDistributions(data);
+    text("last-updated", message("app.value", () => ({ value: I.date(lastStatusTime, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })));
     C.trend($("activity-chart"), state.samples, state.hours);
+  }
+
+  function renderDistributions(data) {
+    const counters = data.running ? data.metrics?.counters : undefined;
+    const latency = data.running ? data.metrics?.request_latency : null;
+    C.table($("response-chart"), [["responses_noerror", "app.rcodeSuccess"], ["responses_nxdomain", "app.rcodeMissing"], ["responses_servfail", "app.rcodeFailed"], ["responses_refused", "app.rcodeRefused"], ["responses_other", "app.rcodeOther"]].map(([key, label]) => ({ label: I.t(label), count: counters?.[key] || 0 })), !counters);
+    C.table($("latency-chart"), latency ? C.histogram(latency.buckets) : [], !latency);
   }
 
   async function enterConsole() {
@@ -308,7 +325,7 @@
       changeSession(result.token);
       $("login-password").value = "";
       await enterConsole();
-      notice(state.dirty ? "登录成功。此前未保存的编辑仍在配置管理中，请确认版本后再应用。" : "");
+      notice(state.dirty ? "app.resumedDraft" : "");
     });
   });
 
@@ -319,37 +336,38 @@
     while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix += 1;
     let oldEnd = oldLines.length, newEnd = newLines.length;
     while (oldEnd > prefix && newEnd > prefix && oldLines[oldEnd - 1] === newLines[newEnd - 1]) { oldEnd -= 1; newEnd -= 1; }
-    $("config-diff").textContent = state.dirty ? [`@@ 从第 ${prefix + 1} 行开始 @@`, ...oldLines.slice(prefix, oldEnd).map((line) => `− ${line}`), ...newLines.slice(prefix, newEnd).map((line) => `+ ${line}`)].join("\n") : "没有变更。";
+    const changedLines = [...oldLines.slice(prefix, oldEnd).map((line) => `− ${line}`), ...newLines.slice(prefix, newEnd).map((line) => `+ ${line}`)];
+    text("config-diff", state.dirty ? message("app.value", () => ({ value: [I.t("app.diffStart", { line: prefix + 1 }), ...changedLines].join("\n") })) : "app.noChanges");
     $("diff-panel").hidden = false;
     focusAfterAction("diff-title");
   }
 
   $("config-toml").addEventListener("input", () => { state.settingsStale = true; updateEditorState(); $("diff-panel").hidden = true; });
-  $("preview-config").addEventListener("click", () => void action(async () => { await syncDraft(); preview(); notice("变更预览已生成，尚未保存。"); }));
-  $("validate-config").addEventListener("click", () => void action(async () => { await syncDraft(); const result = await api("config/validate", "POST", { toml: $("config-toml").value }); notice(result.restart_required ? "校验通过。保存将重启 DNS 并清空缓存。" : "校验通过。保存仅切换缓存策略并清空缓存，不重启 DNS 监听。"); }));
+  $("preview-config").addEventListener("click", () => void action(async () => { await syncDraft(); preview(); notice("app.previewReady"); }));
+  $("validate-config").addEventListener("click", () => void action(async () => { await syncDraft(); const result = await api("config/validate", "POST", { toml: $("config-toml").value }); notice(result.restart_required ? "app.validRestart" : "app.validCache"); }));
   $("reload-config").addEventListener("click", () => {
-    const reload = async () => { await loadConfig(); notice("已读取最新保存配置。"); };
-    if (state.dirty) confirmAction("放弃未保存修改？", "重新加载会覆盖当前编辑内容。如需保留，请取消并先导出。", "放弃并重新加载", reload);
+    const reload = async () => { await loadConfig(); notice("app.reloaded"); };
+    if (state.dirty) confirmAction("app.discardTitle", "app.discardHelp", "app.discard", reload);
     else void action(reload);
   });
   $("save-config").addEventListener("click", () => {
     void action(async () => {
       await syncDraft(); preview(); notice("");
       const impact = await api("config/validate", "POST", { toml: $("config-toml").value });
-    confirmAction(impact.restart_required ? "保存并重启 DNS？" : "保存缓存策略？", impact.restart_required ? "配置将短暂重启 DNS，正在处理的请求可能中断，缓存将清空；旧配置保留用于回滚。" : "DNS 监听保持运行，旧缓存与后台刷新将失效；新请求使用新策略，旧配置保留用于回滚。", "保存并应用", async () => {
+    confirmAction(impact.restart_required ? "app.saveRestartTitle" : "app.saveCacheTitle", impact.restart_required ? "app.saveRestartHelp" : "app.saveCacheHelp", "app.save", async () => {
       const toml = $("config-toml").value;
       await api("config", "PUT", { toml, revision: state.revision });
       await loadConfig();
       await status();
-      notice("配置已保存。请检查运行概览，确认 DNS 已成功启动。");
+      notice("app.configSaved");
     });
     });
   });
-  $("rollback-config").addEventListener("click", () => confirmAction("回滚上一份配置？", "上一份配置将替换当前配置，缓存将清空；涉及非缓存设置时重启 DNS。未保存的编辑会被丢弃。", "确认回滚", async () => {
+  $("rollback-config").addEventListener("click", () => confirmAction("app.rollbackTitle", "app.rollbackHelp", "app.rollback", async () => {
     await api("config/rollback", "POST", { revision: state.revision });
     await loadConfig();
     await status();
-    notice("已恢复上一份配置。请检查运行概览确认启动结果。");
+    notice("app.restored");
   }));
   $("export-config").addEventListener("click", () => void action(async () => {
     await syncDraft();
@@ -357,37 +375,37 @@
     const link = document.createElement("a");
     link.href = url; link.download = "parins.toml"; document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    notice("已导出当前编辑内容，不包含管理账户或会话令牌。请妥善保管配置中的地址和路径。");
+    notice("app.exported");
   }));
   $("cache-inspect-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void action(async () => {
       cacheInspection = null; inspectedQuery = null; $("cache-clear-name").disabled = true;
-      $("cache-inspection").textContent = "正在检查…";
+      text("cache-inspection", "app.inspecting");
       const query = { name: $("cache-name").value.trim(), qtype: $("cache-qtype").value.trim(), subnet: $("cache-subnet").value.trim() || null, edns: $("cache-edns").checked, dnssec_ok: $("cache-do").checked, checking_disabled: $("cache-cd").checked, recursion_desired: $("cache-rd").checked };
       try {
         const result = await api("cache/inspect", "POST", query);
-        cacheInspection = result; inspectedQuery = query; K.renderInspection($("cache-inspection"), result);
+        cacheInspection = result; inspectedQuery = query; I.clear($("cache-inspection")); K.renderInspection($("cache-inspection"), result);
         $("cache-clear-name").disabled = false;
-        notice("检查完成；使用的是已保存配置，不是尚未保存的草稿。");
-      } catch (error) { if (!PariSession.isStale(error)) $("cache-inspection").textContent = "检查未完成，请确认查询条件后重试。"; throw error; }
+        notice("app.inspected");
+      } catch (error) { if (!PariSession.isStale(error)) text("cache-inspection", "app.inspectFailed"); throw error; }
     });
   });
   async function invalidateCache(input) {
     const result = await api("cache/invalidate", "POST", input);
     cacheInspection = null; inspectedQuery = null; $("cache-clear-name").disabled = true;
-    $("cache-inspection").textContent = "清理完成。新查询仍可重新填充缓存。";
-    await status(); notice(`已移除 ${result.removed} 个缓存变体。`);
+    text("cache-inspection", "app.cacheCleared");
+    await status(); notice(message("app.removed", () => ({ count: I.number(result.removed) })));
   }
   $("cache-clear-all").addEventListener("click", () => {
     if (!cacheStatus?.cache) return;
     const input = { all: true, revision: cacheStatus.revision, epoch: cacheStatus.cache.epoch };
-    confirmAction("清空全部缓存？", "将移除正向、否定及过期结果。旧的进行中请求不能回填；后续请求可能产生更多回源流量。DNS 监听不会停止。", "清空缓存", () => invalidateCache(input));
+    confirmAction("app.clearCacheTitle", "app.clearCacheHelp", "app.clearCache", () => invalidateCache(input));
   });
   $("cache-clear-name").addEventListener("click", () => {
     if (!cacheInspection || !inspectedQuery) return;
     const input = { name: inspectedQuery.name, qtype: inspectedQuery.qtype, scope: $("cache-clear-scope").value.trim() || null, revision: cacheInspection.revision, epoch: cacheInspection.epoch };
-    confirmAction("清理选定缓存？", `${input.name} / ${input.qtype} / ${input.scope || "所有 ECS 范围"}。包含此条件下所有 EDNS/DO/CD/RD 标志变体；其他域名保留。`, "确认清理", () => invalidateCache(input));
+    confirmAction("app.clearSelectedTitle", message("app.clearScopeHelp", () => ({ name: input.name, qtype: input.qtype, scope: input.scope || I.t("app.allScopes") })), "app.clearSelected", () => invalidateCache(input));
   });
   $("logout").addEventListener("click", () => {
     const logout = async () => {
@@ -396,26 +414,27 @@
         changeSession(null); state.original = ""; state.revision = null; state.backup = false; state.settings = null; state.formDirty = false; state.settingsStale = false;
         $("settings-forms").replaceChildren();
         $("cache-rules").replaceChildren(); readCacheRules = () => [];
-        $("config-toml").value = ""; $("config-diff").textContent = ""; updateEditorState();
+        $("config-toml").value = ""; text("config-diff", ""); updateEditorState();
         page("login");
       }
-      notice("已退出登录。");
+      notice("app.signedOut");
     };
-    if (state.dirty) confirmAction("退出并放弃修改？", "你有未保存的配置修改。退出后会清除当前草稿，请先导出需要保留的内容。", "退出登录", logout);
+    if (state.dirty) confirmAction("app.logoutTitle", "app.logoutHelp", "app.logout", logout);
     else void action(logout);
   });
   async function loadLogs(before = null) {
-    $("logs-summary").textContent = "正在读取…";
+    text("logs-summary", "app.reading");
     $("logs-next").disabled = true;
     try {
       const result = await api("query-log/list", "POST", { ...logFilter, before_id: before, limit: 50 });
       logPage = result.page; logRevision = result.revision;
       PariQueryLog.render($("logs-results"), logPage);
-      $("logs-summary").textContent = logPage.enabled ? `本页 ${logPage.entries.length} 条 · 内存保留 ${logPage.total} 条 · ${new Date().toLocaleTimeString("zh-CN")} 更新（手动刷新，不打断详情阅读）` : "记录已关闭。日志设置中的开关保存后生效。";
+      const updated = Date.now(), page = logPage;
+      text("logs-summary", page.enabled ? message("app.logSummary", () => ({ count: I.number(page.entries.length), total: I.number(page.total), time: I.date(updated, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })) : "app.logsDisabled");
       $("logs-next").disabled = !logPage.next_cursor;
       $("logs-clear").disabled = !logPage.total;
     } catch (error) {
-      if (!PariSession.isStale(error)) { logPage = null; logRevision = null; $("logs-results").replaceChildren(); $("logs-clear").disabled = true; $("logs-summary").textContent = "读取失败，请重试。"; }
+      if (!PariSession.isStale(error)) { logPage = null; logRevision = null; $("logs-results").replaceChildren(); $("logs-clear").disabled = true; text("logs-summary", "app.loadFailed"); }
       throw error;
     }
   }
@@ -425,19 +444,19 @@
   });
   $("logs-refresh").addEventListener("click", () => void action(async () => { await loadLogs(); notice(""); }));
   $("logs-next").addEventListener("click", () => { if (logPage?.next_cursor) void action(async () => { await loadLogs(logPage.next_cursor); notice(""); }); });
-  $("logs-settings").addEventListener("click", () => void action(async () => { await navigate("runtime"); focusAfterAction("setting-query_log-enabled"); notice("查询日志设置在本页首项，修改后请保存并应用。"); }));
+  $("logs-settings").addEventListener("click", () => void action(async () => { await navigate("runtime"); focusAfterAction("setting-query_log-enabled"); notice("app.logsSettingsHelp"); }));
   $("logs-clear").addEventListener("click", () => {
     if (logRevision === null) return;
     const revision = logRevision;
-    confirmAction("清空查询日志？", "将删除当前实例内存中的全部查询记录，不能恢复。新的请求仍会继续记录；需要停止记录时请关闭日志设置。", "清空日志", async () => {
-      await api("query-log/clear", "POST", { revision }); await loadLogs(); notice("查询日志已清空。");
+    confirmAction("app.clearLogsTitle", "app.clearLogsHelp", "app.clearLogs", async () => {
+      await api("query-log/clear", "POST", { revision }); await loadLogs(); notice("app.logsCleared");
     });
   });
   $("certificate-import-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void action(async () => {
       const target = $("certificate-target").value;
-      if (!$(`enable-${target}`).checked) throw new Error("请先在下方启用目标 DNS 监听器并填写监听地址。");
+      if (!$(`enable-${target}`).checked) throw new I.MessageError("app.enableListener");
       const certificate_pem = $("certificate-pem").value, private_key_pem = $("private-key-pem").value;
       // Import before validating empty certificate paths; preserve every other draft control.
       const result = await api("certificates/import", "POST", { revision: state.revision, certificate_pem, private_key_pem });
@@ -445,7 +464,7 @@
       $(`setting-${target}-cert_file`).value = result.identity.cert_file;
       $(`setting-${target}-key_file`).value = result.identity.key_file;
       state.formDirty = true; updateEditorState();
-      notice("证书与私钥匹配，已填入配置草稿。请保存并应用；客户端仍需验证证书信任、域名和有效期。");
+      notice("app.certificateImported");
     });
   });
   for (const name of ["overview", "logs", ...Object.keys(S.pages), "advanced"]) $(`nav-${name}`).addEventListener("click", () => void action(async () => { await navigate(name); notice(""); }));
@@ -462,9 +481,17 @@
   setInterval(async () => {
     if (!session.token || state.busy || state.polling || document.hidden) return;
     state.polling = true;
-    try { await status(); } catch (error) { if (!PariSession.isStale(error)) { unavailable(); notice(`状态刷新失败：${error.message}`, true); } }
+    try { await status(); } catch (error) { if (!PariSession.isStale(error)) { unavailable(); notice(message("app.statusFailed", () => ({ error: error.key ? display(error) : error.message })), true); } }
     finally { state.polling = false; }
   }, 5000);
+  $("language-select").value = I.locale;
+  $("language-select").addEventListener("change", (event) => I.setLocale(event.target.value));
+  window.addEventListener("parins:language", () => {
+    $("language-select").value = I.locale;
+    if (lastStatus) renderDistributions(lastStatus);
+    if (state.statsUpdated) C.trend($("activity-chart"), state.samples, state.hours);
+  });
+  I.apply();
   showStep(0);
   void start();
 })();

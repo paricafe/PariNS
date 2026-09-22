@@ -34,6 +34,11 @@ Keep checks at the boundary that owns them. UI validation helps users, but Rust
 validation remains authoritative. Reuse protocol and configuration helpers rather
 than implementing different rules for file mode, management APIs, and the browser.
 
+Console translations live in `web/locales-*.js`; `web/i18n.js` updates text and
+accessible labels in place. Language changes must preserve controls, drafts and
+session ownership. Persist only the locale preference, never credentials or drafts.
+Keep both languages complete; configuration values and raw diagnostics stay intact.
+
 ## DNS and cache invariants
 
 - Preserve complete query semantics when caching or coalescing. ECS address

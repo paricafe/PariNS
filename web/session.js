@@ -3,7 +3,7 @@
 // A request belongs to the session that sent it, including errors and JSON reads.
 globalThis.PariSession = (() => {
   class StaleRequest extends Error {
-    constructor() { super("会话已变更，忽略旧请求。"); this.name = "StaleRequest"; }
+    constructor() { super("Stale session request"); this.name = "StaleRequest"; }
   }
   function createClient({ fetcher = globalThis.fetch, onUnauthorized = () => {} } = {}) {
     let token = null, epoch = 0;
@@ -21,11 +21,13 @@ globalThis.PariSession = (() => {
         response = await fetcher(`/api/${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "omit", cache: "no-store", redirect: "error" });
         ensureCurrent(owner);
         data = await response.json();
-      } catch (error) { ensureCurrent(owner); throw error; }
+      } catch (error) { ensureCurrent(owner); throw new PariI18n.MessageError("api.NETWORK"); }
       ensureCurrent(owner);
       if (!response.ok) {
         if (response.status === 401 && owner.token) { setToken(null); onUnauthorized(); }
-        throw new Error(response.status === 409 ? "配置版本已变化。请先导出未保存内容，再重新加载最新配置后合并修改。" : data.error?.message || `请求失败（HTTP ${response.status}）`);
+        const code = data.error?.code;
+        const key = PariI18n.messages[`api.${code}`] ? `api.${code}` : response.status === 409 ? "api.REVISION" : "api.HTTP";
+        throw new PariI18n.MessageError(key, { status: response.status, detail: data.error?.message || "" });
       }
       return data;
     }

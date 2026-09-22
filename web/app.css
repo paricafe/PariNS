@@ -28,6 +28,10 @@ small, .small { font-size: .8rem; }
 .small-dot { display: inline-block; width: 6px; height: 6px; margin-right: .25rem; background: #86cbbc; border-radius: 50%; }
 main { min-width: 0; }
 .topbar { height: 76px; padding: 0 3rem; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 1rem; background: var(--surface); color: var(--muted); font-size: .85rem; }
+.topbar > #page-context { flex: 1; min-width: 0; }
+.language-control { margin: 0; flex-shrink: 0; }
+.language-control select { width: auto; min-height: 40px; font: inherit; }
+@media (max-width: 520px) { .topbar { height: auto; min-height: 76px; flex-wrap: wrap; padding-top: .75rem; padding-bottom: .75rem; } .topbar > #page-context { flex-basis: 100%; } }
 .content { max-width: 1200px; padding: 2.5rem 3rem; margin: 0 auto; min-height: calc(100vh - 140px); }
 .eyebrow { color: var(--accent); font-size: .7rem; letter-spacing: .14em; font-weight: 700; margin-bottom: .5rem; }
 .intro { color: var(--muted); max-width: 760px; margin-top: .75rem; margin-bottom: 1.75rem; }

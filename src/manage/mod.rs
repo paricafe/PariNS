@@ -566,6 +566,22 @@ async fn handle_inner(
                 "text/javascript; charset=utf-8",
                 include_str!("../../web/app.js"),
             )),
+            "/i18n.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/i18n.js"),
+            )),
+            "/locales-console.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/locales-console.js"),
+            )),
+            "/locales-settings.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/locales-settings.js"),
+            )),
+            "/locales-views.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_str!("../../web/locales-views.js"),
+            )),
             "/session.js" => Some((
                 "application/javascript; charset=utf-8",
                 include_str!("../../web/session.js"),

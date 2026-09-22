@@ -19,6 +19,8 @@ pub struct Config {
     pub ecs: EcsConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub filter: crate::policy::Policy,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -158,6 +160,8 @@ mod tests {
             ("127.0.0.1:5354", "0.0.0.0:5354"),
             ("127.0.0.1:5354", "resolver.example:53"),
             ("max_inflight", "max_inflght"),
+            ("block_exact = []", "block_exact = ['*.test']"),
+            ("block_suffix = []", "block_sufix = []"),
             ("ipv4_prefix = 24", "ipv4_prefix = 33"),
             ("ipv6_prefix = 56", "ipv6_prefix = 129"),
             ("max_entries = 4096", "max_entries = 0"),

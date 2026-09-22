@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod config;
 pub mod ecs;
+pub mod policy;
 pub mod protocol;
 pub mod resolver;
 pub mod server;

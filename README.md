@@ -11,7 +11,8 @@ operate.
 Early development. UDP/TCP listeners, validated single-upstream forwarding,
 UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
 implemented. Optional peer-derived ECS and bounded subnet-aware response caching
-are supported; filtering and encrypted transports remain planned.
+are supported. Local query-name filtering is available; CNAME filtering and
+encrypted transports remain planned.
 
 ## Development
 
@@ -119,6 +120,33 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   TTLs and normalized EDNS. There is no stale serving, prefetch, persistence,
   or concurrent-query coalescing in this release.
 
+## Local filtering
+
+Filtering is disabled by default. Opt in with local rules in the config:
+
+```toml
+[filter]
+enabled = true
+block_exact = ["ads.example"]
+block_suffix = ["tracking.example"]
+allow_exact = ["status.tracking.example"]
+allow_suffix = []
+```
+
+Exact rules match only that name; suffix rules include that name and subdomains
+at DNS label boundaries. ASCII case and a final dot are ignored. Any matching
+allow rule wins for that name, regardless of specificity. Names use ASCII
+letters, digits, underscores and hyphens; use punycode for IDNs. Wildcards,
+Adblock syntax, hosts lines, URLs and regex are rejected, including when disabled.
+Limits are 100000 rules and 8 MiB of rule text. Rules compile once at startup;
+changes require a restart. There is no rule download or third-party list import.
+
+Query-name filtering runs after protocol/ECS validation and before cache lookup
+for every supported query type (including AAAA, HTTPS and SVCB). Blocking returns
+NOERROR with empty RR sections, no AA/AD/TC flags and no synthetic SOA. These
+answers are not inserted into PariNS's cache and do not specify a downstream
+negative-cache TTL. Unsupported ANY/AXFR/IXFR queries still receive REFUSED.
+
 ## Module boundaries
 
 | Module | Responsibility |
@@ -127,6 +155,7 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
 | `protocol` | DNS parsing, request rules, response correlation, UDP encoding |
 | `ecs` | Peer provenance, subnet selection, wire validation, scope and client echo |
 | `cache` | Independent subnet answers, TTL/negative policy, bounded LRU eviction |
+| `policy` | Immutable local rules, label-boundary matching and allow precedence |
 | `resolver` | Compose ECS, cache, upstream deadline, retry and response restoration |
 | `upstream` | Independent UDP exchange and validated TCP fallback |
 | `transport::tcp` | Length-prefixed framing used on both sides |

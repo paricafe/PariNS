@@ -12,6 +12,7 @@ use crate::{
     cache::Cache,
     config::{CacheConfig, Config, EcsConfig},
     ecs::{self, Context},
+    policy::Policy,
     protocol::{self, Request},
     upstream,
 };
@@ -26,6 +27,7 @@ pub struct Resolver {
     timeout: Duration,
     ecs: EcsConfig,
     cache: Mutex<Cache>,
+    policy: Policy,
 }
 
 impl Resolver {
@@ -35,6 +37,7 @@ impl Resolver {
             timeout,
             ecs: EcsConfig::default(),
             cache: Mutex::new(Cache::new(CacheConfig::default())),
+            policy: Policy::default(),
         }
     }
 
@@ -44,6 +47,7 @@ impl Resolver {
             timeout: Duration::from_millis(config.query_timeout_ms),
             ecs: config.ecs.clone(),
             cache: Mutex::new(Cache::new(config.cache.clone())),
+            policy: config.filter.clone(),
         }
     }
 
@@ -68,6 +72,11 @@ impl Resolver {
                 });
             }
         };
+        if self.policy.blocks_query(&query) {
+            let mut message = protocol::error_response(&query, ResponseCode::NoError);
+            context.finish(&query, &mut message, None);
+            return Some(Reply { message, udp_limit });
+        }
         if let Some((mut message, scope)) = self.cache.lock().expect("cache lock poisoned").get(
             &query,
             context.outgoing,

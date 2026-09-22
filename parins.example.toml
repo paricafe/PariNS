@@ -22,3 +22,12 @@ max_bytes = 8388608
 max_variants = 64
 max_ttl_secs = 3600
 negative_ttl_cap_secs = 300
+
+# Local ASCII names only; suffix includes the name itself and its subdomains.
+# Any matching allow wins for that name, but not for a different CNAME target.
+[filter]
+enabled = false
+block_exact = []
+block_suffix = []
+allow_exact = []
+allow_suffix = []

@@ -1,0 +1,19 @@
+.gitignore
+  s_b098854b57084b::t_a98fa0a708fef7 11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "311e6e389a0d51426f591b94bbbc0a6fdfac3768",
+  "prompts": {},
+  "sessions": {
+    "s_b098854b57084b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-b6f5-7b01-8f3b-6ba56af98fa3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

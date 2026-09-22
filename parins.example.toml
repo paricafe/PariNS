@@ -7,6 +7,39 @@ tcp_io_timeout_ms = 5000
 shutdown_grace_ms = 3000
 max_inflight = 256
 max_tcp_connections = 64
+# Optional paths resolve relative to this configuration file.
+# filter_file = "rules.toml" # authoritative instead of the inline [filter]
+# admin_listen = "127.0.0.1:9090" # local /metrics and /healthz only
+
+# Enable encrypted listeners individually with your own certificate/key.
+# [dot]
+# listen = "127.0.0.1:8530"
+# cert_file = "server.pem"
+# key_file = "server.key"
+# [doh]
+# listen = "127.0.0.1:8443"
+# cert_file = "server.pem"
+# key_file = "server.key"
+# [doq]
+# listen = "127.0.0.1:8530" # UDP, distinct from DoT's TCP socket
+# cert_file = "server.pem"
+# key_file = "server.key"
+# [doh3]
+# listen = "127.0.0.1:8443" # UDP, distinct from DoH2's TCP socket
+# cert_file = "server.pem"
+# key_file = "server.key"
+
+# Authenticate the fixed `upstream` IP over DoT; no plaintext downgrade.
+# [upstream_tls]
+# server_name = "resolver.example"
+# ca_file = "private-ca.pem" # omit for built-in WebPKI roots
+
+# Opt-in ONLY for replicas with equivalent ECS/DNSSEC/answer policies.
+# Threshold is an operator choice informed by measured latency, not auto-tuning.
+# [scheduler]
+# secondary = "127.0.0.1:5355"
+# hedge_after_ms = 50
+# max_extra_inflight = 32
 
 # Opt in only when the upstream supports ECS and this privacy policy is desired.
 [ecs]

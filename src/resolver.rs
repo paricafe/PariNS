@@ -2,7 +2,7 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
 
@@ -17,7 +17,6 @@ use crate::{
     metrics::{Counter, Metrics, Timer},
     policy::Policy,
     protocol::{self, Request},
-    upstream,
 };
 
 pub struct Reply {
@@ -26,38 +25,50 @@ pub struct Reply {
 }
 
 pub struct Resolver {
-    upstream: SocketAddr,
+    upstream: crate::scheduler::Client,
     timeout: Duration,
     ecs: EcsConfig,
     cache: Arc<Mutex<Cache>>,
     flights: Flights,
     metrics: Arc<Metrics>,
-    policy: Policy,
+    policy: RwLock<Policy>,
 }
 
 impl Resolver {
     pub fn new(upstream: SocketAddr, timeout: Duration) -> Self {
         Self {
-            upstream,
+            upstream: crate::scheduler::Client::new(upstream, None, None).expect("single upstream"),
             timeout,
             ecs: EcsConfig::default(),
             cache: Arc::new(Mutex::new(Cache::new(CacheConfig::default()))),
             flights: Flights::new(CoalescingConfig::default()),
             metrics: Arc::new(Metrics::default()),
-            policy: Policy::default(),
+            policy: RwLock::new(Policy::default()),
         }
     }
 
     pub fn from_config(config: &Config) -> Self {
-        Self {
-            upstream: config.upstream,
+        Self::try_from_config(config).expect("validated resolver configuration")
+    }
+
+    pub fn try_from_config(config: &Config) -> anyhow::Result<Self> {
+        Ok(Self {
+            upstream: crate::scheduler::Client::new(
+                config.upstream,
+                config
+                    .upstream_tls
+                    .as_ref()
+                    .map(crate::tls::Upstream::new)
+                    .transpose()?,
+                config.scheduler.clone(),
+            )?,
             timeout: Duration::from_millis(config.query_timeout_ms),
             ecs: config.ecs.clone(),
             cache: Arc::new(Mutex::new(Cache::new(config.cache.clone()))),
             flights: Flights::new(config.coalescing.clone()),
             metrics: Arc::new(Metrics::default()),
-            policy: config.filter.clone(),
-        }
+            policy: RwLock::new(config.load_policy()?),
+        })
     }
 
     pub async fn resolve(&self, bytes: &[u8], peer: IpAddr) -> Option<Reply> {
@@ -80,7 +91,14 @@ impl Resolver {
         &self.metrics
     }
 
+    pub fn replace_policy(&self, policy: Policy) {
+        *self.policy.write().expect("policy lock poisoned") = policy;
+    }
+
     async fn resolve_inner(&self, bytes: &[u8], peer: IpAddr) -> Option<Reply> {
+        // One immutable generation governs this request, including across awaits.
+        // The Arc-backed trie clone releases the lock before parsing or network IO.
+        let policy = self.policy.read().expect("policy lock poisoned").clone();
         let query = match protocol::request(bytes) {
             Request::Drop => return None,
             Request::Reply(message) => {
@@ -101,7 +119,7 @@ impl Resolver {
                 });
             }
         };
-        if self.policy.blocks_query(&query) {
+        if policy.blocks_query(&query) {
             self.metrics.inc(Counter::QueryBlocked);
             let mut message = protocol::error_response(&query, ResponseCode::NoError);
             context.finish(&query, &mut message, None);
@@ -114,7 +132,7 @@ impl Resolver {
         );
         if let Some((mut message, scope)) = cached {
             self.metrics.inc(Counter::CacheHits);
-            if self.policy.apply_response(&query, &mut message) {
+            if policy.apply_response(&query, &mut message) {
                 self.metrics.inc(Counter::ResponseBlocked);
             }
             context.finish(&query, &mut message, Some(scope.prefix_len()));
@@ -126,7 +144,7 @@ impl Resolver {
         let cache_query = query.clone();
         let cache_context = context.clone();
         let metrics = self.metrics.clone();
-        let upstream = self.upstream;
+        let upstream = self.upstream.clone();
         let timeout = self.timeout;
         let work = async move {
             // Close the cache-miss/admission race if another group completed meanwhile.
@@ -140,7 +158,7 @@ impl Resolver {
             }
             let _timer = metrics.track(Timer::Upstream);
             let result = tokio::time::timeout(timeout, async {
-                let mut response = upstream::exchange(&outbound, upstream).await?;
+                let mut response = upstream.exchange(&outbound).await?;
                 let retry = response.response_code == ResponseCode::Refused
                     && cache_context
                         .outgoing
@@ -155,7 +173,7 @@ impl Resolver {
                         "::".parse().unwrap()
                     });
                     ecs::set_subnet(&mut outbound, Some(anonymous));
-                    response = upstream::exchange(&outbound, upstream).await?;
+                    response = upstream.exchange(&outbound).await?;
                 }
                 Ok::<_, anyhow::Error>((response, retry))
             })
@@ -211,7 +229,7 @@ impl Resolver {
         });
         // Cache retains the original upstream response; policy applies equally
         // on misses and hits and never inserts its synthesized answer.
-        if self.policy.apply_response(&query, &mut message) {
+        if policy.apply_response(&query, &mut message) {
             self.metrics.inc(Counter::ResponseBlocked);
         }
         context.finish(&query, &mut message, scope);

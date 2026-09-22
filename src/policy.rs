@@ -1,11 +1,15 @@
-//! Immutable local filtering policy. No IO, cache ownership, or upstream state.
+//! Immutable local filtering policy and bounded local rule-file loading.
+//! No cache ownership or upstream state.
 
 use std::{
     collections::{HashMap, HashSet},
+    fs::File,
+    io::Read,
+    path::Path,
     sync::Arc,
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use hickory_proto::{
     op::{Message, ResponseCode},
     rr::{Name, RData},
@@ -100,6 +104,24 @@ impl TryFrom<Rules> for Policy {
 }
 
 impl Policy {
+    /// Parse and validate a complete replacement before the caller publishes it.
+    pub fn load(path: &Path) -> Result<Self> {
+        const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+        let file = File::open(path).context("open filter file")?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "filter file must be a regular file"
+        );
+        let mut bytes = Vec::new();
+        file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_FILE_BYTES,
+            "filter file exceeds 8 MiB"
+        );
+        let text = std::str::from_utf8(&bytes).context("filter file must be UTF-8")?;
+        toml::from_str(text).context("invalid filter file")
+    }
+
     pub fn blocks(&self, name: &Name) -> bool {
         if !self.enabled {
             return false;

@@ -1,6 +1,9 @@
 //! Startup configuration. Invalid values fail before any listeners are bound.
 
-use std::{net::SocketAddr, path::Path};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -25,6 +28,22 @@ pub struct Config {
     pub coalescing: CoalescingConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub dot: Option<crate::tls::ListenerConfig>,
+    #[serde(default)]
+    pub doh: Option<crate::tls::ListenerConfig>,
+    #[serde(default)]
+    pub doq: Option<crate::tls::ListenerConfig>,
+    #[serde(default)]
+    pub doh3: Option<crate::tls::ListenerConfig>,
+    #[serde(default)]
+    pub upstream_tls: Option<crate::tls::ClientSettings>,
+    #[serde(default)]
+    pub filter_file: Option<PathBuf>,
+    #[serde(default)]
+    pub admin_listen: Option<SocketAddr>,
+    #[serde(default)]
+    pub scheduler: Option<crate::scheduler::Settings>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -98,7 +117,59 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read config {}", path.display()))?;
-        Self::parse(&text)
+        let mut config = Self::parse(&text)?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        if let Some(file) = &mut config.filter_file
+            && file.is_relative()
+        {
+            *file = base.join(&*file);
+        }
+        for listener in [
+            &mut config.dot,
+            &mut config.doh,
+            &mut config.doq,
+            &mut config.doh3,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for file in [&mut listener.files.cert_file, &mut listener.files.key_file] {
+                if file.is_relative() {
+                    *file = base.join(&*file);
+                }
+            }
+        }
+        if let Some(file) = config
+            .upstream_tls
+            .as_mut()
+            .and_then(|settings| settings.ca_file.as_mut())
+            && file.is_relative()
+        {
+            *file = base.join(&*file);
+        }
+        Ok(config)
+    }
+
+    /// Load all cryptographic material without opening a listener.
+    pub fn check_files(&self) -> Result<()> {
+        self.load_policy()?;
+        for listener in [&self.dot, &self.doh, &self.doq, &self.doh3]
+            .into_iter()
+            .flatten()
+        {
+            crate::tls::server_config(&listener.files, &[])?;
+        }
+        if let Some(settings) = &self.upstream_tls {
+            crate::tls::Upstream::new(settings)?;
+        }
+        Ok(())
+    }
+
+    pub fn load_policy(&self) -> Result<crate::policy::Policy> {
+        match &self.filter_file {
+            Some(path) => crate::policy::Policy::load(path),
+            None => Ok(self.filter.clone()),
+        }
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -108,6 +179,12 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(settings) = &self.scheduler {
+            settings.validate(self.upstream)?;
+        }
+        if let Some(address) = self.admin_listen {
+            ensure!(address.ip().is_loopback(), "admin_listen must be loopback");
+        }
         ensure!(
             self.metrics.interval_secs <= 3600,
             "metrics.interval_secs must be in 0..=3600"
@@ -140,18 +217,31 @@ impl Config {
             "invalid ECS prefix limit"
         );
         ensure!(self.upstream.port() != 0, "upstream port must be nonzero");
+        let ip = self.upstream.ip().to_canonical();
         ensure!(
-            !self.upstream.ip().is_unspecified() && !self.upstream.ip().is_multicast(),
+            !ip.is_unspecified()
+                && !ip.is_multicast()
+                && !matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast()),
             "upstream must be a unicast IP address"
         );
-        ensure!(
-            self.listen != self.upstream
-                && !(self.listen.ip().is_unspecified()
-                    && self.upstream.ip().is_loopback()
-                    && self.listen.is_ipv4() == self.upstream.is_ipv4()
-                    && self.listen.port() == self.upstream.port()),
-            "upstream must not point to the listener"
-        );
+        let listener = if self.upstream_tls.is_some() {
+            self.dot.as_ref().map(|listener| listener.listen)
+        } else {
+            Some(self.listen)
+        };
+        if let Some(listener) = listener {
+            for address in
+                std::iter::once(self.upstream).chain(self.scheduler.as_ref().map(|s| s.secondary))
+            {
+                let local = listener.ip().to_canonical();
+                let upstream = address.ip().to_canonical();
+                ensure!(
+                    listener.port() != address.port()
+                        || !(local == upstream || local.is_unspecified() && upstream.is_loopback()),
+                    "upstream replica must not point to a matching DNS listener"
+                );
+            }
+        }
         for (name, value) in [
             ("query_timeout_ms", self.query_timeout_ms),
             ("tcp_io_timeout_ms", self.tcp_io_timeout_ms),
@@ -178,6 +268,40 @@ mod tests {
     #[test]
     fn example_is_valid() {
         Config::parse(EXAMPLE).unwrap();
+    }
+
+    #[test]
+    fn every_replica_is_checked_for_plain_and_tls_listener_loops() {
+        let mut cfg = Config::parse(EXAMPLE).unwrap();
+        cfg.scheduler = Some(crate::scheduler::Settings {
+            secondary: cfg.listen,
+            hedge_after_ms: 10,
+            max_extra_inflight: 1,
+        });
+        assert!(cfg.validate().is_err());
+        cfg.scheduler = None;
+        cfg.listen = "[::]:5354".parse().unwrap();
+        assert!(cfg.validate().is_err());
+        cfg.upstream_tls = Some(crate::tls::ClientSettings {
+            server_name: "localhost".into(),
+            ca_file: None,
+        });
+        cfg.dot = Some(crate::tls::ListenerConfig {
+            listen: "[::ffff:127.0.0.1]:5354".parse().unwrap(),
+            files: crate::tls::TlsFiles {
+                cert_file: "unused.pem".into(),
+                key_file: "unused.key".into(),
+            },
+        });
+        assert!(cfg.validate().is_err());
+        cfg.dot.as_mut().unwrap().listen.set_port(8530);
+        assert!(cfg.validate().is_ok());
+        cfg.scheduler = Some(crate::scheduler::Settings {
+            secondary: "127.0.0.1:8530".parse().unwrap(),
+            hedge_after_ms: 10,
+            max_extra_inflight: 1,
+        });
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

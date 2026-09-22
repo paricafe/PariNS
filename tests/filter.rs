@@ -5,7 +5,7 @@ use hickory_proto::{
         rdata::{A, CNAME},
     },
 };
-use parins::{config::Config, ecs, protocol, resolver::Resolver};
+use parins::{config::Config, ecs, policy::Policy, protocol, resolver::Resolver};
 use tokio::net::UdpSocket;
 
 fn config(address: std::net::SocketAddr, rules: &str) -> Config {
@@ -228,4 +228,101 @@ async fn allow_exception_reaches_upstream_and_keeps_normal_cache_behavior() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[test]
+fn local_rule_file_is_bounded_and_failed_reload_keeps_old_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rules.toml");
+    std::fs::write(&path, "enabled = true\nblock_suffix = ['ads.test']").unwrap();
+    let mut active = Policy::load(&path).unwrap();
+    let blocked = Name::from_ascii("www.ads.test").unwrap();
+    assert!(active.blocks(&blocked));
+    for invalid in [
+        "enabled = true\nunknown = []",
+        "enabled = true\nblock_exact = ['https://ads.test']",
+        "enabled = true\nblock_exact = [",
+    ] {
+        std::fs::write(&path, invalid).unwrap();
+        assert!(Policy::load(&path).is_err());
+        if let Ok(next) = Policy::load(&path) {
+            active = next;
+        }
+        assert!(active.blocks(&blocked));
+    }
+    std::fs::write(&path, [0xff, 0xfe]).unwrap();
+    assert!(Policy::load(&path).is_err());
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(8 * 1024 * 1024 + 1)
+        .unwrap();
+    assert!(
+        Policy::load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds 8 MiB")
+    );
+    assert!(active.blocks(&blocked));
+    std::fs::write(&path, "enabled = false").unwrap();
+    active = Policy::load(&path).unwrap();
+    assert!(!active.blocks(&blocked));
+}
+
+#[tokio::test]
+async fn reload_changes_cached_cname_filter_but_inflight_keeps_starting_snapshot() {
+    use std::{sync::Arc, time::Duration};
+    use tokio::time::timeout;
+
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(upstream.local_addr().unwrap(), "block_exact = ['ads.test']");
+    config.query_timeout_ms = 2000;
+    let resolver = Arc::new(Resolver::from_config(&config));
+    let q = query("alias.test", RecordType::A);
+    let active_resolver = resolver.clone();
+    let active_query = q.clone();
+    let pending = tokio::spawn(async move { resolve(&active_resolver, &active_query).await });
+    let mut buffer = [0; 4096];
+    let (length, peer) = timeout(Duration::from_secs(1), upstream.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    let outbound = protocol::decode(&buffer[..length]).unwrap();
+    // The active request has snapshotted the blocking generation before upstream IO.
+    resolver.replace_policy(Policy::default());
+    let mut answer = protocol::error_response(&outbound, ResponseCode::NoError);
+    answer.add_answer(Record::from_rdata(
+        outbound.queries[0].name().clone(),
+        60,
+        RData::CNAME(CNAME(Name::from_ascii("ads.test").unwrap())),
+    ));
+    answer.add_answer(Record::from_rdata(
+        Name::from_ascii("ads.test").unwrap(),
+        60,
+        RData::A(A::new(192, 0, 2, 1)),
+    ));
+    upstream
+        .send_to(&answer.to_vec().unwrap(), peer)
+        .await
+        .unwrap();
+    assert_blocked(
+        &q,
+        &timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+
+    // Cache contains the original response, not the old generation's synthesized block.
+    assert_eq!(resolve(&resolver, &q).await.answers.len(), 2);
+    resolver.replace_policy(toml::from_str("enabled = true\nblock_exact = ['ads.test']").unwrap());
+    assert_blocked(&q, &resolve(&resolver, &q).await);
+    resolver
+        .replace_policy(toml::from_str("enabled = true\nblock_exact = ['alias.test']").unwrap());
+    assert_blocked(&q, &resolve(&resolver, &q).await);
+    resolver.replace_policy(Policy::default());
+    assert_eq!(resolve(&resolver, &q).await.answers.len(), 2);
+    assert_eq!(
+        upstream.try_recv(&mut buffer).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }

@@ -177,7 +177,17 @@ This is direct IP access, not a domain-name/reverse-proxy configuration feature.
 Use the same local tunnel or NAT port (3000). Passwords use
 Argon2id. Eight-hour bearer sessions remain only in page memory: refreshing
 requires login, and logout revokes the session. There are no external frontend
-assets, cookies, browser-persisted tokens, or query logs.
+assets or cookies. Tokens and query logs are not persisted in browser storage;
+opt-in query history is held in server memory.
+
+On unreleased `main`, the console supports Simplified Chinese and English. Use
+the language selector at the top of any page, including sign-in and setup.
+The initial language follows a supported browser language, falling back to
+Simplified Chinese. A manual choice is remembered locally in that browser;
+switching works even if storage is blocked. Only this preference is persisted.
+Switching updates labels, help, messages, dates and charts in place, preserving
+drafts and expanded query details. Configuration keys, user-entered values and
+raw server diagnostic details keep their original text.
 
 On first start, PariNS generates a self-signed HTTPS identity in
 `/var/lib/parins/https-identity.pem` (certificate **and private key**, 0600) and

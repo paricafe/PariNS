@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Simplified Chinese/English console switcher with a local language preference,
+  clearer instructions and translated forms, query details, charts and messages.
+  Switching languages preserves unsaved drafts and expanded query details.
 - Opt-in bounded query log with per-request answers, client/transport, actual
   upstream/cache/filter paths, ECS flags, search, pagination and clearing.
 - Multiline UDP/TCP/DoT/DoH/DoQ upstream pools with static weighted round-robin

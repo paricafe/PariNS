@@ -1,0 +1,23 @@
+LICENSE
+  s_aa37914330e67a::t_2e0be94fa83663 1-202
+README.md
+  s_aa37914330e67a::t_408845bc9491e6 1-37
+.gitignore
+  s_aa37914330e67a::t_408845bc9491e6 1-8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "538e1650e6cb638b02c66cf6acd6a8a0b4d01235",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

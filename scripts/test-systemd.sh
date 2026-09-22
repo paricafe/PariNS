@@ -17,14 +17,25 @@ sudo -n true
 [ -z "$(systemctl show --property=FragmentPath --value parins-managed.service)" ]
 ! sudo test -e /var/lib/parins
 ! sudo test -e /opt/parins-managed/parins
+# Hosted runners make /opt group-writable for their tool cache. Only this
+# disposable-runner fixture tightens it temporarily; the installer stays strict.
+[ -d /opt ] && [ ! -L /opt ] && [ "$(sudo stat -c %u /opt)" = 0 ] || {
+    printf '%s\n' 'Refusing: runner /opt must be a root-owned, non-symlink directory.' >&2
+    exit 1
+}
+opt_mode=$(sudo stat -c %a /opt)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/parins-systemd-test.XXXXXX")
 installed=false
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
-    if "$installed"; then
+    if "$installed" && sudo test -f /etc/systemd/system/parins-managed.service && \
+        ! sudo test -L /etc/systemd/system/parins-managed.service && \
+        [ "$(sudo stat -c %u /etc/systemd/system/parins-managed.service)" = 0 ] && \
+        sudo grep -Fqx '# PariNS managed installer unit v1' /etc/systemd/system/parins-managed.service; then
         sudo systemctl disable --now parins-managed.service || status=1
     fi
+    sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
     for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json auth-header status.json; do
@@ -35,6 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+sudo chmod go-w /opt
 install_service() {
     sudo sh "$repo/scripts/install.sh" --binary "$repo/target/release/parins"
     sudo systemctl is-active --quiet parins-managed.service

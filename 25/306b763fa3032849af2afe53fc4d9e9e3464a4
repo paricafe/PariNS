@@ -1,0 +1,26 @@
+CHANGELOG.md
+  s_aa37914330e67a::t_4fc479bff9c72d 6
+  s_aa37914330e67a::t_a1006d3294c251 3-4,7-18
+  s_aa37914330e67a::t_ca30b08f5f9639 5
+parins.example.toml
+  s_aa37914330e67a::t_a1006d3294c251 70,75-98
+README.md
+  s_aa37914330e67a::t_ca30b08f5f9639 358-363,397-399
+  s_aa37914330e67a::t_a1006d3294c251 17-19,35-38,227-230,365-376,388-396,400-438,615,621,636-642
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "25306b763fa3032849af2afe53fc4d9e9e3464a4",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

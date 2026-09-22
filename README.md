@@ -15,6 +15,7 @@ are supported. Local query-name/CNAME filtering, bounded request coalescing and
 aggregate runtime metrics are available. DoT, DoH (HTTP/2 and HTTP/3), DoQ,
 verified DoT upstreams, file-backed rule/certificate reload, a local metrics
 endpoint and opt-in equivalent-replica hedging are implemented and locally tested.
+Authenticated DoT upstream connections can optionally be reused within a fixed cap.
 Production deployment and capacity acceptance have not been performed.
 
 ## Development
@@ -235,14 +236,33 @@ configuration are ignored by Git. Provision certificates outside this repository
   does not expose an earlier response-stream cancellation notification.
 - Optional `[upstream_tls]` authenticates the fixed upstream IP using `server_name`.
   `ca_file` replaces built-in WebPKI roots. Certificate failures never downgrade
-  to plaintext. Upstream DoT currently opens a fresh connection per transaction;
-  there is no upstream connection pool or DoH/DoQ upstream client.
+  to plaintext. Upstream DoT opens a fresh connection per transaction by default;
+  optional bounded reuse is described below. There is no DoH/DoQ upstream client.
 - SIGHUP validates all new rule/certificate candidates before replacing them.
   Each listener's new full handshakes see its atomic certificate replacement;
   established connections and resumed sessions may retain previous TLS identity
   context. Publication is not one global transaction across all listeners and
   rules. Listener addresses, resource limits, upstream/CA settings and inline
   configuration require restart, which creates fresh resolver/cache ownership.
+
+## Optional DoT upstream reuse
+
+With `[upstream_tls]` configured, enable `[upstream_pool] enabled = true` to reuse
+authenticated connections, following the connection-lifecycle guidance in
+[RFC 7858 §3.4](https://www.rfc-editor.org/rfc/rfc7858.html#section-3.4).
+`max_connections` defaults to 8 (range 1..256), shared by clones and both replica
+endpoints within one immutable TLS profile. Connections never cross endpoints
+or authentication profiles. Each connection handles one query at a time; DNS
+pipelining is not implemented. Pool waiting, handshake, exchange and reconnect
+all remain inside the Resolver's original `query_timeout_ms` deadline.
+
+`idle_timeout_ms` defaults to 30000 (range 1..600000). Expiry is checked on checkout,
+not by a background reaper: without new traffic, idle sockets can remain until
+the owning upstream is dropped, still within the connection cap. Cancellation,
+partial responses and invalid replies discard the borrowed connection. A reused
+connection closed by the peer gets at most one authenticated reconnect; protocol
+and certificate errors do not trigger retries or plaintext fallback. Leave pool
+capacity headroom for replica hedges; a one-connection cap serializes them.
 
 ## Optional replica scheduling
 
@@ -265,6 +285,7 @@ by default and trades additional upstream traffic for latency; measure first.
 
 ```sh
 cargo run --locked --release --example bench -- 1000 32
+cargo run --locked --release --example bench_dot -- 1000 8
 cargo install cargo-audit --version 0.22.2 --locked
 cargo audit --deny warnings
 sh scripts/package.sh
@@ -273,6 +294,12 @@ sh scripts/package.sh
 The benchmark runs only synthetic loopback upstreams and emits JSON for warm
 cache, cold single-upstream and cold hedged scenarios. It is a Resolver baseline,
 not network/TLS throughput, RSS measurement or production capacity evidence.
+`bench_dot` separately compares fresh and pooled authenticated DoT transactions
+against one synthetic loopback TLS peer, without response caching or artificial
+delay. JSON includes checked answers, errors, connection/handshake counts and
+latency percentiles. Full handshakes are counted separately from TLS session
+resumption; compare repeated runs with the same query count and concurrency.
+These transport microbenchmarks are not production capacity guarantees.
 Packaging creates a host-native archive under `target/packages`, containing no
 keys or private configuration. `deploy/parins.service` is a Linux systemd template,
 not an installed service; review paths, file permissions, firewall and source
@@ -307,7 +334,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 
 - Explicit emergency-profile product policy and health-driven scheduling.
 - Licensed third-party rule import and additional filtering response modes.
-- Upstream connection reuse and additional authenticated upstream protocols.
+- DoT pipelining and additional authenticated upstream protocols.
 - Public-service source limits and measured deployment/rollback acceptance.
 - Full configuration replacement beyond rule/certificate reload.
 

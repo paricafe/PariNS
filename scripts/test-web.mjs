@@ -141,15 +141,15 @@ test("new listeners stay blank until entered and retain the original optional co
   form.querySelector('[data-path="dot.key_file"]').value = " key.pem ";
   assert.deepEqual(S.diff(base, S.read(form, base)), { dot: { listen: "[::1]:0", cert_file: " cert.pem ", key_file: " key.pem " } });
 });
-test("listener rendering preserves raw drafts through toggles, translation and draft-preserving renders", () => {
-  // Only the DOM surface consumed by settings/i18n is needed; browser layout and
-  // native keyboard behavior are verified separately in the real browser.
+// DOM surface shared by settings and cache-rule form contract tests. Real native
+// numeric editing/validity and keyboard behavior are verified in the browser.
+function formElement() {
   class Element {
     constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.attrs = {}; this.events = {}; this.value = ""; }
     append(...nodes) { this.children.push(...nodes); }
     replaceChildren(...nodes) { this.children = nodes; }
     setAttribute(key, value) { this.attrs[key] = value; }
-    getAttribute(key) { return key.startsWith("data-") && !key.startsWith("data-i18n") ? this.dataset[key.slice(5)] : this.attrs[key]; }
+    getAttribute(key) { return key.startsWith("data-") && !key.startsWith("data-i18n") ? this.dataset[key.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] : this.attrs[key]; }
     addEventListener(event, callback) { this.events[event] = callback; }
     focus() { document.activeElement = this; }
     matches(selector) {
@@ -165,6 +165,10 @@ test("listener rendering preserves raw drafts through toggles, translation and d
     }
     querySelector(selector) { return this.querySelectorAll(selector)[0]; }
   }
+  return Element;
+}
+test("listener rendering preserves raw drafts through toggles, translation and draft-preserving renders", () => {
+  const Element = formElement();
   const previous = globalThis.document, container = new Element("div");
   globalThis.document = { createElement: tag => new Element(tag), documentElement: {}, querySelectorAll: selector => container.querySelectorAll(selector) };
   try {
@@ -209,6 +213,34 @@ test("listener rendering preserves raw drafts through toggles, translation and d
     assert.equal(container.querySelector('[data-path="dot.listen"][data-part="port"]').value, "853");
     assert.equal(container.querySelector('[data-path="dot.cert_file"]').value, "cert.pem");
     assert.equal(container.querySelector('[data-path="dot.key_file"]').value, "key.pem");
+  } finally { globalThis.document = previous; PariI18n.setLocale("zh-CN"); }
+});
+test("cache rule DOM rejects bad numeric input before empty values become inheritance", () => {
+  const Element = formElement(), previous = globalThis.document, container = new Element("div");
+  globalThis.document = { createElement: tag => new Element(tag), documentElement: {}, querySelectorAll: selector => container.querySelectorAll(selector) };
+  try {
+    const read = PariCache.rules(container, [{ ...PariCache.defaults(), name: "rule.test", max_ttl_secs: 60 }], () => {});
+    const fields = container.querySelectorAll("[data-rule-field]");
+    const numbers = fields.filter(input => input.type === "number");
+    for (const input of numbers) { input.validity = { badInput: false, valid: true }; input.checkValidity = () => input.validity.valid; }
+    for (const input of numbers) {
+      const saved = input.value;
+      for (const locale of ["zh-CN", "en"]) {
+        PariI18n.setLocale(locale);
+        input.value = ""; input.validity = { badInput: true, valid: false };
+        assert.throws(read, error => error.key === "views.ttlError" && error.fieldId === input.id && error.fieldView === "cache");
+        assert.equal(input.value, ""); assert.equal(input.validity.badInput, true);
+        input.validity = { badInput: false, valid: true };
+        assert.equal(read()[0][input.dataset.ruleField], null);
+        for (const value of ["0", "86401", "1.5"]) {
+          input.value = value; input.validity = { badInput: false, valid: false };
+          assert.throws(read, error => error.fieldId === input.id && error.key === "views.ttlError");
+          assert.equal(input.value, value);
+        }
+        input.value = saved; input.validity = { badInput: false, valid: true };
+      }
+    }
+    assert.equal(read()[0].max_ttl_secs, 60);
   } finally { globalThis.document = previous; PariI18n.setLocale("zh-CN"); }
 });
 test("nullable fields clear to null", () => assert.equal(S.valueOf({ value: "  " }, { type: "nullable" }), null));

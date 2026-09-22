@@ -68,7 +68,7 @@
       if (!PariSession.isStale(error)) {
         notice(error.key ? error : error.message || "app.offline", true);
         if (error.fieldId) {
-          state.view = "security"; displaySettingsPage(); page("config", false);
+          state.view = error.fieldView; displaySettingsPage(); page("config", false);
           focusAfterAction(error.fieldId);
         }
       }

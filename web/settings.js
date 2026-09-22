@@ -236,7 +236,7 @@ globalThis.PariSettings = (() => {
           const port = container.querySelector(`[data-path="${entry.path}"][data-part="port"]`);
           if (!newlyEnabled && address.value === address.dataset.initialValue && port.value === port.dataset.initialValue) continue;
           try { put(result, entry.path, joinListener(address.value, port.value)); }
-          catch (error) { error.fieldId = (error.key === "settings.listener.port.invalid" ? port : address).id; throw error; }
+          catch (error) { error.fieldId = (error.key === "settings.listener.port.invalid" ? port : address).id; error.fieldView = "security"; throw error; }
           continue;
         }
         const input = container.querySelector(`[data-path="${entry.path}"]`);

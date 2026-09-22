@@ -54,7 +54,19 @@ globalThis.PariCache = (() => {
     addButton.addEventListener("click", () => { if (list.children.length >= 256) return; add(defaults()); onChange(); list.lastElementChild.querySelector("input").focus(); });
     container.append(list, addButton);
     entries.forEach(add);
-    return () => [...list.children].map((row) => decodeRule(Object.fromEntries([...row.querySelectorAll("[data-rule-field]")].map((input) => [input.dataset.ruleField, input.value]))));
+    return () => [...list.children].map((row) => {
+      const inputs = [...row.querySelectorAll("[data-rule-field]")];
+      for (const input of inputs) {
+        // Incomplete native number edits can expose value="" without being empty.
+        // Validate before decodeRule interprets an empty value as inheritance.
+        if (input.type === "number" && !input.checkValidity()) {
+          const error = new I.MessageError("views.ttlError");
+          error.fieldId = input.id; error.fieldView = "cache";
+          throw error;
+        }
+      }
+      return decodeRule(Object.fromEntries(inputs.map(input => [input.dataset.ruleField, input.value])));
+    });
   }
   function renderStats(container, cache, refresh) {
     container.replaceChildren();

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>PariNS · 管理台</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div class="shell">
+    <aside class="sidebar" aria-label="管理导航">
+      <a class="brand" href="/" aria-label="PariNS 管理台首页"><span class="brand-mark" aria-hidden="true">P</span><span>PariNS<small>DNS CONTROL</small></span></a>
+      <p class="sidebar-caption">轻量 · 可控 · 可观测</p>
+      <nav id="navigation" hidden aria-label="页面">
+        <button type="button" id="nav-overview" class="nav-button active" aria-current="page">运行概览 <span aria-hidden="true">↗</span></button>
+        <button type="button" id="nav-config" class="nav-button">配置管理 <span aria-hidden="true">≡</span></button>
+      </nav>
+      <div class="sidebar-footer"><span class="small-dot" aria-hidden="true"></span> 独立 DNS 转发服务<br><span>配置由本机 PariNS 管理</span></div>
+    </aside>
+    <main id="main" tabindex="-1">
+      <header class="topbar"><span id="page-context">管理台 / 连接服务</span><button id="logout" class="button quiet" type="button" hidden>退出登录</button></header>
+      <div class="content">
+        <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+        <section id="loading-panel" aria-busy="true"><p class="eyebrow">PARINS MANAGEMENT</p><h1>正在连接管理服务</h1><p class="muted">读取初始化状态，请稍候。</p><button id="retry-start" type="button" class="button secondary" hidden>重新连接</button></section>
+
+        <section id="setup-panel" hidden>
+          <p class="eyebrow">FIRST-TIME SETUP</p><h1>让 DNS 从这里开始</h1><p class="intro">创建管理员，选择监听地址和上游。确认配置后，PariNS 将启动 DNS 服务。</p>
+          <ol class="steps" aria-label="初始化进度"><li id="step-label-0" aria-current="step"><span>01</span> 管理员</li><li id="step-label-1"><span>02</span> DNS 网络</li><li id="step-label-2"><span>03</span> 确认配置</li></ol>
+          <form id="setup-form" class="panel setup-form">
+            <div class="setup-step" id="setup-step-0">
+              <h2>只属于你的管理入口</h2><p class="muted">初始化令牌保存在服务状态目录的 setup-token 文件中，安装程序和日志仅显示其路径。请在服务器本机读取，并通过 SSH 隧道访问管理台。</p>
+              <label for="setup-token">初始化令牌</label><input id="setup-token" name="setup-token" type="password" autocomplete="off" required spellcheck="false" aria-describedby="token-help"><small id="token-help">不要将令牌放入 URL、截图或公开日志。</small>
+              <label for="setup-username">管理员用户名</label><input id="setup-username" name="username" autocomplete="username" maxlength="64" required>
+              <div class="field-pair"><div><label for="setup-password">管理员密码</label><input id="setup-password" name="new-password" type="password" autocomplete="new-password" minlength="12" required aria-describedby="password-help"></div><div><label for="setup-confirm">再次输入密码</label><input id="setup-confirm" name="confirm-password" type="password" autocomplete="new-password" minlength="12" required></div></div><small id="password-help">至少 12 个字符。请使用独立的长密码，并妥善保存。</small>
+            </div>
+            <div class="setup-step" id="setup-step-1" hidden>
+              <h2>定义 DNS 请求的入口和出口</h2><p class="muted">默认仅监听本机，避免无意中开放公共递归服务。这里配置普通 UDP/TCP DNS；加密监听和来源预算可在完整配置中启用。</p>
+              <label for="setup-listen">DNS 监听地址</label><input id="setup-listen" name="listen" value="127.0.0.1:5353" required spellcheck="false" aria-describedby="listen-help"><small id="listen-help">IP:端口，例如 127.0.0.1:5353 或 [::1]:5353。开放到外部前，请配置防火墙和来源预算。</small>
+              <label for="setup-upstream">上游 DNS 地址</label><input id="setup-upstream" name="upstream" placeholder="输入你选择的上游 IP:端口" required spellcheck="false" aria-describedby="upstream-help"><small id="upstream-help">必填，使用实际 IP 和端口；不会替你选择第三方解析服务。上游不能指向自身监听地址。</small>
+            </div>
+            <div class="setup-step" id="setup-step-2" hidden>
+              <h2>检查即将生效的配置</h2><p class="muted">这是服务将保存的完整 TOML。可在此调整高级选项；提交时会校验配置和本机文件。端口必须可用。</p>
+              <label for="setup-toml">完整配置（高级，可编辑）</label><textarea id="setup-toml" class="code-editor" rows="17" spellcheck="false" aria-describedby="setup-review-help"></textarea><small id="setup-review-help">回到上一步再继续，会使用网络字段重新生成此配置。初始化不会修改系统的 DNS 设置。</small>
+            </div>
+            <div class="form-actions"><button id="setup-back" type="button" class="button secondary" hidden>上一步</button><span class="spacer"></span><button id="setup-next" type="button" class="button primary">继续</button><button id="setup-submit" type="submit" class="button primary" hidden>保存并启动 DNS</button></div>
+          </form>
+        </section>
+
+        <section id="login-panel" hidden>
+          <p class="eyebrow">WELCOME BACK</p><h1>登录管理台</h1><p class="intro">查看运行状态，安全地校验和修改 DNS 配置。</p>
+          <form id="login-form" class="panel login-form"><h2>管理员登录</h2><label for="login-username">用户名</label><input id="login-username" name="username" autocomplete="username" required><label for="login-password">密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" required><button type="submit" class="button primary full-width">登录</button><p class="muted small">会话仅保留在当前页面内存中，刷新页面后需要重新登录。</p></form>
+        </section>
+
+        <section id="overview-panel" hidden>
+          <div class="heading-row"><div><p class="eyebrow">SERVICE OVERVIEW</p><h1>运行概览</h1></div><button id="refresh-status" class="button secondary" type="button">刷新状态</button></div>
+          <div class="service-strip"><div><span id="service-badge" class="badge">读取中</span><h2 id="service-title">正在获取 DNS 服务状态</h2><p id="service-detail" class="muted">运行指标会每 5 秒自动更新。</p></div><div class="revision">配置版本<strong id="status-revision">—</strong></div></div>
+          <div id="service-error" class="notice error" role="status" hidden></div>
+          <dl class="metrics"><div><dt>累计请求</dt><dd id="metric-requests">—</dd><small>当前 DNS 实例</small></div><div><dt>缓存命中率</dt><dd id="metric-cache">—</dd><small>命中 / 缓存查找</small></div><div><dt>处理中</dt><dd id="metric-inflight">—</dd><small>当前请求并发</small></div><div><dt>上游失败</dt><dd id="metric-failures">—</dd><small>累计失败操作</small></div></dl>
+          <div class="panel"><div class="heading-row"><h2>配置与维护</h2><button id="open-config" type="button" class="button secondary">管理配置 →</button></div><p class="muted">先校验，再预览修改。保存会短暂重启 DNS 实例并清空内存缓存；管理台保持可用。只保留上一份配置用于回滚。</p><div class="detail-row"><span>统计范围</span><span>实例内聚合计数，不记录查询域名</span></div><div class="detail-row"><span>最近刷新</span><span id="last-updated">尚未刷新</span></div></div>
+        </section>
+
+        <section id="config-panel" hidden>
+          <div class="heading-row"><div><p class="eyebrow">CONFIGURATION</p><h1>配置管理</h1></div><span id="edit-state" class="badge">未修改</span></div>
+          <p class="intro">完整 TOML 是配置的唯一来源。校验不会应用修改；保存或回滚会重启 DNS 实例。</p>
+          <div class="panel editor-panel"><div class="editor-toolbar"><span>parins.toml <span id="config-revision" class="muted"></span></span><div class="button-group"><button id="reload-config" type="button" class="button quiet">重新加载</button><button id="export-config" type="button" class="button quiet">导出当前编辑内容</button></div></div><label for="config-toml" class="sr-only">DNS 完整 TOML 配置</label><textarea id="config-toml" class="code-editor" rows="24" spellcheck="false" aria-describedby="editor-help"></textarea><p id="editor-help" class="muted small">监控刷新不会覆盖编辑内容。文件路径由服务端解析；管理账户和会话信息不包含在此配置中。</p><div class="form-actions"><button id="rollback-config" type="button" class="button secondary" disabled>回滚上一份配置</button><span class="spacer"></span><button id="validate-config" type="button" class="button secondary">校验配置</button><button id="preview-config" type="button" class="button secondary">预览变更</button><button id="save-config" type="button" class="button primary" disabled>保存并应用</button></div></div>
+          <section id="diff-panel" class="panel" hidden aria-labelledby="diff-title"><h2 id="diff-title" tabindex="-1">变更预览</h2><p class="muted small">− 表示旧内容，+ 表示新内容；显示首尾共同内容之间的变更区段。</p><pre id="config-diff" class="diff-output"></pre></section>
+        </section>
+      </div>
+      <footer class="page-footer">PariNS <span>让每次解析，都有清晰的边界。</span></footer>
+    </main>
+  </div>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><h2 id="confirm-title">确认操作</h2><p id="confirm-description"></p><div class="form-actions"><button class="button secondary" value="cancel" autofocus>取消</button><button id="confirm-action" class="button primary" value="confirm">确认</button></div></form></dialog>
+  <noscript><p>管理台需要启用 JavaScript。你仍可在本机编辑 TOML 并通过命令行校验配置。</p></noscript>
+</body>
+</html>

@@ -1,0 +1,21 @@
+scripts/test-bootstrap.sh
+  s_aa37914330e67a::t_0f62601f5ebc05 94-98
+scripts/bootstrap.sh
+  s_aa37914330e67a::t_0f62601f5ebc05 15-18,30,68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e62341bdb86a3d56bd20f31f861dcf4f69d9cd21",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

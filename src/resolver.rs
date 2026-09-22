@@ -58,7 +58,9 @@ impl Resolver {
                 config
                     .upstream_tls
                     .as_ref()
-                    .map(crate::tls::Upstream::new)
+                    .map(|settings| {
+                        crate::tls::Upstream::with_pool(settings, &config.upstream_pool)
+                    })
                     .transpose()?,
                 config.scheduler.clone(),
             )?,

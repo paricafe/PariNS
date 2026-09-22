@@ -34,6 +34,12 @@ max_tcp_connections = 64
 # server_name = "resolver.example"
 # ca_file = "private-ca.pem" # omit for built-in WebPKI roots
 
+# Optional reusable authenticated DoT connections; requires upstream_tls.
+# [upstream_pool]
+# enabled = true
+# max_connections = 8 # shared across both replicas of this resolver
+# idle_timeout_ms = 30000 # expired connections discarded on next checkout
+
 # Opt-in ONLY for replicas with equivalent ECS/DNSSEC/answer policies.
 # Threshold is an operator choice informed by measured latency, not auto-tuning.
 # [scheduler]

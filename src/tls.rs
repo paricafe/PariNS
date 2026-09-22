@@ -26,6 +26,10 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::{ingress::Ingress, metrics::Counter, protocol, transport::tcp};
 
+mod pool;
+pub use pool::PoolSettings;
+type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsFiles {
@@ -119,10 +123,16 @@ fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
 pub struct Upstream {
     connector: TlsConnector,
     server_name: ServerName<'static>,
+    pool: Option<Arc<pool::Pool>>,
 }
 
 impl Upstream {
     pub fn new(settings: &ClientSettings) -> Result<Self> {
+        Self::with_pool(settings, &PoolSettings::default())
+    }
+
+    pub fn with_pool(settings: &ClientSettings, pool: &PoolSettings) -> Result<Self> {
+        pool.validate()?;
         let server_name = ServerName::try_from(settings.server_name.clone())
             .context("invalid TLS upstream server name")?;
         let mut roots = RootCertStore::empty();
@@ -143,12 +153,47 @@ impl Upstream {
         Ok(Self {
             connector: TlsConnector::from(Arc::new(config)),
             server_name,
+            pool: pool.enabled.then(|| Arc::new(pool::Pool::new(pool))),
         })
     }
 
     pub async fn exchange(&self, query: &Message, address: SocketAddr) -> Result<Message> {
+        let Some(pool) = &self.pool else {
+            return transaction(&mut self.connect(address).await?, query).await;
+        };
+        let mut slot = pool.checkout(address).await;
+        // Never leave a borrowed/partially consumed stream in shared state. A
+        // cancelled query or hedge drops it along with this guard, leaving None.
+        let cached = slot
+            .take()
+            .filter(|idle| idle.address == address && idle.returned.elapsed() < pool.idle_timeout);
+        let reused = cached.is_some();
+        let mut stream = match cached {
+            Some(idle) => idle.stream,
+            None => self.connect(address).await?,
+        };
+        let response = match transaction(&mut stream, query).await {
+            Ok(response) => response,
+            Err(error) if reused && closed_connection(&error) => {
+                // A server may close an idle connection at any time. Retry only
+                // this transport closure, once, within the original query budget.
+                drop(stream);
+                stream = self.connect(address).await?;
+                transaction(&mut stream, query).await?
+            }
+            Err(error) => return Err(error),
+        };
+        *slot = Some(pool::Idle {
+            stream,
+            address,
+            returned: tokio::time::Instant::now(),
+        });
+        Ok(response)
+    }
+
+    async fn connect(&self, address: SocketAddr) -> Result<ClientStream> {
         let stream = TcpStream::connect(address).await?;
-        let mut stream = self
+        let stream = self
             .connector
             .connect(self.server_name.clone(), stream)
             .await?;
@@ -161,19 +206,33 @@ impl Upstream {
                 .is_none_or(|p| p == b"dot"),
             "unexpected DoT ALPN"
         );
-        let mut outbound = query.clone();
-        outbound.metadata.id = rand::random();
-        tcp::write_frame(&mut stream, &outbound.to_vec()?).await?;
-        stream.flush().await?;
-        let mut response = protocol::decode(&tcp::read_frame(&mut stream).await?)?;
-        ensure!(
-            protocol::matches_response(&outbound, &response),
-            "unrelated DoT upstream response"
-        );
-        ensure!(!response.truncation, "truncated DoT upstream response");
-        response.metadata.id = query.id;
-        Ok(response)
+        Ok(stream)
     }
+}
+
+fn closed_connection(error: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::*;
+    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected
+        )
+    })
+}
+
+async fn transaction(stream: &mut ClientStream, query: &Message) -> Result<Message> {
+    let mut outbound = query.clone();
+    outbound.metadata.id = rand::random();
+    tcp::write_frame(stream, &outbound.to_vec()?).await?;
+    stream.flush().await?;
+    let mut response = protocol::decode(&tcp::read_frame(stream).await?)?;
+    ensure!(
+        protocol::matches_response(&outbound, &response),
+        "unrelated DoT upstream response"
+    );
+    ensure!(!response.truncation, "truncated DoT upstream response");
+    response.metadata.id = query.id;
+    Ok(response)
 }
 
 pub async fn serve(

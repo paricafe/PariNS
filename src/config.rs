@@ -39,6 +39,8 @@ pub struct Config {
     #[serde(default)]
     pub upstream_tls: Option<crate::tls::ClientSettings>,
     #[serde(default)]
+    pub upstream_pool: crate::tls::PoolSettings,
+    #[serde(default)]
     pub filter_file: Option<PathBuf>,
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
@@ -179,6 +181,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.upstream_pool.validate()?;
+        ensure!(
+            !self.upstream_pool.enabled || self.upstream_tls.is_some(),
+            "upstream_pool requires upstream_tls"
+        );
         if let Some(settings) = &self.scheduler {
             settings.validate(self.upstream)?;
         }
@@ -268,6 +275,29 @@ mod tests {
     #[test]
     fn example_is_valid() {
         Config::parse(EXAMPLE).unwrap();
+    }
+
+    #[test]
+    fn upstream_pool_is_opt_in_requires_tls_and_has_finite_limits() {
+        let mut config = Config::parse(EXAMPLE).unwrap();
+        assert!(!config.upstream_pool.enabled);
+        config.upstream_pool.enabled = true;
+        assert!(config.validate().is_err());
+        config.upstream_tls = Some(crate::tls::ClientSettings {
+            server_name: "localhost".into(),
+            ca_file: None,
+        });
+        assert!(config.validate().is_ok());
+        for value in [0, 257] {
+            config.upstream_pool.max_connections = value;
+            assert!(config.validate().is_err());
+        }
+        config.upstream_pool.max_connections = 8;
+        for value in [0, 600001] {
+            config.upstream_pool.idle_timeout_ms = value;
+            assert!(config.validate().is_err());
+        }
+        assert!(Config::parse(&format!("{EXAMPLE}\n[upstream_pool]\nunknown = true\n")).is_err());
     }
 
     #[test]

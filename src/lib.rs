@@ -1,5 +1,6 @@
 //! DNS forwarding components for PariNS.
 
+pub mod admin;
 pub mod cache;
 pub mod config;
 pub mod doh;

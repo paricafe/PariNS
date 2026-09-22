@@ -21,6 +21,9 @@ pub fn decode(bytes: &[u8]) -> Result<Message> {
     let mut decoder = BinDecoder::new(bytes);
     let message = Message::read(&mut decoder)?;
     ensure!(decoder.is_empty(), "trailing bytes after DNS message");
+    if crate::ecs::subnet(&message).is_some() {
+        crate::ecs::validate_wire(bytes)?;
+    }
     Ok(message)
 }
 
@@ -103,6 +106,7 @@ pub fn matches_response(query: &Message, response: &Message) -> bool {
         && response.op_code == query.op_code
         && response.queries == query.queries
         && response.signature.is_none()
+        && crate::ecs::response_matches(query, response)
 }
 
 pub fn udp_limit(query: &Message) -> usize {
@@ -119,6 +123,7 @@ pub fn encode_udp(response: &Message, limit: usize) -> Result<Vec<u8>> {
     }
     // Return a complete question-only TC response rather than a partial RRset.
     let mut truncated = error_response(response, response.response_code);
+    crate::ecs::set_subnet(&mut truncated, crate::ecs::subnet(response));
     truncated.metadata.truncation = true;
     let bytes = truncated.to_vec()?;
     ensure!(

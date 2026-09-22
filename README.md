@@ -10,7 +10,8 @@ operate.
 
 Early development. UDP/TCP listeners, validated single-upstream forwarding,
 UDP-to-TCP upstream fallback, bounded connections, and graceful shutdown are
-implemented. ECS-aware caching, filtering, and encrypted transports remain planned.
+implemented. Optional peer-derived ECS is supported; caching, filtering, and
+encrypted transports remain planned.
 
 ## Development
 
@@ -72,7 +73,13 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   and signed queries are refused; other opcodes return NOTIMP. Malformed queries
   with a readable DNS header return FORMERR; unreadable packets and response
   packets sent to the listener are dropped (TCP connections are closed).
-- EDNS/DO/CD are forwarded without generating ECS or caching answers. This
+- EDNS/DO/CD are forwarded. ECS is stripped by default; enable `[ecs]` to derive
+  it from the socket peer, capped by `ipv4_prefix`/`ipv6_prefix`. Client `/0`
+  requests retain their privacy; nonzero client ECS must cover the peer or is
+  refused. Trusted forwarding of third-party subnets is not implemented.
+  Downstream ECS echoes the original client option and is omitted if the client
+  did not supply one. A nonzero ECS REFUSED triggers one anonymous `/0` retry
+  within the original deadline. Answers are not yet cached. This
   release does not perform DNSSEC validation or authenticate the plaintext
   upstream; the AD bit is cleared in client responses.
 

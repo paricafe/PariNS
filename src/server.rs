@@ -33,10 +33,7 @@ impl Server {
     }
 
     pub async fn run(self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        let resolver = Arc::new(Resolver::new(
-            self.config.upstream,
-            Duration::from_millis(self.config.query_timeout_ms),
-        ));
+        let resolver = Arc::new(Resolver::from_config(&self.config));
         let queries = Arc::new(Semaphore::new(self.config.max_inflight));
         let connections = Arc::new(Semaphore::new(self.config.max_tcp_connections));
         let io_timeout = Duration::from_millis(self.config.tcp_io_timeout_ms);
@@ -49,14 +46,14 @@ impl Server {
                 _ = &mut shutdown => break,
                 Some(result) = tasks.join_next(), if !tasks.is_empty() => { result?; }
                 accepted = self.tcp.accept() => {
-                    let (stream, _) = accepted?;
+                    let (stream, peer) = accepted?;
                     let Ok(permit) = connections.clone().try_acquire_owned() else { continue };
                     let resolver = resolver.clone();
                     let queries = queries.clone();
                     let stop = stop.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
-                        serve_tcp(stream, resolver, queries, stop, io_timeout).await;
+                        serve_tcp(stream, peer.ip(), resolver, queries, stop, io_timeout).await;
                     });
                 }
                 received = self.udp.recv_from(&mut buffer) => {
@@ -67,7 +64,7 @@ impl Server {
                     let resolver = resolver.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
-                        if let Some(reply) = resolver.resolve(&bytes).await
+                        if let Some(reply) = resolver.resolve(&bytes, peer.ip()).await
                             && let Ok(bytes) = protocol::encode_udp(&reply.message, reply.udp_limit)
                         {
                             let _ = timeout(io_timeout, socket.send_to(&bytes, peer)).await;
@@ -98,6 +95,7 @@ impl Server {
 
 async fn serve_tcp(
     mut stream: TcpStream,
+    peer: std::net::IpAddr,
     resolver: Arc<Resolver>,
     queries: Arc<Semaphore>,
     mut stop: watch::Receiver<bool>,
@@ -112,7 +110,10 @@ async fn serve_tcp(
         let Ok(Ok(bytes)) = frame else { return };
         let permit = queries.clone().try_acquire_owned();
         let response = match permit {
-            Ok(ref _permit) => resolver.resolve(&bytes).await.map(|reply| reply.message),
+            Ok(ref _permit) => resolver
+                .resolve(&bytes, peer)
+                .await
+                .map(|reply| reply.message),
             Err(_) => match protocol::request(&bytes) {
                 protocol::Request::Forward(query) => {
                     Some(protocol::error_response(&query, ResponseCode::ServFail))

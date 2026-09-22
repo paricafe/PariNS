@@ -1,6 +1,7 @@
 //! DNS forwarding components for PariNS.
 
 pub mod config;
+pub mod ecs;
 pub mod protocol;
 pub mod resolver;
 pub mod server;

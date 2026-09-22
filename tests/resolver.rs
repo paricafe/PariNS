@@ -60,7 +60,10 @@ async fn ignores_unrelated_responses_and_restores_client_id() {
             .unwrap();
     });
     let query = query("example.test.");
-    let reply = resolver.resolve(&query.to_vec().unwrap()).await.unwrap();
+    let reply = resolver
+        .resolve(&query.to_vec().unwrap(), "127.0.0.1".parse().unwrap())
+        .await
+        .unwrap();
     assert_eq!(reply.message.id, 42);
     assert_eq!(reply.message.response_code, ResponseCode::NoError);
     assert_eq!(reply.message.answers.len(), 1);
@@ -73,10 +76,13 @@ async fn silent_upstream_returns_servfail_within_deadline() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let resolver = Resolver::new(upstream.local_addr().unwrap(), Duration::from_millis(40));
     let request = query("timeout.test.").to_vec().unwrap();
-    let reply = tokio::time::timeout(Duration::from_secs(1), resolver.resolve(&request))
-        .await
-        .unwrap()
-        .unwrap();
+    let reply = tokio::time::timeout(
+        Duration::from_secs(1),
+        resolver.resolve(&request, "127.0.0.1".parse().unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(reply.message.response_code, ResponseCode::ServFail);
     assert_eq!(reply.message.id, 42);
 }
@@ -101,7 +107,8 @@ async fn concurrent_identical_ids_do_not_cross_queries() {
     });
     let a = query("a.test.").to_vec().unwrap();
     let b = query("b.test.").to_vec().unwrap();
-    let (a, b) = tokio::join!(resolver.resolve(&a), resolver.resolve(&b));
+    let peer = "127.0.0.1".parse().unwrap();
+    let (a, b) = tokio::join!(resolver.resolve(&a, peer), resolver.resolve(&b, peer));
     assert_eq!(a.unwrap().message.answers[0].name.to_ascii(), "a.test.");
     assert_eq!(b.unwrap().message.answers[0].name.to_ascii(), "b.test.");
     task.await.unwrap();

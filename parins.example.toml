@@ -7,3 +7,9 @@ tcp_io_timeout_ms = 5000
 shutdown_grace_ms = 3000
 max_inflight = 256
 max_tcp_connections = 64
+
+# Opt in only when the upstream supports ECS and this privacy policy is desired.
+[ecs]
+enabled = false
+ipv4_prefix = 24
+ipv6_prefix = 56

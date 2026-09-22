@@ -15,6 +15,26 @@ pub struct Config {
     pub shutdown_grace_ms: u64,
     pub max_inflight: usize,
     pub max_tcp_connections: usize,
+    #[serde(default)]
+    pub ecs: EcsConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EcsConfig {
+    pub enabled: bool,
+    pub ipv4_prefix: u8,
+    pub ipv6_prefix: u8,
+}
+
+impl Default for EcsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ipv4_prefix: 24,
+            ipv6_prefix: 56,
+        }
+    }
 }
 
 impl Config {
@@ -31,6 +51,10 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.ecs.ipv4_prefix <= 32 && self.ecs.ipv6_prefix <= 128,
+            "invalid ECS prefix limit"
+        );
         ensure!(self.upstream.port() != 0, "upstream port must be nonzero");
         ensure!(
             !self.upstream.ip().is_unspecified() && !self.upstream.ip().is_multicast(),

@@ -11,7 +11,7 @@ use serde::Serialize;
 const BOUNDS: [u64; 8] = [
     1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000, 5_000_000,
 ];
-const NAMES: [&str; 26] = [
+const NAMES: [&str; 28] = [
     "requests",
     "completed",
     "cancelled",
@@ -38,6 +38,8 @@ const NAMES: [&str; 26] = [
     "responses_nxdomain",
     "responses_other",
     "dropped",
+    "encrypted_received",
+    "encrypted_rejected",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +70,8 @@ pub enum Counter {
     ResponsesNxdomain,
     ResponsesOther,
     Dropped,
+    EncryptedReceived,
+    EncryptedRejected,
 }
 
 #[derive(Clone, Copy, Debug)]

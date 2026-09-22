@@ -12,6 +12,7 @@ pub mod policy;
 pub mod protocol;
 pub mod quic;
 pub mod resolver;
+pub mod scheduler;
 pub mod server;
 pub mod tls;
 mod transport;

@@ -85,6 +85,66 @@ pub struct CacheConfig {
     pub max_variants: usize,
     pub max_ttl_secs: u32,
     pub negative_ttl_cap_secs: u32,
+    pub shards: usize,
+    pub negative_percent: u8,
+    pub prefetch: PrefetchConfig,
+    pub stale: StaleConfig,
+    pub rules: Vec<CacheRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrefetchConfig {
+    pub enabled: bool,
+    pub min_hits: u64,
+    pub remaining_percent: u8,
+    pub max_inflight: usize,
+    pub rate_per_sec: u32,
+    pub backoff_secs: u64,
+}
+
+impl Default for PrefetchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_hits: 3,
+            remaining_percent: 10,
+            max_inflight: 2,
+            rate_per_sec: 10,
+            backoff_secs: 5,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StaleConfig {
+    pub enabled: bool,
+    pub retention_secs: u64,
+    pub reply_ttl_secs: u32,
+}
+
+impl Default for StaleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retention_secs: 300,
+            reply_ttl_secs: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CacheRule {
+    pub name: String,
+    pub suffix: bool,
+    pub qtype: Option<String>,
+    pub bypass: bool,
+    pub max_ttl_secs: Option<u32>,
+    pub negative_ttl_cap_secs: Option<u32>,
+    pub prefetch: Option<bool>,
+    pub stale: Option<bool>,
 }
 
 impl Default for CacheConfig {
@@ -96,6 +156,11 @@ impl Default for CacheConfig {
             max_variants: 64,
             max_ttl_secs: 3600,
             negative_ttl_cap_secs: 300,
+            shards: 4,
+            negative_percent: 20,
+            prefetch: PrefetchConfig::default(),
+            stale: StaleConfig::default(),
+            rules: Vec::new(),
         }
     }
 }
@@ -228,6 +293,53 @@ impl Config {
                 && (1..=86400).contains(&self.cache.negative_ttl_cap_secs),
             "cache TTL caps must be in 1..=86400"
         );
+        ensure!(
+            (1..=64).contains(&self.cache.shards),
+            "cache.shards must be in 1..=64"
+        );
+        ensure!(
+            self.cache.negative_percent <= 90,
+            "cache.negative_percent must be in 0..=90"
+        );
+        let prefetch = &self.cache.prefetch;
+        ensure!(
+            (1..=1_000_000).contains(&prefetch.min_hits)
+                && (1..=90).contains(&prefetch.remaining_percent)
+                && (1..=256).contains(&prefetch.max_inflight)
+                && (1..=10_000).contains(&prefetch.rate_per_sec)
+                && (1..=3600).contains(&prefetch.backoff_secs),
+            "invalid cache.prefetch limits"
+        );
+        ensure!(
+            (1..=604800).contains(&self.cache.stale.retention_secs)
+                && (1..=300).contains(&self.cache.stale.reply_ttl_secs),
+            "invalid cache.stale limits"
+        );
+        ensure!(
+            self.cache.rules.len() <= 256,
+            "cache.rules exceeds 256 rules"
+        );
+        for rule in &self.cache.rules {
+            ensure!(
+                !rule.name.is_empty()
+                    && rule.name.len() <= 253
+                    && hickory_proto::rr::Name::from_ascii(&rule.name).is_ok(),
+                "invalid cache rule name"
+            );
+            if let Some(kind) = &rule.qtype {
+                ensure!(
+                    kind.parse::<hickory_proto::rr::RecordType>().is_ok(),
+                    "invalid cache rule qtype"
+                );
+            }
+            ensure!(
+                [rule.max_ttl_secs, rule.negative_ttl_cap_secs]
+                    .into_iter()
+                    .flatten()
+                    .all(|ttl| (1..=86400).contains(&ttl)),
+                "invalid cache rule TTL cap"
+            );
+        }
         ensure!(
             self.ecs.ipv4_prefix <= 32 && self.ecs.ipv6_prefix <= 128,
             "invalid ECS prefix limit"
@@ -406,5 +518,35 @@ mod tests {
         ] {
             assert!(Config::parse(&EXAMPLE.replace(from, to)).is_err(), "{to}");
         }
+    }
+
+    #[test]
+    fn cache_policy_validation_and_safe_defaults() {
+        let mut cfg = Config::parse(EXAMPLE).unwrap();
+        assert!(!cfg.cache.prefetch.enabled && !cfg.cache.stale.enabled);
+        cfg.cache.rules.push(CacheRule {
+            name: "example.test".into(),
+            qtype: Some("A".into()),
+            max_ttl_secs: Some(30),
+            ..Default::default()
+        });
+        assert!(cfg.validate().is_ok());
+        cfg.cache.rules[0].max_ttl_secs = Some(0);
+        assert!(cfg.validate().is_err());
+        cfg.cache.rules[0].max_ttl_secs = Some(30);
+        cfg.cache.rules[0].qtype = Some("not-a-type".into());
+        assert!(cfg.validate().is_err());
+        cfg.cache.rules.clear();
+        cfg.cache.shards = 0;
+        assert!(cfg.validate().is_err());
+        cfg.cache.shards = 4;
+        cfg.cache.negative_percent = 91;
+        assert!(cfg.validate().is_err());
+        cfg.cache.negative_percent = 20;
+        cfg.cache.prefetch.rate_per_sec = 0;
+        assert!(cfg.validate().is_err());
+        cfg.cache.prefetch.rate_per_sec = 10;
+        cfg.cache.stale.reply_ttl_secs = 0;
+        assert!(cfg.validate().is_err());
     }
 }

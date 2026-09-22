@@ -3,7 +3,7 @@
 
 use std::{
     hint::black_box,
-    sync::{Arc, Barrier, Mutex},
+    sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant},
 };
@@ -20,22 +20,22 @@ use parins::{cache::Cache, config::CacheConfig, ecs::Scope, protocol};
 
 // The only adapter changed when comparing the original caller-locked cache with
 // the concurrent implementation. Workloads and measurements stay identical.
-struct SharedCache(Mutex<Cache>);
+struct SharedCache(Cache);
 impl SharedCache {
     fn new() -> Self {
-        Self(Mutex::new(Cache::new(CacheConfig::default())))
+        let mut config = CacheConfig::default();
+        if let Ok(shards) = std::env::var("PARINS_BENCH_SHARDS") {
+            config.shards = shards.parse().expect("invalid PARINS_BENCH_SHARDS");
+            assert!(config.shards.is_power_of_two() && config.shards <= 64);
+        }
+        Self(Cache::new(config))
     }
     fn insert(&self, fixture: &Fixture, now: Instant) {
         self.0
-            .lock()
-            .unwrap()
             .insert(&fixture.query, &fixture.response, fixture.scope, now);
     }
     fn get(&self, fixture: &Fixture, now: Instant) -> Option<(Message, Scope)> {
-        self.0
-            .lock()
-            .unwrap()
-            .get(&fixture.query, fixture.outgoing, now)
+        self.0.get(&fixture.query, fixture.outgoing, now)
     }
 }
 
@@ -249,24 +249,50 @@ fn main() {
     };
     let seconds = value("--seconds", 1);
     let repeats = value("--repeats", 3);
+    let workers = value("--workers", 0);
+    let selected = args
+        .iter()
+        .position(|arg| arg == "--case")
+        .map(|index| args.get(index + 1).expect("missing --case value").as_str());
+    let workloads = [
+        Workload::Hot,
+        Workload::Multi,
+        Workload::Ecs,
+        Workload::NegativeChurn,
+        Workload::Decode,
+        Workload::Clone,
+    ];
+    assert!(
+        selected.is_none_or(|name| workloads.iter().any(|case| format!("{case:?}") == name)),
+        "unknown --case"
+    );
+    assert!(
+        workers <= 64,
+        "--workers must be between 1 and 64, or 0 for the default matrix"
+    );
     assert!(seconds > 0 && repeats > 0);
     println!(
         "# in-process cache; fixed seed; prebuilt queries; latency sample 1/64; synthetic TTL age 5s; no DNS sockets"
     );
     println!(
+        "# configured shards: {}",
+        std::env::var("PARINS_BENCH_SHARDS")
+            .unwrap_or_else(|_| CacheConfig::default().shards.to_string())
+    );
+    println!(
         "workload,workers,seconds,operations,hits,errors,ops_per_second,sampled_p99_ns,samples"
     );
     for _ in 0..repeats {
-        for workload in [
-            Workload::Hot,
-            Workload::Multi,
-            Workload::Ecs,
-            Workload::NegativeChurn,
-            Workload::Decode,
-            Workload::Clone,
-        ] {
-            for workers in [1, 2, 4] {
-                run(workload, workers, Duration::from_secs(seconds as u64));
+        for workload in workloads {
+            if selected.is_some_and(|name| format!("{workload:?}") != name) {
+                continue;
+            }
+            for worker_count in if workers == 0 {
+                vec![1, 2, 4]
+            } else {
+                vec![workers]
+            } {
+                run(workload, worker_count, Duration::from_secs(seconds as u64));
             }
         }
     }

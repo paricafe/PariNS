@@ -1,0 +1,21 @@
+CHANGELOG.md
+  s_d595d238bbd4ee::t_5744ceb60546b1 7-14
+AGENTS.md
+  s_d595d238bbd4ee::t_5744ceb60546b1 60-61,77-78,92-94,112-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d9a83236687aba41a3f0f60dc3c9c0a4342b7e88",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

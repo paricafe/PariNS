@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.1.1 — 2026-09-22
+
+### Added
 
 - Unified upstream DNS settings and first-run setup: one list for one or more
-  servers, with legacy single-upstream controls removed from the console.
-  Existing configurations still load; simple UDP settings migrate on upstream
-  edits, while legacy TLS/hedging needs an explicit replacement.
+  servers, with a single configuration model for the console and TOML files.
 - Optional HTTP/3 preference for HTTPS upstreams, with reusable QUIC connections,
   bounded attempts, verified HTTP/2 fallback and a cooldown after H3 failure.
 - Simplified Chinese/English console switcher with a local language preference,
@@ -31,7 +31,20 @@
 
 Byte accounting now includes conservative per-entry metadata; the same byte
 budget may hold fewer responses. Budgets are partitioned, not a process RSS cap.
-No new release is published by this change.
+
+### Removed
+
+- Retired root `upstream`, `upstream_tls`, `upstream_pool` and `scheduler`
+  configuration, delayed-replica scheduling, and automatic migration logic.
+  `[upstreams]` is now required; DoT reuse belongs to `[upstreams.dot_pool]`.
+  This is an intentional configuration break during initial development.
+  Use the current example or setup wizard rather than old development configs.
+
+### Fixed
+
+- Cancelling an HTTP/3 upstream request while awaiting a response now releases
+  its stream without a dependency panic and keeps other queries usable.
+- Linux bootstrap defaults to v0.1.1, matching the versioned release packages.
 
 ## v0.1.0 — 2026-09-22
 

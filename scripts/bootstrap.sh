@@ -6,8 +6,8 @@ umask 077
 
 fail() { printf 'PariNS bootstrap: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.0] [--dry-run]' \
-        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.0] [--dry-run]' \
+    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.1] [--dry-run]' \
+        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.1] [--dry-run]' \
         'Linux x86_64/aarch64 and systemd are required for live installation.' \
         '--root stages files only; no service or candidate binary is executed.'
 }
@@ -35,7 +35,7 @@ cleanup() {
     exit "$status"
 }
 main() {
-    version=v0.1.0 root= dry_run=false
+    version=v0.1.1 root= dry_run=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--root)
@@ -106,9 +106,7 @@ main() {
     ' "$download_dir/types" || fail 'archive links and special files are forbidden'
     package="$download_dir/$archive"
     mkdir -m 0700 "$package" "$package/deploy"
-    files='parins install.sh parins.example.toml LICENSE README.md deploy/parins-managed.service'
-    if grep -Fxq "$archive/CHANGELOG.md" "$download_dir/members"; then files="$files CHANGELOG.md"; fi
-    if grep -Fxq "$archive/deploy/parins.service" "$download_dir/members"; then files="$files deploy/parins.service"; fi
+    files='parins install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service'
     # Extract exact regular-file contents, never archive paths or permissions.
     for name in SHA256SUMS $files; do
         grep -Fxq "$archive/$name" "$download_dir/members" || fail "missing package member: $name"

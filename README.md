@@ -12,9 +12,10 @@ provider or hosted service.
 ## Features
 
 - **DNS transports:** UDP, TCP, DoT, DoH over HTTP/2 and HTTP/3, and DoQ listeners.
-- **Upstream forwarding:** UDP/TCP, authenticated DoT, DoH (HTTP/2), and DoQ;
+- **Upstream forwarding:** UDP/TCP, authenticated DoT, DoH (HTTP/2 with optional
+  HTTP/3 preference), and DoQ;
   multiline upstream pools with weighted round-robin or bounded parallel racing.
-  Legacy DoT connection reuse and equivalent-replica hedging remain supported.
+  Optional per-endpoint DoT connection reuse reduces repeated handshakes.
 - **Subnet-aware caching:** concurrent shards, independent ECS variants,
   positive/negative budgets, domain policies, optional prefetch and failure-only
   stale answers, and in-flight request coalescing. ECS is opt-in.
@@ -29,13 +30,14 @@ provider or hosted service.
 
 ## Status
 
-Early release (v0.1.0). The features above are implemented, with automated Linux and
+Early release (v0.1.1). The features above are implemented, with automated Linux and
 macOS tests and isolated Linux systemd installation checks. Production deployment
 and target-machine capacity acceptance have not been performed.
 
-The expanded cache controls, query logs, upstream pools and PEM import are **unreleased changes on main**,
-not part of the v0.1.0 download. Build from source to try them; the one-click
-installer continues to install the latest published release.
+Version 0.1.1 includes the expanded cache controls, query logs, bilingual console,
+unified upstream settings, H3 preference and PEM import. This project is in active
+initial development: `[upstreams]` is required, and old single-upstream settings
+are no longer accepted. Start with the bundled example or the setup wizard.
 
 PariNS forwards to existing resolvers; it is not an authoritative DNS server or
 a standalone iterative resolver, and does not perform DNSSEC validation. DNS
@@ -76,8 +78,9 @@ sudo openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint
 sudo cat /var/lib/parins/setup-token
 ```
 
-Enter the token, create an administrator, and choose your DNS upstream's actual
-IP:port. The wizard starts with `127.0.0.1:5353` for local testing. For LAN clients,
+Enter the token, create an administrator, and enter your upstream DNS servers,
+one per line. IP addresses and encrypted DNS URLs are supported; hostname URLs
+also need bootstrap DNS addresses. The wizard starts with `127.0.0.1:5353` for local testing. For LAN clients,
 choose the server's LAN IP on port 53 and allow those clients through your firewall.
 Port 53 must be free; conflicting DNS services are not stopped automatically.
 DNS starts after setup succeeds. Self-signed certificates need explicit trust and
@@ -97,7 +100,7 @@ sudo systemctl status parins-managed.service
 The installer does not change your host/router DNS or firewall. Use the dashboard
 to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
 needed. To upgrade, rerun the installer; existing account, configuration and HTTPS
-identity are preserved. Pin a version with `sudo sh parins-install.sh --version v0.1.0`.
+identity are preserved. Pin a version with `sudo sh parins-install.sh --version v0.1.1`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`
@@ -165,7 +168,7 @@ ssh -N -L 3000:127.0.0.1:3000 USER@HOST
 Read `sudo cat /var/lib/parins/setup-token` on the server. If using the tunnel,
 open <https://127.0.0.1:3000>. Enter the one-time token, choose an
 administrator name and a password of at least 12 bytes, and set the DNS listen
-address and your upstream's literal IP:port. The wizard defaults to loopback DNS;
+address and upstream list. The wizard defaults to loopback DNS;
 set port 53 explicitly if wanted and free. The service has only the capability
 needed to bind low ports. Port conflicts reject setup/application; no conflicting
 service is automatically stopped. Never share the token or put it in a URL.
@@ -180,7 +183,7 @@ requires login, and logout revokes the session. There are no external frontend
 assets or cookies. Tokens and query logs are not persisted in browser storage;
 opt-in query history is held in server memory.
 
-On unreleased `main`, the console supports Simplified Chinese and English. Use
+The console supports Simplified Chinese and English. Use
 the language selector at the top of any page, including sign-in and setup.
 The initial language follows a supported browser language, falling back to
 Simplified Chinese. A manual choice is remembered locally in that browser;
@@ -286,7 +289,7 @@ dig @127.0.0.1 -p 5353 example.com A +tcp
 Use `--config PATH` to select a different configuration file. `listen` selects
 the same address and port for UDP and TCP; port zero selects a shared ephemeral
 port, printed on startup. Set `[upstreams].servers` to one or more endpoints
-(see [Upstream DNS settings](#upstream-dns-settings-unreleased)). UDP endpoints
+(see [Upstream DNS settings](#upstream-dns-settings)). UDP endpoints
 must also support TCP for truncated answers. Do not point them back at PariNS, including through a local
 interface alias that configuration validation cannot identify.
 
@@ -553,7 +556,7 @@ configuration are ignored by Git. Provision certificates outside this repository
   X-Forwarded-For/Forwarded headers are not trusted.
 - Connections/handshakes share `max_tcp_connections`; streams and bodies have
   finite bounds. Per-connection streams are capped at `min(max_inflight, 1024)`.
-  The legacy `tcp_io_timeout_ms` also bounds encrypted handshakes
+  `tcp_io_timeout_ms` also bounds encrypted handshakes
   and complete HTTP/QUIC request work. HTTP/2 headers are limited to 8 KiB;
   HTTP/3 field sections to 128 KiB; DNS payloads to 65535 bytes. Large DNS GET URLs
   may exceed header limits; use POST. These budgets are not an RSS guarantee.
@@ -561,11 +564,10 @@ configuration are ignored by Git. Provision certificates outside this repository
   their active DNS waiter. H3 **single-stream** cancellation is currently observed
   on response write or at the finite request deadline: the selected H3 library
   does not expose an earlier response-stream cancellation notification.
-- Optional `[upstream_tls]` authenticates the fixed upstream IP using `server_name`.
-  `ca_file` replaces built-in WebPKI roots. Certificate failures never downgrade
-  to plaintext. Upstream DoT opens a fresh connection per transaction by default;
-  optional bounded reuse is described below. For DoH/DoQ clients and multiple
-  endpoints, use the new upstream pool described below.
+- Encrypted upstreams authenticate the hostname or IP in their URL.
+  `[upstreams].ca_file` replaces built-in WebPKI roots. Certificate failures never
+  downgrade to plaintext. DoT opens a fresh connection per transaction by default;
+  optional bounded reuse is configured under `[upstreams.dot_pool]`.
 - SIGHUP validates all new rule/certificate candidates before replacing them.
   Each listener's new full handshakes see its atomic certificate replacement;
   established connections and resumed sessions may retain previous TLS identity
@@ -573,7 +575,7 @@ configuration are ignored by Git. Provision certificates outside this repository
   rules. Listener addresses, resource limits, upstream/CA settings and inline
   configuration require restart, which creates fresh resolver/cache ownership.
 
-## Query logs and certificate paste (unreleased)
+## Query logs and certificate paste
 
 The **Query log** page provides manual refresh, search, status filtering,
 newest-first cursor pagination, and explicit clearing. Enable it under Runtime
@@ -607,11 +609,11 @@ the same file. Remove unused files manually only after checking current/rollback
 configurations. Management HTTPS certificates remain independently configured
 through startup flags; this form configures DNS listeners, not the console.
 
-## Upstream DNS settings (unreleased)
+## Upstream DNS settings
 
 **Upstream DNS settings** is the sole visual upstream editor, for one or more
-servers. Enter one endpoint per line. The first-run wizard on main uses the same
-list, query modes, explicit bootstrap and H3 preference; v0.1.0 has the older wizard.
+servers. Enter one endpoint per line. The first-run wizard uses the same
+list, query modes, explicit bootstrap and H3 preference.
 Supported syntax is IP with optional port, `udp://`, `tcp://`, `tls://`,
 `https://host/dns-query`, and `quic://`; bracket IPv6 literals. A trailing
 `weight=N` (1..1000) sets a static weight. This is smooth weighted round-robin,
@@ -647,25 +649,11 @@ does not discover alternate ports through Alt-Svc or HTTPS/SVCB records. Direct
 HTTPS-origin probing and TCP fallback follow [RFC 9114 §3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-3.1).
 Unsupported schemes,
 credentials, URL query strings, fragments and duplicate endpoints are rejected.
-Do not combine `[upstreams]` with legacy `[scheduler]`, `[upstream_tls]` or an
-enabled `[upstream_pool]`. All pool endpoints should have equivalent resolution,
+All pool endpoints should have equivalent resolution,
 filtering and ECS policies because they share the resolver cache. There is no
 domain-routing syntax or DNSCrypt support. Do not point endpoints/bootstrap back
 at PariNS (including NAT aliases); direct matching listeners are rejected, but
 arbitrary network hairpin routes cannot be inferred by local validation.
-
-### Existing configuration migration
-
-New configurations need only `[upstreams]`; a root `upstream` is no longer
-required. Existing root `upstream` configurations still load. A plain UDP
-single upstream appears as a one-entry list; editing that list or its options
-migrates it to `[upstreams]` when saved. Unrelated edits preserve the old path.
-Legacy TLS, connection-pool and delayed-replica configurations keep their
-existing behavior and remain accessible in Advanced settings. The console
-shows a migration notice: enter complete replacement upstream settings and
-review TLS hostnames, CA trust and query mode before saving. This explicitly
-replaces the legacy fields; fixed-IP/SNI overrides and delayed hedging are not
-silently translated into a different scheduling or identity policy.
 
 ### Client request forwarding
 
@@ -684,11 +672,11 @@ packet replay.
 
 ## Optional DoT upstream reuse
 
-With `[upstream_tls]` configured, enable `[upstream_pool] enabled = true` to reuse
+For `tls://` endpoints, enable `[upstreams.dot_pool] enabled = true` to reuse
 authenticated connections, following the connection-lifecycle guidance in
 [RFC 7858 §3.4](https://www.rfc-editor.org/rfc/rfc7858.html#section-3.4).
-`max_connections` defaults to 8 (range 1..256), shared by clones and both replica
-endpoints within one immutable TLS profile. Connections never cross endpoints
+`max_connections` defaults to 8 (range 1..256), independently per DoT endpoint
+and shared by its concurrent queries. Connections never cross endpoints
 or authentication profiles. Each connection handles one query at a time; DNS
 pipelining is not implemented. Pool waiting, handshake, exchange and reconnect
 all remain inside the Resolver's original `query_timeout_ms` deadline.
@@ -698,25 +686,8 @@ not by a background reaper: without new traffic, idle sockets can remain until
 the owning upstream is dropped, still within the connection cap. Cancellation,
 partial responses and invalid replies discard the borrowed connection. A reused
 connection closed by the peer gets at most one authenticated reconnect; protocol
-and certificate errors do not trigger retries or plaintext fallback. Leave pool
-capacity headroom for replica hedges; a one-connection cap serializes them.
-
-## Optional replica scheduling
-
-`[scheduler]` enables exactly one secondary **semantically equivalent** upstream.
-The operator must establish equal ECS, DNSSEC and answer policies. Both replicas
-use the same transport and TLS server name. The primary starts first; after
-`hedge_after_ms`, or an IO error/SERVFAIL, at most one secondary starts.
-`max_extra_inflight` is a process-resolver-wide non-queuing extra-operation budget.
-The first non-SERVFAIL response wins, including NXDOMAIN, NODATA and REFUSED.
-REFUSED remains available for the resolver's bounded anonymous ECS retry.
-The overall query deadline is unchanged and losing futures are dropped, not
-left running in background tasks. Saturation falls back to primary-only behavior.
-
-Changing upstream semantics requires a new Resolver instance (restart in the
-binary), with an independent cache and singleflight table. No automatic
-non-ECS emergency profile or health-based routing is enabled. Hedging is disabled
-by default and trades additional upstream traffic for latency; measure first.
+and certificate errors do not trigger retries or plaintext fallback. A
+one-connection cap serializes queries to that endpoint.
 
 ## Development, testing and packaging
 
@@ -748,7 +719,7 @@ sh scripts/package.sh
 ```
 
 The benchmark runs only synthetic loopback upstreams and emits JSON for warm
-cache, cold single-upstream and cold hedged scenarios. It is a Resolver baseline,
+cache, cold single-upstream and cold parallel-upstream scenarios. It is a Resolver baseline,
 not network/TLS throughput, RSS measurement or production capacity evidence.
 `bench_dot` separately compares fresh and pooled authenticated DoT transactions
 against one synthetic loopback TLS peer, without response caching or artificial
@@ -783,7 +754,7 @@ Linux/macOS CI results must be checked separately from local macOS acceptance.
 | `metrics` | Fixed counters, RAII lifecycle gauges and cumulative latency buckets |
 | `resolver` | Compose policy, ECS, cache, upstream deadline and response restoration |
 | `upstream` | Independent UDP exchange and validated TCP fallback |
-| `scheduler` | Opt-in equivalent-replica race, shared extra budget, loser cancellation |
+| `upstreams` | Unified endpoints, explicit bootstrap, weighted/parallel scheduling, H3 preference |
 | `tls` / `doh` / `quic` | Authenticated transport, framing, HTTP/stream lifecycle |
 | `ingress` | Shared encrypted-query admission and response serialization |
 | `limits` | Bounded socket-subnet token buckets and RAII query/connection quotas |

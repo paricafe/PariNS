@@ -21,7 +21,9 @@ pub fn decode(bytes: &[u8]) -> Result<Message> {
     let mut decoder = BinDecoder::new(bytes);
     let message = Message::read(&mut decoder)?;
     ensure!(decoder.is_empty(), "trailing bytes after DNS message");
-    if crate::ecs::subnet(&message).is_some() {
+    // Malformed OPT tails can make the library discard all typed options,
+    // including an ECS /0 privacy request. Validate the original envelope.
+    if message.edns.is_some() {
         crate::ecs::validate_wire(bytes)?;
     }
     Ok(message)

@@ -126,6 +126,37 @@ fn malformed_ecs_lengths_padding_scope_and_duplicates_are_rejected() {
         .options_mut()
         .insert(EdnsOption::Subnet("192.0.2.0/24".parse().unwrap()));
     assert!(protocol::decode(&q.to_vec().unwrap()).is_err());
+
+    // A valid privacy /0 followed by an incomplete EDNS option must not become
+    // an option-free query that causes the resolver to disclose its peer IP.
+    let opt_start = query(None).to_vec().unwrap().len();
+    let mut q = query(Some("0.0.0.0/0"));
+    q.edns
+        .as_mut()
+        .unwrap()
+        .options_mut()
+        .insert(EdnsOption::Unknown(65000, vec![]));
+    let mut bytes = q.to_vec().unwrap();
+    bytes.truncate(bytes.len() - 2);
+    let length = (bytes.len() - opt_start - 11) as u16;
+    bytes[opt_start + 9..opt_start + 11].copy_from_slice(&length.to_be_bytes());
+    assert!(
+        matches!(protocol::request(&bytes), protocol::Request::Reply(r) if r.response_code == ResponseCode::FormErr)
+    );
+}
+
+#[test]
+fn downstream_edns_is_normalized_even_without_upstream_opt() {
+    let mut input = query(None);
+    let mut edns = Edns::new();
+    edns.set_max_payload(4096).set_dnssec_ok(true);
+    input.edns = Some(edns);
+    let (_, context) = Context::prepare(&input, "192.0.2.1".parse().unwrap(), &enabled()).unwrap();
+    let mut response = Message::response(input.id, input.op_code);
+    context.finish(&input, &mut response, None);
+    let edns = response.edns.unwrap();
+    assert!(edns.flags().dnssec_ok);
+    assert_eq!(edns.max_payload(), protocol::MAX_UDP_PAYLOAD);
 }
 
 #[test]

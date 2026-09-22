@@ -138,9 +138,14 @@ impl Context {
         response.metadata.authentic_data = false;
         response.queries = query.queries.clone();
         set_subnet(response, None);
-        if query.edns.is_none() {
+        if let Some(client_edns) = &query.edns {
+            let edns = response.edns.get_or_insert_with(Edns::new);
+            edns.set_max_payload(MAX_UDP_PAYLOAD)
+                .set_dnssec_ok(client_edns.flags().dnssec_ok);
+        } else {
             response.edns = None;
-        } else if let Some(original) = self.incoming {
+        }
+        if let Some(original) = self.incoming {
             let echoed = ClientSubnet::new(
                 original.addr(),
                 original.source_prefix(),

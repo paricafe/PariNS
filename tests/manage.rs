@@ -125,8 +125,12 @@ impl Management {
     }
 
     async fn raw(&self, bytes: &[u8]) -> Response {
+        self.raw_at(self.address, bytes).await
+    }
+
+    async fn raw_at(&self, address: SocketAddr, bytes: &[u8]) -> Response {
         timeout(DEADLINE, async {
-            let mut stream = self.connect().await;
+            let mut stream = self.connect_at(address).await;
             stream.write_all(bytes).await.unwrap();
             stream.flush().await.unwrap();
             let mut response = String::new();
@@ -144,10 +148,14 @@ impl Management {
     }
 
     async fn connect(&self) -> TlsStream<TcpStream> {
+        self.connect_at(self.address).await
+    }
+
+    async fn connect_at(&self, address: SocketAddr) -> TlsStream<TcpStream> {
         self.connector
             .connect(
                 ServerName::try_from("localhost").unwrap(),
-                TcpStream::connect(self.address).await.unwrap(),
+                TcpStream::connect(address).await.unwrap(),
             )
             .await
             .expect("HTTPS handshake with trusted generated certificate")
@@ -998,7 +1006,7 @@ async fn persistence_failure_restores_previous_dns_and_can_be_retried_after_repa
 }
 
 #[tokio::test]
-async fn setup_and_login_share_five_attempts_then_reject_before_authentication() {
+async fn same_source_setup_and_login_share_five_attempts_then_reject_before_authentication() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
@@ -1034,6 +1042,50 @@ async fn setup_and_login_share_five_attempts_then_reject_before_authentication()
             .expect(200)["setup_required"],
         true
     );
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn exhausted_socket_source_does_not_block_other_source_setup_or_login() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let reservation = TcpListener::bind("[::]:0").await.unwrap();
+    let server = Management::start_reserved(&directory, reservation).await;
+    let other = SocketAddr::from(([127, 0, 0, 1], server.address.port()));
+    for attempt in 0..5 {
+        let wire = String::from_utf8(server.wire("POST", "/api/login", None, Some(json!({}))))
+            .unwrap().replacen("\r\n\r\n", &format!("\r\nX-Forwarded-For: 192.0.2.{attempt}\r\nForwarded: for=198.51.100.{attempt}\r\n\r\n"), 1);
+        server.raw(wire.as_bytes()).await.expect(400);
+    }
+    // Changing forwarding headers and opening another TCP socket cannot reset
+    // the actual IPv6 peer's debt.
+    let wire = String::from_utf8(server.wire("POST", "/api/login", None, Some(json!({}))))
+        .unwrap()
+        .replacen("\r\n\r\n", "\r\nX-Forwarded-For: 203.0.113.1\r\n\r\n", 1);
+    server.raw(wire.as_bytes()).await.expect(429);
+    let setup_token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    let setup = String::from_utf8(server.wire(
+        "POST",
+        "/api/setup",
+        None,
+        Some(json!({"username":"admin","password":PASSWORD,"toml":configuration()})),
+    ))
+    .unwrap()
+    .replacen(
+        "\r\n\r\n",
+        &format!("\r\nX-PariNS-Setup: {setup_token}\r\n\r\n"),
+        1,
+    );
+    let session = server.raw_at(other, setup.as_bytes()).await.expect(200);
+    assert!(session["token"].is_string());
+    let login = server.wire(
+        "POST",
+        "/api/login",
+        None,
+        Some(json!({"username":"admin","password":PASSWORD})),
+    );
+    server.raw_at(other, &login).await.expect(200);
+    server.raw(&login).await.expect(429);
     server.finish().await;
 }
 

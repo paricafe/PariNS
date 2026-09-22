@@ -6,6 +6,7 @@ PariI18n.register("api", {
   LOGIN_FAILED: ["用户名或密码有误，请重新输入。", "Incorrect username or password. Please try again."],
   UNAUTHORIZED: ["请重新登录。", "Please sign in again."],
   LOGIN_LIMIT: ["登录尝试过于频繁，请一分钟后重试。", "Too many sign-in attempts. Try again in one minute."],
+  AUTH_BUSY: ["认证服务繁忙，请稍后重试。", "Authentication is busy. Please try again shortly."],
   SETUP_REQUIRED: ["请先完成首次设置。", "Complete first-time setup to continue."],
   ALREADY_SETUP: ["设置已完成，请刷新页面并登录。", "Setup is complete. Refresh the page and sign in."],
   SETUP_TOKEN: ["初始化令牌有误，请从 setup-token 文件重新复制。", "Incorrect setup token. Copy it again from the setup-token file."],

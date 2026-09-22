@@ -1,4 +1,5 @@
 //! Authenticated management plane. DNS forwarding remains in Server/Resolver.
+mod auth_budget;
 mod cache;
 mod certificates;
 mod https;
@@ -9,7 +10,7 @@ mod store;
 
 use anyhow::Result;
 use axum::{
-    Router,
+    Extension, Router,
     body::{Body, to_bytes},
     extract::State,
     http::{HeaderMap, Request, StatusCode},
@@ -23,7 +24,6 @@ use runtime::Manager;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
     future::Future,
     net::{IpAddr, SocketAddr},
     path::Path,
@@ -41,7 +41,7 @@ struct Session {
 struct Shared {
     manager: Arc<tokio::sync::Mutex<Manager>>,
     sessions: Mutex<Vec<Session>>,
-    logins: Mutex<VecDeque<Instant>>,
+    auth: auth_budget::Budget,
     mutation: Arc<Semaphore>,
     history: Mutex<stats::History>,
     address: SocketAddr,
@@ -108,26 +108,6 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::result::Result<T,
 }
 
 impl Shared {
-    fn login_budget(&self) -> std::result::Result<(), ApiError> {
-        let now = Instant::now();
-        let mut attempts = self.logins.lock().unwrap();
-        while attempts
-            .front()
-            .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
-        {
-            attempts.pop_front();
-        }
-        if attempts.len() >= 5 {
-            return Err(error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "LOGIN_LIMIT",
-                "Try again in one minute",
-            ));
-        }
-        attempts.push_back(now);
-        Ok(())
-    }
-
     fn session(&self) -> String {
         let token = store::secret();
         let mut sessions = self.sessions.lock().unwrap();
@@ -204,6 +184,7 @@ struct CertificateImport {
 
 async fn api(
     shared: Arc<Shared>,
+    peer: SocketAddr,
     method: &str,
     path: &str,
     headers: &HeaderMap,
@@ -217,7 +198,7 @@ async fn api(
             return Ok(json!({"toml":include_str!("../../parins.example.toml")}));
         }
         ("POST", "/api/login") => {
-            shared.login_budget()?;
+            shared.auth.attempt(peer.ip())?;
             let credentials: Credentials = decode(body)?;
             if credentials.username.len() > 64 || credentials.password.len() > 256 {
                 return Err(error(
@@ -233,13 +214,14 @@ async fn api(
                     "Complete setup first",
                 )
             })?;
-            let valid = tokio::task::spawn_blocking(move || {
-                let valid_password =
-                    store::verify_password(&saved.password_hash, &credentials.password);
-                valid_password && saved.username == credentials.username
-            })
-            .await
-            .map_err(|_| internal())?;
+            let valid = shared
+                .auth
+                .password_work(move || {
+                    let valid_password =
+                        store::verify_password(&saved.password_hash, &credentials.password);
+                    valid_password && saved.username == credentials.username
+                })
+                .await?;
             if !valid {
                 return Err(error(
                     StatusCode::UNAUTHORIZED,
@@ -250,7 +232,7 @@ async fn api(
             return Ok(json!({"token":shared.session()}));
         }
         ("POST", "/api/setup") => {
-            shared.login_budget()?;
+            shared.auth.attempt(peer.ip())?;
             let setup: Setup = decode(body)?;
             let supplied = headers
                 .get("x-parins-setup")
@@ -291,11 +273,11 @@ async fn api(
                         "Username must be 1..64 ASCII letters, digits, hyphen or underscore",
                     ));
                 }
-                let hash =
-                    tokio::task::spawn_blocking(move || store::hash_password(&setup.password))
-                        .await
-                        .map_err(|_| internal())?
-                        .map_err(invalid)?;
+                let hash = control
+                    .auth
+                    .password_work(move || store::hash_password(&setup.password))
+                    .await?
+                    .map_err(invalid)?;
                 manager
                     .apply(Stored {
                         username: setup.username,
@@ -505,8 +487,12 @@ async fn api(
     }
 }
 
-async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Response {
-    let mut response = handle_inner(shared, request)
+async fn handle(
+    State(shared): State<Arc<Shared>>,
+    Extension(peer): Extension<SocketAddr>,
+    request: Request<Body>,
+) -> Response {
+    let mut response = handle_inner(shared, peer, request)
         .await
         .unwrap_or_else(IntoResponse::into_response);
     let headers = response.headers_mut();
@@ -530,6 +516,7 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
 
 async fn handle_inner(
     shared: Arc<Shared>,
+    peer: SocketAddr,
     request: Request<Body>,
 ) -> std::result::Result<Response, ApiError> {
     let (parts, body) = request.into_parts();
@@ -630,10 +617,18 @@ async fn handle_inner(
             "Request body is too large or incomplete",
         )
     })?;
-    Ok(
-        axum::Json(api(shared, parts.method.as_str(), path, &parts.headers, &bytes).await?)
-            .into_response(),
+    Ok(axum::Json(
+        api(
+            shared,
+            peer,
+            parts.method.as_str(),
+            path,
+            &parts.headers,
+            &bytes,
+        )
+        .await?,
     )
+    .into_response())
 }
 
 /// Bind the management listener before starting any saved DNS configuration.
@@ -665,7 +660,7 @@ pub async fn serve(
     let shared = Arc::new(Shared {
         manager: manager.clone(),
         sessions: Mutex::new(Vec::new()),
-        logins: Mutex::new(VecDeque::new()),
+        auth: auth_budget::Budget::new(),
         mutation: Arc::new(Semaphore::new(1)),
         history: Mutex::new(stats::History::default()),
         address,
@@ -698,12 +693,12 @@ pub async fn serve(
             },
             _ = tasks.join_next(), if !tasks.is_empty() => {},
             incoming = listener.accept() => {
-                let (stream,_) = match incoming {
+                let (stream,peer) = match incoming {
                     Ok(incoming) => incoming,
                     Err(error) => break Err(error.into()),
                 };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
-                let service = TowerToHyperService::new(router.clone());
+                let service = TowerToHyperService::new(router.clone().layer(Extension(peer)));
                 let acceptor = acceptor.clone();
                 tasks.spawn(async move {
                     let _permit = permit;

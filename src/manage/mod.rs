@@ -1,8 +1,9 @@
-//! Loopback-only management plane. DNS forwarding remains in Server/Resolver.
+//! Authenticated management plane. DNS forwarding remains in Server/Resolver.
+mod https;
 mod runtime;
 mod store;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -20,7 +21,7 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -38,22 +39,34 @@ struct Shared {
     sessions: Mutex<Vec<Session>>,
     logins: Mutex<VecDeque<Instant>>,
     mutation: Arc<Semaphore>,
-    hosts: Vec<String>,
+    address: SocketAddr,
 }
 
-fn allowed_hosts(address: SocketAddr) -> Vec<String> {
-    let ip = match address.ip() {
-        std::net::IpAddr::V4(ip) => ip.to_string(),
-        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
-    };
-    let mut hosts = Vec::new();
-    for host in [ip.as_str(), "127.0.0.1", "localhost", "[::1]"] {
-        hosts.push(format!("{host}:{}", address.port()));
-        if address.port() == 80 {
-            hosts.push(host.to_owned());
-        }
+fn host_allowed(address: SocketAddr, host: &str) -> bool {
+    if host == format!("localhost:{}", address.port())
+        || address.port() == 443 && host == "localhost"
+    {
+        return true;
     }
-    hosts
+    // Literal IPs support both directly assigned addresses and public-IP NAT.
+    // Arbitrary domain names remain rejected to prevent DNS rebinding. The Host
+    // header is not an identity: setup tokens and bearer auth are still required.
+    let target = host.parse::<SocketAddr>().ok().or_else(|| {
+        if address.port() != 443 {
+            return None;
+        }
+        let ip = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host);
+        ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 443))
+    });
+    target.is_some_and(|target| {
+        target.port() == address.port()
+            && !target.ip().is_unspecified()
+            && !target.ip().is_multicast()
+            && (!address.ip().is_loopback() || target.ip().is_loopback())
+    })
 }
 
 #[derive(Debug)]
@@ -396,11 +409,11 @@ async fn handle_inner(
         .get("host")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if !shared.hosts.iter().any(|a| a == host)
+    if !host_allowed(shared.address, host)
         || parts
             .headers
             .get("origin")
-            .is_some_and(|h| h.to_str().ok() != Some(format!("http://{host}").as_str()))
+            .is_some_and(|h| h.to_str().ok() != Some(format!("https://{host}").as_str()))
         || parts
             .headers
             .get("sec-fetch-site")
@@ -458,19 +471,24 @@ async fn handle_inner(
     )
 }
 
-/// Bind the private management listener before starting any saved DNS configuration.
+/// Bind the management listener before starting any saved DNS configuration.
 pub async fn serve(
     directory: &Path,
     address: SocketAddr,
+    tls_files: Option<crate::tls::TlsFiles>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    ensure!(
-        address.ip().is_loopback(),
-        "management listener must be loopback; use an SSH tunnel"
-    );
     let listener = TcpListener::bind(address).await?;
     let address = listener.local_addr()?;
     let store = Store::open(directory)?;
+    let acceptor =
+        tokio_rustls::TlsAcceptor::from(https::config(&store, tls_files.as_ref(), address)?);
+    if tls_files.is_none() {
+        eprintln!(
+            "PariNS self-signed management certificate: {} (verify its fingerprint before trusting)",
+            store.dir.join("https-cert.pem").display()
+        );
+    }
     if store.read()?.is_none() {
         store.setup_token()?;
         eprintln!(
@@ -484,10 +502,15 @@ pub async fn serve(
         sessions: Mutex::new(Vec::new()),
         logins: Mutex::new(VecDeque::new()),
         mutation: Arc::new(Semaphore::new(1)),
-        hosts: allowed_hosts(address),
+        address,
     });
     let router = Router::new().fallback(handle).with_state(shared.clone());
-    eprintln!("PariNS management: http://{address}");
+    eprintln!("PariNS management: https://{address}");
+    if !address.ip().is_loopback() {
+        eprintln!(
+            "Management HTTPS is network-accessible. Use the server IP, not the wildcard address, in your browser; allow the port in your firewall/security group for intended clients."
+        );
+    }
     let permits = Arc::new(Semaphore::new(32));
     let mut tasks = JoinSet::new();
     tokio::pin!(shutdown);
@@ -502,8 +525,10 @@ pub async fn serve(
                 };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
                 let service = TowerToHyperService::new(router.clone());
+                let acceptor = acceptor.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
+                    let Ok(Ok(stream)) = timeout(Duration::from_secs(5), acceptor.accept(stream)).await else { return; };
                     let mut builder = hyper::server::conn::http1::Builder::new();
                     builder.keep_alive(false).max_headers(32).timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(5));
                     let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service)).await;
@@ -524,14 +549,39 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn host_allowlist_includes_bound_ip_and_http_default_port() {
-        let hosts = super::allowed_hosts("127.0.0.2:80".parse().unwrap());
-        for host in ["127.0.0.2", "127.0.0.2:80", "localhost", "[::1]:80"] {
-            assert!(hosts.iter().any(|h| h == host));
+    fn host_allowlist_includes_bound_ip_and_https_default_port() {
+        let address = "127.0.0.2:443".parse().unwrap();
+        for host in ["127.0.0.2", "127.0.0.2:443", "localhost", "[::1]:443"] {
+            assert!(super::host_allowed(address, host));
         }
-        let hosts = super::allowed_hosts("[::1]:3000".parse().unwrap());
-        assert!(hosts.iter().any(|h| h == "[::1]:3000"));
-        assert!(!hosts.iter().any(|h| h == "localhost"));
-        assert!(!hosts.iter().any(|h| h == "attacker.test:3000"));
+        let address = "[::1]:3000".parse().unwrap();
+        assert!(super::host_allowed(address, "[::1]:3000"));
+        assert!(!super::host_allowed(address, "localhost"));
+        assert!(!super::host_allowed(address, "attacker.test:3000"));
+        assert!(!super::host_allowed(address, "203.0.113.10:3000"));
+    }
+
+    #[test]
+    fn public_listener_accepts_literal_ipv4_ipv6_but_not_domains_or_other_ports() {
+        for address in ["0.0.0.0:3000", "[::]:3000", "10.0.0.1:3000"] {
+            let address = address.parse().unwrap();
+            for host in ["203.0.113.10:3000", "[2001:db8::10]:3000", "127.0.0.1:3000"] {
+                assert!(super::host_allowed(address, host), "{address} {host}");
+            }
+            for host in [
+                "attacker.test:3000",
+                "203.0.113.10",
+                "203.0.113.10:3001",
+                "user@203.0.113.10:3000",
+                "0.0.0.0:3000",
+                "[::]:3000",
+                "224.0.0.1:3000",
+            ] {
+                assert!(!super::host_allowed(address, host), "{address} {host}");
+            }
+        }
+        let address = "0.0.0.0:443".parse().unwrap();
+        assert!(super::host_allowed(address, "203.0.113.10"));
+        assert!(super::host_allowed(address, "[2001:db8::10]"));
     }
 }

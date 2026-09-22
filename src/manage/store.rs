@@ -110,7 +110,7 @@ impl Store {
         Ok(token)
     }
 
-    fn atomic_write(&self, name: &str, bytes: &[u8]) -> Result<()> {
+    pub(super) fn atomic_write(&self, name: &str, bytes: &[u8]) -> Result<()> {
         let destination = self.dir.join(name);
         // Do not replace unexpected symlinks, devices or exposed secret files.
         checked_open(&destination, false)?;
@@ -210,7 +210,7 @@ fn private_permissions(metadata: &fs::Metadata, mode: u32) -> Result<()> {
     Ok(())
 }
 
-fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     let Some(file) = checked_open(path, false)? else {
         return Ok(None);
     };

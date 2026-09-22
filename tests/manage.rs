@@ -1,10 +1,14 @@
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{Name, RecordType},
 };
 use parins::{manage, protocol};
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, ServerName, pem::PemObject},
+};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -13,6 +17,7 @@ use tokio::{
     task::JoinHandle,
     time::{sleep, timeout},
 };
+use tokio_rustls::{TlsConnector, client::TlsStream};
 
 const PASSWORD: &str = "local-integration-password";
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -36,6 +41,7 @@ impl Response {
 
 struct Management {
     address: SocketAddr,
+    connector: TlsConnector,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<anyhow::Result<()>>>,
 }
@@ -45,19 +51,36 @@ impl Management {
         // The public entry point binds its own listener, so reserve an ephemeral
         // address briefly before handing it to serve. Every test is isolated.
         let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = reservation.local_addr().unwrap();
+        Self::start_reserved(directory, reservation).await
+    }
+
+    async fn start_reserved(directory: &Path, reservation: TcpListener) -> Self {
+        let listen = reservation.local_addr().unwrap();
+        let address = if listen.ip().is_unspecified() {
+            SocketAddr::new(
+                if listen.is_ipv4() {
+                    std::net::Ipv4Addr::LOCALHOST.into()
+                } else {
+                    std::net::Ipv6Addr::LOCALHOST.into()
+                },
+                listen.port(),
+            )
+        } else {
+            listen
+        };
         drop(reservation);
         let directory = directory.to_owned();
+        let certificate = directory.join("https-cert.pem");
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            manage::serve(&directory, address, async {
+            manage::serve(&directory, listen, None, async {
                 let _ = stopped.await;
             })
             .await
         });
         timeout(DEADLINE, async {
             loop {
-                if TcpStream::connect(address).await.is_ok() {
+                if certificate.is_file() && TcpStream::connect(address).await.is_ok() {
                     break;
                 }
                 assert!(!task.is_finished(), "management exited before binding");
@@ -66,8 +89,13 @@ impl Management {
         })
         .await
         .unwrap();
+        let mut roots = RootCertStore::empty();
+        for certificate in CertificateDer::pem_file_iter(certificate).unwrap() {
+            roots.add(certificate.unwrap()).unwrap();
+        }
         let server = Self {
             address,
+            connector: connector(roots),
             stop: Some(stop),
             task: Some(task),
         };
@@ -98,8 +126,9 @@ impl Management {
 
     async fn raw(&self, bytes: &[u8]) -> Response {
         timeout(DEADLINE, async {
-            let mut stream = TcpStream::connect(self.address).await.unwrap();
+            let mut stream = self.connect().await;
             stream.write_all(bytes).await.unwrap();
+            stream.flush().await.unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).await.unwrap();
             let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response");
@@ -112,6 +141,16 @@ impl Management {
         })
         .await
         .expect("HTTP request deadline")
+    }
+
+    async fn connect(&self) -> TlsStream<TcpStream> {
+        self.connector
+            .connect(
+                ServerName::try_from("localhost").unwrap(),
+                TcpStream::connect(self.address).await.unwrap(),
+            )
+            .await
+            .expect("HTTPS handshake with trusted generated certificate")
     }
 
     async fn request(
@@ -172,6 +211,17 @@ impl Management {
             .unwrap();
         let _rebound = TcpListener::bind(self.address).await.unwrap();
     }
+}
+
+fn connector(roots: RootCertStore) -> TlsConnector {
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    TlsConnector::from(Arc::new(config))
 }
 
 impl Drop for Management {
@@ -258,7 +308,7 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         .await
         .expect(403);
     let same_origin = format!(
-        "GET /api/session HTTP/1.1\r\nHost: localhost:{}\r\nOrigin: http://localhost:{}\r\nConnection: close\r\n\r\n",
+        "GET /api/session HTTP/1.1\r\nHost: localhost:{}\r\nOrigin: https://localhost:{}\r\nConnection: close\r\n\r\n",
         server.address.port(),
         server.address.port()
     );
@@ -281,6 +331,123 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         .setup_with("wrong-token", &configuration())
         .await
         .expect(409);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn ipv4_wildcard_supports_public_ip_origin_without_bypassing_authentication() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let server = Management::start_reserved(&directory, listener).await;
+    let public_host = format!("203.0.113.10:{}", server.address.port());
+    for (host, origin, status) in [
+        (public_host.clone(), format!("https://{public_host}"), 200),
+        (
+            public_host.clone(),
+            format!("https://203.0.113.11:{}", server.address.port()),
+            403,
+        ),
+        (public_host.clone(), format!("http://{public_host}"), 403),
+        (
+            format!("attacker.example:{}", server.address.port()),
+            format!("https://attacker.example:{}", server.address.port()),
+            403,
+        ),
+        (
+            "203.0.113.10:0".into(),
+            "https://203.0.113.10:0".into(),
+            403,
+        ),
+    ] {
+        let request = format!(
+            "GET /api/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n"
+        );
+        server.raw(request.as_bytes()).await.expect(status);
+    }
+    let private = format!(
+        "GET /api/config HTTP/1.1\r\nHost: {public_host}\r\nOrigin: https://{public_host}\r\nConnection: close\r\n\r\n"
+    );
+    server.raw(private.as_bytes()).await.expect(401);
+    let setup = String::from_utf8(server.wire(
+        "POST",
+        "/api/setup",
+        None,
+        Some(json!({"username":"admin","password":PASSWORD,"toml":configuration()})),
+    ))
+    .unwrap()
+    .replace(
+        &format!("Host: {}", server.address),
+        &format!("Host: {public_host}"),
+    )
+    .replacen(
+        "\r\n\r\n",
+        &format!("\r\nOrigin: https://{public_host}\r\nX-PariNS-Setup: wrong-token\r\n\r\n"),
+        1,
+    );
+    server.raw(setup.as_bytes()).await.expect(403);
+    assert!(!directory.join("state.json").exists());
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn ipv6_wildcard_serves_https_with_bracketed_public_ip_origin() {
+    let listener = match TcpListener::bind("[::]:0").await {
+        Ok(listener) => listener,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+            ) =>
+        {
+            eprintln!("IPv6 unavailable on this test host: {error}");
+            return;
+        }
+        Err(error) => panic!("bind IPv6 management listener: {error}"),
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let server = Management::start_reserved(&temporary.path().join("state"), listener).await;
+    let host = format!("[2001:db8::10]:{}", server.address.port());
+    let request = format!(
+        "GET /api/session HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\nConnection: close\r\n\r\n"
+    );
+    server.raw(request.as_bytes()).await.expect(200);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn management_requires_tls_and_generated_certificate_is_not_implicitly_trusted() {
+    let temporary = tempfile::tempdir().unwrap();
+    let server = Management::start(&temporary.path().join("state")).await;
+    let untrusted = connector(RootCertStore::empty());
+    let failure = timeout(
+        DEADLINE,
+        untrusted.connect(
+            ServerName::try_from("localhost").unwrap(),
+            TcpStream::connect(server.address).await.unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .expect_err("self-signed identity must require explicit trust");
+    assert!(
+        failure.to_string().contains("UnknownIssuer"),
+        "unexpected TLS failure: {failure}"
+    );
+    let mut plain = TcpStream::connect(server.address).await.unwrap();
+    plain
+        .write_all(&server.wire("GET", "/api/session", None, None))
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    let _closed = timeout(DEADLINE, plain.read_to_end(&mut bytes))
+        .await
+        .unwrap();
+    assert!(
+        !bytes.starts_with(b"HTTP/"),
+        "plaintext must not reach the HTTP router"
+    );
+    assert!(!String::from_utf8_lossy(&bytes).contains("setup_required"));
     server.finish().await;
 }
 
@@ -400,6 +567,8 @@ async fn restart_restores_configuration_but_not_sessions_and_logout_revokes_toke
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
+    let identity = std::fs::read(directory.join("https-identity.pem")).unwrap();
+    let certificate = std::fs::read(directory.join("https-cert.pem")).unwrap();
     let token = server.setup(&directory, &configuration()).await;
     let exposed = server.config(&token).await;
     assert!(exposed.get("password_hash").is_none());
@@ -409,6 +578,14 @@ async fn restart_restores_configuration_but_not_sessions_and_logout_revokes_toke
     assert!(disk.contains("$argon2id$"));
     server.finish().await;
     let server = Management::start(&directory).await;
+    assert_eq!(
+        std::fs::read(directory.join("https-identity.pem")).unwrap(),
+        identity
+    );
+    assert_eq!(
+        std::fs::read(directory.join("https-cert.pem")).unwrap(),
+        certificate
+    );
     assert_eq!(
         server
             .request("GET", "/api/session", None, None)
@@ -620,7 +797,7 @@ async fn disconnected_transaction(stop_management: bool) {
     let candidate_address = reservation.local_addr().unwrap();
     drop(reservation);
     let next = original.replacen("127.0.0.1:0", &candidate_address.to_string(), 1);
-    let mut connection = TcpStream::connect(server.address).await.unwrap();
+    let mut connection = server.connect().await;
     connection
         .write_all(&server.wire(
             "PUT",
@@ -630,6 +807,7 @@ async fn disconnected_transaction(stop_management: bool) {
         ))
         .await
         .unwrap();
+    connection.flush().await.unwrap();
     // The old listener closes before draining the deliberately pending query.
     // This proves apply was admitted before the HTTP client disappears.
     timeout(DEADLINE, async {

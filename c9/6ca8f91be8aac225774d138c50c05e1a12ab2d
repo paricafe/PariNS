@@ -1,0 +1,97 @@
+tests/quic.rs
+  s_aa37914330e67a::t_6f7aaed334815d 78
+src/upstreams.rs
+  s_aa37914330e67a::t_6d96ed856b75fc 39,52,59,263-268,304
+tests/cache_refresh.rs
+  s_aa37914330e67a::t_6f7aaed334815d 80,333,441
+tests/upstreams.rs
+  s_aa37914330e67a::t_4a452cfe720f41 10,22,26
+  s_aa37914330e67a::t_6f7aaed334815d 214,786
+  s_aa37914330e67a::t_ce00dd424153f8 54-57
+  s_aa37914330e67a::t_8df5953874dace 107,113,122,135,150-151,228,233,251,286,291,311,331,769
+  s_aa37914330e67a::t_972e9b179cd660 333-334,352,369,403,418,451,463,467-468,482-483,518,530-533,546,578,712,716,724,753,757,764,788,817,821,845,848,854,879,883,886-891,914,974,983,1001,1003-1005
+examples/bench.rs
+  s_aa37914330e67a::t_6f7aaed334815d 131
+  s_aa37914330e67a::t_ce00dd424153f8 17,117-118,134-138,192,237
+tests/coalescing.rs
+  s_aa37914330e67a::t_6f7aaed334815d 30
+tests/ecs.rs
+  s_aa37914330e67a::t_6f7aaed334815d 207
+tests/server.rs
+  s_aa37914330e67a::t_6f7aaed334815d 44
+src/upstreams/transport.rs
+  s_aa37914330e67a::t_eb205b27c9d59b 81
+  s_aa37914330e67a::t_6d96ed856b75fc 182,208
+src/resolver.rs
+  s_aa37914330e67a::t_6d96ed856b75fc 4,20,61,78,347,379,399
+tests/manage.rs
+  s_aa37914330e67a::t_ce00dd424153f8 239
+web/settings.js
+  s_aa37914330e67a::t_8bf97fba29dbb4 33-36,133
+tests/tls.rs
+  s_aa37914330e67a::t_9ec07a7d070db4 1-2,189
+scripts/test-web.mjs
+  s_aa37914330e67a::t_8bf97fba29dbb4 33,38,43,58,77
+src/tls.rs
+  s_aa37914330e67a::t_29731873c03e58 193
+tests/query_log.rs
+  s_aa37914330e67a::t_6f7aaed334815d 45,144,208,252,302
+tests/filter.rs
+  s_aa37914330e67a::t_6f7aaed334815d 13
+tests/runtime.rs
+  s_aa37914330e67a::t_533d8253648735 340-343,414-417,426
+  s_aa37914330e67a::t_6f7aaed334815d 80
+  s_aa37914330e67a::t_24c6f7dd22ac94 12,325-339,344-345,360-362,370,410,413,418
+scripts/test-systemd.sh
+  s_aa37914330e67a::t_8bf97fba29dbb4 121,124
+tests/resolver.rs
+  s_aa37914330e67a::t_ce00dd424153f8 9
+  s_aa37914330e67a::t_9ec07a7d070db4 1-2,33,79,95
+tests/cache_integration.rs
+  s_aa37914330e67a::t_6f7aaed334815d 58
+tests/tls_pool.rs
+  s_aa37914330e67a::t_ce00dd424153f8 458-460
+  s_aa37914330e67a::t_4b5181cc8dc3d6 39-41,234
+src/config.rs
+  s_aa37914330e67a::t_10da42139bc5dd 362,365,368-370,372-374,404-408,411,414,416,429-430,436,439,450
+  s_aa37914330e67a::t_bfc5c0d2e951ea 419-425,431-434
+  s_aa37914330e67a::t_6d96ed856b75fc 15,213,230,249-250
+web/app.js
+  s_aa37914330e67a::t_8bf97fba29dbb4 162,167,174,200,211
+web/locales-settings.js
+  s_aa37914330e67a::t_8bf97fba29dbb4 30-34
+tests/doh.rs
+  s_aa37914330e67a::t_9ec07a7d070db4 1-2,240,294,374
+  s_aa37914330e67a::t_6f7aaed334815d 102
+src/tls/pool.rs
+  s_aa37914330e67a::t_29731873c03e58 19
+  s_aa37914330e67a::t_6d96ed856b75fc 39,43
+tests/admin.rs
+  s_aa37914330e67a::t_9ec07a7d070db4 1-2,45
+parins.example.toml
+  s_aa37914330e67a::t_8bf97fba29dbb4 54-59
+tests/common/mod.rs
+  s_aa37914330e67a::t_bbac52769f6a34 1-8
+  s_aa37914330e67a::t_6982ba4712287a 9
+src/manage/settings.rs
+  s_aa37914330e67a::t_ef2701b1c591e4 36,42,106,127,133,136-139,141,143
+  s_aa37914330e67a::t_1a012763a1dd80 146,153-155
+AGENTS.md
+  s_aa37914330e67a::t_78c9a981bdce59 25,80-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c96ca8f91be8aac225774d138c50c05e1a12ab2d",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

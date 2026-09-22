@@ -9,6 +9,20 @@ use tokio::net::{TcpStream, UdpSocket};
 use crate::protocol::{self, MAX_MESSAGE};
 use crate::transport::tcp;
 
+pub async fn exchange_tcp(query: &Message, address: SocketAddr) -> Result<Message> {
+    let mut stream = TcpStream::connect(address).await?;
+    let mut outbound = query.clone();
+    outbound.metadata.id = rand::random();
+    tcp::write_frame(&mut stream, &outbound.to_vec()?).await?;
+    let mut response = protocol::decode(&tcp::read_frame(&mut stream).await?)?;
+    ensure!(
+        protocol::matches_response(&outbound, &response) && !response.truncation,
+        "invalid upstream TCP response"
+    );
+    response.metadata.id = query.id;
+    Ok(response)
+}
+
 pub async fn exchange_with_tls(
     query: &Message,
     address: SocketAddr,

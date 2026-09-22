@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub listen: SocketAddr,
     pub upstream: SocketAddr,
+    #[serde(default)]
+    pub upstreams: Option<crate::upstreams::Settings>,
+    #[serde(default)]
+    pub query_log: crate::query_log::Settings,
     pub query_timeout_ms: u64,
     pub tcp_io_timeout_ms: u64,
     pub shutdown_grace_ms: u64,
@@ -222,6 +226,14 @@ impl Config {
         {
             *file = base.join(&*file);
         }
+        if let Some(file) = config
+            .upstreams
+            .as_mut()
+            .and_then(|settings| settings.ca_file.as_mut())
+            && file.is_relative()
+        {
+            *file = base.join(&*file);
+        }
         Ok(config)
     }
 
@@ -236,6 +248,9 @@ impl Config {
         }
         if let Some(settings) = &self.upstream_tls {
             crate::tls::Upstream::new(settings)?;
+        }
+        if self.upstreams.is_some() {
+            crate::scheduler::Client::from_config(self)?;
         }
         Ok(())
     }
@@ -254,6 +269,17 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.query_log.validate()?;
+        if let Some(settings) = &self.upstreams {
+            settings.validate()?;
+            settings.validate_listeners(self)?;
+            ensure!(
+                self.scheduler.is_none()
+                    && self.upstream_tls.is_none()
+                    && !self.upstream_pool.enabled,
+                "upstreams cannot be combined with legacy scheduler, upstream_tls or upstream_pool"
+            );
+        }
         self.source_limits.validate()?;
         self.upstream_pool.validate()?;
         ensure!(
@@ -352,7 +378,9 @@ impl Config {
                 && !matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast()),
             "upstream must be a unicast IP address"
         );
-        let listener = if self.upstream_tls.is_some() {
+        let listener = if self.upstreams.is_some() {
+            None
+        } else if self.upstream_tls.is_some() {
             self.dot.as_ref().map(|listener| listener.listen)
         } else {
             Some(self.listen)

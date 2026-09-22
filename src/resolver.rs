@@ -17,6 +17,7 @@ use crate::{
     metrics::{Counter, Metrics, Timer},
     policy::Policy,
     protocol::{self, Request},
+    query_log::{Entry, QueryLog, Settings, Trace},
 };
 
 mod refresh;
@@ -64,6 +65,7 @@ pub struct Resolver {
     coalescing: CoalescingConfig,
     metrics: Arc<Metrics>,
     policy: RwLock<Policy>,
+    query_log: Arc<QueryLog>,
 }
 
 impl Resolver {
@@ -79,6 +81,7 @@ impl Resolver {
             coalescing: CoalescingConfig::default(),
             metrics: Arc::new(Metrics::default()),
             policy: RwLock::new(Policy::default()),
+            query_log: Arc::new(QueryLog::new(Settings::default())),
         }
     }
 
@@ -88,17 +91,7 @@ impl Resolver {
 
     pub fn try_from_config(config: &Config) -> anyhow::Result<Self> {
         Ok(Self {
-            upstream: crate::scheduler::Client::new(
-                config.upstream,
-                config
-                    .upstream_tls
-                    .as_ref()
-                    .map(|settings| {
-                        crate::tls::Upstream::with_pool(settings, &config.upstream_pool)
-                    })
-                    .transpose()?,
-                config.scheduler.clone(),
-            )?,
+            upstream: crate::scheduler::Client::from_config(config)?,
             timeout: Duration::from_millis(config.query_timeout_ms),
             ecs: config.ecs.clone(),
             generation: RwLock::new(Arc::new(Generation::new(
@@ -108,12 +101,47 @@ impl Resolver {
             coalescing: config.coalescing.clone(),
             metrics: Arc::new(Metrics::default()),
             policy: RwLock::new(config.load_policy()?),
+            query_log: Arc::new(QueryLog::new(config.query_log.clone())),
         })
     }
 
     pub async fn resolve(&self, bytes: &[u8], peer: IpAddr) -> Option<Reply> {
+        self.resolve_with_transport(bytes, peer, "unknown").await
+    }
+
+    pub fn query_log(&self) -> Arc<QueryLog> {
+        self.query_log.clone()
+    }
+
+    /// Admission failures do not enter the resolver pipeline, but remain visible
+    /// in opt-in history. Transport adapters pass the actual response or drop.
+    pub(crate) fn log_rejected(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+        reply: Option<&Message>,
+    ) {
+        if let Some(epoch) = self.query_log.begin() {
+            let mut entry = Entry::request(protocol::decode(bytes).ok().as_ref(), peer, transport);
+            entry.finish(reply, Duration::ZERO, Trace::default());
+            self.query_log.record(epoch, entry);
+        }
+    }
+
+    pub async fn resolve_with_transport(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+    ) -> Option<Reply> {
         let mut guard = self.metrics.track(Timer::Request);
-        let reply = self.resolve_inner(bytes, peer).await;
+        let log = self.query_log.pending(bytes, peer, transport);
+        let mut trace = Trace::default();
+        let reply = self.resolve_inner(bytes, peer, &mut trace).await;
+        if let Some(log) = log {
+            log.finish(reply.as_ref().map(|r| &r.message), trace);
+        }
         self.metrics
             .inc(match reply.as_ref().map(|r| r.message.response_code) {
                 Some(ResponseCode::NoError) => Counter::ResponsesNoerror,
@@ -168,7 +196,7 @@ impl Resolver {
         generation.refresh.shutdown().await;
     }
 
-    async fn resolve_inner(&self, bytes: &[u8], peer: IpAddr) -> Option<Reply> {
+    async fn resolve_inner(&self, bytes: &[u8], peer: IpAddr, trace: &mut Trace) -> Option<Reply> {
         // One immutable generation governs this request, including across awaits.
         // The Arc-backed trie clone releases the lock before parsing or network IO.
         let policy = self.policy.read().expect("policy lock poisoned").clone();
@@ -200,6 +228,7 @@ impl Resolver {
             }
         };
         if policy.blocks_query(&query) {
+            trace.cache = Some("blocked");
             self.metrics.inc(Counter::QueryBlocked);
             let mut message = protocol::error_response(&query, ResponseCode::NoError);
             context.finish(&query, &mut message, None);
@@ -207,6 +236,7 @@ impl Resolver {
         }
         let cached = cache.lookup(&query, context.outgoing, Instant::now(), false);
         if let Some(hit) = cached {
+            trace.cache = Some("fresh");
             self.metrics.inc(Counter::CacheHits);
             if hit.refresh {
                 let work = Exchange {
@@ -241,6 +271,7 @@ impl Resolver {
             }
             let (mut message, scope) = (hit.message, hit.scope);
             if policy.apply_response(&query, &mut message) {
+                trace.cache = Some("blocked");
                 self.metrics.inc(Counter::ResponseBlocked);
             }
             context.finish(&query, &mut message, Some(scope.prefix_len()));
@@ -271,16 +302,31 @@ impl Resolver {
                     response: Err(()),
                     stale_eligible: false,
                     admitted: false,
+                    upstream: None,
+                    outgoing_ecs: None,
+                    cached: false,
                 }
             }
         };
+        trace.cache = Some(if result.cached {
+            "fresh"
+        } else if result.response.is_err() {
+            "error"
+        } else {
+            "upstream"
+        });
+        trace.upstream = result.upstream;
+        trace.outgoing_ecs = result.outgoing_ecs;
         // Fallback belongs to each foreground consumer, never to the shared work:
         // background refresh reports only actual admissions, and stale-hit counts
         // describe replies even when many callers shared one failed exchange.
         let response = if result.stale_eligible {
             cache
                 .lookup(&query, context.outgoing, Instant::now(), true)
-                .map(|hit| (hit.message, Some(hit.scope.prefix_len())))
+                .map(|hit| {
+                    trace.cache = Some(if hit.stale { "stale" } else { "fresh" });
+                    (hit.message, Some(hit.scope.prefix_len()))
+                })
                 .map(Ok)
                 .unwrap_or(result.response)
         } else {
@@ -295,6 +341,7 @@ impl Resolver {
         // Cache retains the original upstream response; policy applies equally
         // on misses and hits and never inserts its synthesized answer.
         if policy.apply_response(&query, &mut message) {
+            trace.cache = Some("blocked");
             self.metrics.inc(Counter::ResponseBlocked);
         }
         context.finish(&query, &mut message, scope);
@@ -336,12 +383,18 @@ impl Exchange {
                 response: Ok((hit.message, Some(hit.scope.prefix_len()))),
                 stale_eligible: false,
                 admitted: false,
+                upstream: None,
+                outgoing_ecs: None,
+                cached: true,
             };
         }
         let _timer = self.metrics.track(Timer::Upstream);
         let mut retried = false;
+        let mut endpoint = None;
         let result = tokio::time::timeout(self.timeout, async {
-            let mut response = self.upstream.exchange(&self.outbound).await?;
+            let exchange = self.upstream.exchange_traced(&self.outbound).await?;
+            endpoint = Some(exchange.upstream);
+            let mut response = exchange.message;
             if response.response_code == ResponseCode::Refused
                 && self
                     .context
@@ -358,7 +411,10 @@ impl Exchange {
                     "::".parse().unwrap()
                 });
                 ecs::set_subnet(&mut self.outbound, Some(anonymous));
-                response = self.upstream.exchange(&self.outbound).await?;
+                endpoint = None;
+                let exchange = self.upstream.exchange_traced(&self.outbound).await?;
+                endpoint = Some(exchange.upstream);
+                response = exchange.message;
             }
             Ok::<_, anyhow::Error>(response)
         })
@@ -395,12 +451,18 @@ impl Exchange {
                     response: Ok((response, scope)),
                     admitted,
                     stale_eligible: failed && !retried,
+                    upstream: endpoint,
+                    outgoing_ecs: crate::query_log::subnet(&self.outbound),
+                    cached: false,
                 }
             }
             _ => Answer {
                 response: Err(()),
                 admitted: false,
                 stale_eligible: failed && !retried,
+                upstream: endpoint,
+                outgoing_ecs: crate::query_log::subnet(&self.outbound),
+                cached: false,
             },
         }
     }

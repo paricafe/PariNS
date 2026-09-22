@@ -190,6 +190,10 @@ impl Server {
         let period = Duration::from_secs(self.config.metrics.interval_secs.max(1));
         let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let log = resolver.query_log();
+        let log_enabled = self.config.query_log.enabled;
+        let mut log_cleanup = tokio::time::interval(Duration::from_secs(1));
+        log_cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let queries = Arc::new(Semaphore::new(self.config.max_inflight));
         let connections = Arc::new(Semaphore::new(self.config.max_tcp_connections));
         let io_timeout = Duration::from_millis(self.config.tcp_io_timeout_ms);
@@ -239,6 +243,7 @@ impl Server {
                     };
                 }
                 _ = ticker.tick(), if report => emit_metrics(&metrics, run_id, started, "periodic"),
+                _ = log_cleanup.tick(), if log_enabled => log.purge_expired(),
                 Some(result) = tasks.join_next(), if !tasks.is_empty() => {
                     if let Err(error) = result { break Err(error.into()); }
                 }
@@ -264,10 +269,12 @@ impl Server {
                     metrics.inc(Counter::UdpReceived);
                     let Some(source) = ingress.admit_query(peer.ip()) else {
                         metrics.inc(Counter::UdpDropped);
+                        resolver.log_rejected(&buffer[..length], peer.ip(), "udp", None);
                         continue;
                     };
                     let Ok(permit) = queries.clone().try_acquire_owned() else {
                         metrics.inc(Counter::UdpDropped);
+                        resolver.log_rejected(&buffer[..length], peer.ip(), "udp", None);
                         continue
                     };
                     let bytes = buffer[..length].to_vec();
@@ -276,7 +283,7 @@ impl Server {
                     tasks.spawn(async move {
                         let _permit = permit;
                         let _source = source;
-                        if let Some(reply) = resolver.resolve(&bytes, peer.ip()).await
+                        if let Some(reply) = resolver.resolve_with_transport(&bytes, peer.ip(), "udp").await
                             && let Ok(bytes) = protocol::encode_udp(&reply.message, reply.udp_limit)
                         {
                             let _ = timeout(io_timeout, socket.send_to(&bytes, peer)).await;
@@ -342,12 +349,14 @@ async fn serve_tcp(
         let permit = ingress.queries.clone().try_acquire_owned();
         let response = match (source.as_ref(), &permit) {
             (Some(_), Ok(_)) => resolver
-                .resolve(&bytes, peer)
+                .resolve_with_transport(&bytes, peer, "tcp")
                 .await
                 .map(|reply| reply.message),
             _ => {
                 resolver.metrics().inc(Counter::TcpRejected);
-                crate::ingress::rejected_response(&bytes)
+                let reply = crate::ingress::rejected_response(&bytes);
+                resolver.log_rejected(&bytes, peer, "tcp", reply.as_ref());
+                reply
             }
         };
         let Some(response) = response else { return };

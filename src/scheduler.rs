@@ -57,9 +57,35 @@ pub struct Client {
     primary: SocketAddr,
     tls: Option<crate::tls::Upstream>,
     replica: Option<Replica>,
+    pool: Option<Arc<crate::upstreams::Pool>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Exchange {
+    pub message: Message,
+    pub upstream: String,
 }
 
 impl Client {
+    pub fn from_config(config: &crate::config::Config) -> Result<Self> {
+        if let Some(settings) = &config.upstreams {
+            return Ok(Self {
+                primary: config.upstream,
+                tls: None,
+                replica: None,
+                pool: Some(Arc::new(crate::upstreams::Pool::new(settings, config)?)),
+            });
+        }
+        Self::new(
+            config.upstream,
+            config
+                .upstream_tls
+                .as_ref()
+                .map(|settings| crate::tls::Upstream::with_pool(settings, &config.upstream_pool))
+                .transpose()?,
+            config.scheduler.clone(),
+        )
+    }
     pub fn new(
         primary: SocketAddr,
         tls: Option<crate::tls::Upstream>,
@@ -79,11 +105,30 @@ impl Client {
             primary,
             tls,
             replica,
+            pool: None,
         })
     }
 
     pub async fn exchange(&self, query: &Message) -> Result<Message> {
-        let primary = crate::upstream::exchange_with_tls(query, self.primary, self.tls.as_ref());
+        Ok(self.exchange_traced(query).await?.message)
+    }
+
+    pub async fn exchange_traced(&self, query: &Message) -> Result<Exchange> {
+        if let Some(pool) = &self.pool {
+            return pool.exchange(query).await;
+        }
+        let attempt = |address| async move {
+            let message =
+                crate::upstream::exchange_with_tls(query, address, self.tls.as_ref()).await?;
+            Ok(Exchange {
+                message,
+                upstream: format!(
+                    "{}://{address}",
+                    if self.tls.is_some() { "tls" } else { "udp" }
+                ),
+            })
+        };
+        let primary = attempt(self.primary);
         let Some(replica) = &self.replica else {
             return primary.await;
         };
@@ -105,8 +150,7 @@ impl Client {
         };
         let secondary = async {
             let _permit = permit;
-            crate::upstream::exchange_with_tls(query, replica.settings.secondary, self.tls.as_ref())
-                .await
+            attempt(replica.settings.secondary).await
         };
         tokio::pin!(secondary);
         if let Some(result) = first {
@@ -123,13 +167,13 @@ impl Client {
     }
 }
 
-fn success(result: &Result<Message>) -> bool {
+fn success(result: &Result<Exchange>) -> bool {
     result
         .as_ref()
-        .is_ok_and(|message| message.response_code != ResponseCode::ServFail)
+        .is_ok_and(|response| response.message.response_code != ResponseCode::ServFail)
 }
 
-fn prefer(primary: Result<Message>, secondary: Result<Message>) -> Result<Message> {
+fn prefer(primary: Result<Exchange>, secondary: Result<Exchange>) -> Result<Exchange> {
     if success(&secondary) || primary.is_err() && secondary.is_ok() {
         secondary
     } else {

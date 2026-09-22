@@ -146,7 +146,7 @@ async fn doq_request(
     ensure!(frame[2..4] == [0, 0], "DoQ ID must be zero");
     ensure_no_keepalive(&frame[2..])?;
     let response = tokio::select! {
-        response = ingress.handle(&frame[2..], peer) => response,
+        response = ingress.handle_with_transport(&frame[2..], peer, "doq") => response,
         _ = send.stopped() => return Ok(()),
     };
     if let Some(mut response) = response {
@@ -248,7 +248,7 @@ async fn h3_request(
         // Whole-connection loss cancels immediately; a reset of only this H3
         // stream is observed at response write or the enclosing I/O deadline.
         Ok(query) => match tokio::select! {
-            response = ingress.handle(&query, peer) => response,
+            response = ingress.handle_with_transport(&query, peer, "doh3") => response,
             _ = connection.closed() => return Ok(()),
         } {
             Some(response) => (200, response),

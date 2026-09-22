@@ -199,7 +199,7 @@ async fn request_task(
         Err(status) => return send(&mut respond, status, Vec::new()).await,
     };
     let response = tokio::select! {
-        response = ingress.handle(&bytes, peer) => response,
+        response = ingress.handle_with_transport(&bytes, peer, "doh") => response,
         _ = std::future::poll_fn(|cx| respond.poll_reset(cx)) => return Ok(()),
     };
     match response {

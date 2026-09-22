@@ -43,17 +43,36 @@ impl Ingress {
     }
 
     pub async fn handle(&self, bytes: &[u8], peer: IpAddr) -> Option<Vec<u8>> {
+        self.handle_with_transport(bytes, peer, "unknown").await
+    }
+
+    pub async fn handle_with_transport(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+    ) -> Option<Vec<u8>> {
         self.resolver.metrics().inc(Counter::EncryptedReceived);
         let Some(_source) = self.admit_query(peer) else {
             self.resolver.metrics().inc(Counter::EncryptedRejected);
-            return rejected_response(bytes)?.to_vec().ok();
+            let reply = rejected_response(bytes);
+            self.resolver
+                .log_rejected(bytes, peer, transport, reply.as_ref());
+            return reply?.to_vec().ok();
         };
         let permit = self.queries.clone().try_acquire_owned();
         let message = match permit {
-            Ok(ref _permit) => self.resolver.resolve(bytes, peer).await.map(|r| r.message),
+            Ok(ref _permit) => self
+                .resolver
+                .resolve_with_transport(bytes, peer, transport)
+                .await
+                .map(|r| r.message),
             Err(_) => {
                 self.resolver.metrics().inc(Counter::EncryptedRejected);
-                rejected_response(bytes)
+                let reply = rejected_response(bytes);
+                self.resolver
+                    .log_rejected(bytes, peer, transport, reply.as_ref());
+                reply
             }
         };
         message?.to_vec().ok()

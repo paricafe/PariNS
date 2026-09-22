@@ -15,6 +15,9 @@ pub struct Answer {
     pub response: Result<(Message, Option<u8>), ()>,
     pub stale_eligible: bool,
     pub admitted: bool,
+    pub upstream: Option<String>,
+    pub outgoing_ecs: Option<String>,
+    pub cached: bool,
 }
 type Work = BoxFuture<'static, Answer>;
 pub enum Role {

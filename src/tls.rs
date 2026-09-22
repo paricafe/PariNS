@@ -113,6 +113,33 @@ fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
         "TLS certificate file has no certificates"
     );
     let key = PrivateKeyDer::from_pem_file(&files.key_file).context("load TLS private key")?;
+    checked_identity(certificates, key)
+}
+
+/// Validate an imported identity before any secret is persisted. Parsing and
+/// key consistency use the same provider as file-backed listener identities.
+pub fn validate_pem_identity(
+    certificate_pem: &[u8],
+    private_key_pem: &[u8],
+) -> Result<Arc<CertifiedKey>> {
+    let certificates = CertificateDer::pem_slice_iter(certificate_pem)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("invalid PEM certificate chain")?;
+    ensure!(!certificates.is_empty(), "PEM certificate chain is empty");
+    let mut keys = PrivateKeyDer::pem_slice_iter(private_key_pem)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("invalid PEM private key")?;
+    ensure!(
+        keys.len() == 1,
+        "provide exactly one unencrypted PEM private key"
+    );
+    checked_identity(certificates, keys.remove(0))
+}
+
+fn checked_identity(
+    certificates: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<Arc<CertifiedKey>> {
     let key = CertifiedKey::from_der(certificates, key, &rustls::crypto::ring::default_provider())?;
     // from_der permits providers that cannot determine key consistency; ours must prove it.
     key.keys_match()?;
@@ -317,7 +344,10 @@ async fn connection(
             result = timeout(ingress.io_timeout, tcp::read_frame(&mut stream)) => result??,
         };
         // Once admitted, a query can finish during the server's bounded shutdown grace.
-        let Some(response) = ingress.handle(&bytes, peer.ip()).await else {
+        let Some(response) = ingress
+            .handle_with_transport(&bytes, peer.ip(), "dot")
+            .await
+        else {
             return Ok(());
         };
         timeout(ingress.io_timeout, async {

@@ -1,0 +1,33 @@
+src/policy/tests.rs
+  s_aa37914330e67a::t_2dc19a4f8ae26f 2-22,125-154
+  s_aa37914330e67a::t_f1b3e4959293b2 155-169
+src/resolver.rs
+  s_aa37914330e67a::t_2dc19a4f8ae26f 85,129-131
+src/policy.rs
+  s_aa37914330e67a::t_2dc19a4f8ae26f 3-6,9-12,128-145
+  s_aa37914330e67a::t_ce4cde09ed9bbe 146-160
+README.md
+  s_aa37914330e67a::t_f2014d3488b658 14,150-157,166-167,178
+tests/filter.rs
+  s_aa37914330e67a::t_3eff6a00790830 3-6,21-23,122-125,140-144,146-150,155-158,162-175,178-182,186-189,191-194,200-203,209-217,227-230
+  s_aa37914330e67a::t_c7755120934803 8,118-121,126-139,145,151-154,159-161,176-177,183-185,190,195-199,204-208,218-226,231
+tests/server.rs
+  s_aa37914330e67a::t_f2014d3488b658 5-8,202-237
+  s_aa37914330e67a::t_e84a70a431e727 238-255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b5a5eab5c688faa55aae4b939ffc95fb2ab7e8eb",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

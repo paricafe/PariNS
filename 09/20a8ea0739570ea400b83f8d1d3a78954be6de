@@ -1,0 +1,19 @@
+AGENTS.md
+  s_beb3344c577f4a::t_5fbdff4610eb1e 1-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0920a8ea0739570ea400b83f8d1d3a78954be6de",
+  "prompts": {},
+  "sessions": {
+    "s_beb3344c577f4a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c94f-7917-7e93-b15e-eeb1b68e97f4",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

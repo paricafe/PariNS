@@ -25,6 +25,31 @@ fn query(subnet: Option<&str>) -> Message {
     query
 }
 
+#[test]
+fn unsolicited_cookie_is_removed_but_other_response_options_survive() {
+    use hickory_proto::rr::rdata::opt::EdnsCode;
+    for requested in [false, true] {
+        let mut q = query(Some("192.0.2.10/32"));
+        if requested {
+            q.edns
+                .as_mut()
+                .unwrap()
+                .options_mut()
+                .insert(EdnsOption::Unknown(10, vec![1; 8]));
+        }
+        let (out, context) =
+            Context::prepare(&q, "192.0.2.10".parse().unwrap(), &enabled()).unwrap();
+        let mut response = protocol::error_response(&out, ResponseCode::NoError);
+        let options = response.edns.as_mut().unwrap().options_mut();
+        options.insert(EdnsOption::Unknown(10, vec![1; 16]));
+        options.insert(EdnsOption::Unknown(15, vec![0, 0]));
+        context.finish(&q, &mut response, Some(24));
+        let edns = response.edns.unwrap();
+        assert_eq!(edns.option(EdnsCode::from(10)).is_some(), requested);
+        assert!(edns.option(EdnsCode::from(15)).is_some());
+    }
+}
+
 fn enabled() -> EcsConfig {
     EcsConfig {
         enabled: true,

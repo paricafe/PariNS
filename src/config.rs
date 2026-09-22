@@ -21,6 +21,26 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub filter: crate::policy::Policy,
+    #[serde(default)]
+    pub coalescing: CoalescingConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CoalescingConfig {
+    pub enabled: bool,
+    pub max_groups: usize,
+    pub max_waiters: usize,
+}
+
+impl Default for CoalescingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_groups: 128,
+            max_waiters: 64,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -79,6 +99,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=65536).contains(&self.coalescing.max_groups)
+                && (1..=65536).contains(&self.coalescing.max_waiters),
+            "invalid coalescing limits"
+        );
         ensure!(
             (1..=262_144).contains(&self.cache.max_entries),
             "cache.max_entries must be in 1..=262144"
@@ -162,6 +187,8 @@ mod tests {
             ("max_inflight", "max_inflght"),
             ("block_exact = []", "block_exact = ['*.test']"),
             ("block_suffix = []", "block_sufix = []"),
+            ("max_groups = 128", "max_groups = 0"),
+            ("max_waiters = 64", "max_waiters = 65537"),
             ("ipv4_prefix = 24", "ipv4_prefix = 33"),
             ("ipv6_prefix = 56", "ipv6_prefix = 129"),
             ("max_entries = 4096", "max_entries = 0"),

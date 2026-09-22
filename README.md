@@ -157,6 +157,18 @@ CNAME checks alone are not a complete DNS/application firewall.
 
 ## Module boundaries
 
+Identical eligible cache misses share one upstream operation, keyed by the actual
+outbound ECS subnet and DNS semantics (not the eventual response scope). `[coalescing]`
+defaults to enabled, 128 groups and 64 callers per group, including the first caller.
+At either limit, new requests return SERVFAIL without extra upstream IO. Requests
+with non-ECS EDNS options or non-IN class bypass sharing; ingress budgets still apply.
+Waiters share the first operation's timeout. Cancelling one does not cancel others;
+cancelling the last releases IO without a detached background task. Each caller
+still receives independent policy checks, ID/question and ECS restoration.
+
+`Resolver::metrics()` exposes fixed-cardinality process counters and request/upstream
+latency histograms. No query names or client addresses are used as metric labels.
+
 | Module | Responsibility |
 | --- | --- |
 | `config` | Parse and validate startup configuration |
@@ -164,6 +176,8 @@ CNAME checks alone are not a complete DNS/application firewall.
 | `ecs` | Peer provenance, subnet selection, wire validation, scope and client echo |
 | `cache` | Independent subnet answers, TTL/negative policy, bounded LRU eviction |
 | `policy` | Immutable local rules, label matching, allow precedence, CNAME filtering |
+| `flight` | Bounded in-flight sharing and cancellation ownership |
+| `metrics` | Fixed counters, RAII lifecycle gauges and cumulative latency buckets |
 | `resolver` | Compose policy, ECS, cache, upstream deadline and response restoration |
 | `upstream` | Independent UDP exchange and validated TCP fallback |
 | `transport::tcp` | Length-prefixed framing used on both sides |
@@ -176,7 +190,7 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 
 - Multiple upstream profiles and explicit cache ownership across configuration updates.
 - Rule-list import, atomic rule updates and additional filtering response modes.
-- Bounded upstream scheduling, connection reuse, and query coalescing.
+- Multiple-upstream scheduling and upstream connection reuse.
 - UDP/TCP DNS, DNS over TLS, DNS over HTTPS, and DNS over QUIC.
 - Operational metrics and atomic configuration and rule updates.
 

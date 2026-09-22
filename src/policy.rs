@@ -128,12 +128,12 @@ impl Policy {
 
     /// Only follow answer CNAMEs reachable from the original question and class.
     /// A name's allow exception never skips checks on a different chain target.
-    pub fn apply_response(&self, query: &Message, response: &mut Message) {
+    pub fn apply_response(&self, query: &Message, response: &mut Message) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
         let Some(question) = query.queries.first() else {
-            return;
+            return false;
         };
         let mut links: HashMap<&Name, Vec<&Name>> = HashMap::new();
         for rr in &response.answers {
@@ -151,12 +151,13 @@ impl Policy {
             }
             if self.blocks(name) {
                 *response = crate::protocol::error_response(query, ResponseCode::NoError);
-                return;
+                return true;
             }
             if let Some(targets) = links.get(name) {
                 pending.extend(targets.iter().copied());
             }
         }
+        false
     }
 }
 

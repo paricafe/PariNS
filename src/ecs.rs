@@ -22,6 +22,7 @@ pub enum Scope {
     Network(IpNet),
 }
 
+#[derive(Clone)]
 pub struct Context {
     pub outgoing: Option<ClientSubnet>,
     incoming: Option<ClientSubnet>,
@@ -142,6 +143,12 @@ impl Context {
             let edns = response.edns.get_or_insert_with(Edns::new);
             edns.set_max_payload(MAX_UDP_PAYLOAD)
                 .set_dnssec_ok(client_edns.flags().dnssec_ok);
+            // An unsolicited upstream COOKIE belongs to its transaction, not
+            // to any of the downstream clients sharing the answer (RFC 7873).
+            let cookie = EdnsCode::from(10);
+            if client_edns.option(cookie).is_none() {
+                edns.options_mut().remove(cookie);
+            }
         } else {
             response.edns = None;
         }

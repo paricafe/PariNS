@@ -31,3 +31,9 @@ block_exact = []
 block_suffix = []
 allow_exact = []
 allow_suffix = []
+
+[coalescing]
+enabled = true
+max_groups = 128
+# Includes the first caller. The server max_inflight budget still applies.
+max_waiters = 64

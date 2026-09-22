@@ -12,6 +12,10 @@ usage() {
         '--root stages files only; no service or candidate binary is executed.'
 }
 owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1"; }
+private_directory() {
+    mode=$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1") || return 1
+    case "$mode" in *00) return 0 ;; *) return 1 ;; esac
+}
 digest() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
     else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -23,7 +27,7 @@ cleanup() {
     if [ -n "${download_dir:-}" ] && [ -d "$download_dir" ] && [ ! -L "$download_dir" ]; then
         case "$download_dir" in "$temporary_parent"/parins-bootstrap.??????)
             if [ "$(owner "$download_dir")" = "$(id -u)" ] &&
-                [ -z "$(find "$download_dir" -prune \( -perm -077 \) -print)" ]; then
+                private_directory "$download_dir"; then
                 rm -rf -- "$download_dir"
             fi ;;
         esac
@@ -61,7 +65,7 @@ main() {
         root=$(CDPATH= cd -- "$root" && pwd -P)
         [ "$root" != / ] || fail 'staging root must not be /'
         [ "$(owner "$root")" = "$(id -u)" ] || fail 'staging root must be owned by the current user'
-        [ -z "$(find "$root" -prune -perm -077 -print)" ] || fail 'staging root must be private (mode 0700)'
+        private_directory "$root" || fail 'staging root must be private (mode 0700)'
     else
         [ "$(id -u)" = 0 ] || fail 'live installation requires root; run sudo sh bootstrap.sh'
         command -v systemctl >/dev/null 2>&1 || fail 'systemctl is required'

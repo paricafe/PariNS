@@ -91,7 +91,11 @@ expect_failure --root ''
 expect_failure --root /
 expect_failure --root "$fixture/missing"
 mkdir -m 0755 "$fixture/public-stage"
-expect_failure --root "$fixture/public-stage"
+for mode in 0755 0740 0720 0710 0704 0702 0701; do
+    chmod "$mode" "$fixture/public-stage"
+    BOOTSTRAP_OS=Linux BOOTSTRAP_ARCH=x86_64 expect_failure --root "$fixture/public-stage"
+    grep -Fq 'staging root must be private' "$fixture/failure.log"
+done
 ln -s "$fixture/stage" "$fixture/linked-stage"
 expect_failure --root "$fixture/linked-stage"
 touch "$fixture/download-fails"

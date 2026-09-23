@@ -9,6 +9,7 @@ import { OverviewPage, LogsPage } from './pages/observability';
 import { SessionProvider, useSession } from './session/context';
 import { Button, Drawer } from './components/beui';
 import { ConfirmProvider, useConfirm } from './components/ConfirmProvider';
+import { TransportHint, transportChangeText } from './components/TransportHint';
 
 type Theme = 'system' | 'light' | 'dark';
 const navigation = [
@@ -58,7 +59,8 @@ function Preferences({ language, theme, changeLanguage, changeTheme }: ReturnTyp
 }
 
 function SaveBar({ language }: { language: Language }) {
-  const { draft, dirty, busy, prepareSave, commitPrepared, reload, resolveUnknown, setError } = useConfig();
+  const { draft, dirty, busy, prepareSave, commitPrepared, reload, resolveUnknown, setError, discard } = useConfig();
+  const { transportChanged } = useSession();
   const confirmAction = useConfirm();
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => { if (dirty) setNotice(null); }, [dirty]);
@@ -67,13 +69,18 @@ function SaveBar({ language }: { language: Language }) {
   const runSave = async (trigger: HTMLElement) => {
     try {
       const prepared = await prepareSave();
-      if (!await confirmAction(prepared.restart_required ? 'app.saveRestartHelp' : 'app.saveCacheHelp', 'app.save', trigger)) return;
-      const refreshed = await commitPrepared(prepared);
-      setNotice(refreshed ? t('app.configSaved') : null);
+      const impact = prepared.restart_required ? t('app.saveRestartHelp') : t('app.saveCacheHelp');
+      const change = prepared.transportChange;
+      const message = change ? `${impact} ${transportChangeText(change, language)} ${change.requires_http_confirmation ? t('app.confirmHttpDowngrade') : ''}` : impact;
+      if (!await confirmAction(message, 'app.save', trigger)) return;
+      const result = await commitPrepared(prepared);
+      if (result.transportChange) { discard(); transportChanged(result.transportChange); return; }
+      setNotice(result.refreshed ? t('app.configSaved') : null);
     } catch (reason) { setError(toConfigIssue(reason)); }
   };
   return <div className="save-bar" role="region" aria-label={t('ui.draft')}>
     <div className="save-bar-content"><div><strong>{draft.unknownApply ? t(draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown') : dirty ? t('app.dirty') : notice}</strong>
+      {draft.unknownApply && draft.pendingTransportChange && <TransportHint change={draft.pendingTransportChange} language={language} link />}
       {notice && (dirty || draft.unknownApply) && <span className="small">{notice}</span>}</div>
       <div className="button-group">{!dirty && !draft.unknownApply ? <button type="button" className="button quiet" onClick={() => setNotice(null)}>{t('ui.closeDialog')}</button> : draft.unknownApply ? <><button type="button" className="button secondary" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button><button type="button" className="button primary" disabled={busy} onClick={() => void resolveUnknown().then((result) => setNotice(result === 'applied' ? t(draft.pendingRollback ? 'app.rollbackComplete' : 'app.configSaved') : result === 'pending' ? t('app.saveStillUnknown') : t('api.REVISION'))).catch((reason) => setError(toConfigIssue(reason)))}>{t(draft.pendingRollback ? 'app.checkRollback' : 'app.checkSave')}</button></> : <>
         <button type="button" className="button quiet" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button>
@@ -156,14 +163,16 @@ function RootView() {
   return <>
     <a href="#main-content" className="skip-link" onClick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>{t('ui.skip')}</a>
     {state.phase !== 'ready' && <header className="auth-topbar"><a href="/#/overview" className="brand-link">PariNS</a><Preferences {...appearance} /></header>}
-    <ConfigProvider api={api} active={state.phase === 'ready'}>{state.phase === 'ready' ? <ConfirmProvider language={appearance.language}><ReadyConsole appearance={appearance} /></ConfirmProvider>
+    <ConfigProvider api={api} active={state.phase === 'ready'} refreshSession={recheck}>{state.phase === 'ready' ? <ConfirmProvider language={appearance.language}><ReadyConsole appearance={appearance} /></ConfirmProvider>
       : state.phase === 'setup' ? <main id="main-content" tabIndex={-1}><SetupPage language={appearance.language} /></main>
         : state.phase === 'login' ? <main id="main-content" tabIndex={-1}><LoginPage language={appearance.language} /></main>
           : <main id="main-content" tabIndex={-1} className="state-page"><div className="state-card"><h1>{t('ui.title')}</h1>
-            <p>{state.phase === 'checking' ? t('ui.connecting') : state.phase === 'cookie-unavailable' ? t('app.cookieUnavailable') : state.phase === 'unsupported' ? t('app.webLocksUnavailable') : state.phase === 'logout-unknown' ? t('app.logoutUnknown') : t('app.startFailed')}</p>
+            <p>{state.phase === 'checking' ? t('ui.connecting') : state.phase === 'cookie-unavailable' ? t('app.cookieUnavailable') : state.phase === 'transport-change' ? t('app.transportChanged') : state.phase === 'setup-unknown' ? t('app.setupUnknown') : state.phase === 'logout-unknown' ? t('app.logoutUnknown') : t('app.startFailed')}</p>
+            {state.phase === 'setup-unknown' && state.nextOrigin && <a href={`${state.nextOrigin}${window.location.pathname}${window.location.hash}`}>{t('app.openNewAddress')} · {state.nextOrigin}</a>}
+            {state.phase === 'transport-change' && (state.nextOrigin ? <a href={`${state.nextOrigin}${window.location.pathname}${window.location.hash}`}>{t('app.openNewAddress')} · {state.nextOrigin}</a> : <p>{t('app.transportAddressUnknown')}</p>)}
             {state.error && <p className="muted small">{state.error}</p>}
             {state.phase === 'logout-unknown' ? <button className="button primary" type="button" onClick={() => void retryLogout().catch(() => {})}>{t('app.logout')}</button>
-              : state.phase !== 'checking' && <button className="button secondary" type="button" onClick={() => void recheck()}>{t('ui.reconnect')}</button>}
+              : state.phase !== 'checking' && state.phase !== 'transport-change' && <button className="button secondary" type="button" onClick={() => void recheck()}>{t('ui.reconnect')}</button>}
           </div></main>}</ConfigProvider>
   </>;
 }

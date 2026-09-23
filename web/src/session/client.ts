@@ -2,6 +2,21 @@ export interface SessionView {
   setup_required: boolean;
   authenticated: boolean;
   session: { binding: string; expires_in_seconds: number } | null;
+  transport: TransportView;
+}
+
+export interface TransportView {
+  scheme: 'http' | 'https';
+  origin: string | null;
+  certificate_source: 'doh' | 'doh3' | null;
+}
+
+export interface TransportChange {
+  from: 'http' | 'https';
+  to: 'http' | 'https';
+  next_origin: string | null;
+  reauthenticate: boolean;
+  requires_http_confirmation: boolean;
 }
 
 export class ApiError extends Error {
@@ -19,17 +34,17 @@ export class CookieUnavailable extends Error {
   constructor() { super('The browser did not establish a login session'); this.name = 'CookieUnavailable'; }
 }
 
-export class WebLocksUnavailable extends Error {
-  constructor() { super('This browser does not support Web Locks'); this.name = 'WebLocksUnavailable'; }
-}
-
 export type ApiMethod = 'GET' | 'POST' | 'PUT';
-type AuthEvent = 'unauthorized' | 'session-changed';
+type AuthEvent = 'unauthorized' | 'session-changed' | 'transport-changed';
 
 function hasSession(value: unknown): value is SessionView {
   if (!value || typeof value !== 'object') return false;
   const view = value as Record<string, unknown>;
   if (typeof view.setup_required !== 'boolean' || typeof view.authenticated !== 'boolean') return false;
+  const transport = view.transport as Record<string, unknown> | undefined;
+  if (!transport || !['http', 'https'].includes(String(transport.scheme)) ||
+    !(transport.origin === null || typeof transport.origin === 'string') ||
+    ![null, 'doh', 'doh3'].includes(transport.certificate_source as null | string)) return false;
   if (view.session === null) return !view.authenticated;
   const session = view.session as Record<string, unknown> | undefined;
   return Boolean(view.authenticated && session && typeof session.binding === 'string' && session.binding.length > 0 && typeof session.expires_in_seconds === 'number');
@@ -88,6 +103,7 @@ export class ApiClient {
         const code = typeof detail.code === 'string' ? detail.code : 'HTTP';
         if (response.status === 401 && binding) this.onAuthEvent?.('unauthorized');
         if (response.status === 409 && code === 'SESSION_CHANGED') this.onAuthEvent?.('session-changed');
+        if (response.status === 409 && code === 'TRANSPORT_CHANGED') this.onAuthEvent?.('transport-changed');
         throw new ApiError(response.status, code, typeof detail.message === 'string' ? detail.message : `HTTP ${response.status}`);
       }
       return data as T;
@@ -107,10 +123,4 @@ export class ApiClient {
   }
 
   private ensureCurrent(epoch: number) { if (epoch !== this.epoch) throw new StaleRequest(); }
-}
-
-// Auth mutations need a cross-tab lock because Set-Cookie precedes JS response handling.
-export async function withAuthLock<T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!navigator.locks?.request) throw new WebLocksUnavailable();
-  return navigator.locks.request('parins-auth-transition', { mode: 'exclusive', signal }, async () => action());
 }

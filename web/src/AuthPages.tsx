@@ -1,12 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { networkTemplate } from './model';
 import { hasTranslation, translate, type Language } from './i18n';
-import { ApiError, CookieUnavailable, WebLocksUnavailable } from './session/client';
+import { ApiError, CookieUnavailable } from './session/client';
 import { useSession } from './session/context';
 
 function present(error: unknown, language: Language): string {
   if (error instanceof CookieUnavailable) return translate('app.cookieUnavailable', language);
-  if (error instanceof WebLocksUnavailable) return translate('app.webLocksUnavailable', language);
   if (error instanceof ApiError && hasTranslation(`api.${error.code}`)) return translate(`api.${error.code}`, language, { detail: error.message, status: error.status });
   return error instanceof Error ? error.message : translate('app.offline', language);
 }

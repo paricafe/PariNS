@@ -106,6 +106,7 @@ h3 { font-size: 15px; }
 .detail-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--divider); }
 .detail-row span { color: var(--muted); }
 .detail-row strong { font-weight: 650; text-align: right; overflow-wrap: anywhere; }
+.transport-address { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .metric-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .meter-card { border: 1px solid var(--divider); border-radius: 8px; padding: 12px; display: grid; gap: 5px; }
 .meter-card strong { font-size: 18px; font-variant-numeric: tabular-nums; }
@@ -177,7 +178,7 @@ meter { width: 100%; }
   .logout-button { max-width: 45px; overflow: hidden; text-overflow: ellipsis; }
   .config-tools .button-group { width: 100%; }
   .config-tools .button { flex: 1; }
-  .danger-zone, .heading-row { flex-wrap: wrap; }
+  .danger-zone, .heading-row, .group-head { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }

@@ -53,7 +53,7 @@ describe("bilingual console catalog", () => {
 
   it("covers secure session and appearance states without obsolete refresh copy", () => {
     for (const key of [
-      "api.SESSION_CHANGED", "app.cookieUnavailable", "app.webLocksUnavailable",
+      "api.SESSION_CHANGED", "api.TRANSPORT_CHANGED", "app.cookieUnavailable", "app.transportChanged",
       "app.logoutUnknown", "app.sessionChanged", "ui.theme", "ui.themeAuto",
       "ui.themeLight", "ui.themeDark",
     ]) expect(hasTranslation(key), key).toBe(true);

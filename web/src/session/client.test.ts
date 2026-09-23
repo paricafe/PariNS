@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApiClient, ApiError, StaleRequest, WebLocksUnavailable, withAuthLock } from './client';
+import { ApiClient, ApiError, StaleRequest } from './client';
 
 const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
-const view = { setup_required: false, authenticated: true, session: { binding: 'binding-1', expires_in_seconds: 3600 } };
+const view = { setup_required: false, authenticated: true, session: { binding: 'binding-1', expires_in_seconds: 3600 },
+  transport: { scheme: 'http', origin: null, certificate_source: null } };
 
 describe('management request ownership', () => {
   it('calls the browser fetch with its global receiver by default', async () => {
@@ -64,15 +65,24 @@ describe('management request ownership', () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it('reports a changed transport realm without replaying a write', async () => {
+    const fetcher = vi.fn(async () => json(409, { error: { code: 'TRANSPORT_CHANGED', message: 'use new origin' } }));
+    const api = new ApiClient(fetcher as typeof fetch);
+    const events: string[] = [];
+    api.setAuthEventHandler((event) => events.push(event));
+    api.replaceBinding('old-binding');
+    await expect(api.request('config', 'PUT', { toml: '', revision: 1 })).rejects.toMatchObject({ code: 'TRANSPORT_CHANGED' });
+    expect(events).toEqual(['transport-changed']);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects malformed session payloads instead of fabricating login', async () => {
     const api = new ApiClient(vi.fn(async () => json(200, { authenticated: true, setup_required: false, token: 'bad' })) as typeof fetch);
     await expect(api.session()).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
   });
 
-  it('fails closed when cross-tab Web Locks are unavailable', async () => {
-    const before = globalThis.navigator;
-    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {} });
-    try { await expect(withAuthLock(async () => 1)).rejects.toBeInstanceOf(WebLocksUnavailable); }
-    finally { Object.defineProperty(globalThis, 'navigator', { configurable: true, value: before }); }
+  it('requires a transport view when restoring the session', async () => {
+    const api = new ApiClient(vi.fn(async () => json(200, { ...view, transport: undefined })) as typeof fetch);
+    await expect(api.session()).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
   });
 });

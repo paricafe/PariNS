@@ -81,13 +81,16 @@ export const settingPages = {
       field("filter.allow_suffix", "lines"),
     ]),
   ]),
-  security: page("security", (["dot", "doh", "doq", "doh3"] as const).map((protocol) => group(
-    protocol,
-    (["listen", "cert_file", "key_file"] as const).map((name) => field(
-      `${protocol}.${name}`, name === "listen" ? "endpoint" : "text", false, undefined, undefined, `listener.${name}`,
+  security: page("security", [
+    group("web", [field("web.public_host", "text", true)]),
+    ...(["dot", "doh", "doq", "doh3"] as const).map((protocol) => group(
+      protocol,
+      (["listen", "cert_file", "key_file"] as const).map((name) => field(
+        `${protocol}.${name}`, name === "listen" ? "endpoint" : "text", false, undefined, undefined, `listener.${name}`,
+      )),
+      protocol,
     )),
-    protocol,
-  ))),
+  ]),
   runtime: page("runtime", [
     group("queryLog", [field("query_log.enabled", "checkbox"), number("query_log.max_entries", 1, 10000), number("query_log.retention_secs", 1, 604800)]),
     group("concurrency", [number("max_inflight", 1, 65536), number("max_tcp_connections", 1, 65536), number("shutdown_grace_ms", 1, 60000)]),

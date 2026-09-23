@@ -10,8 +10,9 @@ describe("configuration form model", () => {
     expect(settingPages.dns.groups[0].fields[0].path).toBe("upstreams.servers");
     expect(settingPages.cache.groups.flatMap((group) => group.fields)
       .find((field) => field.path === "cache.negative_percent")).toMatchObject({ min: 0, max: 90 });
-    expect(settingPages.security.groups.map((group) => group.optional)).toEqual(["dot", "doh", "doq", "doh3"]);
-    expect(settingPages.security.groups.every((group) => group.fields[0].type === "endpoint")).toBe(true);
+    expect(settingPages.security.groups.map((group) => group.optional)).toEqual([undefined, "dot", "doh", "doq", "doh3"]);
+    expect(settingPages.security.groups[0].fields[0].path).toBe("web.public_host");
+    expect(settingPages.security.groups.slice(1).every((group) => group.fields[0].type === "endpoint")).toBe(true);
   });
 
   it("writes a touched nested path immutably and emits a sparse patch", () => {
@@ -55,13 +56,13 @@ describe("configuration form model", () => {
     }
     expect(splitListener("")).toEqual({ address: "", port: "" });
     expect(joinListener(" [2001:db8::1] ", " 00053 ")).toBe("[2001:db8::1]:53");
-    const field = settingPages.security.groups[0].fields[0];
+    const field = settingPages.security.groups[1].fields[0];
     expect(fieldDisplayValue("[2001:0db8:0:0::1]:00853", field))
       .toEqual({ address: "2001:0db8:0:0::1", port: "00853" });
   });
 
   it("reports listener draft errors without altering raw input", () => {
-    const field = settingPages.security.groups[0].fields[0];
+    const field = settingPages.security.groups[1].fields[0];
     const raw = { address: "::1", port: "1e3" };
     expect(() => convertFieldValue(field, raw)).toThrowError(expect.objectContaining({
       key: "settings.listener.port.invalid", path: "dot.listen.port",

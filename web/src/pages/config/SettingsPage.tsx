@@ -8,6 +8,7 @@ import { ApiError, StaleRequest } from '../../session/client';
 import { Switch, Tabs, Button, Drawer } from '../../components/beui';
 import { useConfirm } from '../../components/ConfirmProvider';
 import { lineDiff } from './lineDiff';
+import { TransportHint, transportChangeText } from '../../components/TransportHint';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
 type CacheTab = typeof cacheTabs[number];
@@ -216,7 +217,8 @@ function CertificateImport({ language }: { language: Language }) {
 }
 
 export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'advanced'; language: Language }) {
-  const { draft, dirty, setToml, preview, validate, ensureParsed, rollback, exportDraft, busy, error, setError } = useConfig();
+  const { draft, dirty, setToml, preview, validate, prepareSave, commitPrepared, ensureParsed, previewRollback, rollback, exportDraft, busy, error, setError, discard } = useConfig();
+  const { state, transportChanged } = useSession();
   const confirmAction = useConfirm();
   const navigate = useNavigate();
   const [cacheTab, setCacheTab] = useState<CacheTab>('usage');
@@ -250,11 +252,33 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
     <div className="config-tools"><span>{t('ui.draft')} {draft && <small className="muted">{t('app.revision').replace('{revision}', String(draft.revision))}</small>}</span>
       <div className="button-group"><button type="button" className="button quiet" disabled={!draft || busy} onClick={() => void exportDraft().then(() => setNotice(t('app.exported'))).catch((reason) => setError(String(reason)))}>{t('ui.export')}</button>
         <Button variant="secondary" disabled={!draft || busy} onClick={() => { const source = draft?.original; if (source === undefined) return; void preview().then((result) => { setPreviewed({ source, result }); setNotice(null); }).catch(() => {}); }}>{t('ui.preview')}</Button>
-        <button type="button" className="button secondary" disabled={!draft || busy} onClick={() => void validate().then((result) => setNotice(t(result.restart_required ? 'app.validRestart' : 'app.validCache'))).catch(() => {})}>{t('ui.validate')}</button>
-        <button type="button" className="button quiet" disabled={!draft?.hasBackup || busy} onClick={() => void confirmAction('app.rollbackHelp', 'ui.rollback').then((accepted) => { if (accepted) void rollback().catch(() => {}); })}>{t('ui.rollback')}</button></div>
+        <button type="button" className="button secondary" disabled={!draft || busy} onClick={() => void validate().then((result) => setNotice(result.transport_change
+          ? transportChangeText(result.transport_change, language) : t(result.restart_required ? 'app.validRestart' : 'app.validCache'))).catch(() => {})}>{t('ui.validate')}</button>
+        {pageId === 'security' && !dirty && <button type="button" className="button secondary" disabled={!draft || busy || draft.unknownApply} onClick={(event) => { const trigger = event.currentTarget; void (async () => {
+          try {
+            const prepared = await prepareSave();
+            const impact = prepared.restart_required ? t('app.saveRestartHelp') : t('app.saveCacheHelp');
+            if (!await confirmAction(impact, 'app.reapply', trigger)) return;
+            const result = await commitPrepared(prepared);
+            if (result.transportChange) { discard(); transportChanged(result.transportChange); }
+            else if (result.refreshed) setNotice(t('app.configSaved'));
+          } catch (reason) { setError(reason instanceof ModelError || reason instanceof ApiError ? reason : reason instanceof Error ? reason.message : String(reason)); }
+        })(); }}>{t('app.reapply')}</button>}
+        <button type="button" className="button quiet" disabled={!draft?.hasBackup || busy} onClick={(event) => { const trigger = event.currentTarget; void (async () => {
+          try {
+            const prepared = await previewRollback();
+            const change = prepared.transportChange;
+            const message = change ? `${t('app.rollbackHelp')} ${transportChangeText(change, language)} ${change.requires_http_confirmation ? t('app.confirmHttpDowngrade') : ''}` : t('app.rollbackHelp');
+            if (!await confirmAction(message, 'ui.rollback', trigger)) return;
+            const result = await rollback(prepared);
+            if (result.transportChange) { discard(); transportChanged(result.transportChange); }
+            else if (result.refreshed) setNotice(t('app.restored'));
+          } catch (reason) { setError(reason instanceof ModelError || reason instanceof ApiError ? reason : reason instanceof Error ? reason.message : String(reason)); }
+        })(); }}>{t('ui.rollback')}</button></div>
     </div>
     {previewed && draft?.original === previewed.source && draft.toml === previewed.result && !needsFormFlush && <section className="panel diff-panel" aria-label={t('app.diffTitle')}>
       <h2>{t('app.diffTitle')}</h2><p className="muted small">{t('app.diffHelp')}</p>
+      {draft.previewTransportChange && <TransportHint change={draft.previewTransportChange} language={language} />}
       {diff.some((line) => line.kind !== 'same') ? <pre className="diff-lines"><code>{diff.map((line, index) => <span className={`diff-${line.kind}`} key={index}>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text || ' '}</span>)}</code></pre>
         : <p className="muted">{t('app.noChanges')}</p>}
     </section>}
@@ -265,6 +289,13 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
         {cacheTab === 'settings' && <GenericSettings pageId="cache" language={language} />}
         {cacheTab === 'rules' && <CacheRules language={language} />}
         {cacheTab === 'inspect' && <CacheInspect language={language} dirty={dirty} />}
-      </> : <><GenericSettings pageId={pageId} language={language} />{pageId === 'security' && <CertificateImport language={language} />}</>}
+      </> : <>{pageId === 'security' && <section className="panel" aria-label={t('app.transportCurrentAddress')}>
+        <h2>{t('app.transportCurrentAddress')}</h2>
+        <p><strong>{t(state.transport?.scheme === 'https' ? 'app.transportHttps' : 'app.transportHttp')}</strong></p>
+        <p className="transport-address">{state.transport?.origin ?? window.location.origin}</p>
+        <p className="muted small">{t(state.transport?.scheme === 'https' ? 'app.transportHttpsHelp' : 'app.transportHttpHelp')}</p>
+        <p className="muted small">{t('app.transportCertificateSource')}: {state.transport?.certificate_source?.toUpperCase() ?? t('app.transportNoCertificate')}</p>
+      </section>}
+      <GenericSettings pageId={pageId} language={language} />{pageId === 'security' && <CertificateImport language={language} />}</>}
   </div>;
 }

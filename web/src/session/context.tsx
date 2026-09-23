@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ApiClient, ApiError, CookieUnavailable, StaleRequest, WebLocksUnavailable, withAuthLock, type SessionView } from './client';
+import { ApiClient, ApiError, CookieUnavailable, StaleRequest, type SessionView, type TransportChange, type TransportView } from './client';
 
-export type SessionPhase = 'checking' | 'setup' | 'login' | 'ready' | 'connection-error' | 'cookie-unavailable' | 'logout-unknown' | 'unsupported';
-export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string }
+export type SessionPhase = 'checking' | 'setup' | 'setup-unknown' | 'login' | 'ready' | 'connection-error' | 'cookie-unavailable' | 'logout-unknown' | 'transport-change';
+export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string; transport?: TransportView; nextOrigin?: string | null }
 
 interface SessionContextValue {
   state: SessionState;
@@ -12,6 +12,7 @@ interface SessionContextValue {
   logout(): Promise<void>;
   retryLogout(): Promise<void>;
   recheck(): Promise<void>;
+  transportChanged(change: TransportChange): void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -25,6 +26,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const bootId = useRef(0);
   const logoutBinding = useRef<string | null>(null);
   const logoutIntent = useRef(false);
+  const authInFlight = useRef(false);
   const phase = useRef<SessionPhase>(state.phase);
   phase.current = state.phase;
 
@@ -32,9 +34,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (!mounted.current) return;
     const binding = view.authenticated ? view.session!.binding : null;
     if (binding !== api.currentBinding) api.replaceBinding(binding);
-    setState(view.setup_required ? { phase: 'setup' } : view.authenticated
-      ? { phase: 'ready', expiresInSeconds: view.session!.expires_in_seconds }
-      : { phase: 'login' });
+    setState(view.setup_required ? { phase: 'setup', transport: view.transport } : view.authenticated
+      ? { phase: 'ready', expiresInSeconds: view.session!.expires_in_seconds, transport: view.transport }
+      : { phase: 'login', transport: view.transport });
   }, [api]);
 
   const recheck = useCallback(async () => {
@@ -46,7 +48,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       applySession(view);
     } catch (error) {
       if (error instanceof StaleRequest || id !== bootId.current || !mounted.current || logoutIntent.current) return;
-      setState({ phase: 'connection-error', error: error instanceof Error ? error.message : undefined });
+      setState((current) => current.phase === 'setup-unknown'
+        ? { ...current, error: error instanceof Error ? error.message : undefined }
+        : { phase: 'connection-error', error: error instanceof Error ? error.message : undefined });
     }
   }, [api, applySession]);
 
@@ -59,7 +63,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mounted.current = true;
-    api.setAuthEventHandler(() => maskAndRecheck());
+    api.setAuthEventHandler((event) => {
+      if (event === 'transport-changed') {
+        bootId.current += 1;
+        api.replaceBinding(null);
+        setState({ phase: 'transport-change', nextOrigin: null });
+      } else maskAndRecheck();
+    });
     if (typeof BroadcastChannel !== 'undefined') {
       const next = new BroadcastChannel(CHANNEL_NAME);
       next.onmessage = (event) => { if (event.data === 'changed') maskAndRecheck(); };
@@ -81,6 +91,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const announce = () => channel.current?.postMessage('changed');
 
+  // Only this tab serializes its own buttons. The server binding/realm checks own cross-tab safety.
+  const authAction = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
+    if (authInFlight.current) throw new ApiError(409, 'BUSY', 'An authentication action is running');
+    authInFlight.current = true;
+    try { return await action(); }
+    finally { authInFlight.current = false; }
+  }, []);
+
+  const transportChanged = useCallback((change: TransportChange) => {
+    bootId.current += 1;
+    logoutIntent.current = false;
+    api.replaceBinding(null);
+    setState({ phase: 'transport-change', nextOrigin: change.next_origin });
+    announce();
+    if (change.next_origin) window.setTimeout(() => {
+      window.location.assign(`${change.next_origin}${window.location.pathname}${window.location.search}${window.location.hash}`);
+    }, 0);
+  }, [api]);
+
   const confirmLogin = useCallback(async () => {
     const view = await api.session();
     if (!view.authenticated || !view.session) throw new CookieUnavailable();
@@ -90,7 +119,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string) => {
     try {
-      await withAuthLock(async () => {
+      await authAction(async () => {
         const view = await api.session();
         if (view.authenticated) { applySession(view); return; }
         await api.request('login', 'POST', { username, password }, undefined, { unauthenticated: true });
@@ -98,30 +127,40 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       });
     } catch (error) {
       if (error instanceof CookieUnavailable) setState({ phase: 'cookie-unavailable' });
-      if (error instanceof WebLocksUnavailable) setState({ phase: 'unsupported' });
       throw error;
     }
-  }, [api, applySession, confirmLogin]);
+  }, [api, applySession, authAction, confirmLogin]);
 
   const setup = useCallback(async (username: string, password: string, toml: string, token: string) => {
+    let sent = false;
+    const candidate = { change: null as TransportChange | null };
     try {
-      await withAuthLock(async () => {
+      await authAction(async () => {
         const view = await api.session();
         if (view.authenticated) { applySession(view); return; }
         if (!view.setup_required) { applySession(view); throw new ApiError(409, 'SETUP_DONE', 'Setup already completed'); }
-        await api.request('setup', 'POST', { username, password, toml }, { 'X-PariNS-Setup': token }, { unauthenticated: true });
+        const preview = await api.request<{ valid: true; transport_change: TransportChange | null }>('setup/preview', 'POST', { toml },
+          { 'X-PariNS-Setup': token }, { unauthenticated: true });
+        candidate.change = preview.transport_change;
+        sent = true;
+        const result = await api.request<SessionView & { transport_change: TransportChange | null }>('setup', 'POST', { username, password, toml }, { 'X-PariNS-Setup': token }, { unauthenticated: true });
+        sent = false;
+        if (result.transport_change) { transportChanged(result.transport_change); return; }
         await confirmLogin();
       });
     } catch (error) {
       if (error instanceof CookieUnavailable) setState({ phase: 'cookie-unavailable' });
-      if (error instanceof WebLocksUnavailable) setState({ phase: 'unsupported' });
+      if (sent && (error instanceof StaleRequest || error instanceof ApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code))) {
+        api.replaceBinding(null);
+        setState({ phase: 'setup-unknown', nextOrigin: candidate.change?.next_origin ?? null });
+      }
       throw error;
     }
-  }, [api, applySession, confirmLogin]);
+  }, [api, applySession, authAction, confirmLogin, transportChanged]);
 
   const performLogout = useCallback(async (expected: string | null) => {
     try {
-      await withAuthLock(async () => {
+      await authAction(async () => {
         const view = await api.session();
         const actual = view.session?.binding ?? null;
         if (actual && actual !== expected) {
@@ -139,11 +178,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         announce();
       });
     } catch (error) {
-      if (error instanceof WebLocksUnavailable) setState({ phase: 'unsupported' });
-      else if (!(error instanceof ApiError && error.code === 'SESSION_CHANGED')) setState({ phase: 'logout-unknown' });
+      if (!(error instanceof ApiError && error.code === 'SESSION_CHANGED')) setState({ phase: 'logout-unknown' });
       throw error;
     }
-  }, [api, applySession]);
+  }, [api, applySession, authAction]);
 
   const logout = useCallback(async () => {
     logoutBinding.current = api.currentBinding;
@@ -159,7 +197,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     await performLogout(logoutBinding.current);
   }, [performLogout, state.phase]);
 
-  const value = useMemo<SessionContextValue>(() => ({ state, api, login, setup, logout, retryLogout, recheck }), [state, api, login, setup, logout, retryLogout, recheck]);
+  const value = useMemo<SessionContextValue>(() => ({ state, api, login, setup, logout, retryLogout, recheck, transportChanged }), [state, api, login, setup, logout, retryLogout, recheck, transportChanged]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 

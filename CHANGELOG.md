@@ -1,9 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.1.2 — 2026-09-23
+
+### Improved
 
 - Split encrypted DNS listener forms into listening address and port fields,
   preserving IPv6, unsaved input and the existing `listen` configuration format.
+
+### Fixed
+
 - Isolate management login/setup attempt limits by socket peer, with bounded
   source tracking and a separate password-hashing concurrency budget.
 - Invalidate overlapping obsolete cached answers when a new successful response

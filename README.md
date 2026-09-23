@@ -30,12 +30,14 @@ provider or hosted service.
 
 ## Status
 
-Early release (v0.1.1). The features above are implemented, with automated Linux and
+Early release (v0.1.2). The features above are implemented, with automated Linux and
 macOS tests and isolated Linux systemd installation checks. Production deployment
 and target-machine capacity acceptance have not been performed.
 
-Version 0.1.1 includes the expanded cache controls, query logs, bilingual console,
-unified upstream settings, H3 preference and PEM import. This project is in active
+Version 0.1.2 improves encrypted listener forms and fixes authentication limits,
+EDE cache invalidation, DoH Age handling, DoQ address rotation and cache-rule drafts.
+It includes the expanded cache controls, query logs, bilingual console, unified
+upstream settings, H3 preference and PEM import. This project is in active
 initial development: `[upstreams]` is required, and old single-upstream settings
 are no longer accepted. Start with the bundled example or the setup wizard.
 
@@ -100,7 +102,7 @@ sudo systemctl status parins-managed.service
 The installer does not change your host/router DNS or firewall. Use the dashboard
 to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
 needed. To upgrade, rerun the installer; existing account, configuration and HTTPS
-identity are preserved. Pin a version with `sudo sh parins-install.sh --version v0.1.1`.
+identity are preserved. Pin a version with `sudo sh parins-install.sh --version v0.1.2`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`

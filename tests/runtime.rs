@@ -377,24 +377,51 @@ async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext()
 #[tokio::test]
 async fn failed_certificate_startup_releases_previously_bound_sockets() {
     let cert = Certificate::new();
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = probe.local_addr().unwrap();
-    drop(probe);
-    let dot_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let dot_address = dot_probe.local_addr().unwrap();
-    drop(dot_probe);
-    let mut config = config("127.0.0.1:9".parse().unwrap());
-    config.listen = address;
-    let mut dot = cert.listener();
-    dot.listen = dot_address;
-    config.dot = Some(dot);
-    let mut bad = cert.listener();
-    bad.files.key_file = cert.directory.path().join("missing-key.pem");
-    config.doh = Some(bad);
-    assert!(Server::bind(config).await.is_err());
-    TcpListener::bind(address).await.unwrap();
-    UdpSocket::bind(address).await.unwrap();
-    TcpListener::bind(dot_address).await.unwrap();
+    for _ in 0..16 {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = probe.local_addr().unwrap();
+        // Hold both reservations until they are chosen so they are distinct.
+        let dot_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dot_address = dot_probe.local_addr().unwrap();
+        drop(probe);
+        drop(dot_probe);
+        let mut config = config("127.0.0.1:9".parse().unwrap());
+        config.listen = address;
+        let mut dot = cert.listener();
+        dot.listen = dot_address;
+        config.dot = Some(dot);
+        let mut bad = cert.listener();
+        bad.files.key_file = cert.directory.path().join("missing-key.pem");
+        config.doh = Some(bad);
+        let error = match Server::bind(config).await {
+            Ok(_) => panic!("missing certificate key unexpectedly accepted"),
+            Err(error) => error,
+        };
+        if error
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+        {
+            continue;
+        }
+        assert!(
+            format!("{error:#}").contains("load TLS private key"),
+            "{error:#}"
+        );
+        let released = async {
+            let _tcp = TcpListener::bind(address).await?;
+            let _udp = UdpSocket::bind(address).await?;
+            let _dot = TcpListener::bind(dot_address).await?;
+            Ok::<(), std::io::Error>(())
+        }
+        .await;
+        match released {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("cannot rebind released sockets: {error}"),
+        }
+    }
+    panic!("could not verify socket release after 16 port reservations");
 }
 
 #[test]

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Replace the native-script management page with a React 19/TypeScript console,
+  including responsive navigation, light/dark/system appearance, bilingual views,
+  per-request query details, and a single in-memory configuration draft.
+- Replace Bearer tokens with eight-hour Secure/HttpOnly/SameSite=Strict Cookie
+  sessions. Refresh restores a valid login; protected APIs require a session
+  binding, and login/setup/logout are coordinated across tabs.
+- Require exact same-origin checks for management writes, retire all old Web
+  assets and Bearer callers, and embed checked static build output in the Rust
+  binary. Unsaved drafts still do not persist across a full refresh.
+
 ## v0.1.2 — 2026-09-23
 
 ### Improved

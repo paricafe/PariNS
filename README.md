@@ -180,16 +180,23 @@ at the listening port, plus localhost. It rejects arbitrary domain names, other
 ports and cross-origin browser requests; forwarding headers are not trusted.
 This is direct IP access, not a domain-name/reverse-proxy configuration feature.
 Use the same local tunnel or NAT port (3000). Passwords use
-Argon2id. Eight-hour bearer sessions remain only in page memory: refreshing
-requires login, and logout revokes the session. There are no external frontend
-assets or cookies. Tokens and query logs are not persisted in browser storage;
-opt-in query history is held in server memory.
+Argon2id. Successful login establishes an eight-hour Secure, HttpOnly,
+SameSite=Strict Cookie; refreshing restores the session until it expires, is
+revoked by logout, or the management process restarts. The browser never stores
+the session credential or binding in local/session storage. The management
+origin is tied to the exact scheme, host and port; each protected request also
+uses a per-session binding to prevent stale tabs from writing under a new login.
+There are no external frontend assets. Opt-in query history is held in server
+memory, not browser storage. An unsaved configuration draft does not survive a
+full page refresh.
 
-The console supports Simplified Chinese and English. Use
-the language selector at the top of any page, including sign-in and setup.
+The React console supports Simplified Chinese and English, plus light, dark and
+system-following appearance. Use the selectors at the top of any page, including
+sign-in and setup.
 The initial language follows a supported browser language, falling back to
-Simplified Chinese. A manual choice is remembered locally in that browser;
-switching works even if storage is blocked. Only this preference is persisted.
+Simplified Chinese. Manual language and appearance choices are remembered locally
+in that browser; switching works even if storage is blocked. Only these display
+preferences are persisted.
 Switching updates labels, help, messages, dates and charts in place, preserving
 drafts and expanded query details. Configuration keys, user-entered values and
 raw server diagnostic details keep their original text.
@@ -693,12 +700,32 @@ one-connection cap serializes queries to that endpoint.
 
 ## Development, testing and packaging
 
+The management UI is a React 19/TypeScript application built into four fixed
+same-origin assets under `web/dist/`. Production runs only the Rust binary; it
+does not run Node.js. Build the UI before compiling Rust because the binary
+embeds the generated files:
+
+```sh
+cd web
+npm ci --ignore-scripts
+npm run typecheck
+npm test
+npm run build
+cd ..
+```
+
 ```sh
 cargo run --locked -- --config parins.example.toml --check
 cargo test --locked --all-targets
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
+
+The frontend lockfile is pinned. `npm run build` rejects extra chunks, remote
+resources, and inline scripts so every referenced production asset has an exact
+Rust route. The repository's strict CSP is retained. The adapted beUI motion
+components are free MIT-licensed source with their notice shipped in release
+archives; see `web/src/components/beui/README.md`.
 
 The example uses loopback addresses and an upstream on port 5354. Set
 `upstreams.servers` to your chosen resolver(s) before sending queries. Unknown configuration

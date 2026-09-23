@@ -53,12 +53,13 @@ Keep checks at the boundary that owns them. UI validation helps users, but Rust
 validation remains authoritative. Reuse protocol and configuration helpers rather
 than implementing different rules for file mode, management APIs, and the browser.
 
-Console translations live in `web/locales-*.js`; `web/i18n.js` updates text and
-accessible labels in place. Language changes must preserve controls, drafts and
-session ownership. Persist only the locale preference, never credentials or drafts.
+Console translations and field metadata live in typed modules under `web/src/i18n/`
+and `web/src/model/`. React owns only presentation and one in-memory configuration
+draft; Rust owns parsing, validation, and apply. Language and theme changes must
+preserve controls, drafts, focus and session ownership. Persist only language and
+theme preferences, never credentials, session bindings, PEM, logs or drafts.
 Keep both languages complete; configuration values and raw diagnostics stay intact.
-Read native numeric-control validity before interpreting an empty value as an
-optional override; incomplete edits must remain drafts and identify their field.
+Incomplete numeric and listener edits remain raw drafts until preview/validation.
 
 ## DNS and cache invariants
 
@@ -89,6 +90,11 @@ optional override; incomplete edits must remain drafts and identify their field.
   and negative budgets; document capacity/utilization trade-offs when changing them.
 - Management mutations must retain authentication, Host/Origin checks, and relevant
   revision/epoch checks. Preserve atomic persistence and failure recovery.
+- Management sessions use a Secure, HttpOnly, SameSite=Strict `__Host-` Cookie and
+  an in-memory session binding on protected APIs. No Bearer compatibility. The
+  browser must serialize login/setup/logout across tabs with Web Locks; never
+  persist or broadcast the binding. An unknown configuration result is not proof
+  of failure and must not be silently replayed.
 - Authentication attempt budgets use the socket peer, never forwarding headers.
   Bound and reclaim source state separately from global password-hash concurrency;
   blocking hash work owns its permit until it finishes, even after caller cancellation.
@@ -128,9 +134,12 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   and `cargo test --locked --all-targets`.
 - Build/configuration: `cargo build --locked --release`, then
   `./target/release/parins --config parins.example.toml --check`.
-- Web: `for file in web/*.js; do node --check "$file"; done` and
-  `node --test scripts/test-web.mjs`. For interaction changes, verify the affected
-  flow in a real browser, including errors, session transitions, and small screens.
+- Web: from `web/`, run `npm ci --ignore-scripts`, `npm run typecheck`,
+  `npm test`, and `npm run build` before compiling Rust; the binary embeds
+  the exact checked `web/dist/` output. Run `npm audit --registry
+  https://registry.npmjs.org --audit-level=high`. For interaction changes,
+  verify the affected flow in a real browser, including errors, session
+  transitions, keyboard use, and small screens.
 - Installer/bootstrap: `sh scripts/test-install.sh` and
   `sh scripts/test-bootstrap.sh`. Run `scripts/test-systemd.sh --ephemeral-ci`
   only on a disposable Linux environment, not a developer's host.

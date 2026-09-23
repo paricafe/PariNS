@@ -13,7 +13,7 @@ use axum::{
     Extension, Router,
     body::{Body, to_bytes},
     extract::State,
-    http::{HeaderMap, Request, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use hyper_util::{
@@ -34,9 +34,18 @@ use store::{Store, Stored};
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 
 const BODY_LIMIT: usize = 300 * 1024;
+const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 3600);
+const SESSION_COOKIE: &str = "__Host-parins_session";
+const COOKIE_ATTRIBUTES: &str = "Path=/; HttpOnly; Secure; SameSite=Strict";
+#[derive(Clone)]
 struct Session {
     token: String,
+    binding: String,
     created: Instant,
+}
+enum CookieAction {
+    Issue(String),
+    Clear,
 }
 struct Shared {
     manager: Arc<tokio::sync::Mutex<Manager>>,
@@ -55,7 +64,7 @@ fn host_allowed(address: SocketAddr, host: &str) -> bool {
     }
     // Literal IPs support both directly assigned addresses and public-IP NAT.
     // Arbitrary domain names remain rejected to prevent DNS rebinding. The Host
-    // header is not an identity: setup tokens and bearer auth are still required.
+    // header is not an identity: setup tokens and Cookie auth are still required.
     let target = host.parse::<SocketAddr>().ok().or_else(|| {
         if address.port() != 443 {
             return None;
@@ -72,6 +81,49 @@ fn host_allowed(address: SocketAddr, host: &str) -> bool {
             && !target.ip().is_multicast()
             && (!address.ip().is_loopback() || target.ip().is_loopback())
     })
+}
+
+// Origin and Host must name the same HTTPS origin, including effective port.
+// Keeping localhost distinct from an IP literal also rejects same-site requests
+// sent from another management port or host.
+fn origin_identity(authority: &str) -> Option<(String, u16)> {
+    if authority == "localhost" {
+        return Some(("localhost".to_owned(), 443));
+    }
+    if let Some(port) = authority.strip_prefix("localhost:") {
+        return Some(("localhost".to_owned(), port.parse().ok()?));
+    }
+    if let Ok(address) = authority.parse::<SocketAddr>() {
+        return Some((address.ip().to_string(), address.port()));
+    }
+    if let Some(literal) = authority
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        let ip = literal.parse::<std::net::Ipv6Addr>().ok()?;
+        return Some((ip.to_string(), 443));
+    }
+    let ip = authority.parse::<std::net::Ipv4Addr>().ok()?;
+    Some((ip.to_string(), 443))
+}
+
+fn same_origin(headers: &HeaderMap, host: &str, unsafe_method: bool) -> bool {
+    let origins = headers.get_all(header::ORIGIN);
+    let mut origins = origins.iter();
+    let Some(origin) = origins.next() else {
+        return !unsafe_method;
+    };
+    if origins.next().is_some() {
+        return false;
+    }
+    let Some(source) = origin
+        .to_str()
+        .ok()
+        .and_then(|s| s.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    origin_identity(source).is_some_and(|source| Some(source) == origin_identity(host))
 }
 
 #[derive(Debug)]
@@ -108,39 +160,83 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::result::Result<T,
 }
 
 impl Shared {
-    fn session(&self) -> String {
-        let token = store::secret();
+    fn session(&self, previous: Option<&str>) -> Session {
         let mut sessions = self.sessions.lock().unwrap();
-        sessions.retain(|s| s.created.elapsed() < Duration::from_secs(8 * 3600));
-        if sessions.len() == 16 {
+        sessions.retain(|s| {
+            s.created.elapsed() < SESSION_LIFETIME && Some(s.token.as_str()) != previous
+        });
+        if sessions.len() >= 16 {
             sessions.remove(0);
         }
-        sessions.push(Session {
-            token: token.clone(),
+        let session = Session {
+            token: store::secret(),
+            binding: store::secret(),
             created: Instant::now(),
-        });
-        token
+        };
+        sessions.push(session.clone());
+        session
     }
 
-    fn authorized(&self, headers: &HeaderMap) -> std::result::Result<String, ApiError> {
-        let supplied = headers
-            .get("authorization")
+    fn find_session(&self, headers: &HeaderMap) -> Option<Session> {
+        let supplied = session_cookie(headers)?;
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.retain(|s| s.created.elapsed() < SESSION_LIFETIME);
+        sessions.iter().find(|s| s.token == supplied).cloned()
+    }
+
+    fn authorized(&self, headers: &HeaderMap) -> std::result::Result<(), ApiError> {
+        let session = self
+            .find_session(headers)
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Sign in required"))?;
+        verify_binding(headers, &session)
+    }
+}
+
+fn verify_binding(headers: &HeaderMap, session: &Session) -> std::result::Result<(), ApiError> {
+    if headers.get_all("x-parins-session").iter().count() != 1
+        || headers
+            .get("x-parins-session")
             .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .unwrap_or("");
-        let sessions = self.sessions.lock().unwrap();
-        if sessions
-            .iter()
-            .any(|s| s.token == supplied && s.created.elapsed() < Duration::from_secs(8 * 3600))
-        {
-            Ok(supplied.to_owned())
-        } else {
-            Err(error(
-                StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
-                "Sign in required",
-            ))
+            != Some(session.binding.as_str())
+    {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "SESSION_CHANGED",
+            "Session changed; check your current sign-in",
+        ));
+    }
+    Ok(())
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    let mut found = None;
+    for header in headers.get_all(header::COOKIE).iter() {
+        for part in header.to_str().ok()?.split(';') {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if name == SESSION_COOKIE {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(value);
+            }
         }
+    }
+    found
+}
+
+fn session_view(setup_required: bool, session: Option<&Session>) -> Value {
+    match session {
+        Some(session) => json!({
+            "setup_required":setup_required,
+            "authenticated":true,
+            "session":{
+                "binding":session.binding,
+                "expires_in_seconds":SESSION_LIFETIME.saturating_sub(session.created.elapsed()).as_secs(),
+            }
+        }),
+        None => json!({"setup_required":setup_required,"authenticated":false,"session":null}),
     }
 }
 
@@ -189,10 +285,13 @@ async fn api(
     path: &str,
     headers: &HeaderMap,
     body: &[u8],
+    cookie: &mut Option<CookieAction>,
 ) -> std::result::Result<Value, ApiError> {
     match (method, path) {
         ("GET", "/api/session") => {
-            return Ok(json!({"setup_required":shared.manager.lock().await.saved.is_none()}));
+            let setup_required = shared.manager.lock().await.saved.is_none();
+            let session = shared.find_session(headers);
+            return Ok(session_view(setup_required, session.as_ref()));
         }
         ("GET", "/api/template") => {
             return Ok(json!({"toml":include_str!("../../parins.example.toml")}));
@@ -229,7 +328,9 @@ async fn api(
                     "Invalid credentials",
                 ));
             }
-            return Ok(json!({"token":shared.session()}));
+            let session = shared.session(session_cookie(headers));
+            *cookie = Some(CookieAction::Issue(session.token.clone()));
+            return Ok(session_view(false, Some(&session)));
         }
         ("POST", "/api/setup") => {
             shared.auth.attempt(peer.ip())?;
@@ -244,7 +345,7 @@ async fn api(
                     error(StatusCode::CONFLICT, "BUSY", "Another change is running")
                 })?;
             let control = shared.clone();
-            return tokio::spawn(async move {
+            let session = tokio::spawn(async move {
                 let _permit = permit;
                 let mut manager = control.manager.lock().await;
                 if manager.saved.is_some() {
@@ -288,19 +389,31 @@ async fn api(
                     })
                     .await
                     .map_err(invalid)?;
-                Ok(json!({"token":control.session()}))
+                Ok(control.session(None))
             })
             .await
             .map_err(|_| internal())?;
+            let session = session?;
+            *cookie = Some(CookieAction::Issue(session.token.clone()));
+            return Ok(session_view(false, Some(&session)));
+        }
+        ("POST", "/api/logout") => {
+            if let Some(session) = shared.find_session(headers) {
+                verify_binding(headers, &session)?;
+                shared
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .retain(|s| s.token != session.token);
+            }
+            *cookie = Some(CookieAction::Clear);
+            let setup_required = shared.manager.lock().await.saved.is_none();
+            return Ok(session_view(setup_required, None));
         }
         _ => {}
     }
-    let token = shared.authorized(headers)?;
+    shared.authorized(headers)?;
     match (method, path) {
-        ("POST", "/api/logout") => {
-            shared.sessions.lock().unwrap().retain(|s| s.token != token);
-            Ok(json!({"ok":true}))
-        }
         ("GET", "/api/status") => Ok(shared.manager.lock().await.status()),
         ("GET", "/api/stats") => Ok(shared.history.lock().unwrap().view()),
         ("POST", "/api/query-log/list") => {
@@ -520,20 +633,21 @@ async fn handle_inner(
     request: Request<Body>,
 ) -> std::result::Result<Response, ApiError> {
     let (parts, body) = request.into_parts();
-    let host = parts
-        .headers
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
+    let hosts = parts.headers.get_all(header::HOST);
+    let mut hosts = hosts.iter();
+    let host = hosts.next().and_then(|h| h.to_str().ok()).unwrap_or("");
+    let unsafe_method = parts.method != "GET" && parts.method != "HEAD";
     if !host_allowed(shared.address, host)
-        || parts
-            .headers
-            .get("origin")
-            .is_some_and(|h| h.to_str().ok() != Some(format!("https://{host}").as_str()))
-        || parts
-            .headers
-            .get("sec-fetch-site")
-            .is_some_and(|v| v == "cross-site")
+        || hosts.next().is_some()
+        || !same_origin(&parts.headers, host, unsafe_method)
+        || parts.headers.get_all("sec-fetch-site").iter().count() > 1
+        || parts.headers.get("sec-fetch-site").is_some_and(|site| {
+            if unsafe_method {
+                site != "same-origin"
+            } else {
+                site == "cross-site"
+            }
+        })
     {
         return Err(error(
             StatusCode::FORBIDDEN,
@@ -546,48 +660,19 @@ async fn handle_inner(
         let asset = match path {
             "/" => Some((
                 "text/html; charset=utf-8",
-                include_str!("../../web/index.html"),
+                include_str!("../../web/dist/index.html"),
             )),
-            "/app.css" => Some(("text/css; charset=utf-8", include_str!("../../web/app.css"))),
-            "/app.js" => Some((
+            "/assets/app.css" => Some((
+                "text/css; charset=utf-8",
+                include_str!("../../web/dist/assets/app.css"),
+            )),
+            "/assets/app.js" => Some((
                 "text/javascript; charset=utf-8",
-                include_str!("../../web/app.js"),
+                include_str!("../../web/dist/assets/app.js"),
             )),
-            "/i18n.js" => Some((
+            "/theme-init.js" => Some((
                 "text/javascript; charset=utf-8",
-                include_str!("../../web/i18n.js"),
-            )),
-            "/locales-console.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/locales-console.js"),
-            )),
-            "/locales-settings.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/locales-settings.js"),
-            )),
-            "/locales-views.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/locales-views.js"),
-            )),
-            "/session.js" => Some((
-                "application/javascript; charset=utf-8",
-                include_str!("../../web/session.js"),
-            )),
-            "/settings.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/settings.js"),
-            )),
-            "/charts.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/charts.js"),
-            )),
-            "/cache.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/cache.js"),
-            )),
-            "/query-log.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/query-log.js"),
+                include_str!("../../web/dist/theme-init.js"),
             )),
             _ => None,
         };
@@ -598,7 +683,14 @@ async fn handle_inner(
     if !path.starts_with("/api/") {
         return Err(error(StatusCode::NOT_FOUND, "NOT_FOUND", "Not found"));
     }
-    if parts.method != "GET"
+    if parts.headers.contains_key(header::AUTHORIZATION) {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Sign in required",
+        ));
+    }
+    if unsafe_method
         && !parts
             .headers
             .get("content-type")
@@ -617,7 +709,8 @@ async fn handle_inner(
             "Request body is too large or incomplete",
         )
     })?;
-    Ok(axum::Json(
+    let mut cookie = None;
+    let mut response = axum::Json(
         api(
             shared,
             peer,
@@ -625,10 +718,25 @@ async fn handle_inner(
             path,
             &parts.headers,
             &bytes,
+            &mut cookie,
         )
         .await?,
     )
-    .into_response())
+    .into_response();
+    let cookie = match cookie {
+        Some(CookieAction::Issue(token)) => format!(
+            "{SESSION_COOKIE}={token}; {COOKIE_ATTRIBUTES}; Max-Age={}",
+            SESSION_LIFETIME.as_secs()
+        ),
+        Some(CookieAction::Clear) => {
+            format!("{SESSION_COOKIE}=; {COOKIE_ATTRIBUTES}; Max-Age=0")
+        }
+        None => return Ok(response),
+    };
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    Ok(response)
 }
 
 /// Bind the management listener before starting any saved DNS configuration.
@@ -722,6 +830,38 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn origin_comparison_normalizes_default_https_port_and_ipv6() {
+        use axum::http::{HeaderMap, HeaderValue, header};
+        for (host, origin) in [
+            ("localhost", "https://localhost:443"),
+            ("localhost:443", "https://localhost"),
+            ("127.0.0.1", "https://127.0.0.1:443"),
+            ("[::1]", "https://[::1]:443"),
+            ("[2001:db8::1]:3000", "https://[2001:0db8::1]:3000"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+            assert!(super::same_origin(&headers, host, true), "{host} {origin}");
+        }
+        let mut headers = HeaderMap::new();
+        for origin in [
+            "null",
+            "http://localhost:443",
+            "https://localhost:444",
+            "https://localhost.evil:443",
+            "https://[::2]:443",
+            "https://::1",
+        ] {
+            headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+            assert!(!super::same_origin(&headers, "localhost", true), "{origin}");
+        }
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://::1"));
+        assert!(!super::same_origin(&headers, "[::1]", true));
+        headers.remove(header::ORIGIN);
+        assert!(!super::same_origin(&headers, "localhost", true));
+    }
+
     #[test]
     fn host_allowlist_includes_bound_ip_and_https_default_port() {
         let address = "127.0.0.2:443".parse().unwrap();

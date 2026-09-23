@@ -1,6 +1,4 @@
-"use strict";
-
-PariI18n.register("settings", {
+export const settingsMessages = {
   "page.dns.title": ["DNS 设置", "DNS settings"],
   "page.dns.intro": ["设置监听地址和上游 DNS，选择查询方式。IPv6 地址请加方括号。", "Set listening addresses, upstream DNS servers, and query mode. Enclose IPv6 addresses in brackets."],
   "page.cache.title": ["缓存与 ECS", "Cache & ECS"],
@@ -85,16 +83,16 @@ PariI18n.register("settings", {
   "filter.allow_suffix.label": ["允许域名及子域名", "Allow domains and subdomains"],
   "group.dot.title": ["DNS-over-TLS", "DNS-over-TLS"],
   "group.dot.enable": ["启用 DNS-over-TLS", "Enable DNS-over-TLS"],
-  "group.dot.help": ["使用 TCP，通常为 853 端口。可在上方导入证书自动填入路径，或填写服务器已有 PEM 文件路径。", "Uses TCP, usually on port 853. Import a certificate above to fill the paths, or enter existing PEM file paths on the server."],
+  "group.dot.help": ["使用 TCP，通常为 853 端口。可在下方导入证书填入路径，或填写服务器已有 PEM 文件路径。", "Uses TCP, usually on port 853. Import a certificate below to fill the paths, or enter existing PEM file paths on the server."],
   "group.doh.title": ["DNS-over-HTTPS", "DNS-over-HTTPS"],
   "group.doh.enable": ["启用 DNS-over-HTTPS", "Enable DNS-over-HTTPS"],
-  "group.doh.help": ["使用 TCP，查询路径为 /dns-query。可在上方导入证书自动填入路径，或填写服务器已有 PEM 文件路径。", "Uses TCP at /dns-query. Import a certificate above to fill the paths, or enter existing PEM file paths on the server."],
+  "group.doh.help": ["使用 TCP，查询路径为 /dns-query。可在下方导入证书填入路径，或填写服务器已有 PEM 文件路径。", "Uses TCP at /dns-query. Import a certificate below to fill the paths, or enter existing PEM file paths on the server."],
   "group.doq.title": ["DNS-over-QUIC", "DNS-over-QUIC"],
   "group.doq.enable": ["启用 DNS-over-QUIC", "Enable DNS-over-QUIC"],
-  "group.doq.help": ["使用 UDP，通常为 853 端口。可在上方导入证书自动填入路径，或填写服务器已有 PEM 文件路径。", "Uses UDP, usually on port 853. Import a certificate above to fill the paths, or enter existing PEM file paths on the server."],
+  "group.doq.help": ["使用 UDP，通常为 853 端口。可在下方导入证书填入路径，或填写服务器已有 PEM 文件路径。", "Uses UDP, usually on port 853. Import a certificate below to fill the paths, or enter existing PEM file paths on the server."],
   "group.doh3.title": ["DNS-over-HTTP/3", "DNS-over-HTTP/3"],
   "group.doh3.enable": ["启用 DNS-over-HTTP/3", "Enable DNS-over-HTTP/3"],
-  "group.doh3.help": ["使用 UDP，查询路径为 /dns-query。可在上方导入证书自动填入路径，或填写服务器已有 PEM 文件路径。", "Uses UDP at /dns-query. Import a certificate above to fill the paths, or enter existing PEM file paths on the server."],
+  "group.doh3.help": ["使用 UDP，查询路径为 /dns-query。可在下方导入证书填入路径，或填写服务器已有 PEM 文件路径。", "Uses UDP at /dns-query. Import a certificate below to fill the paths, or enter existing PEM file paths on the server."],
   "listener.listen.label": ["监听地址", "Listening address"],
   "listener.address.label": ["监听地址", "Listening address"],
   "listener.port.label": ["端口", "Port"],
@@ -142,4 +140,4 @@ PariI18n.register("settings", {
   "validation.integer": ["请填写整数。", "Enter a whole number."],
   "validation.range": ["请填写 {min} 到 {max} 之间的整数。", "Enter a whole number from {min} to {max}."],
   "validation.check": ["请检查填写的内容。", "Check the value entered."]
-});
+} as const;

@@ -1,6 +1,21 @@
-"use strict";
-
-PariI18n.register("views", {
+export const viewsMessages = {
+  cacheTabUsage: ["使用情况", "Usage"],
+  cacheTabSettings: ["缓存设置", "Cache settings"],
+  cacheTabRules: ["域名规则", "Domain rules"],
+  cacheTabInspect: ["检查缓存", "Inspect cache"],
+  rules: ["按域名设置缓存", "Per-domain cache settings"],
+  rulesHelp: ["规则优先级：精确域名、较长后缀、指定记录类型，最后按列表顺序。每条规则可覆盖默认设置；总开关控制所有缓存。TTL 取上游有效期与配置上限中较短的时间。", "Rules take priority by exact domain, longer suffix, then record type; ties use list order. Rules override defaults, while the main switch controls all caching. TTL uses the shorter of the upstream lifetime and your limit."],
+  noRules: ["尚未添加域名规则。", "No domain rules yet."],
+  usageTitle: ["缓存用量", "Cache usage"],
+  bytesNote: ["这里的字节数是缓存计费用量，不是进程实际内存占用。", "These bytes are cache-accounting usage, not actual process memory."],
+  clearAllConfirm: ["清空全部缓存？之后的查询将重新向上游获取结果。", "Clear all cache entries? Later queries will fetch fresh answers upstream."],
+  clearAll: ["清空全部缓存", "Clear all cache"],
+  inspectTitle: ["检查域名缓存", "Inspect cached domain"],
+  inspectActiveConfig: ["检查按当前生效配置进行；未保存的草稿不会参与。", "Inspection uses the active configuration, not your unsaved draft."],
+  subnet: ["发往上游的 ECS 子网（可选）", "ECS subnet sent upstream (optional)"],
+  inspect: ["检查", "Inspect"],
+  clearSelectedConfirm: ["清理此域名和所选 ECS 范围的缓存？", "Clear cache for this domain and selected ECS scope?"],
+  clearSelected: ["清理选定缓存", "Clear selected cache"],
   value: ["{value}", "{value}"],
   ttlError: ["TTL 请填写 1–86400 的整数，或留空使用全局设置。", "Enter a whole number from 1 to 86400 for TTL, or leave it blank to use global settings."],
   domainError: ["请填写缓存规则的域名。", "Enter a domain for this cache rule."],
@@ -99,6 +114,7 @@ PariI18n.register("views", {
   time: ["时间", "Time"],
   query: ["查询", "Query"],
   clientTransport: ["客户端 / 协议", "Client / transport"],
+  client: ["客户端", "Client"],
   resultPath: ["结果 / 处理方式", "Result / resolution"],
   duration: ["耗时", "Duration"],
   unreadableQuery: ["查询格式错误", "Malformed query"],
@@ -112,4 +128,4 @@ PariI18n.register("views", {
   count: ["次数", "Count"],
   distribution: ["占比", "Share"],
   share: ["{label}占比 {percent}%", "{label}: {percent}%"]
-});
+} as const;

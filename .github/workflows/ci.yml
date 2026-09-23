@@ -21,6 +21,21 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.16.0'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build and test management console
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm test
+          npm run build
+      - name: Audit frontend dependencies
+        working-directory: web
+        run: npm audit --registry https://registry.npmjs.org --audit-level=high
       - name: Install pinned toolchain
         run: rustup show active-toolchain
       - run: cargo fmt --check
@@ -33,10 +48,6 @@ jobs:
           sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh
           sh scripts/test-install.sh
           sh scripts/test-bootstrap.sh
-      - name: Web management checks
-        run: |
-          for file in web/*.js; do node --check "$file"; done
-          node --test scripts/test-web.mjs
       - name: Linux managed service acceptance
         if: runner.os == 'Linux'
         run: sh scripts/test-systemd.sh --ephemeral-ci

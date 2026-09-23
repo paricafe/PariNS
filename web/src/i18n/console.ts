@@ -1,10 +1,9 @@
-"use strict";
-
-PariI18n.register("api", {
+export const apiMessages = {
   NETWORK: ["连接失败，请检查网络和 PariNS 服务后重试。", "Connection failed. Check your network and the PariNS service, then try again."],
   REVISION: ["配置已更新。请先导出草稿，再加载最新配置并合并修改。", "The configuration has changed. Export your draft, reload the latest configuration, then merge your changes."],
   LOGIN_FAILED: ["用户名或密码有误，请重新输入。", "Incorrect username or password. Please try again."],
   UNAUTHORIZED: ["请重新登录。", "Please sign in again."],
+  SESSION_CHANGED: ["会话已变化，请重新确认当前登录状态。", "Your session changed. Check your sign-in status again."],
   LOGIN_LIMIT: ["登录尝试过于频繁，请一分钟后重试。", "Too many sign-in attempts. Try again in one minute."],
   AUTH_BUSY: ["认证服务繁忙，请稍后重试。", "Authentication is busy. Please try again shortly."],
   SETUP_REQUIRED: ["请先完成首次设置。", "Complete first-time setup to continue."],
@@ -21,10 +20,11 @@ PariI18n.register("api", {
   ORIGIN: ["请从管理台的 HTTPS 地址访问。", "Open the console using its HTTPS address."],
   JSON_REQUIRED: ["请求格式有误，请刷新页面后重试。", "Invalid request format. Refresh the page and try again."],
   BODY_LIMIT: ["提交内容过大或不完整，请缩小内容后重试。", "The submitted content is too large or incomplete. Reduce it and try again."],
+  BAD_RESPONSE: ["服务器响应不完整，操作结果可能尚未确认。请先核对状态。", "The server response was incomplete, so the result may be unknown. Check the current state first."],
   HTTP: ["请求失败（HTTP {status}）。{detail}", "Request failed (HTTP {status}). {detail}"],
-});
+} as const;
 
-PariI18n.register("ui", {
+export const uiMessages = {
   logSearchPlaceholder: ["cache.test 或 192.0.2.1", "cache.test or 192.0.2.1"],
   "title": ["PariNS · 管理台","PariNS · Console"],
   "skip": ["跳到主要内容","Skip to main content"],
@@ -80,7 +80,7 @@ PariI18n.register("ui", {
   "username": ["用户名","Username"],
   "password": ["密码","Password"],
   "login": ["登录","Sign in"],
-  "sessionHelp": ["刷新或关闭页面后，需要重新登录。","Sign in again after refreshing or closing this page."],
+  "sessionHelp": ["有效会话会在刷新页面后保持登录；未保存的草稿不会保留。","Your session stays signed in after a refresh while valid; unsaved drafts do not persist."],
   "overviewEyebrow": ["运行概览","DNS AT A GLANCE"],
   "refresh": ["刷新状态","Refresh status"],
   "loading": ["读取中","Loading"],
@@ -187,9 +187,17 @@ PariI18n.register("ui", {
   "upstreamPlaceholder": ["例如 udp://192.0.2.53:53","For example, udp://192.0.2.53:53"],
   "scopePlaceholder": ["no_ecs、privacy_v4、privacy_v6 或 CIDR","no_ecs, privacy_v4, privacy_v6 or CIDR"],
   "language": ["界面语言","Interface language"],
-});
+  "theme": ["外观", "Appearance"],
+  "themeAuto": ["跟随系统", "System"],
+  "themeLight": ["浅色", "Light"],
+  "themeDark": ["深色", "Dark"],
+  "showNavigation": ["打开导航", "Open navigation"],
+  "closeNavigation": ["关闭导航", "Close navigation"],
+  "closeDialog": ["关闭弹窗", "Close dialog"],
+  "closeDetails": ["关闭详情", "Close details"],
+} as const;
 
-PariI18n.register("app", {
+export const appMessages = {
   "connecting": ["连接中","Connecting"],
   "setup": ["首次设置","Setup"],
   "login": ["登录","Sign in"],
@@ -209,6 +217,26 @@ PariI18n.register("app", {
   "setupSaved": ["设置已保存，请在仪表盘确认 DNS 已启动，然后配置设备连接。","Setup saved. Check the dashboard to confirm DNS is running, then connect your devices."],
   "advancedIntro": ["直接编辑完整 TOML 配置，保存前可检查和预览修改。","Edit the full TOML configuration. Check and preview your changes before saving."],
   "disconnected": ["连接中断","Disconnected"],
+  "cookieUnavailable": ["浏览器未接受安全会话 Cookie。请检查浏览器的 Cookie 设置，并使用管理台的 HTTPS 地址。", "Your browser did not accept the secure session cookie. Check cookie settings and use the console HTTPS address."],
+  "webLocksUnavailable": ["此浏览器无法安全协调多个标签页的登录操作。请更新浏览器后重试。", "This browser cannot coordinate sign-in across tabs safely. Update your browser and try again."],
+  "logoutUnknown": ["退出尚未确认。请重新检查会话状态，必要时再次退出。", "Sign-out is not confirmed. Check your session and sign out again if needed."],
+  "saveUnknown": ["保存结果尚未确认，请核对服务端配置后再操作。", "Save result is not confirmed. Check the server configuration before another change."],
+  "savedRefreshFailed": ["配置已保存，但无法重新读取。请刷新页面确认当前配置。", "Configuration was saved, but could not be reloaded. Refresh the page to check the current configuration."],
+  "certificateImportUnknown": ["证书导入结果尚未确认。私钥输入已清空；如需重试，请重新粘贴。同一证书再次导入会复用已保存的文件。", "The certificate import result is unknown. The private key input was cleared. Paste it again to retry; importing the same certificate reuses an existing saved file."],
+  "returnToEdit": ["返回表单修改", "Return to form"],
+  "returnToToml": ["返回高级编辑器修改", "Return to advanced editor"],
+  "rollbackNeedsCheck": ["恢复结果需要核对；请先查看服务器配置，勿重复恢复。", "Rollback needs verification. Check the server configuration before trying again."],
+  "rollbackRefreshFailed": ["恢复已完成，但暂时无法读取当前配置。请核对后继续。", "Rollback completed, but the current configuration could not be read. Check it before continuing."],
+  "checkRollback": ["核对恢复结果", "Check rollback result"],
+  "rollbackComplete": ["已核对服务器上的恢复结果。", "The server's rollback result has been checked."],
+  "diffTitle": ["修改预览", "Change preview"],
+  "diffHelp": ["− 表示旧配置中的行，+ 表示准备保存的行。预览不会保存配置。", "− marks lines from the current configuration; + marks lines ready to save. Preview does not save changes."],
+  "discardPem": ["关闭后会清空已输入的证书和私钥。确定放弃吗？", "Closing clears the entered certificate and private key. Discard them?"],
+  "importFillsDraft": ["导入后只填入当前协议的证书路径；请再保存并应用配置。", "Import fills the certificate paths for this protocol only. Save and apply the configuration afterward."],
+  "importAndFill": ["导入并填入路径", "Import and fill paths"],
+  "checkSave": ["核对保存结果", "Check save result"],
+  "saveStillUnknown": ["服务器尚未显示这次修改，结果仍不能确定。请稍后核对，或明确放弃草稿并重新加载。", "The server does not show this change yet; the result is still uncertain. Check again later or explicitly discard the draft and reload."],
+  "sessionChanged": ["会话已变化，正在重新确认登录状态。", "Your session changed. Checking sign-in status again."],
   "statusUnavailable": ["暂时无法获取状态","Status is temporarily unavailable"],
   "connectionHelp": ["请检查网络连接和 PariNS 服务。","Check your connection and the PariNS service."],
   "statsUnavailable": ["连接恢复后，统计会自动更新。","Statistics will update when the connection is restored."],
@@ -268,6 +296,7 @@ PariI18n.register("app", {
   "clearLogsHelp": ["全部现有记录将被永久删除，之后的查询仍会记录。停止记录请关闭「查询日志」。","All existing records will be permanently deleted. New queries will still be logged. Turn off Query log to stop recording."],
   "clearLogs": ["清空日志","Clear log"],
   "logsCleared": ["查询日志已清空。","Query log cleared."],
+  "clearLogsUnknown": ["清空请求结果尚未确认，请刷新日志核对。", "The clear request was not confirmed. Refresh the log to check."],
   "enableListener": ["请先在下方启用对应的加密 DNS，并填写地址。","Enable the encrypted DNS service below and enter its listen address first."],
   "certificateImported": ["证书已导入，请保存并应用。连接设备时，请确认其信任证书且域名和有效期正确。","Certificate imported. Save and apply, then check that clients trust the certificate and that its domain and dates are valid."],
   "context": ["管理台 / {page}","Console / {page}"],
@@ -280,4 +309,4 @@ PariI18n.register("app", {
   "logSummary": ["本页 {count} 条 · 共保留 {total} 条 · 更新于 {time}","{count} on this page · {total} stored · Updated {time}"],
   "statusFailed": ["状态更新失败：{error}","Status update failed: {error}"],
   "value": ["{value}","{value}"],
-});
+} as const;

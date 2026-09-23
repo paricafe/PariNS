@@ -1,130 +1,14 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title data-i18n="ui.title">PariNS · 管理台</title>
-  <link rel="stylesheet" href="/app.css">
-  <script src="/i18n.js" defer></script>
-  <script src="/locales-console.js" defer></script>
-  <script src="/locales-settings.js" defer></script>
-  <script src="/locales-views.js" defer></script>
-  <script src="/settings.js" defer></script>
-  <script src="/charts.js" defer></script>
-  <script src="/session.js" defer></script>
-  <script src="/cache.js" defer></script>
-  <script src="/query-log.js" defer></script>
-  <script src="/app.js" defer></script>
-</head>
-<body>
-  <a class="skip-link" href="#main"><span data-i18n="ui.skip">跳到主要内容</span></a>
-  <div class="shell">
-    <aside class="sidebar" aria-label="管理导航" data-i18n-aria-label="ui.navLabel">
-      <a class="brand" href="/" aria-label="PariNS 管理台首页" data-i18n-aria-label="ui.homeLabel"><span class="brand-mark" aria-hidden="true">P</span><span>PariNS<small><span data-i18n="ui.brand">DNS 管理</span></small></span></a>
-      <p class="sidebar-caption"><span data-i18n="ui.tagline">DNS 服务管理</span></p>
-      <nav id="navigation" hidden aria-label="页面" data-i18n-aria-label="ui.pagesLabel">
-        <button type="button" id="nav-overview" class="nav-button active" aria-current="page"><span data-i18n="ui.overview">仪表盘</span> <span aria-hidden="true">◷</span></button>
-        <button type="button" id="nav-dns" class="nav-button"><span data-i18n="ui.dns">DNS 设置</span> <span aria-hidden="true">↗</span></button>
-        <button type="button" id="nav-logs" class="nav-button"><span data-i18n="ui.logs">查询日志</span> <span aria-hidden="true">≡</span></button>
-        <button type="button" id="nav-cache" class="nav-button"><span data-i18n="ui.cache">缓存与 ECS</span> <span aria-hidden="true">▤</span></button>
-        <button type="button" id="nav-filters" class="nav-button"><span data-i18n="ui.filters">过滤规则</span> <span aria-hidden="true">⊘</span></button>
-        <button type="button" id="nav-security" class="nav-button"><span data-i18n="ui.security">安全与加密</span> <span aria-hidden="true">◇</span></button>
-        <button type="button" id="nav-runtime" class="nav-button"><span data-i18n="ui.runtime">运行设置</span> <span aria-hidden="true">≡</span></button>
-        <button type="button" id="nav-advanced" class="nav-button"><span data-i18n="ui.advanced">高级配置</span> <span aria-hidden="true">{ }</span></button>
-      </nav>
-      <div class="sidebar-footer"><span class="small-dot" aria-hidden="true"></span> <span data-i18n="ui.service">自建 DNS 服务</span><br><span><span data-i18n="ui.managed">由 PariNS 提供服务</span></span></div>
-    </aside>
-    <main id="main" tabindex="-1">
-      <header class="topbar"><span id="page-context"><span data-i18n="ui.connectingContext">管理台 / 连接中</span></span><label class="language-control"><span class="sr-only" data-i18n="ui.language">界面语言</span><select id="language-select"><option value="zh-CN" lang="zh-CN">简体中文</option><option value="en" lang="en">English</option></select></label><button id="logout" class="button quiet" type="button" hidden><span data-i18n="ui.logout">退出登录</span></button></header>
-      <div class="content">
-        <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
-        <section id="loading-panel" aria-busy="true"><p class="eyebrow"><span data-i18n="ui.management">管理台</span></p><h1><span data-i18n="ui.connecting">正在连接 PariNS</span></h1><p class="muted"><span data-i18n="ui.connectingHelp">连接后即可管理 DNS。</span></p><button id="retry-start" type="button" class="button secondary" hidden><span data-i18n="ui.reconnect">重新连接</span></button></section>
-
-        <section id="setup-panel" hidden>
-          <p class="eyebrow"><span data-i18n="ui.setupEyebrow">首次使用</span></p><h1><span data-i18n="ui.setupTitle">设置你的 DNS</span></h1><p class="intro"><span data-i18n="ui.setupIntro">创建管理员账户，设置 DNS 地址，即可开始使用。</span></p>
-          <ol class="steps" aria-label="设置进度" data-i18n-aria-label="ui.setupProgress"><li id="step-label-0" aria-current="step"><span>01</span> <span data-i18n="ui.admin">管理员</span></li><li id="step-label-1"><span>02</span> <span data-i18n="ui.network">DNS 网络</span></li><li id="step-label-2"><span>03</span> <span data-i18n="ui.review">确认配置</span></li></ol>
-          <form id="setup-form" class="panel setup-form">
-            <div class="setup-step" id="setup-step-0">
-              <h2><span data-i18n="ui.account">创建管理员账户</span></h2><p class="muted"><span data-i18n="ui.tokenIntro">从安装提示的 setup-token 文件中复制初始化令牌。首次访问使用自签 HTTPS 证书，请先核对证书；公网访问请限制管理台的访问来源。</span></p>
-              <label for="setup-token"><span data-i18n="ui.token">初始化令牌</span></label><input id="setup-token" name="setup-token" type="password" autocomplete="off" required spellcheck="false" aria-describedby="token-help"><small id="token-help"><span data-i18n="ui.tokenHelp">令牌仅用于首次设置，请妥善保管。</span></small>
-              <label for="setup-username"><span data-i18n="ui.adminUsername">管理员用户名</span></label><input id="setup-username" name="username" autocomplete="username" maxlength="64" required>
-              <div class="field-pair"><div><label for="setup-password"><span data-i18n="ui.adminPassword">管理员密码</span></label><input id="setup-password" name="new-password" type="password" autocomplete="new-password" minlength="12" required aria-describedby="password-help"></div><div><label for="setup-confirm"><span data-i18n="ui.confirmPassword">确认密码</span></label><input id="setup-confirm" name="confirm-password" type="password" autocomplete="new-password" minlength="12" required></div></div><small id="password-help"><span data-i18n="ui.passwordHelp">至少 12 个字符，建议使用专用的长密码。</span></small>
-            </div>
-            <div class="setup-step" id="setup-step-1" hidden>
-              <h2><span data-i18n="ui.networkTitle">设置 DNS 地址</span></h2><p class="muted"><span data-i18n="ui.networkIntro">先设置普通 UDP/TCP DNS。默认仅供本机使用，加密 DNS 和客户端限流可在管理台继续设置。</span></p>
-              <label for="setup-listen"><span data-i18n="ui.listen">DNS 监听地址</span></label><input id="setup-listen" name="listen" value="127.0.0.1:5353" required spellcheck="false" aria-describedby="listen-help"><small id="listen-help"><span data-i18n="ui.listenHelp">格式为 IP:端口，例如 127.0.0.1:5353 或 [::1]:5353。供其他设备使用时，请同时设置防火墙和客户端限流。</span></small>
-              <label for="setup-upstream" data-i18n="settings.upstreams.servers.label">上游 DNS（每行一个）</label><textarea id="setup-upstream" name="upstreams" rows="3" placeholder="例如 udp://192.0.2.53:53" data-i18n-placeholder="ui.upstreamPlaceholder" required spellcheck="false" aria-describedby="upstream-help"></textarea><small id="upstream-help" data-i18n="settings.upstreams.servers.help"></small>
-              <label for="setup-upstream-mode" data-i18n="settings.upstreams.mode.label">查询方式</label><select id="setup-upstream-mode"><option value="weighted" data-i18n="settings.upstreams.mode.weighted">加权负载均衡 · 按权重轮流查询</option><option value="parallel" data-i18n="settings.upstreams.mode.parallel">并发请求 · 返回首个可用结果</option></select>
-              <label class="toggle-label" for="setup-prefer-h3"><input id="setup-prefer-h3" type="checkbox" aria-describedby="setup-h3-help"><span data-i18n="settings.upstreams.prefer_h3.label">HTTPS 上游优先使用 HTTP/3</span></label><small id="setup-h3-help" data-i18n="settings.upstreams.prefer_h3.help"></small>
-              <label for="setup-bootstrap" data-i18n="settings.upstreams.bootstrap.label">引导 DNS（每行一个 IP:端口）</label><textarea id="setup-bootstrap" rows="2" spellcheck="false" aria-describedby="setup-bootstrap-help"></textarea><small id="setup-bootstrap-help" data-i18n="settings.upstreams.bootstrap.help"></small>
-            </div>
-            <div class="setup-step" id="setup-step-2" hidden>
-              <h2><span data-i18n="ui.reviewTitle">确认并启动</span></h2><p class="muted"><span data-i18n="ui.reviewIntro">下方是即将保存的配置，可按需调整高级选项。启动前会检查配置、证书文件和端口。</span></p>
-              <label for="setup-toml"><span data-i18n="ui.setupConfig">完整配置（可编辑）</span></label><textarea id="setup-toml" class="code-editor" rows="17" spellcheck="false" aria-describedby="setup-review-help"></textarea><small id="setup-review-help"><span data-i18n="ui.reviewHelp">返回修改地址后，此处配置会重新生成。启动后，可将设备的 DNS 指向本服务。</span></small>
-            </div>
-            <div class="form-actions"><button id="setup-back" type="button" class="button secondary" hidden><span data-i18n="ui.back">上一步</span></button><span class="spacer"></span><button id="setup-next" type="button" class="button primary"><span data-i18n="ui.continue">继续</span></button><button id="setup-submit" type="submit" class="button primary" hidden><span data-i18n="ui.start">保存并启动 DNS</span></button></div>
-          </form>
-        </section>
-
-        <section id="login-panel" hidden>
-          <p class="eyebrow"><span data-i18n="ui.welcome">欢迎回来</span></p><h1><span data-i18n="ui.loginTitle">登录管理台</span></h1><p class="intro"><span data-i18n="ui.loginIntro">查看解析情况，管理你的 DNS。</span></p>
-          <form id="login-form" class="panel login-form"><h2><span data-i18n="ui.loginAdmin">管理员登录</span></h2><label for="login-username"><span data-i18n="ui.username">用户名</span></label><input id="login-username" name="username" autocomplete="username" required><label for="login-password"><span data-i18n="ui.password">密码</span></label><input id="login-password" name="password" type="password" autocomplete="current-password" required><button type="submit" class="button primary full-width"><span data-i18n="ui.login">登录</span></button><p class="muted small"><span data-i18n="ui.sessionHelp">刷新或关闭页面后，需要重新登录。</span></p></form>
-        </section>
-
-        <section id="overview-panel" hidden>
-          <div class="heading-row"><div><p class="eyebrow"><span data-i18n="ui.overviewEyebrow">运行概览</span></p><h1><span data-i18n="ui.overview">仪表盘</span></h1></div><button id="refresh-status" class="button secondary" type="button"><span data-i18n="ui.refresh">刷新状态</span></button></div>
-          <div class="service-strip"><div><span id="service-badge" class="badge"><span data-i18n="ui.loading">读取中</span></span><h2 id="service-title"><span data-i18n="ui.loadingStatus">正在获取 DNS 状态</span></h2><p id="service-detail" class="muted"><span data-i18n="ui.statusInterval">每 5 秒自动更新。</span></p></div><div class="revision"><span data-i18n="ui.revision">配置版本</span><strong id="status-revision">—</strong></div></div>
-          <div id="service-error" class="notice error" role="status" hidden></div>
-          <dl class="metrics"><div><dt><span data-i18n="ui.requests">累计请求</span></dt><dd id="metric-requests">—</dd><small><span data-i18n="ui.currentInstance">本次启动以来</span></small></div><div><dt><span data-i18n="ui.blocked">已拦截</span></dt><dd id="metric-blocked">—</dd><small><span data-i18n="ui.blockedHelp">被过滤规则拦截的请求或响应</span></small></div><div><dt><span data-i18n="ui.hitRate">缓存命中率</span></dt><dd id="metric-cache">—</dd><small><span data-i18n="ui.hitRateHelp">缓存查找中直接命中的比例</span></small></div><div><dt><span data-i18n="ui.latency">平均耗时</span></dt><dd id="metric-latency">—</dd><small><span data-i18n="ui.latencyHelp">每次请求的平均处理时间 · 毫秒</span></small></div></dl>
-          <section class="panel" aria-labelledby="trend-title"><div class="heading-row"><div><h2 id="trend-title"><span data-i18n="ui.activity">查询趋势</span></h2><p class="muted small"><span data-i18n="ui.activityHelp">每分钟更新，显示每秒平均次数；保留最近 24 小时，重启后清空。</span></p></div><div class="range-buttons" role="group" aria-label="趋势时间范围" data-i18n-aria-label="ui.trendRange"><button type="button" class="button quiet active" data-hours="1" aria-pressed="true"><span data-i18n="ui.hour1">1 小时</span></button><button type="button" class="button quiet" data-hours="6" aria-pressed="false"><span data-i18n="ui.hour6">6 小时</span></button><button type="button" class="button quiet" data-hours="24" aria-pressed="false"><span data-i18n="ui.hour24">24 小时</span></button></div></div><div class="chart-legend"><span class="request-key"><span data-i18n="ui.legendRequests">实线 · 请求</span></span><span class="cache-key"><span data-i18n="ui.legendCache">虚线 · 缓存命中</span></span><span class="blocked-key"><span data-i18n="ui.legendBlocked">点线 · 拦截</span></span></div><div id="activity-chart" class="activity-chart"><p class="chart-empty"><span data-i18n="ui.loadingSamples">正在读取统计…</span></p></div></section>
-          <div class="dashboard-columns"><section class="panel"><h2><span data-i18n="ui.responses">响应结果</span></h2><p class="muted small"><span data-i18n="ui.responsesHelp">本次启动以来的响应分类</span></p><div id="response-chart"></div></section><section class="panel"><h2><span data-i18n="ui.latencyDistribution">请求耗时分布</span></h2><p class="muted small"><span data-i18n="ui.latencyDistributionHelp">按处理时间分组，包含已取消的请求。</span></p><div id="latency-chart"></div></section></div>
-          <section class="panel"><div class="heading-row"><h2><span data-i18n="ui.maintenance">服务信息</span></h2><button id="open-config" type="button" class="button secondary"><span data-i18n="ui.openDns">DNS 设置 →</span></button></div><div class="detail-row"><span><span data-i18n="ui.dnsAddress">DNS 地址</span></span><span id="status-listen">—</span></div><div class="detail-row"><span><span data-i18n="ui.uptime">运行时长</span></span><span id="status-uptime">—</span></div><div class="detail-row"><span><span data-i18n="ui.inflight">正在处理的请求</span></span><span id="metric-inflight">—</span></div><div class="detail-row"><span><span data-i18n="ui.failures">上游请求失败次数</span></span><span id="metric-failures">—</span></div><div class="detail-row"><span><span data-i18n="ui.statsScope">统计说明</span></span><span><span data-i18n="ui.statsHelp">这里汇总本次启动以来的请求。查看具体域名和客户端，请启用「查询日志」。</span></span></div><div class="detail-row"><span><span data-i18n="ui.updated">更新时间</span></span><span id="last-updated"><span data-i18n="ui.notUpdated">等待更新</span></span></div></section>
-        </section>
-
-        <section id="logs-panel" hidden>
-          <div class="heading-row"><div><p class="eyebrow"><span data-i18n="ui.logsEyebrow">请求记录</span></p><h1><span data-i18n="ui.logs">查询日志</span></h1></div><div class="button-group"><button id="logs-settings" type="button" class="button quiet"><span data-i18n="ui.logSettings">日志设置</span></button><button id="logs-refresh" type="button" class="button secondary"><span data-i18n="ui.refreshLatest">刷新</span></button></div></div>
-          <p class="intro"><span data-i18n="ui.logIntro">查看每次查询的域名、客户端和结果。记录保存在内存中，重启后清空；其中包含访问域名和客户端 IP，请限制管理台访问。</span></p>
-          <section class="panel">
-            <form id="logs-filter" class="settings-fields"><div class="field"><label for="logs-search"><span data-i18n="ui.logSearch">搜索域名、客户端或上游</span></label><input id="logs-search" type="search" maxlength="253" placeholder="cache.test 或 192.0.2.1" data-i18n-placeholder="ui.logSearchPlaceholder" autocomplete="off"></div><div class="field"><label for="logs-status"><span data-i18n="ui.result">结果</span></label><select id="logs-status"><option value="" data-i18n="ui.allResults">全部结果</option><option value="success" data-i18n="ui.success">成功</option><option value="blocked" data-i18n="ui.blocked">已拦截</option><option value="error" data-i18n="ui.error">错误</option><option value="dropped" data-i18n="ui.dropped">已丢弃</option></select></div><div class="field"><button type="submit" class="button secondary"><span data-i18n="ui.filter">筛选</span></button></div></form>
-            <h2 class="sr-only"><span data-i18n="ui.records">查询记录</span></h2><p id="logs-summary" class="muted small" role="status"><span data-i18n="ui.logsUnread">等待加载日志</span></p><div id="logs-results"></div>
-            <div class="form-actions"><button id="logs-clear" type="button" class="button quiet" disabled><span data-i18n="ui.clearLogs">清空日志…</span></button><span class="spacer"></span><button id="logs-next" type="button" class="button secondary" disabled><span data-i18n="ui.earlier">更早的记录 →</span></button></div>
-          </section>
-        </section>
-
-        <section id="config-panel" hidden>
-          <div class="heading-row"><div><p class="eyebrow"><span data-i18n="ui.configuration">设置</span></p><h1 id="config-title"><span data-i18n="ui.dns">DNS 设置</span></h1></div><span id="edit-state" class="badge"><span data-i18n="ui.unchanged">已保存</span></span></div>
-          <p id="config-intro" class="intro"></p>
-          <div class="config-tools"><span><span data-i18n="ui.draft">配置草稿</span> <span id="config-revision" class="muted"></span></span><div class="button-group"><button id="reload-config" type="button" class="button quiet"><span data-i18n="ui.reload">重新加载</span></button><button id="export-config" type="button" class="button quiet"><span data-i18n="ui.export">导出草稿</span></button></div></div>
-          <p id="form-help" class="muted small"><span data-i18n="ui.formHelp">各页修改一起保存。使用表单编辑后，TOML 会重新排版并移除注释。</span></p>
-          <div id="cache-tools" hidden>
-            <section class="panel"><h2><span data-i18n="ui.cacheStatus">缓存用量</span></h2><p class="muted small"><span data-i18n="ui.cacheStatusHelp">每 5 秒更新。命中按缓存查找计数，容量包含等待清理的过期记录。</span></p><div id="cache-stats"></div><button id="cache-clear-all" class="button secondary" type="button"><span data-i18n="ui.clearCache">清空全部缓存…</span></button></section>
-            <section class="panel"><h2><span data-i18n="ui.inspectCache">检查域名缓存</span></h2><p class="muted small"><span data-i18n="ui.inspectHelp">根据当前生效的设置查看缓存。检查仅在本地完成。ECS 填写发往上游的子网，留空表示未携带 ECS，/0 表示隐藏子网；其他选项请与查询一致。</span></p>
-              <form id="cache-inspect-form"><div class="settings-fields">
-                <div class="field"><label for="cache-name"><span data-i18n="ui.domain">域名</span></label><input id="cache-name" required maxlength="254" placeholder="example.com" spellcheck="false"></div>
-                <div class="field"><label for="cache-qtype"><span data-i18n="ui.recordType">记录类型</span></label><input id="cache-qtype" value="A" required maxlength="16"></div>
-                <div class="field"><label for="cache-subnet"><span data-i18n="ui.ecsSubnet">发往上游的 ECS 子网（可选）</span></label><input id="cache-subnet" placeholder="192.0.2.0/24" spellcheck="false"></div>
-                <div class="field"><label class="toggle-label"><input id="cache-edns" type="checkbox"><span data-i18n="ui.edns">包含 EDNS</span></label><label class="toggle-label"><input id="cache-do" type="checkbox"><span data-i18n="ui.dnssec">DO · 请求 DNSSEC 数据</span></label><label class="toggle-label"><input id="cache-cd" type="checkbox"><span data-i18n="ui.checkingDisabled">CD · 关闭校验</span></label><label class="toggle-label"><input id="cache-rd" type="checkbox" checked><span data-i18n="ui.recursionDesired">RD · 请求递归解析</span></label></div>
-              </div><button class="button secondary" type="submit"><span data-i18n="ui.inspect">检查缓存</span></button></form>
-              <div id="cache-inspection" role="status" aria-live="polite"><p class="muted"><span data-i18n="ui.inspectEmpty">输入域名，查看已有缓存和匹配规则。</span></p></div>
-              <div class="field"><label for="cache-clear-scope"><span data-i18n="ui.clearScope">清理范围（留空清理此域名的所有子网）</span></label><input id="cache-clear-scope" placeholder="no_ecs、privacy_v4、privacy_v6 或 CIDR" data-i18n-placeholder="ui.scopePlaceholder" spellcheck="false"></div><button id="cache-clear-name" class="button quiet" type="button" disabled><span data-i18n="ui.clearSelected">清理此域名的缓存…</span></button>
-            </section>
-          </div>
-          <section id="certificate-import-panel" class="panel" hidden>
-            <h2><span data-i18n="ui.pasteCertificate">粘贴证书与私钥</span></h2><p class="muted small"><span data-i18n="ui.certificateHelp">使用 PEM 格式，每项最多 64 KiB。导入会检查证书与私钥是否配对，保存并应用后生效。请另行确认有效期、域名和客户端信任。最多保存 32 份，相同证书会复用。</span></p>
-            <form id="certificate-import-form"><div class="field-pair"><div><label for="certificate-pem"><span data-i18n="ui.certificate">证书 / 证书链</span></label><textarea id="certificate-pem" rows="7" required maxlength="65536" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----"></textarea></div><div><label for="private-key-pem"><span data-i18n="ui.privateKey">私钥</span></label><textarea id="private-key-pem" class="private-key-input" rows="7" required maxlength="65536" spellcheck="false" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></div></div><label for="certificate-target"><span data-i18n="ui.certificateTarget">用于哪种加密 DNS</span></label><select id="certificate-target"><option value="dot">DNS-over-TLS</option><option value="doh">DNS-over-HTTPS</option><option value="doq">DNS-over-QUIC</option><option value="doh3">DNS-over-HTTP/3</option></select><p class="muted small"><span data-i18n="ui.privateKeyHelp">先在下方启用对应服务并填写地址。私钥仅保存于服务器私有文件；导入成功或退出登录后，输入框会自动清空。</span></p><button type="submit" class="button secondary"><span data-i18n="ui.importCertificate">导入证书</span></button></form>
-          </section>
-          <div id="settings-forms"></div>
-          <section id="cache-rules-panel" class="panel" hidden><h2><span data-i18n="ui.domainRules">按域名设置缓存</span></h2><p class="muted small"><span data-i18n="ui.rulesHelp">规则优先级：精确域名、较长后缀、指定记录类型，最后按列表顺序。每条规则可覆盖默认设置；总开关控制所有缓存。TTL 取上游有效期与配置上限中较短的时间。</span></p><div id="cache-rules"></div></section>
-          <p id="management-tls-help" class="notice" hidden><span data-i18n="ui.managementTls">管理台自身的 HTTPS 地址和证书，请通过启动参数 --web-listen、--web-cert、--web-key 设置，重启管理服务后生效。</span></p>
-          <div id="advanced-editor" class="panel editor-panel" hidden><div class="editor-toolbar"><span><span data-i18n="ui.tomlTitle">parins.toml · 高级编辑</span></span></div><label for="config-toml" class="sr-only"><span data-i18n="ui.tomlLabel">DNS 完整 TOML 配置</span></label><textarea id="config-toml" class="code-editor" rows="24" spellcheck="false" aria-describedby="editor-help"></textarea><p id="editor-help" class="muted small"><span data-i18n="ui.tomlHelp">可直接编辑完整配置，也可切回表单继续修改。文件相对路径以服务状态目录为起点。</span></p></div>
-          <div class="save-bar"><p class="muted small"><span data-i18n="ui.saveHelp">保存会一起应用各页修改。缓存设置会清空旧缓存，其他设置可能重启 DNS；确认时会提示具体影响。</span></p><div class="form-actions"><button id="rollback-config" type="button" class="button secondary" disabled><span data-i18n="ui.rollback">恢复上一份配置</span></button><span class="spacer"></span><button id="validate-config" type="button" class="button secondary"><span data-i18n="ui.validate">检查配置</span></button><button id="preview-config" type="button" class="button secondary"><span data-i18n="ui.preview">查看修改</span></button><button id="save-config" type="button" class="button primary" disabled><span data-i18n="ui.save">保存并应用</span></button></div></div>
-          <section id="diff-panel" class="panel" hidden aria-labelledby="diff-title"><h2 id="diff-title" tabindex="-1"><span data-i18n="ui.diffTitle">修改预览</span></h2><p class="muted small"><span data-i18n="ui.diffHelp">− 为原内容，+ 为新内容。</span></p><pre id="config-diff" class="diff-output"></pre></section>
-        </section>
-      </div>
-    </main>
-  </div>
-  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><h2 id="confirm-title"><span data-i18n="ui.confirmTitle">确认操作</span></h2><p id="confirm-description"></p><div class="form-actions"><button class="button secondary" value="cancel" autofocus><span data-i18n="ui.cancel">取消</span></button><button id="confirm-action" class="button primary" value="confirm"><span data-i18n="ui.confirm">确认</span></button></div></form></dialog>
-  <noscript><p>请启用 JavaScript 使用管理台。 / Enable JavaScript to use the console.</p></noscript>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>PariNS</title>
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

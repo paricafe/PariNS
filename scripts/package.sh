@@ -28,6 +28,20 @@ if [ -n "$version" ] || [ -n "$target" ]; then
         *) fail 'release packages must be built and tested on their native Linux architecture' ;;
     esac
     command -v readelf >/dev/null 2>&1 || fail 'readelf is required for static ELF verification'
+    release_mode=true
+else
+    release_mode=false
+fi
+# A standalone package always embeds assets built from this checkout. Do not
+# infer freshness from an existing, ignored web/dist directory.
+(
+    cd web
+    npm ci --ignore-scripts
+    npm run typecheck
+    npm test
+    npm run build
+)
+if [ "$release_mode" = true ]; then
     cargo build --locked --release --target "$target"
     binary="target/$target/release/parins"
     [ "$(od -An -tx1 -N6 "$binary" | tr -d ' \n')" = 7f454c460201 ] || fail 'not an ELF64 little-endian binary'
@@ -51,9 +65,10 @@ fi
 staging=$(mktemp -d "${TMPDIR:-/tmp}/parins-package.XXXXXX")
 mkdir -p "$staging/$archive" target/packages
 cp "$binary" parins.example.toml LICENSE README.md CHANGELOG.md "$staging/$archive/"
+cp web/src/components/beui/LICENSE.beui "$staging/$archive/"
 cp scripts/install.sh "$staging/$archive/"
 cp -R deploy "$staging/$archive/"
-(cd "$staging/$archive" && shasum -a 256 parins install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/*.service) > "$staging/$archive/SHA256SUMS"
+(cd "$staging/$archive" && shasum -a 256 parins install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/*.service) > "$staging/$archive/SHA256SUMS"
 tar -czf "target/packages/$archive.tar.gz" -C "$staging" "$archive"
 (cd target/packages && shasum -a 256 "$archive.tar.gz") > "target/packages/$archive.tar.gz.sha256"
 printf 'Package: target/packages/%s.tar.gz\nChecksum: target/packages/%s.tar.gz.sha256\n' "$archive" "$archive"

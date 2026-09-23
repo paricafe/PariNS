@@ -1,0 +1,32 @@
+.observability-meter {
+  appearance: none;
+  background: #e4e4e7;
+  border: 0;
+  border-radius: 999px;
+}
+
+.observability-meter::-webkit-meter-bar {
+  background: #e4e4e7;
+  border: 0;
+  border-radius: 999px;
+}
+
+.observability-meter::-webkit-meter-optimum-value {
+  background: #18181b;
+  border-radius: 999px;
+}
+
+.observability-meter::-moz-meter-bar {
+  background: #18181b;
+  border-radius: 999px;
+}
+
+.dark .observability-meter,
+.dark .observability-meter::-webkit-meter-bar {
+  background: #3f3f46;
+}
+
+.dark .observability-meter::-webkit-meter-optimum-value,
+.dark .observability-meter::-moz-meter-bar {
+  background: #f4f4f5;
+}

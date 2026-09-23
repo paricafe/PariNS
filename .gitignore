@@ -4,6 +4,10 @@
 # Rust build output.
 /target/
 
+# Built management console and installed frontend dependencies.
+/web/dist/
+/web/node_modules/
+
 # macOS metadata.
 .DS_Store
 

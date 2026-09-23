@@ -37,6 +37,22 @@ impl Response {
         assert_eq!(self.status, status, "{}", self.body);
         self.json()
     }
+
+    fn auth(&self) -> String {
+        let cookie = self
+            .headers
+            .lines()
+            .find_map(|line| line.strip_prefix("set-cookie: __host-parins_session="))
+            .expect("HTTPS response sets session Cookie")
+            .split(';')
+            .next()
+            .unwrap();
+        let binding = self.json()["session"]["binding"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        format!("{cookie}|{binding}")
+    }
 }
 
 struct Management {
@@ -115,9 +131,13 @@ impl Management {
         );
         if method != "GET" {
             request.push_str("Content-Type: application/json\r\n");
+            request.push_str(&format!("Origin: https://{}\r\n", self.address));
         }
         if let Some(token) = token {
-            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+            let (cookie, binding) = token.split_once('|').expect("Cookie and binding fixture");
+            request.push_str(&format!(
+                "Cookie: __Host-parins_session={cookie}\r\nX-PariNS-Session: {binding}\r\n"
+            ));
         }
         request.push_str("\r\n");
         request.push_str(&body);
@@ -173,10 +193,9 @@ impl Management {
 
     async fn setup(&self, directory: &Path, toml: &str) -> String {
         let token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
-        self.setup_with(&token, toml).await.expect(200)["token"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+        let response = self.setup_with(&token, toml).await;
+        response.expect(200);
+        response.auth()
     }
 
     async fn setup_with(&self, token: &str, toml: &str) -> Response {
@@ -287,8 +306,9 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
     );
     for (path, content_type) in [
         ("/", "text/html"),
-        ("/app.js", "text/javascript"),
-        ("/app.css", "text/css"),
+        ("/assets/app.js", "text/javascript"),
+        ("/assets/app.css", "text/css"),
+        ("/theme-init.js", "text/javascript"),
     ] {
         let response = server.request("GET", path, None, None).await;
         assert_eq!(response.status, 200);
@@ -339,6 +359,181 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         .setup_with("wrong-token", &configuration())
         .await
         .expect(409);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn cookie_session_restores_without_a_token_and_binding_prevents_stale_requests() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let setup_token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    let issued = server.setup_with(&setup_token, &configuration()).await;
+    let view = issued.expect(200);
+    assert_eq!(view["authenticated"], true);
+    assert!(view.get("token").is_none());
+    assert!(
+        issued
+            .headers
+            .contains("httponly; secure; samesite=strict; max-age=28800")
+    );
+    assert!(
+        issued
+            .headers
+            .contains("set-cookie: __host-parins_session=")
+    );
+    assert!(!issued.headers.contains("domain="));
+    let auth = issued.auth();
+    let (cookie, binding) = auth.split_once('|').unwrap();
+    assert_eq!(view["session"]["binding"], binding);
+    assert!(view["session"]["expires_in_seconds"].as_u64().unwrap() <= 28800);
+
+    let resume = format!(
+        "GET /api/session HTTP/1.1\r\nHost: {}\r\nCookie: __Host-parins_session={cookie}\r\nConnection: close\r\n\r\n",
+        server.address
+    );
+    let resumed = server.raw(resume.as_bytes()).await;
+    assert_eq!(resumed.expect(200)["session"]["binding"], binding);
+    assert!(!resumed.headers.contains("set-cookie:"));
+    server.config(&auth).await;
+
+    let valid = String::from_utf8(server.wire("GET", "/api/config", Some(&auth), None)).unwrap();
+    let changed = valid.replace(
+        &format!("X-PariNS-Session: {binding}\r\n"),
+        "X-PariNS-Session: stale-binding\r\n",
+    );
+    let conflict = server.raw(changed.as_bytes()).await;
+    assert_eq!(conflict.expect(409)["error"]["code"], "SESSION_CHANGED");
+    assert!(!conflict.headers.contains("set-cookie:"));
+    let missing = valid.replace(&format!("X-PariNS-Session: {binding}\r\n"), "");
+    server.raw(missing.as_bytes()).await.expect(409);
+
+    let bearer = valid.replacen(
+        "\r\n\r\n",
+        &format!("\r\nAuthorization: Bearer {cookie}\r\n\r\n"),
+        1,
+    );
+    server.raw(bearer.as_bytes()).await.expect(401);
+    let changed_logout = String::from_utf8(server.wire("POST", "/api/logout", Some(&auth), None))
+        .unwrap()
+        .replace(
+            &format!("X-PariNS-Session: {binding}\r\n"),
+            "X-PariNS-Session: stale-binding\r\n",
+        );
+    let rejected = server.raw(changed_logout.as_bytes()).await;
+    rejected.expect(409);
+    assert!(!rejected.headers.contains("set-cookie:"));
+    server.config(&auth).await;
+
+    let logout = server
+        .request("POST", "/api/logout", Some(&auth), None)
+        .await;
+    let logged_out = logout.expect(200);
+    assert_eq!(logged_out["authenticated"], false);
+    assert_eq!(logged_out["session"], Value::Null);
+    assert!(logout.headers.contains(
+        "set-cookie: __host-parins_session=; path=/; httponly; secure; samesite=strict; max-age=0"
+    ));
+    server
+        .request("GET", "/api/config", Some(&auth), None)
+        .await
+        .expect(401);
+    let stale = server.raw(resume.as_bytes()).await;
+    assert_eq!(stale.expect(200)["authenticated"], false);
+    assert!(!stale.headers.contains("set-cookie:"));
+    let repeated = server
+        .request("POST", "/api/logout", Some(&auth), None)
+        .await;
+    assert_eq!(repeated.expect(200)["authenticated"], false);
+    assert!(repeated.headers.contains("max-age=0"));
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn unsafe_api_requires_exact_origin_and_same_origin_fetch_metadata() {
+    let temporary = tempfile::tempdir().unwrap();
+    let server = Management::start(&temporary.path().join("state")).await;
+    let valid =
+        String::from_utf8(server.wire("POST", "/api/config/parse", None, Some(json!({})))).unwrap();
+    // A correct origin reaches authentication; malformed or cross-origin
+    // requests are rejected before any private API branch executes.
+    server.raw(valid.as_bytes()).await.expect(401);
+    let origin = format!("Origin: https://{}\r\n", server.address);
+    for wire in [
+        valid.replace(&origin, ""),
+        valid.replace(&origin, "Origin: null\r\n"),
+        valid.replace(&origin, "Origin: https://attacker.example\r\n"),
+        valid.replace(
+            &origin,
+            &format!("{origin}Origin: https://{}\r\n", server.address),
+        ),
+        valid.replace(
+            &origin,
+            &format!("Origin: https://127.0.0.1:{}1\r\n", server.address.port()),
+        ),
+        valid.replacen("\r\n\r\n", "\r\nSec-Fetch-Site: same-site\r\n\r\n", 1),
+        valid.replacen("\r\n\r\n", "\r\nSec-Fetch-Site: cross-site\r\n\r\n", 1),
+    ] {
+        server.raw(wire.as_bytes()).await.expect(403);
+    }
+    let same_origin = valid.replacen("\r\n\r\n", "\r\nSec-Fetch-Site: same-origin\r\n\r\n", 1);
+    server.raw(same_origin.as_bytes()).await.expect(401);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn successful_login_replaces_the_presented_cookie_but_failed_login_preserves_it() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let old = server.setup(&directory, &configuration()).await;
+    let failed = server
+        .request(
+            "POST",
+            "/api/login",
+            Some(&old),
+            Some(json!({"username":"admin","password":"incorrect-password"})),
+        )
+        .await;
+    failed.expect(401);
+    assert!(!failed.headers.contains("set-cookie:"));
+    server.config(&old).await;
+
+    let login = server
+        .request(
+            "POST",
+            "/api/login",
+            Some(&old),
+            Some(json!({"username":"admin","password":PASSWORD})),
+        )
+        .await;
+    let view = login.expect(200);
+    assert!(view.get("token").is_none());
+    let current = login.auth();
+    assert_ne!(old, current);
+    server
+        .request("GET", "/api/config", Some(&old), None)
+        .await
+        .expect(401);
+    server.config(&current).await;
+
+    // Cookie is shared between tabs, while each tab still owns its binding.
+    let (new_cookie, _) = current.split_once('|').unwrap();
+    let (old_cookie, _) = old.split_once('|').unwrap();
+    let old_tab_with_new_cookie =
+        String::from_utf8(server.wire("GET", "/api/config", Some(&old), None))
+            .unwrap()
+            .replace(
+                &format!("Cookie: __Host-parins_session={old_cookie}"),
+                &format!("Cookie: __Host-parins_session={new_cookie}"),
+            );
+    assert_eq!(
+        server
+            .raw(old_tab_with_new_cookie.as_bytes())
+            .await
+            .expect(409)["error"]["code"],
+        "SESSION_CHANGED"
+    );
     server.finish().await;
 }
 
@@ -699,11 +894,11 @@ async fn ipv4_wildcard_supports_public_ip_origin_without_bypassing_authenticatio
         &format!("Host: {}", server.address),
         &format!("Host: {public_host}"),
     )
-    .replacen(
-        "\r\n\r\n",
-        &format!("\r\nOrigin: https://{public_host}\r\nX-PariNS-Setup: wrong-token\r\n\r\n"),
-        1,
-    );
+    .replace(
+        &format!("Origin: https://{}", server.address),
+        &format!("Origin: https://{public_host}"),
+    )
+    .replacen("\r\n\r\n", "\r\nX-PariNS-Setup: wrong-token\r\n\r\n", 1);
     server.raw(setup.as_bytes()).await.expect(403);
     assert!(!directory.join("state.json").exists());
     server.finish().await;
@@ -932,18 +1127,18 @@ async fn restart_restores_configuration_but_not_sessions_and_logout_revokes_toke
             None,
             Some(json!({"username":"admin","password":PASSWORD})),
         )
-        .await
-        .expect(200);
-    let new_token = login["token"].as_str().unwrap();
+        .await;
+    login.expect(200);
+    let new_token = login.auth();
     assert_ne!(new_token, token);
-    assert_eq!(server.config(new_token).await["revision"], 1);
-    assert_dns(server.dns(new_token).await).await;
+    assert_eq!(server.config(&new_token).await["revision"], 1);
+    assert_dns(server.dns(&new_token).await).await;
     server
-        .request("POST", "/api/logout", Some(new_token), None)
+        .request("POST", "/api/logout", Some(&new_token), None)
         .await
         .expect(200);
     server
-        .request("GET", "/api/config", Some(new_token), None)
+        .request("GET", "/api/config", Some(&new_token), None)
         .await
         .expect(401);
     server.finish().await;
@@ -1077,7 +1272,7 @@ async fn exhausted_socket_source_does_not_block_other_source_setup_or_login() {
         1,
     );
     let session = server.raw_at(other, setup.as_bytes()).await.expect(200);
-    assert!(session["token"].is_string());
+    assert_eq!(session["authenticated"], true);
     let login = server.wire(
         "POST",
         "/api/login",
@@ -1095,8 +1290,10 @@ async fn request_body_and_configuration_sizes_are_bounded_before_mutation() {
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
     let token = server.setup(&directory, &configuration()).await;
+    let (cookie, binding) = token.split_once('|').unwrap();
     let headers = format!(
-        "POST /api/config/validate HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST /api/config/validate HTTP/1.1\r\nHost: {}\r\nOrigin: https://{}\r\nCookie: __Host-parins_session={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        server.address,
         server.address,
         300 * 1024 + 1
     );
@@ -1113,8 +1310,8 @@ async fn request_body_and_configuration_sizes_are_bounded_before_mutation() {
         .await
         .expect(422);
     let no_json = format!(
-        "POST /api/logout HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        server.address
+        "POST /api/logout HTTP/1.1\r\nHost: {}\r\nOrigin: https://{}\r\nCookie: __Host-parins_session={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        server.address, server.address,
     );
     server.raw(no_json.as_bytes()).await.expect(415);
     assert_eq!(server.config(&token).await["revision"], 1);

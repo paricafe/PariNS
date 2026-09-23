@@ -1,7 +1,7 @@
 # PariNS
 
 Self-hosted DNS with subnet-aware caching, local filtering, encrypted transports,
-and an integrated HTTPS management console.
+and an integrated browser management console.
 
 PariNS is a standalone Rust service for running your own DNS forwarder on a local
 machine, home network, private network, or VPS. Choose your upstream resolver,
@@ -24,15 +24,21 @@ provider or hosted service.
 - **Web management:** first-run setup, administrator authentication, visual
   statistics with 24-hour aggregate history, grouped configuration forms and
   advanced TOML editing, validation, export, and one-generation rollback.
-- **Self-hosted operations:** persistent self-signed HTTPS by default, optional
-  custom certificates, a Linux systemd installer, aggregate metrics, and
+- **Self-hosted operations:** HTTP console by default, optional management HTTPS
+  using an inbound DoH identity, a Linux systemd installer, aggregate metrics, and
   configurable resource and source-subnet budgets.
 
 ## Status
 
-Early release (v0.1.2). The features above are implemented, with automated Linux and
-macOS tests and isolated Linux systemd installation checks. Production deployment
-and target-machine capacity acceptance have not been performed.
+Published v0.1.2 is an early release, with automated Linux and macOS tests
+and isolated Linux systemd installation checks. The new console transport
+behavior below is not yet in that release. Production deployment and
+target-machine capacity acceptance have not been performed.
+
+The default-HTTP console and DoH certificate reuse described below are changes
+in the unreleased source tree. Published v0.1.2 packages still use the HTTPS
+setup documented in that tag; do not assume an existing installation has
+switched protocol until the new configuration is applied.
 
 Version 0.1.2 improves encrypted listener forms and fixes authentication limits,
 EDE cache invalidation, DoH Age handling, DoQ address rotation and cache-rule drafts.
@@ -43,8 +49,8 @@ are no longer accepted. Start with the bundled example or the setup wizard.
 
 PariNS forwards to existing resolvers; it is not an authoritative DNS server or
 a standalone iterative resolver, and does not perform DNSSEC validation. DNS
-listener certificates are configured separately from the management console's
-self-signed certificate. See [Behavior and limits](#behavior-and-limits) before
+inbound DoH certificates can also secure the management console. See
+[Behavior and limits](#behavior-and-limits) before
 deploying.
 
 ## Quick start
@@ -70,13 +76,14 @@ or a substitute for trusting the release publisher.
 
 ### 2. Open the setup wizard
 
-Open `https://SERVER_IP:3000` (or <https://127.0.0.1:3000> on the server itself).
+For the unreleased source build, open `http://SERVER_IP:3000` (or
+<http://127.0.0.1:3000> on the server itself). Published v0.1.2 packages still
+open on HTTPS; use the README shipped with that package.
 Allow inbound TCP 3000 only from your administrator IPs. The installer prints
 local interface URLs; a VPS behind NAT may need its provider-assigned public IP.
-Verify the self-signed certificate fingerprint over a trusted SSH connection:
+Read the one-time setup token locally:
 
 ```sh
-sudo openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint
 sudo cat /var/lib/parins/setup-token
 ```
 
@@ -85,9 +92,10 @@ one per line. IP addresses and encrypted DNS URLs are supported; hostname URLs
 also need bootstrap DNS addresses. The wizard starts with `127.0.0.1:5353` for local testing. For LAN clients,
 choose the server's LAN IP on port 53 and allow those clients through your firewall.
 Port 53 must be free; conflicting DNS services are not stopped automatically.
-DNS starts after setup succeeds. Self-signed certificates need explicit trust and
-may also have a public-IP name mismatch; see [Managed mode](#managed-mode-install-then-initialize-in-the-browser)
-for certificate, tunnel, and custom-certificate options.
+DNS starts after setup succeeds. HTTP carries passwords, configuration and
+private-key paste in plaintext; prefer local access or an SSH tunnel during
+initial setup. See [Managed mode](#managed-mode-install-then-initialize-in-the-browser)
+for the DoH certificate and HTTPS transition.
 
 ### 3. Use your DNS server
 
@@ -101,8 +109,9 @@ sudo systemctl status parins-managed.service
 
 The installer does not change your host/router DNS or firewall. Use the dashboard
 to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
-needed. To upgrade, rerun the installer; existing account, configuration and HTTPS
-identity are preserved. Pin a version with `sudo sh parins-install.sh --version v0.1.2`.
+needed. To upgrade, rerun the installer; existing account and configuration are
+preserved. Old self-signed files are not used or automatically deleted by the
+new build. Pin a version with `sudo sh parins-install.sh --version v0.1.2`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`
@@ -130,6 +139,7 @@ install Rust with [rustup](https://rust-lang.org/tools/install/) and run:
 ```sh
 git clone https://github.com/paricafe/PariNS.git
 cd PariNS
+cd web && npm ci --ignore-scripts && npm run build && cd ..
 cargo build --locked --release
 sudo sh scripts/install.sh
 ```
@@ -150,25 +160,26 @@ failure attempts to restore the prior service; inspect the reported backup and
 `journalctl -u parins-managed.service` if recovery itself fails.
 
 The first start serves only the console; **DNS starts after successful setup**.
-The CLI and installed service now default to **`0.0.0.0:3000`, HTTPS only**.
-Open `https://SERVER_PUBLIC_IP:3000` after allowing inbound TCP 3000 in the host
+The CLI and installed service default to **`0.0.0.0:3000`, HTTP** until inbound
+DoH or DoH3 is enabled with a valid certificate and `[web].public_host`.
+Open `http://SERVER_PUBLIC_IP:3000` after allowing inbound TCP 3000 in the host
 firewall and cloud security group for your intended administrator IPs. The
 installer does not change those rules, configure NAT, or prove Internet routing.
-An upgrade from the original console changes both HTTP to HTTPS and the installed
-service's loopback default to all IPv4 interfaces; keep an explicit loopback
-override if that is what you want.
+Because HTTP is unencrypted, restrict access and prefer local access or an SSH
+tunnel for initial credentials and private-key entry. Existing installations
+retain their saved configuration; this change does not erase old self-signed files.
 
-For IPv6 use `--web-listen '[::]:3000'` and access `https://[SERVER_IPV6]:3000`.
+For IPv6 use `--web-listen '[::]:3000'` and access `http://[SERVER_IPV6]:3000`.
 IPv4 acceptance on an IPv6 socket depends on the operating system; the default
 IPv4 socket does not claim IPv6 coverage. `--web-listen 127.0.0.1:3000` retains
-local-only access. An optional SSH tunnel still works, using HTTPS locally:
+local-only access. An SSH tunnel protects a remote HTTP setup connection:
 
 ```sh
 ssh -N -L 3000:127.0.0.1:3000 USER@HOST
 ```
 
 Read `sudo cat /var/lib/parins/setup-token` on the server. If using the tunnel,
-open <https://127.0.0.1:3000>. Enter the one-time token, choose an
+open <http://127.0.0.1:3000>. Enter the one-time token, choose an
 administrator name and a password of at least 12 bytes, and set the DNS listen
 address and upstream list. The wizard defaults to loopback DNS;
 set port 53 explicitly if wanted and free. The service has only the capability
@@ -176,15 +187,16 @@ needed to bind low ports. Port conflicts reject setup/application; no conflictin
 service is automatically stopped. Never share the token or put it in a URL.
 
 The console accepts literal IPv4/IPv6 hosts (including a public IP mapped by NAT)
-at the listening port, plus localhost. It rejects arbitrary domain names, other
-ports and cross-origin browser requests; forwarding headers are not trusted.
-This is direct IP access, not a domain-name/reverse-proxy configuration feature.
-Use the same local tunnel or NAT port (3000). Passwords use
-Argon2id. Successful login establishes an eight-hour Secure, HttpOnly,
-SameSite=Strict Cookie; refreshing restores the session until it expires, is
-revoked by logout, or the management process restarts. The browser never stores
-the session credential or binding in local/session storage. The management
-origin is tied to the exact scheme, host and port; each protected request also
+at its listening port, localhost, and a specific validated `[web].public_host`
+when configured. It rejects other hostnames, ports and cross-origin browser
+requests; forwarding headers are not trusted. This is not a reverse-proxy trust
+configuration. Passwords use Argon2id. HTTP login uses an eight-hour HttpOnly,
+SameSite=Strict Cookie; HTTPS uses a Secure, HttpOnly, SameSite=Strict `__Host-`
+Cookie. Refreshing restores the session until it expires, is revoked by logout,
+or the management process restarts. Logout revokes that session server-side; it
+does not promise to erase the browser's now-unusable Cookie value. The browser
+never stores the session credential or binding in local/session storage. The
+management origin is tied to the exact scheme, host and port; each protected request also
 uses a per-session binding to prevent stale tabs from writing under a new login.
 There are no external frontend assets. Opt-in query history is held in server
 memory, not browser storage. An unsaved configuration draft does not survive a
@@ -201,37 +213,28 @@ Switching updates labels, help, messages, dates and charts in place, preserving
 drafts and expanded query details. Configuration keys, user-entered values and
 raw server diagnostic details keep their original text.
 
-On first start, PariNS generates a self-signed HTTPS identity in
-`/var/lib/parins/https-identity.pem` (certificate **and private key**, 0600) and
-exports only its public certificate to `/var/lib/parins/https-cert.pem`.
-The identity is atomically stored, reused across restart/upgrades and independent
-of DNS certificates/configuration. A corrupt or insecure existing identity fails
-startup instead of silently replacing a certificate you may have pinned.
+The console does not create a certificate. When inbound `[doh]` is enabled,
+PariNS verifies its certificate/key and the `[web].public_host` name, then serves
+HTTPS on the same management port with that identity. If `[doh]` is absent and
+`[doh3]` is enabled, it uses the DoH3 identity instead. DoT, DoQ and encrypted
+upstreams do not change the console protocol. The DoH DNS listener and management
+listener keep separate ports, routes and ALPN. For example, DoH on 443 and the
+console on 3000 can use the same certificate for `dns.example.com`; the console
+URL becomes `https://dns.example.com:3000/`. The certificate must cover the
+chosen name; PariNS does not infer a public IP from `0.0.0.0`, configure DNS,
+or make a private CA trusted by clients.
 
-**Self-signed means encrypted, not automatically trusted.** Verify the certificate
-fingerprint over a trusted channel such as SSH before trusting it in your browser:
-
-```sh
-sudo openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint
-```
-
-Only `https-cert.pem` may be copied to clients; never export `https-identity.pem`.
-The generated certificate is valid for approximately ten years and covers
-localhost, loopback IPs and an explicitly bound IP. With a wildcard bind, PariNS
-cannot infer the public/NAT IP, so direct public access can also show a hostname
-mismatch. For a matching identity, supply a certificate whose IP SAN includes
-the accessed public IP. Custom certificate/key paths must be provided together:
-
-```sh
-./target/release/parins --manage --web-cert /path/to/cert.pem --web-key /path/to/key.pem
-```
-
-There is no automatic renewal/ACME or HTTP fallback/redirect on port 3000.
-Replace an expiring certificate explicitly and restart the process. Custom
-certificates must be readable by the service and do not overwrite the generated
-identity. Certificate changes for the management listener require a full process
-restart, not the DNS configuration's apply button. Existing setup-token and
-administrator state are retained when upgrading from HTTP.
+Saving a configuration that enables inbound DoH switches the existing management
+port to HTTPS and requires a new login. If setup itself enables DoH, open the
+returned HTTPS address and log in with the newly created administrator account.
+Disabling all inbound DoH switches to HTTP only after explicit downgrade
+confirmation. A failed candidate or TLS material fault never silently exposes
+the management API over HTTP. Renew external certificate files through your
+issuer, then reapply the same configuration or restart PariNS to load them;
+there is no built-in ACME or certificate watcher. An unchanged management
+origin can keep its session during certificate replacement. Old generated
+`https-identity.pem`/`https-cert.pem` files are unused and not automatically
+removed; check their purpose before manually cleaning them up.
 
 After setup, the console provides visual traffic statistics, grouped settings
 forms, and an advanced TOML editor with validation, change preview, export, and
@@ -279,6 +282,10 @@ sudo systemctl disable --now parins-managed.service  # retains state and backups
 ```
 
 ### File-configured mode
+
+Build `web/` first as shown above, even for file-configured mode: the Rust
+binary embeds the management assets at compile time but does not start the
+console unless `--manage` is used.
 
 ```sh
 cargo build --locked --release
@@ -334,10 +341,11 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   upstream; the AD bit is cleared in client responses.
 
 The example and setup wizard default to loopback **DNS**; the management console
-defaults separately to `0.0.0.0:3000` over HTTPS. This release is not yet accepted
-as a production public resolver: production capacity validation and network-level abuse protection are
-not implemented. Logs contain startup/shutdown/reload events and
-optional aggregate metrics, not query names or client IP addresses.
+defaults separately to `0.0.0.0:3000` over HTTP until inbound DoH is enabled.
+PariNS is not yet accepted as a production public resolver: production capacity
+validation and network-level abuse protection are not implemented. Logs contain
+startup/shutdown/reload events and optional aggregate metrics, not query names
+or client IP addresses.
 
 ## Optional source budgets
 
@@ -615,8 +623,9 @@ returned by the API or included in TOML/export. Save/apply uses the existing
 configuration transaction. Certificate expiry, hostname and trust must still be
 checked by clients. At most 32 identities are retained; normalized repeats reuse
 the same file. Remove unused files manually only after checking current/rollback
-configurations. Management HTTPS certificates remain independently configured
-through startup flags; this form configures DNS listeners, not the console.
+configurations. Enabling inbound DoH or DoH3 with a validated `[web].public_host`
+also chooses the identity for management HTTPS; importing PEM alone does not
+switch the console protocol.
 
 ## Upstream DNS settings
 
@@ -788,7 +797,7 @@ Linux/macOS CI results must be checked separately from local macOS acceptance.
 | `ingress` | Shared encrypted-query admission and response serialization |
 | `limits` | Bounded socket-subnet token buckets and RAII query/connection quotas |
 | `admin` | Loopback read-only metrics and process liveness |
-| `manage` | HTTPS API, authentication, private state, and transactional DNS configuration changes |
+| `manage` | HTTP/HTTPS management transport, authentication, private state, and transactional DNS configuration changes |
 | `web` | Embedded setup wizard, dashboard, and configuration editor |
 | `transport::tcp` | Length-prefixed framing used on both sides |
 | `server` | Listener ownership, admission budgets, client tasks, shutdown |

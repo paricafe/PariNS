@@ -62,7 +62,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy https-cert.pem credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -76,42 +76,32 @@ install_service() {
     sudo systemctl is-active --quiet parins-managed.service
     sudo cmp "$binary" /opt/parins-managed/parins
 }
-https() {
+http() {
     curl --fail --silent --show-error --noproxy '*' \
-        --cacert "$fixture/https-cert.pem" \
         --cookie "$fixture/cookies.txt" --cookie-jar "$fixture/cookies.txt" "$@"
 }
-session() { https --max-time 5 https://127.0.0.1:3000/api/session; }
-check_identity() {
-    sudo cmp "$fixture/https-cert.pem" /var/lib/parins/https-cert.pem
-    [ "$(sudo sha256sum /var/lib/parins/https-identity.pem)" = "$identity_digest" ]
-    [ "$(sudo stat -c %a /var/lib/parins/https-identity.pem)" = 600 ]
-}
+session() { http --max-time 5 http://127.0.0.1:3000/api/session; }
 installed=true
 install_service
 sudo systemd-analyze verify /etc/systemd/system/parins-managed.service
-sudo test -s /var/lib/parins/https-identity.pem
-sudo cat /var/lib/parins/https-cert.pem > "$fixture/https-cert.pem"
 : > "$fixture/cookies.txt"
-! grep -q 'PRIVATE KEY' "$fixture/https-cert.pem"
-openssl x509 -in "$fixture/https-cert.pem" -noout -checkend 86400
-identity_digest=$(sudo sha256sum /var/lib/parins/https-identity.pem)
-check_identity
-session | jq -e '.setup_required == true' >/dev/null
+! sudo test -e /var/lib/parins/https-identity.pem
+! sudo test -e /var/lib/parins/https-cert.pem
+session | jq -e '.setup_required == true and .transport.scheme == "http"' >/dev/null
 for asset in / /theme-init.js /assets/app.js /assets/app.css; do
-    https --max-time 5 "https://127.0.0.1:3000$asset" >/dev/null
+    http --max-time 5 "http://127.0.0.1:3000$asset" >/dev/null
 done
-# Exercise the real non-loopback interface. The TLS identity is still checked
-# against 127.0.0.1; an explicit public-IP Host/Origin exercises the NAT-facing
-# HTTP contract without requiring public Internet routing on a hosted runner.
+# Exercise the real non-loopback interface without requiring public Internet routing.
 ss -H -ltn4 'sport = :3000' | awk '{print $4}' | grep -Fx '0.0.0.0:3000' >/dev/null
 interface_ip=$(ip -4 -o address show scope global | awk 'NR == 1 {split($4, address, "/"); print address[1]}')
 [ -n "$interface_ip" ]
-https --max-time 5 --connect-to "127.0.0.1:3000:$interface_ip:3000" \
-    -H 'Host: 198.51.100.42:3000' -H 'Origin: https://198.51.100.42:3000' \
-    https://127.0.0.1:3000/api/session | jq -e '.setup_required == true' >/dev/null
-if curl --fail --silent --noproxy '*' --max-time 5 http://127.0.0.1:3000/api/session >/dev/null 2>&1; then
-    printf '%s\n' 'Unexpected plaintext HTTP response on the HTTPS management port.' >&2
+http --max-time 5 --connect-to "127.0.0.1:3000:$interface_ip:3000" \
+    -H 'Host: 198.51.100.42:3000' -H 'Origin: http://198.51.100.42:3000' \
+    http://127.0.0.1:3000/api/session | jq -e '.setup_required == true' >/dev/null
+# Negative protocol probe only: ignore trust so a stray self-signed HTTPS
+# listener cannot make this check pass merely because its certificate is unknown.
+if curl --fail --silent --insecure --noproxy '*' --max-time 5 https://127.0.0.1:3000/api/session >/dev/null 2>&1; then
+    printf '%s\n' 'Unexpected HTTPS response without inbound DoH.' >&2
     exit 1
 fi
 sudo test -s /var/lib/parins/setup-token
@@ -119,9 +109,8 @@ sudo test -s /var/lib/parins/setup-token
 [ "$(sudo stat -Lc %a /var/lib/parins)" = 700 ]
 sudo cat /var/lib/parins/setup-token > "$fixture/token-copy"
 install_service
-check_identity
 sudo cmp "$fixture/token-copy" /var/lib/parins/setup-token
-session | jq -e '.setup_required == true' >/dev/null
+session | jq -e '.setup_required == true and .transport.scheme == "http"' >/dev/null
 ! sudo test -e /var/lib/parins/state.json
 
 # No public DNS, certificate authorities or external APIs: blocked .invalid queries are
@@ -134,10 +123,10 @@ printf '%s\n' 'listen = "127.0.0.1:0"' \
 openssl rand -hex 24 | jq -Rs '{username:"ci-admin",password:rtrimstr("\n")}' > "$fixture/credentials.json"
 jq --rawfile toml "$fixture/candidate.toml" '. + {toml:$toml}' "$fixture/credentials.json" > "$fixture/setup.json"
 sed 's/^/X-PariNS-Setup: /' "$fixture/token-copy" > "$fixture/setup-header"
-https --max-time 15 -H 'Origin: https://127.0.0.1:3000' \
+http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
     -H 'Content-Type: application/json' \
     -H "@$fixture/setup-header" --data-binary "@$fixture/setup.json" \
-    https://127.0.0.1:3000/api/setup > "$fixture/response.json"
+    http://127.0.0.1:3000/api/setup > "$fixture/response.json"
 binding=$(jq -er '.session.binding | select(type == "string" and length > 0)' "$fixture/response.json")
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 sudo test -s /var/lib/parins/state.json
@@ -145,8 +134,8 @@ sudo test -s /var/lib/parins/state.json
 sudo cat /var/lib/parins/state.json > "$fixture/state-copy"
 
 check_dns() {
-    https --max-time 5 -H "X-PariNS-Session: $binding" \
-        https://127.0.0.1:3000/api/status > "$fixture/status.json"
+    http --max-time 5 -H "X-PariNS-Session: $binding" \
+        http://127.0.0.1:3000/api/status > "$fixture/status.json"
     jq -e '.running == true and .revision == 1 and .last_error == null' "$fixture/status.json" >/dev/null
     address=$(jq -er '.listen' "$fixture/status.json")
     python3 - "$address" <<'PY'
@@ -181,13 +170,14 @@ PY
 }
 check_dns
 install_service
-check_identity
+! sudo test -e /var/lib/parins/https-identity.pem
+! sudo test -e /var/lib/parins/https-cert.pem
 sudo cmp "$fixture/state-copy" /var/lib/parins/state.json
 session | jq -e '.setup_required == false and .authenticated == false' >/dev/null
-https --max-time 15 -H 'Origin: https://127.0.0.1:3000' \
+http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
     -H 'Content-Type: application/json' \
-    --data-binary "@$fixture/credentials.json" https://127.0.0.1:3000/api/login > "$fixture/response.json"
+    --data-binary "@$fixture/credentials.json" http://127.0.0.1:3000/api/login > "$fixture/response.json"
 binding=$(jq -er '.session.binding' "$fixture/response.json")
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 check_dns
-printf '%s\n' 'Linux systemd install, verified HTTPS on wildcard/non-loopback, setup, UDP/TCP DNS and identity/state-preserving upgrade passed.'
+printf '%s\n' 'Linux systemd install, HTTP on wildcard/non-loopback, setup, UDP/TCP DNS and state-preserving upgrade passed.'

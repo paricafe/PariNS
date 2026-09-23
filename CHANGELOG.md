@@ -5,9 +5,14 @@
 - Replace the native-script management page with a React 19/TypeScript console,
   including responsive navigation, light/dark/system appearance, bilingual views,
   per-request query details, and a single in-memory configuration draft.
-- Replace Bearer tokens with eight-hour Secure/HttpOnly/SameSite=Strict Cookie
-  sessions. Refresh restores a valid login; protected APIs require a session
-  binding, and login/setup/logout are coordinated across tabs.
+- Replace Bearer tokens with eight-hour HttpOnly/SameSite=Strict Cookie
+  sessions (Secure and `__Host-` under HTTPS). Refresh restores a valid login;
+  protected APIs require a session binding. Logout revokes only its session,
+  without relying on Web Locks or deleting the browser Cookie.
+- Serve the management console over HTTP on port 3000 by default, without
+  generating a self-signed certificate. Enabling inbound DoH or DoH3 with a
+  validated `[web].public_host` switches that port to HTTPS using the same
+  verified DNS identity; explicit confirmation is required to return to HTTP.
 - Require exact same-origin checks for management writes, retire all old Web
   assets and Bearer callers, and embed checked static build output in the Rust
   binary. Unsaved drafts still do not persist across a full refresh.

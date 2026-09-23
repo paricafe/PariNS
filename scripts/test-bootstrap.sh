@@ -46,11 +46,15 @@ printf '%s\n' '#!/bin/sh' 'printf called > "$BOOTSTRAP_FIXTURE/binary-called"' '
 cp "$repo/scripts/install.sh" "$package/install.sh"
 cp "$repo/deploy/parins-managed.service" "$repo/deploy/parins.service" "$package/deploy/"
 cp "$repo/parins.example.toml" "$repo/LICENSE" "$repo/README.md" "$package/"
+cp "$repo/web/src/components/beui/LICENSE.beui" "$package/"
 printf 'fixture release notes\n' > "$package/CHANGELOG.md"
 manifest() {
     for name in parins install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service; do
         printf '%s  %s\n' "$(digest "$package/$name")" "$name"
     done > "$package/SHA256SUMS"
+    if [ -f "$package/LICENSE.beui" ]; then
+        printf '%s  LICENSE.beui\n' "$(digest "$package/LICENSE.beui")" >> "$package/SHA256SUMS"
+    fi
 }
 checksum() { printf '%s  %s\n' "$(digest "$fixture/downloads/$asset")" "$asset" > "$fixture/downloads/$asset.sha256"; }
 pack() { tar -czf "$fixture/downloads/$asset" -C "$fixture/build" "$archive"; checksum; }
@@ -75,6 +79,18 @@ printf 'keep certificate identity\n' > "$fixture/stage/var/lib/parins/https-iden
 sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.2
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins/state.json"
 grep -Fxq 'keep certificate identity' "$fixture/stage/var/lib/parins/https-identity.pem"
+# The published v0.1.2 format had no beUI notice; its verified package stays
+# installable while newer packages include and verify LICENSE.beui.
+mv "$package/LICENSE.beui" "$fixture/notice-copy"
+manifest
+pack
+sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.2 --dry-run
+printf '%064d  LICENSE.beui\n' 0 >> "$package/SHA256SUMS"
+pack
+expect_failure --version v0.1.2
+mv "$fixture/notice-copy" "$package/LICENSE.beui"
+manifest
+pack
 # Both architecture mappings select their exact release asset.
 cp -R "$package" "$fixture/build/parins-v0.1.2-linux-aarch64"
 tar -czf "$fixture/downloads/parins-v0.1.2-linux-aarch64.tar.gz" -C "$fixture/build" parins-v0.1.2-linux-aarch64

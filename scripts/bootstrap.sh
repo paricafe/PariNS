@@ -96,7 +96,7 @@ main() {
         $0 == prefix || $0 == prefix "deploy/" { next }
         index($0, prefix) != 1 { exit 1 }
         { name = substr($0, length(prefix) + 1) }
-        name !~ /^(SHA256SUMS|parins|install\.sh|parins\.example\.toml|LICENSE|README\.md|CHANGELOG\.md|deploy\/parins(-managed)?\.service)$/ { exit 1 }
+        name !~ /^(SHA256SUMS|parins|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed)?\.service)$/ { exit 1 }
         END { if (NR == 0) exit 1 }
     ' "$download_dir/members" || fail 'unsafe or unexpected archive path'
     tar -tvzf "$download_dir/$asset" > "$download_dir/types" || fail 'cannot inspect archive types'
@@ -107,6 +107,11 @@ main() {
     package="$download_dir/$archive"
     mkdir -m 0700 "$package" "$package/deploy"
     files='parins install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service'
+    # The beUI notice is present in packages built from the new console. The
+    # bootstrap default still points at v0.1.2, whose archive predates beUI.
+    if grep -Fxq "$archive/LICENSE.beui" "$download_dir/members"; then
+        files="$files LICENSE.beui"
+    fi
     # Extract exact regular-file contents, never archive paths or permissions.
     for name in SHA256SUMS $files; do
         grep -Fxq "$archive/$name" "$download_dir/members" || fail "missing package member: $name"
@@ -114,10 +119,13 @@ main() {
     done
     awk '
         NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ { exit 1 }
-        $2 !~ /^(parins|install\.sh|parins\.example\.toml|LICENSE|README\.md|CHANGELOG\.md|deploy\/parins(-managed)?\.service)$/ { exit 1 }
+        $2 !~ /^(parins|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed)?\.service)$/ { exit 1 }
         ++seen[$2] != 1 { exit 1 }
         END { if (NR == 0) exit 1 }
     ' "$package/SHA256SUMS" || fail 'invalid package checksum manifest'
+    if ! grep -Fxq "$archive/LICENSE.beui" "$download_dir/members"; then
+        ! grep -Eq '  LICENSE\.beui$' "$package/SHA256SUMS" || fail 'manifest lists a missing beUI notice'
+    fi
     for name in $files; do
         expected=$(awk -v name="$name" '$2 == name {print tolower($1)}' "$package/SHA256SUMS")
         [ -n "$expected" ] && [ "$(digest "$package/$name")" = "$expected" ] || fail "package checksum mismatch: $name"

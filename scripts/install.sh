@@ -146,19 +146,15 @@ printf 'Installed. Backup: %s\n' "$backup"
 if [ -n "$root" ]; then
     printf '%s\n' 'Staging only: state is untouched and no service or executable was started.'
 else
-    printf '%s\n' 'Console: https://SERVER_PUBLIC_IP:3000 (listens on 0.0.0.0:3000; HTTPS only)' \
+    printf '%s\n' 'Fresh setup console: http://SERVER_PUBLIC_IP:3000 (listens on 0.0.0.0:3000 by default)' \
         'Allow TCP 3000 in the host firewall/cloud security group for your admin IP; no firewall rules are changed here.' \
-        'The initial certificate is self-signed. Verify its fingerprint over SSH before trusting it in your browser.' \
-        'Public certificate: /var/lib/parins/https-cert.pem (safe to export); fingerprint: sudo openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint' \
-        'NEVER export /var/lib/parins/https-identity.pem: it contains the private key.' \
+        'HTTP is unencrypted: prefer local access or an SSH tunnel for initial setup, especially when entering passwords or private keys.' \
+        'If an existing or new configuration enables inbound DoH, use the HTTPS management address shown by PariNS instead.' \
         'Read the one-time setup token locally: sudo cat /var/lib/parins/setup-token' \
         'Open the console to initialize. DNS starts only after setup; no host DNS or firewall was changed.'
-    if command -v openssl >/dev/null 2>&1 && [ -f /var/lib/parins/https-cert.pem ]; then
-        openssl x509 -in /var/lib/parins/https-cert.pem -noout -sha256 -fingerprint || true
-    fi
     # Local interface addresses are useful hints, not a claim about public NAT.
     if command -v ip >/dev/null 2>&1; then
-        ip -4 -o address show scope global | awk '{split($4, address, "/"); printf "Local interface console: https://%s:3000\n", address[1]}'
+        ip -4 -o address show scope global | awk '{split($4, address, "/"); printf "Local interface setup address (before DoH): http://%s:3000\n", address[1]}'
     fi
     printf '%s\n' 'Check service: sudo systemctl status parins-managed.service' \
         'View logs: sudo journalctl -u parins-managed.service -n 50 --no-pager'

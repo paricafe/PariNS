@@ -90,22 +90,31 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   and negative budgets; document capacity/utilization trade-offs when changing them.
 - Management mutations must retain authentication, Host/Origin checks, and relevant
   revision/epoch checks. Preserve atomic persistence and failure recovery.
-- Management sessions use a Secure, HttpOnly, SameSite=Strict `__Host-` Cookie and
-  an in-memory session binding on protected APIs. No Bearer compatibility. The
-  browser must serialize login/setup/logout across tabs with Web Locks; never
-  persist or broadcast the binding. An unknown configuration result is not proof
-  of failure and must not be silently replayed.
+- Management sessions use HttpOnly, SameSite=Strict Cookies and an in-memory
+  binding on protected APIs: `parins_session_http` for HTTP, or Secure
+  `__Host-parins_session` for HTTPS. No Bearer compatibility. Logout revokes only
+  its specified server-side session, without clearing the Cookie or relying on
+  Web Locks for cross-tab ordering. Never persist or broadcast the binding.
+  An unknown configuration result is not proof of failure and must not be
+  silently replayed.
 - Authentication attempt budgets use the socket peer, never forwarding headers.
   Bound and reclaim source state separately from global password-hash concurrency;
   blocking hash work owns its permit until it finishes, even after caller cancellation.
 - Cache-only configuration changes should not restart DNS listeners. Validate and
   persist before publishing replacement state; do not promise cache retention after
   arbitrary policy changes. Report restart requirements accurately for other changes.
-- Preserve HTTPS and certificate verification. Never commit credentials, private
+- Management defaults to HTTP on its one listener; enabling inbound DoH selects
+  its validated identity for management HTTPS, falling back to DoH3 only when
+  DoH is absent. Share a prepared identity snapshot, not DNS TLS routing/ALPN.
+  A failed candidate or TLS fault never silently downgrades HTTPS to HTTP;
+  explicit DoH disablement needs downgrade confirmation. Rust owns validated
+  `[web].public_host`, management origin and protocol transaction state.
+- Preserve configured HTTPS and certificate verification. Never commit credentials, private
   keys, runtime state, or private configuration. Do not add sensitive logging by
   default; query/client data needs explicit privacy and retention decisions.
 - Pasted DNS identities must be validated before private persistence; return only
-  file references, never private keys. Console TLS and DNS TLS remain independent.
+  file references, never private keys. Management and DNS listeners have separate
+  ports, ALPN and routes even when they reuse one validated inbound DoH identity.
 - Pool endpoints share cache semantics: require equivalent policies, explicit
   hostname bootstrap and authenticated encrypted transports. Parallel losers must
   cancel with the caller; failed DNS responses must not preempt usable answers.

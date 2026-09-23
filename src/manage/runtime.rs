@@ -1,10 +1,15 @@
 //! Managed DNS lifecycle. Configuration transactions survive HTTP disconnects.
-use super::store::{Store, Stored};
+use super::{
+    Active,
+    store::{Store, Stored},
+    transport::Snapshot,
+};
 use crate::{config::Config, metrics::Metrics, server::Server};
 use anyhow::{Result, anyhow, ensure};
+use serde_json::Value;
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
@@ -53,17 +58,31 @@ pub(super) struct Manager {
     running: Option<Running>,
     pub last_error: Option<String>,
     generation: u64,
+    address: SocketAddr,
+    active: Arc<Mutex<Active>>,
 }
 
 impl Manager {
-    pub async fn open(store: Store) -> Result<Self> {
+    pub async fn open(
+        store: Store,
+        address: SocketAddr,
+        active: Arc<Mutex<Active>>,
+    ) -> Result<Self> {
         let saved = store.read()?;
+        if let Some(saved) = &saved {
+            let config = Config::parse_in(&saved.toml, &store.dir)?;
+            let snapshot = Snapshot::prepare(&config, address)
+                .map_err(|error| anyhow!("management TLS stage failed: {error:#}"))?;
+            active.lock().unwrap().snapshot = Arc::new(snapshot);
+        }
         let mut this = Self {
             store: Arc::new(store),
             saved,
             running: None,
             last_error: None,
             generation: 0,
+            address,
+            active,
         };
         if let Some(saved) = this.saved.clone() {
             this.restore(&saved.toml).await;
@@ -86,6 +105,17 @@ impl Manager {
             "cache": running.map(|r| r.resolver.cache().snapshot()),
             "refresh": running.map(|r| r.resolver.refresh_snapshot()),
         })
+    }
+
+    pub fn transport_change(&self, toml: &str, request_host: &str) -> Result<Value> {
+        let config = Config::parse_in(toml, &self.store.dir)?;
+        let candidate = Snapshot::describe(&config, self.address)?;
+        let current = self.active.lock().unwrap().snapshot.clone();
+        Ok(current.change(&candidate, request_host, self.address))
+    }
+
+    pub fn transport(&self) -> Value {
+        self.active.lock().unwrap().snapshot.view()
     }
 
     pub fn resolver(&self) -> Option<&Arc<crate::resolver::Resolver>> {
@@ -120,12 +150,18 @@ impl Manager {
     }
 
     pub async fn validate(&self, toml: String) -> Result<Config> {
+        Ok(self.prepare(toml).await?.0)
+    }
+
+    pub async fn prepare(&self, toml: String) -> Result<(Config, Snapshot)> {
         ensure!(toml.len() <= 256 * 1024, "configuration exceeds 256 KiB");
         let dir = self.store.dir.clone();
+        let address = self.address;
         tokio::task::spawn_blocking(move || {
             let config = Config::parse_in(&toml, &dir)?;
+            let snapshot = Snapshot::prepare(&config, address)?;
             config.check_files()?;
-            Ok(config)
+            Ok((config, snapshot))
         })
         .await?
     }
@@ -134,7 +170,8 @@ impl Manager {
         let result = async {
             let config = self.validate(toml.to_owned()).await?;
             let grace = config.shutdown_grace_ms;
-            let server = Server::bind(config).await?;
+            let selected = self.active.lock().unwrap().snapshot.selected.clone();
+            let server = Server::bind_with_identity(config, selected).await?;
             let listen = server.local_addr()?;
             Ok::<_, anyhow::Error>(Running::start(server, grace, listen))
         }
@@ -153,7 +190,7 @@ impl Manager {
 
     /// Returns whether listener restart was necessary.
     pub async fn apply(&mut self, next: Stored) -> Result<bool> {
-        let config = self.validate(next.toml.clone()).await?;
+        let (config, candidate) = self.prepare(next.toml.clone()).await?;
         if self.cache_only(&next.toml) {
             // Manager's mutex serializes this transaction. There is no fallible
             // IO after persist and no await between live swap and revision update.
@@ -170,7 +207,7 @@ impl Manager {
         let previous = self.saved.clone();
         self.stop().await;
         let result = async {
-            let server = Server::bind(config).await?;
+            let server = Server::bind_with_identity(config, candidate.selected.clone()).await?;
             let listen = server.local_addr()?;
             let store = self.store.clone();
             let saved = next.clone();
@@ -181,6 +218,7 @@ impl Manager {
         .await;
         match result {
             Ok(running) => {
+                self.publish(candidate);
                 self.generation = self.generation.saturating_add(1);
                 self.running = Some(running);
                 self.saved = Some(next);
@@ -194,9 +232,20 @@ impl Manager {
                 if self.running.is_none() {
                     self.last_error = Some(format!("Apply failed; DNS is stopped: {error}"));
                 }
-                Err(anyhow!("configuration not applied: {error}"))
+                Err(error.context("configuration not applied"))
             }
         }
+    }
+
+    fn publish(&self, mut candidate: Snapshot) {
+        let mut active = self.active.lock().unwrap();
+        if active.snapshot.changes_realm(&candidate) {
+            active.sessions.clear();
+            candidate.realm = active.snapshot.realm.saturating_add(1);
+        } else {
+            candidate.realm = active.snapshot.realm;
+        }
+        active.snapshot = Arc::new(candidate);
     }
 
     pub async fn stop(&mut self) {

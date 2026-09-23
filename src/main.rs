@@ -11,8 +11,6 @@ async fn main() -> Result<()> {
     let mut manage = false;
     let mut state_dir = PathBuf::from("parins-state");
     let mut web_listen = "0.0.0.0:3000".parse()?;
-    let mut web_cert = None;
-    let mut web_key = None;
     let mut config_given = false;
     let mut management_option = false;
     while let Some(arg) = args.next() {
@@ -40,21 +38,9 @@ async fn main() -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("--web-listen requires IP:port"))?
                     .parse()?;
             }
-            "--web-cert" | "--web-key" => {
-                management_option = true;
-                let file = PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a path"))?,
-                );
-                if arg == "--web-cert" {
-                    web_cert = Some(file);
-                } else {
-                    web_key = Some(file);
-                }
-            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: parins [--config PATH] [--check]\n       parins --manage [--state-dir DIR] [--web-listen IP:PORT] [--web-cert CERT --web-key KEY]\nDefault config: parins.toml; managed state: parins-state; web listen: 0.0.0.0:3000 (HTTPS, generated self-signed certificate)\nIPv6: --web-listen [::]:3000; local-only: --web-listen 127.0.0.1:3000"
+                    "Usage: parins [--config PATH] [--check]\n       parins --manage [--state-dir DIR] [--web-listen IP:PORT]\nDefault config: parins.toml; managed state: parins-state; web listen: 0.0.0.0:3000 (HTTP until inbound DoH/DoH3 with a matching certificate is enabled)\nIPv6: --web-listen [::]:3000; local-only: --web-listen 127.0.0.1:3000"
                 );
                 return Ok(());
             }
@@ -74,15 +60,7 @@ async fn main() -> Result<()> {
         #[cfg(unix)]
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let tls_files = match (web_cert, web_key) {
-            (None, None) => None,
-            (Some(cert_file), Some(key_file)) => Some(parins::tls::TlsFiles {
-                cert_file,
-                key_file,
-            }),
-            _ => bail!("--web-cert and --web-key must be provided together"),
-        };
-        return parins::manage::serve(&state_dir, web_listen, tls_files, async {
+        return parins::manage::serve(&state_dir, web_listen, async {
             #[cfg(unix)]
             tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
             #[cfg(not(unix))]
@@ -91,7 +69,7 @@ async fn main() -> Result<()> {
         .await;
     }
     if management_option {
-        bail!("--state-dir, --web-listen, --web-cert and --web-key require --manage");
+        bail!("--state-dir and --web-listen require --manage");
     }
     let config = Config::load(&path)?;
     if check {

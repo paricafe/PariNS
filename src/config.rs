@@ -1,7 +1,7 @@
 //! Startup configuration. Invalid values fail before any listeners are bound.
 
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -42,9 +42,52 @@ pub struct Config {
     #[serde(default)]
     pub doh3: Option<crate::tls::ListenerConfig>,
     #[serde(default)]
+    pub web: Option<WebConfig>,
+    #[serde(default)]
     pub filter_file: Option<PathBuf>,
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebConfig {
+    pub public_host: String,
+}
+
+/// A concrete browser host, never an authority or URL. The returned value is
+/// suitable for a certificate name check and for constructing an origin.
+pub fn public_host(value: &str) -> Result<String> {
+    ensure!(
+        !value.is_empty() && value == value.trim(),
+        "web.public_host must be one domain or IP"
+    );
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        ensure!(
+            !ip.is_unspecified() && !ip.is_multicast(),
+            "web.public_host must be a concrete IP"
+        );
+        return Ok(ip.to_string());
+    }
+    ensure!(
+        !value.contains(['/', ':', '@', '[', ']', '*', '?', '#', '\\']) && !value.ends_with('.'),
+        "web.public_host must be one domain or IP without a port or scheme"
+    );
+    let name = idna::domain_to_ascii_strict(value)
+        .map_err(|_| anyhow::anyhow!("web.public_host is not a valid domain"))?
+        .to_ascii_lowercase();
+    ensure!(
+        name.len() <= 253
+            && name.split('.').all(|part| !part.is_empty()
+                && part.len() <= 63
+                && !part.starts_with('-')
+                && !part.ends_with('-')
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')),
+        "web.public_host is not a valid domain"
+    );
+    Ok(name)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -245,6 +288,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(web) = &self.web {
+            public_host(&web.public_host)?;
+        }
         self.query_log.validate()?;
         self.upstreams.validate()?;
         self.upstreams.validate_listeners(self)?;
@@ -356,6 +402,30 @@ mod tests {
     #[test]
     fn example_is_valid() {
         Config::parse(EXAMPLE).unwrap();
+    }
+
+    #[test]
+    fn web_public_host_is_one_concrete_normalized_name_or_ip() {
+        assert_eq!(
+            public_host("BÜCHER.Example").unwrap(),
+            "xn--bcher-kva.example"
+        );
+        assert_eq!(public_host("2001:db8::1").unwrap(), "2001:db8::1");
+        for invalid in [
+            "",
+            "*.example.com",
+            "https://dns.example",
+            "dns.example:3000",
+            "[::1]",
+            "dns.example/path",
+            "dns.example.",
+            "0.0.0.0",
+            "a..b",
+        ] {
+            assert!(public_host(invalid).is_err(), "{invalid}");
+        }
+        assert!(Config::parse(&format!("{EXAMPLE}\n[web]\npublic_host='dns.example'\n")).is_ok());
+        assert!(Config::parse(&format!("{EXAMPLE}\n[web]\npublic_host='*.example'\n")).is_err());
     }
 
     #[test]

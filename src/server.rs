@@ -76,6 +76,15 @@ enum Encrypted {
 impl Server {
     /// Bind both protocols before accepting traffic. Port zero selects one shared port.
     pub async fn bind(config: Config) -> Result<Self> {
+        Self::bind_with_identity(config, None).await
+    }
+
+    /// Managed mode can pass its already verified DoH/DoH3 identity. This keeps
+    /// DNS and management certificates from diverging between file reads.
+    pub async fn bind_with_identity(
+        config: Config,
+        selected: Option<(&'static str, Arc<rustls::sign::CertifiedKey>)>,
+    ) -> Result<Self> {
         config.validate()?;
         let tcp = TcpListener::bind(config.listen).await?;
         let udp = Arc::new(UdpSocket::bind(tcp.local_addr()?).await?);
@@ -95,7 +104,12 @@ impl Server {
             ));
         }
         if let Some(settings) = &config.doh {
-            let (tls, identity) = crate::tls::reloading_server_config(&settings.files, &[b"h2"])?;
+            let (tls, identity) = if let Some(("doh", key)) = &selected {
+                let identity = crate::tls::Identity::from_key(&settings.files, key.clone());
+                (identity.server_config(&[b"h2"])?, identity)
+            } else {
+                crate::tls::reloading_server_config(&settings.files, &[b"h2"])?
+            };
             identities.push(identity);
             encrypted.push(Encrypted::Doh(
                 TcpListener::bind(settings.listen).await?,
@@ -107,8 +121,16 @@ impl Server {
             (&config.doh3, crate::quic::Protocol::H3, b"h3".as_slice()),
         ] {
             if let Some(settings) = settings {
-                let (tls, identity) =
-                    crate::tls::reloading_server_config(&settings.files, &[alpn])?;
+                let (tls, identity) = if matches!(protocol, crate::quic::Protocol::H3) {
+                    if let Some(("doh3", key)) = &selected {
+                        let identity = crate::tls::Identity::from_key(&settings.files, key.clone());
+                        (identity.server_config(&[alpn])?, identity)
+                    } else {
+                        crate::tls::reloading_server_config(&settings.files, &[alpn])?
+                    }
+                } else {
+                    crate::tls::reloading_server_config(&settings.files, &[alpn])?
+                };
                 identities.push(identity);
                 encrypted.push(Encrypted::Quic(
                     crate::quic::bind(

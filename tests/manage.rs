@@ -7,7 +7,7 @@ use hickory_proto::{
 use parins::{manage, protocol};
 use rustls::{
     ClientConfig, RootCertStore,
-    pki_types::{CertificateDer, ServerName, pem::PemObject},
+    pki_types::{CertificateDer, ServerName},
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -17,7 +17,7 @@ use tokio::{
     task::JoinHandle,
     time::{sleep, timeout},
 };
-use tokio_rustls::{TlsConnector, client::TlsStream};
+use tokio_rustls::TlsConnector;
 
 const PASSWORD: &str = "local-integration-password";
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -42,8 +42,11 @@ impl Response {
         let cookie = self
             .headers
             .lines()
-            .find_map(|line| line.strip_prefix("set-cookie: __host-parins_session="))
-            .expect("HTTPS response sets session Cookie")
+            .find_map(|line| {
+                line.strip_prefix("set-cookie: parins_session_http=")
+                    .or_else(|| line.strip_prefix("set-cookie: __host-parins_session="))
+            })
+            .expect("response sets session Cookie")
             .split(';')
             .next()
             .unwrap();
@@ -57,7 +60,6 @@ impl Response {
 
 struct Management {
     address: SocketAddr,
-    connector: TlsConnector,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<anyhow::Result<()>>>,
 }
@@ -86,17 +88,16 @@ impl Management {
         };
         drop(reservation);
         let directory = directory.to_owned();
-        let certificate = directory.join("https-cert.pem");
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            manage::serve(&directory, listen, None, async {
+            manage::serve(&directory, listen, async {
                 let _ = stopped.await;
             })
             .await
         });
         timeout(DEADLINE, async {
             loop {
-                if certificate.is_file() && TcpStream::connect(address).await.is_ok() {
+                if TcpStream::connect(address).await.is_ok() {
                     break;
                 }
                 assert!(!task.is_finished(), "management exited before binding");
@@ -105,13 +106,8 @@ impl Management {
         })
         .await
         .unwrap();
-        let mut roots = RootCertStore::empty();
-        for certificate in CertificateDer::pem_file_iter(certificate).unwrap() {
-            roots.add(certificate.unwrap()).unwrap();
-        }
         let server = Self {
             address,
-            connector: connector(roots),
             stop: Some(stop),
             task: Some(task),
         };
@@ -131,12 +127,12 @@ impl Management {
         );
         if method != "GET" {
             request.push_str("Content-Type: application/json\r\n");
-            request.push_str(&format!("Origin: https://{}\r\n", self.address));
+            request.push_str(&format!("Origin: http://{}\r\n", self.address));
         }
         if let Some(token) = token {
             let (cookie, binding) = token.split_once('|').expect("Cookie and binding fixture");
             request.push_str(&format!(
-                "Cookie: __Host-parins_session={cookie}\r\nX-PariNS-Session: {binding}\r\n"
+                "Cookie: parins_session_http={cookie}\r\nX-PariNS-Session: {binding}\r\n"
             ));
         }
         request.push_str("\r\n");
@@ -155,30 +151,18 @@ impl Management {
             stream.flush().await.unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).await.unwrap();
-            let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response");
-            let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
-            Response {
-                status,
-                headers: headers.to_ascii_lowercase(),
-                body: body.to_owned(),
-            }
+            parse_response(&response)
         })
         .await
         .expect("HTTP request deadline")
     }
 
-    async fn connect(&self) -> TlsStream<TcpStream> {
+    async fn connect(&self) -> TcpStream {
         self.connect_at(self.address).await
     }
 
-    async fn connect_at(&self, address: SocketAddr) -> TlsStream<TcpStream> {
-        self.connector
-            .connect(
-                ServerName::try_from("localhost").unwrap(),
-                TcpStream::connect(address).await.unwrap(),
-            )
-            .await
-            .expect("HTTPS handshake with trusted generated certificate")
+    async fn connect_at(&self, address: SocketAddr) -> TcpStream {
+        TcpStream::connect(address).await.unwrap()
     }
 
     async fn request(
@@ -240,15 +224,91 @@ impl Management {
     }
 }
 
-fn connector(roots: RootCertStore) -> TlsConnector {
+fn parse_response(response: &str) -> Response {
+    let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response");
+    let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+    Response {
+        status,
+        headers: headers.to_ascii_lowercase(),
+        body: body.to_owned(),
+    }
+}
+
+fn connector(roots: RootCertStore, alpn: &[u8]) -> TlsConnector {
     let mut config =
         ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![alpn.to_vec()];
     TlsConnector::from(Arc::new(config))
+}
+
+async fn trusted_tls(
+    address: SocketAddr,
+    certificate: &rcgen::CertifiedKey<rcgen::KeyPair>,
+    name: &str,
+    alpn: &[u8],
+) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(certificate.cert.der().to_vec()))
+        .unwrap();
+    connector(roots, alpn)
+        .connect(
+            ServerName::try_from(name.to_owned()).unwrap(),
+            TcpStream::connect(address).await.unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn secure_request(
+    address: SocketAddr,
+    certificate: &rcgen::CertifiedKey<rcgen::KeyPair>,
+    name: &str,
+    wire: &str,
+) -> Response {
+    let mut stream = trusted_tls(address, certificate, name, b"http/1.1").await;
+    assert_eq!(
+        stream.get_ref().1.alpn_protocol(),
+        Some(b"http/1.1".as_slice())
+    );
+    stream.write_all(wire.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    parse_response(&response)
+}
+
+fn https_wire(
+    address: SocketAddr,
+    host: &str,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> String {
+    let body = body.map(|value| value.to_string()).unwrap_or_default();
+    let authority = format!("{host}:{}", address.port());
+    let mut wire = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if method != "GET" {
+        wire.push_str(&format!(
+            "Origin: https://{authority}\r\nContent-Type: application/json\r\n"
+        ));
+    }
+    if let Some(token) = token {
+        let (cookie, binding) = token.split_once('|').unwrap();
+        wire.push_str(&format!(
+            "Cookie: __Host-parins_session={cookie}\r\nX-PariNS-Session: {binding}\r\n"
+        ));
+    }
+    wire.push_str("\r\n");
+    wire.push_str(&body);
+    wire
 }
 
 impl Drop for Management {
@@ -322,7 +382,7 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         .await
         .expect(401);
     for extra in [
-        "Origin: https://attacker.example\r\n",
+        "Origin: http://attacker.example\r\n",
         "Sec-Fetch-Site: cross-site\r\n",
     ] {
         let request = format!(
@@ -336,7 +396,7 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         .await
         .expect(403);
     let same_origin = format!(
-        "GET /api/session HTTP/1.1\r\nHost: localhost:{}\r\nOrigin: https://localhost:{}\r\nConnection: close\r\n\r\n",
+        "GET /api/session HTTP/1.1\r\nHost: localhost:{}\r\nOrigin: http://localhost:{}\r\nConnection: close\r\n\r\n",
         server.address.port(),
         server.address.port()
     );
@@ -375,13 +435,10 @@ async fn cookie_session_restores_without_a_token_and_binding_prevents_stale_requ
     assert!(
         issued
             .headers
-            .contains("httponly; secure; samesite=strict; max-age=28800")
+            .contains("httponly; samesite=strict; max-age=28800")
     );
-    assert!(
-        issued
-            .headers
-            .contains("set-cookie: __host-parins_session=")
-    );
+    assert!(issued.headers.contains("set-cookie: parins_session_http="));
+    assert!(!issued.headers.contains("; secure;"));
     assert!(!issued.headers.contains("domain="));
     let auth = issued.auth();
     let (cookie, binding) = auth.split_once('|').unwrap();
@@ -389,7 +446,7 @@ async fn cookie_session_restores_without_a_token_and_binding_prevents_stale_requ
     assert!(view["session"]["expires_in_seconds"].as_u64().unwrap() <= 28800);
 
     let resume = format!(
-        "GET /api/session HTTP/1.1\r\nHost: {}\r\nCookie: __Host-parins_session={cookie}\r\nConnection: close\r\n\r\n",
+        "GET /api/session HTTP/1.1\r\nHost: {}\r\nCookie: parins_session_http={cookie}\r\nConnection: close\r\n\r\n",
         server.address
     );
     let resumed = server.raw(resume.as_bytes()).await;
@@ -431,9 +488,7 @@ async fn cookie_session_restores_without_a_token_and_binding_prevents_stale_requ
     let logged_out = logout.expect(200);
     assert_eq!(logged_out["authenticated"], false);
     assert_eq!(logged_out["session"], Value::Null);
-    assert!(logout.headers.contains(
-        "set-cookie: __host-parins_session=; path=/; httponly; secure; samesite=strict; max-age=0"
-    ));
+    assert!(!logout.headers.contains("set-cookie:"));
     server
         .request("GET", "/api/config", Some(&auth), None)
         .await
@@ -445,7 +500,7 @@ async fn cookie_session_restores_without_a_token_and_binding_prevents_stale_requ
         .request("POST", "/api/logout", Some(&auth), None)
         .await;
     assert_eq!(repeated.expect(200)["authenticated"], false);
-    assert!(repeated.headers.contains("max-age=0"));
+    assert!(!repeated.headers.contains("set-cookie:"));
     server.finish().await;
 }
 
@@ -458,18 +513,18 @@ async fn unsafe_api_requires_exact_origin_and_same_origin_fetch_metadata() {
     // A correct origin reaches authentication; malformed or cross-origin
     // requests are rejected before any private API branch executes.
     server.raw(valid.as_bytes()).await.expect(401);
-    let origin = format!("Origin: https://{}\r\n", server.address);
+    let origin = format!("Origin: http://{}\r\n", server.address);
     for wire in [
         valid.replace(&origin, ""),
         valid.replace(&origin, "Origin: null\r\n"),
-        valid.replace(&origin, "Origin: https://attacker.example\r\n"),
+        valid.replace(&origin, "Origin: http://attacker.example\r\n"),
         valid.replace(
             &origin,
-            &format!("{origin}Origin: https://{}\r\n", server.address),
+            &format!("{origin}Origin: http://{}\r\n", server.address),
         ),
         valid.replace(
             &origin,
-            &format!("Origin: https://127.0.0.1:{}1\r\n", server.address.port()),
+            &format!("Origin: http://127.0.0.1:{}1\r\n", server.address.port()),
         ),
         valid.replacen("\r\n\r\n", "\r\nSec-Fetch-Site: same-site\r\n\r\n", 1),
         valid.replacen("\r\n\r\n", "\r\nSec-Fetch-Site: cross-site\r\n\r\n", 1),
@@ -482,7 +537,7 @@ async fn unsafe_api_requires_exact_origin_and_same_origin_fetch_metadata() {
 }
 
 #[tokio::test]
-async fn successful_login_replaces_the_presented_cookie_but_failed_login_preserves_it() {
+async fn successful_login_creates_an_independent_session_and_failed_login_preserves_it() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
@@ -514,7 +569,7 @@ async fn successful_login_replaces_the_presented_cookie_but_failed_login_preserv
     server
         .request("GET", "/api/config", Some(&old), None)
         .await
-        .expect(401);
+        .expect(200);
     server.config(&current).await;
 
     // Cookie is shared between tabs, while each tab still owns its binding.
@@ -524,8 +579,8 @@ async fn successful_login_replaces_the_presented_cookie_but_failed_login_preserv
         String::from_utf8(server.wire("GET", "/api/config", Some(&old), None))
             .unwrap()
             .replace(
-                &format!("Cookie: __Host-parins_session={old_cookie}"),
-                &format!("Cookie: __Host-parins_session={new_cookie}"),
+                &format!("Cookie: parins_session_http={old_cookie}"),
+                &format!("Cookie: parins_session_http={new_cookie}"),
             );
     assert_eq!(
         server
@@ -856,23 +911,19 @@ async fn ipv4_wildcard_supports_public_ip_origin_without_bypassing_authenticatio
     let server = Management::start_reserved(&directory, listener).await;
     let public_host = format!("203.0.113.10:{}", server.address.port());
     for (host, origin, status) in [
-        (public_host.clone(), format!("https://{public_host}"), 200),
+        (public_host.clone(), format!("http://{public_host}"), 200),
         (
             public_host.clone(),
-            format!("https://203.0.113.11:{}", server.address.port()),
+            format!("http://203.0.113.11:{}", server.address.port()),
             403,
         ),
-        (public_host.clone(), format!("http://{public_host}"), 403),
+        (public_host.clone(), format!("https://{public_host}"), 403),
         (
             format!("attacker.example:{}", server.address.port()),
-            format!("https://attacker.example:{}", server.address.port()),
+            format!("http://attacker.example:{}", server.address.port()),
             403,
         ),
-        (
-            "203.0.113.10:0".into(),
-            "https://203.0.113.10:0".into(),
-            403,
-        ),
+        ("203.0.113.10:0".into(), "http://203.0.113.10:0".into(), 403),
     ] {
         let request = format!(
             "GET /api/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n"
@@ -880,7 +931,7 @@ async fn ipv4_wildcard_supports_public_ip_origin_without_bypassing_authenticatio
         server.raw(request.as_bytes()).await.expect(status);
     }
     let private = format!(
-        "GET /api/config HTTP/1.1\r\nHost: {public_host}\r\nOrigin: https://{public_host}\r\nConnection: close\r\n\r\n"
+        "GET /api/config HTTP/1.1\r\nHost: {public_host}\r\nOrigin: http://{public_host}\r\nConnection: close\r\n\r\n"
     );
     server.raw(private.as_bytes()).await.expect(401);
     let setup = String::from_utf8(server.wire(
@@ -895,8 +946,8 @@ async fn ipv4_wildcard_supports_public_ip_origin_without_bypassing_authenticatio
         &format!("Host: {public_host}"),
     )
     .replace(
-        &format!("Origin: https://{}", server.address),
-        &format!("Origin: https://{public_host}"),
+        &format!("Origin: http://{}", server.address),
+        &format!("Origin: http://{public_host}"),
     )
     .replacen("\r\n\r\n", "\r\nX-PariNS-Setup: wrong-token\r\n\r\n", 1);
     server.raw(setup.as_bytes()).await.expect(403);
@@ -905,7 +956,7 @@ async fn ipv4_wildcard_supports_public_ip_origin_without_bypassing_authenticatio
 }
 
 #[tokio::test]
-async fn ipv6_wildcard_serves_https_with_bracketed_public_ip_origin() {
+async fn ipv6_wildcard_serves_http_with_bracketed_public_ip_origin() {
     let listener = match TcpListener::bind("[::]:0").await {
         Ok(listener) => listener,
         Err(error)
@@ -923,45 +974,583 @@ async fn ipv6_wildcard_serves_https_with_bracketed_public_ip_origin() {
     let server = Management::start_reserved(&temporary.path().join("state"), listener).await;
     let host = format!("[2001:db8::10]:{}", server.address.port());
     let request = format!(
-        "GET /api/session HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\nConnection: close\r\n\r\n"
+        "GET /api/session HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nConnection: close\r\n\r\n"
     );
     server.raw(request.as_bytes()).await.expect(200);
     server.finish().await;
 }
 
 #[tokio::test]
-async fn management_requires_tls_and_generated_certificate_is_not_implicitly_trusted() {
+async fn fresh_management_serves_http_without_generating_identity() {
     let temporary = tempfile::tempdir().unwrap();
-    let server = Management::start(&temporary.path().join("state")).await;
-    let untrusted = connector(RootCertStore::empty());
-    let failure = timeout(
-        DEADLINE,
-        untrusted.connect(
-            ServerName::try_from("localhost").unwrap(),
-            TcpStream::connect(server.address).await.unwrap(),
-        ),
-    )
-    .await
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let response = server.request("GET", "/api/session", None, None).await;
+    assert_eq!(response.expect(200)["transport"]["scheme"], "http");
+    assert!(!directory.join("https-identity.pem").exists());
+    assert!(!directory.join("https-cert.pem").exists());
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn doh_apply_reuses_identity_and_downgrade_requires_confirmation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let original = configuration();
+    let old = server.setup(&directory, &original).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert_path = temporary.path().join("doh-cert.pem");
+    let key_path = temporary.path().join("doh-key.pem");
+    std::fs::write(&cert_path, identity.cert.pem()).unwrap();
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let doh_address = reservation.local_addr().unwrap();
+    drop(reservation);
+    let candidate = format!(
+        "{original}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='{doh_address}'\ncert_file={}\nkey_file={}\n",
+        json!(cert_path),
+        json!(key_path)
+    );
+    let preview = server
+        .request(
+            "POST",
+            "/api/config/preview",
+            Some(&old),
+            Some(json!({"toml":candidate,"changes":{}})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(preview["transport_change"]["to"], "https");
+    let validated = server
+        .request(
+            "POST",
+            "/api/config/validate",
+            Some(&old),
+            Some(json!({"toml":candidate})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(
+        validated["transport_change"]["next_origin"],
+        format!("https://dns.test:{}", server.address.port())
+    );
+    let applied = server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&old),
+            Some(json!({"toml":candidate,"revision":1})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(applied["transport_change"]["reauthenticate"], true);
+    assert_eq!(applied["revision"], 2);
+    let get_session = https_wire(
+        server.address,
+        "dns.test",
+        "GET",
+        "/api/session",
+        None,
+        None,
+    );
+    let session = secure_request(server.address, &identity, "dns.test", &get_session).await;
+    assert_eq!(session.expect(200)["authenticated"], false);
+    assert_eq!(session.json()["transport"]["certificate_source"], "doh");
+    let login_wire = https_wire(
+        server.address,
+        "dns.test",
+        "POST",
+        "/api/login",
+        None,
+        Some(json!({"username":"admin","password":PASSWORD})),
+    );
+    let login = secure_request(server.address, &identity, "dns.test", &login_wire).await;
+    login.expect(200);
+    assert!(login.headers.contains("set-cookie: __host-parins_session="));
+    assert!(
+        login
+            .headers
+            .contains("httponly; secure; samesite=strict; max-age=28800")
+    );
+    let secure_auth = login.auth();
+    let status_wire = https_wire(
+        server.address,
+        "dns.test",
+        "GET",
+        "/api/status",
+        Some(&secure_auth),
+        None,
+    );
+    let status = secure_request(server.address, &identity, "dns.test", &status_wire).await;
+    assert_eq!(status.expect(200)["transport"]["scheme"], "https");
+
+    let management_tls = trusted_tls(server.address, &identity, "dns.test", b"http/1.1").await;
+    let doh_tls = trusted_tls(doh_address, &identity, "dns.test", b"h2").await;
+    assert_eq!(
+        management_tls.get_ref().1.peer_certificates().unwrap()[0].as_ref(),
+        doh_tls.get_ref().1.peer_certificates().unwrap()[0].as_ref()
+    );
+    assert_eq!(doh_tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+
+    let rollback_preview = https_wire(
+        server.address,
+        "dns.test",
+        "POST",
+        "/api/config/rollback/preview",
+        Some(&secure_auth),
+        Some(json!({"revision":2})),
+    );
+    let preview = secure_request(server.address, &identity, "dns.test", &rollback_preview).await;
+    assert_eq!(
+        preview.expect(200)["transport_change"]["requires_http_confirmation"],
+        true
+    );
+    let rollback = https_wire(
+        server.address,
+        "dns.test",
+        "POST",
+        "/api/config/rollback",
+        Some(&secure_auth),
+        Some(json!({"revision":2})),
+    );
+    let rejected = secure_request(server.address, &identity, "dns.test", &rollback).await;
+    assert_eq!(
+        rejected.expect(409)["error"]["code"],
+        "HTTP_DOWNGRADE_CONFIRMATION_REQUIRED"
+    );
+    let rollback = https_wire(
+        server.address,
+        "dns.test",
+        "POST",
+        "/api/config/rollback",
+        Some(&secure_auth),
+        Some(json!({"revision":2,"allow_http_downgrade":true})),
+    );
+    let result = secure_request(server.address, &identity, "dns.test", &rollback).await;
+    assert_eq!(result.expect(200)["transport_change"]["to"], "http");
+    let back = server.request("GET", "/api/session", None, None).await;
+    assert_eq!(back.expect(200)["transport"]["scheme"], "http");
+    assert_eq!(back.json()["authenticated"], false);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn setup_switches_to_https_without_issuing_an_http_cookie() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert_path = temporary.path().join("setup-cert.pem");
+    let key_path = temporary.path().join("setup-key.pem");
+    std::fs::write(&cert_path, identity.cert.pem()).unwrap();
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).unwrap();
+    let candidate = format!(
+        "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(cert_path),
+        json!(key_path)
+    );
+    let token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    let preview_wire = String::from_utf8(server.wire(
+        "POST",
+        "/api/setup/preview",
+        None,
+        Some(json!({"toml":candidate})),
+    ))
     .unwrap()
-    .expect_err("self-signed identity must require explicit trust");
-    assert!(
-        failure.to_string().contains("UnknownIssuer"),
-        "unexpected TLS failure: {failure}"
+    .replacen(
+        "\r\n\r\n",
+        &format!("\r\nX-PariNS-Setup: {token}\r\n\r\n"),
+        1,
     );
-    let mut plain = TcpStream::connect(server.address).await.unwrap();
-    plain
-        .write_all(&server.wire("GET", "/api/session", None, None))
-        .await
-        .unwrap();
-    let mut bytes = Vec::new();
-    let _closed = timeout(DEADLINE, plain.read_to_end(&mut bytes))
-        .await
-        .unwrap();
-    assert!(
-        !bytes.starts_with(b"HTTP/"),
-        "plaintext must not reach the HTTP router"
+    let preview = server.raw(preview_wire.as_bytes()).await;
+    assert_eq!(
+        preview.expect(200)["transport_change"]["next_origin"],
+        format!("https://dns.test:{}", server.address.port())
     );
-    assert!(!String::from_utf8_lossy(&bytes).contains("setup_required"));
+    let response = server.setup_with(&token, &candidate).await;
+    assert_eq!(response.expect(200)["authenticated"], false);
+    assert_eq!(response.json()["transport_change"]["to"], "https");
+    assert!(!response.headers.contains("set-cookie:"));
+    let wire = https_wire(
+        server.address,
+        "dns.test",
+        "GET",
+        "/api/session",
+        None,
+        None,
+    );
+    assert_eq!(
+        secure_request(server.address, &identity, "dns.test", &wire)
+            .await
+            .expect(200)["authenticated"],
+        false
+    );
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn rejected_management_identity_preserves_http_revision_and_sessions() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let original = configuration();
+    let auth = server.setup(&directory, &original).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert_path = temporary.path().join("cert.pem");
+    let key_path = temporary.path().join("key.pem");
+    std::fs::write(&cert_path, identity.cert.pem()).unwrap();
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).unwrap();
+    let candidate = format!(
+        "{original}\n[web]\npublic_host='other.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        json!(cert_path),
+        json!(key_path)
+    );
+    let rejected = server
+        .request(
+            "POST",
+            "/api/config/validate",
+            Some(&auth),
+            Some(json!({"toml":candidate})),
+        )
+        .await;
+    assert_eq!(
+        rejected.expect(422)["error"]["code"],
+        "CERTIFICATE_NAME_MISMATCH"
+    );
+    let rejected = server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&auth),
+            Some(json!({"toml":candidate,"revision":1})),
+        )
+        .await;
+    assert_eq!(
+        rejected.expect(422)["error"]["code"],
+        "CERTIFICATE_NAME_MISMATCH"
+    );
+    assert_eq!(server.config(&auth).await["revision"], 1);
+    assert_eq!(
+        server
+            .request("GET", "/api/session", None, None)
+            .await
+            .expect(200)["transport"]["scheme"],
+        "http"
+    );
+    std::fs::write(&cert_path, "invalid PEM").unwrap();
+    let invalid = server
+        .request(
+            "POST",
+            "/api/config/validate",
+            Some(&auth),
+            Some(json!({"toml":candidate.replace("other.test", "dns.test")})),
+        )
+        .await;
+    assert_eq!(invalid.expect(422)["error"]["code"], "CERTIFICATE_INVALID");
+    server.config(&auth).await;
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn not_yet_valid_and_expired_management_certificates_are_rejected() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let auth = server.setup(&directory, &configuration()).await;
+    let cert_path = temporary.path().join("dated-cert.pem");
+    let key_path = temporary.path().join("dated-key.pem");
+    let candidate = format!(
+        "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(cert_path),
+        json!(key_path)
+    );
+    let now = std::time::SystemTime::now();
+    for (not_before, not_after) in [
+        (
+            now + Duration::from_secs(3600),
+            now + Duration::from_secs(7200),
+        ),
+        (
+            now - Duration::from_secs(7200),
+            now - Duration::from_secs(3600),
+        ),
+    ] {
+        let mut params = rcgen::CertificateParams::new(vec!["dns.test".into()]).unwrap();
+        params.not_before = not_before.into();
+        params.not_after = not_after.into();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key).unwrap();
+        std::fs::write(&cert_path, certificate.pem()).unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        let rejected = server
+            .request(
+                "POST",
+                "/api/config/validate",
+                Some(&auth),
+                Some(json!({"toml":candidate})),
+            )
+            .await;
+        assert_eq!(rejected.expect(422)["error"]["code"], "CERTIFICATE_INVALID");
+        assert_eq!(server.config(&auth).await["revision"], 1);
+    }
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn saved_https_with_missing_identity_fails_startup_closed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert_path = temporary.path().join("cert.pem");
+    let key_path = temporary.path().join("key.pem");
+    std::fs::write(&cert_path, identity.cert.pem()).unwrap();
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).unwrap();
+    let candidate = format!(
+        "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(cert_path),
+        json!(key_path)
+    );
+    let token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    server.setup_with(&token, &candidate).await.expect(200);
+    server.finish().await;
+    std::fs::remove_file(&cert_path).unwrap();
+    let result = manage::serve(&directory, "127.0.0.1:0".parse().unwrap(), async {}).await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("management TLS stage")
+    );
+    assert!(!directory.join("https-identity.pem").exists());
+}
+
+#[tokio::test]
+async fn same_origin_certificate_reapply_changes_identity_without_revoking_session() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let first = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert_path = temporary.path().join("renew-cert.pem");
+    let key_path = temporary.path().join("renew-key.pem");
+    std::fs::write(&cert_path, first.cert.pem()).unwrap();
+    std::fs::write(&key_path, first.signing_key.serialize_pem()).unwrap();
+    let candidate = format!(
+        "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(cert_path),
+        json!(key_path)
+    );
+    let token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    server.setup_with(&token, &candidate).await.expect(200);
+    let login = https_wire(
+        server.address,
+        "dns.test",
+        "POST",
+        "/api/login",
+        None,
+        Some(json!({"username":"admin","password":PASSWORD})),
+    );
+    let login = secure_request(server.address, &first, "dns.test", &login).await;
+    login.expect(200);
+    let auth = login.auth();
+
+    let second = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    std::fs::write(&cert_path, second.cert.pem()).unwrap();
+    std::fs::write(&key_path, second.signing_key.serialize_pem()).unwrap();
+    let apply = https_wire(
+        server.address,
+        "dns.test",
+        "PUT",
+        "/api/config",
+        Some(&auth),
+        Some(json!({"toml":candidate,"revision":1})),
+    );
+    let result = secure_request(server.address, &first, "dns.test", &apply).await;
+    assert_eq!(result.expect(200)["transport_change"], Value::Null);
+    let status = https_wire(
+        server.address,
+        "dns.test",
+        "GET",
+        "/api/status",
+        Some(&auth),
+        None,
+    );
+    let response = secure_request(server.address, &second, "dns.test", &status).await;
+    assert_eq!(response.expect(200)["revision"], 2);
+    let tls = trusted_tls(server.address, &second, "dns.test", b"http/1.1").await;
+    assert_eq!(
+        tls.get_ref().1.peer_certificates().unwrap()[0].as_ref(),
+        second.cert.der().as_ref()
+    );
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn https_rejects_host_origin_and_http_cookie_confusion() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert_path = temporary.path().join("cert.pem");
+    let key_path = temporary.path().join("key.pem");
+    std::fs::write(&cert_path, identity.cert.pem()).unwrap();
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).unwrap();
+    let candidate = format!(
+        "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(cert_path),
+        json!(key_path)
+    );
+    let token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    server.setup_with(&token, &candidate).await.expect(200);
+    let login = https_wire(
+        server.address,
+        "dns.test",
+        "POST",
+        "/api/login",
+        None,
+        Some(json!({"username":"admin","password":PASSWORD})),
+    );
+    let login = secure_request(server.address, &identity, "dns.test", &login).await;
+    login.expect(200);
+    let auth = login.auth();
+    let good = https_wire(
+        server.address,
+        "dns.test",
+        "POST",
+        "/api/config/validate",
+        Some(&auth),
+        Some(json!({"toml":candidate})),
+    );
+    secure_request(server.address, &identity, "dns.test", &good)
+        .await
+        .expect(200);
+    let authority = format!("dns.test:{}", server.address.port());
+    let wrong_port = if server.address.port() == u16::MAX {
+        server.address.port() - 1
+    } else {
+        server.address.port() + 1
+    };
+    let origin = format!("Origin: https://{authority}\r\n");
+    let invalid = [
+        good.replace(&origin, ""),
+        good.replace(&origin, "Origin: null\r\n"),
+        good.replace(&origin, &format!("Origin: http://{authority}\r\n")),
+        good.replace(
+            &origin,
+            &format!("Origin: https://dns.test:{wrong_port}\r\n"),
+        ),
+        good.replace(&origin, &format!("{origin}Origin: https://{authority}\r\n")),
+        good.replace(
+            &format!("Host: {authority}"),
+            &format!("Host: attacker.test:{}", server.address.port()),
+        ),
+        good.replace(
+            &format!("Host: {authority}"),
+            &format!(
+                "Host: attacker.test:{}\r\nX-Forwarded-Host: {authority}",
+                server.address.port()
+            ),
+        ),
+        good.replacen("\r\n\r\n", "\r\nSec-Fetch-Site: same-site\r\n\r\n", 1),
+    ];
+    for request in invalid {
+        secure_request(server.address, &identity, "dns.test", &request)
+            .await
+            .expect(403);
+    }
+    let config = https_wire(
+        server.address,
+        "dns.test",
+        "GET",
+        "/api/config",
+        Some(&auth),
+        None,
+    );
+    let (cookie, _) = auth.split_once('|').unwrap();
+    let with_http_cookie = config.replace(
+        &format!("Cookie: __Host-parins_session={cookie}"),
+        &format!("Cookie: __Host-parins_session={cookie}; parins_session_http=unrelated"),
+    );
+    secure_request(server.address, &identity, "dns.test", &with_http_cookie)
+        .await
+        .expect(200);
+    let only_http_cookie = config.replace(
+        &format!("Cookie: __Host-parins_session={cookie}"),
+        "Cookie: parins_session_http=unrelated",
+    );
+    secure_request(server.address, &identity, "dns.test", &only_http_cookie)
+        .await
+        .expect(401);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn doh3_only_serves_management_https_and_verified_h3_with_same_certificate() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert_path = temporary.path().join("h3-cert.pem");
+    let key_path = temporary.path().join("h3-key.pem");
+    std::fs::write(&cert_path, identity.cert.pem()).unwrap();
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).unwrap();
+    let reservation = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let h3_address = reservation.local_addr().unwrap();
+    drop(reservation);
+    let candidate = format!(
+        "{}\n[web]\npublic_host='dns.test'\n[doh3]\nlisten='{h3_address}'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(cert_path),
+        json!(key_path)
+    );
+    let token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    let setup = server.setup_with(&token, &candidate).await;
+    assert_eq!(setup.expect(200)["transport"]["certificate_source"], "doh3");
+    assert!(!setup.headers.contains("set-cookie:"));
+    let request = https_wire(
+        server.address,
+        "dns.test",
+        "GET",
+        "/api/session",
+        None,
+        None,
+    );
+    let response = secure_request(server.address, &identity, "dns.test", &request).await;
+    assert_eq!(response.expect(200)["transport"]["scheme"], "https");
+    let management_tls = trusted_tls(server.address, &identity, "dns.test", b"http/1.1").await;
+
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(identity.cert.der().to_vec()))
+        .unwrap();
+    let mut tls = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+    let connection = timeout(DEADLINE, endpoint.connect(h3_address, "dns.test").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let peer = connection
+        .peer_identity()
+        .unwrap()
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .unwrap();
+    assert_eq!(
+        peer[0].as_ref(),
+        management_tls.get_ref().1.peer_certificates().unwrap()[0].as_ref()
+    );
+    connection.close(0u32.into(), b"test complete");
+    endpoint.wait_idle().await;
     server.finish().await;
 }
 
@@ -1081,8 +1670,6 @@ async fn restart_restores_configuration_but_not_sessions_and_logout_revokes_toke
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
-    let identity = std::fs::read(directory.join("https-identity.pem")).unwrap();
-    let certificate = std::fs::read(directory.join("https-cert.pem")).unwrap();
     let token = server.setup(&directory, &configuration()).await;
     let exposed = server.config(&token).await;
     assert!(exposed.get("password_hash").is_none());
@@ -1092,14 +1679,8 @@ async fn restart_restores_configuration_but_not_sessions_and_logout_revokes_toke
     assert!(disk.contains("$argon2id$"));
     server.finish().await;
     let server = Management::start(&directory).await;
-    assert_eq!(
-        std::fs::read(directory.join("https-identity.pem")).unwrap(),
-        identity
-    );
-    assert_eq!(
-        std::fs::read(directory.join("https-cert.pem")).unwrap(),
-        certificate
-    );
+    assert!(!directory.join("https-identity.pem").exists());
+    assert!(!directory.join("https-cert.pem").exists());
     assert_eq!(
         server
             .request("GET", "/api/session", None, None)
@@ -1292,7 +1873,7 @@ async fn request_body_and_configuration_sizes_are_bounded_before_mutation() {
     let token = server.setup(&directory, &configuration()).await;
     let (cookie, binding) = token.split_once('|').unwrap();
     let headers = format!(
-        "POST /api/config/validate HTTP/1.1\r\nHost: {}\r\nOrigin: https://{}\r\nCookie: __Host-parins_session={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST /api/config/validate HTTP/1.1\r\nHost: {}\r\nOrigin: http://{}\r\nCookie: parins_session_http={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         server.address,
         server.address,
         300 * 1024 + 1
@@ -1310,7 +1891,7 @@ async fn request_body_and_configuration_sizes_are_bounded_before_mutation() {
         .await
         .expect(422);
     let no_json = format!(
-        "POST /api/logout HTTP/1.1\r\nHost: {}\r\nOrigin: https://{}\r\nCookie: __Host-parins_session={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "POST /api/logout HTTP/1.1\r\nHost: {}\r\nOrigin: http://{}\r\nCookie: parins_session_http={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         server.address, server.address,
     );
     server.raw(no_json.as_bytes()).await.expect(415);

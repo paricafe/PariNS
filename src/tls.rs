@@ -2,6 +2,7 @@
 //! No opportunistic plaintext fallback. The resolver owns upstream deadlines.
 
 use std::{
+    fmt,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -23,6 +24,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::{ingress::Ingress, metrics::Counter, protocol, transport::tcp};
 
@@ -57,6 +59,25 @@ pub fn server_config(files: &TlsFiles, alpn: &[&[u8]]) -> Result<Arc<ServerConfi
     Ok(reloading_server_config(files, alpn)?.0)
 }
 
+pub fn server_config_with_key(key: Arc<CertifiedKey>, alpn: &[&[u8]]) -> Result<Arc<ServerConfig>> {
+    let mut config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(FixedIdentity(key)));
+    config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
+    Ok(Arc::new(config))
+}
+
+#[derive(Debug)]
+struct FixedIdentity(Arc<CertifiedKey>);
+
+impl ResolvesServerCert for FixedIdentity {
+    fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.0.clone())
+    }
+}
+
 /// A stable certificate resolver shared by all cloned server configurations.
 /// File IO happens during preparation, never on a TLS handshake's hot path.
 #[derive(Clone, Debug)]
@@ -66,6 +87,23 @@ pub struct Identity {
 }
 
 impl Identity {
+    pub fn from_key(files: &TlsFiles, key: Arc<CertifiedKey>) -> Self {
+        Self {
+            files: files.clone(),
+            key: Arc::new(RwLock::new(key)),
+        }
+    }
+
+    pub fn server_config(&self, alpn: &[&[u8]]) -> Result<Arc<ServerConfig>> {
+        let mut config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()?
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(self.clone()));
+        config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
+        Ok(Arc::new(config))
+    }
+
     pub fn prepare(&self) -> Result<Arc<CertifiedKey>> {
         load_identity(&self.files)
     }
@@ -91,20 +129,12 @@ pub fn reloading_server_config(
     files: &TlsFiles,
     alpn: &[&[u8]],
 ) -> Result<(Arc<ServerConfig>, Identity)> {
-    let identity = Identity {
-        files: files.clone(),
-        key: Arc::new(RwLock::new(load_identity(files)?)),
-    };
-    let mut config =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(identity.clone()));
-    config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
-    Ok((Arc::new(config), identity))
+    let identity = Identity::from_key(files, load_identity(files)?);
+    let config = identity.server_config(alpn)?;
+    Ok((config, identity))
 }
 
-fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
+pub fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
     let certificates = CertificateDer::pem_file_iter(&files.cert_file)
         .context("open TLS certificate")?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -115,6 +145,38 @@ fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
     let key = PrivateKeyDer::from_pem_file(&files.key_file).context("load TLS private key")?;
     checked_identity(certificates, key)
 }
+
+/// Only the chosen management identity needs a browser host and current dates.
+/// DNS TLS still uses its existing file/key validation contract.
+pub fn validate_management_identity(key: &CertifiedKey, host: &str) -> Result<()> {
+    let name = ServerName::try_from(host.to_owned()).context("invalid management TLS name")?;
+    let leaf = key.cert.first().context("TLS certificate chain is empty")?;
+    let end_entity =
+        webpki::EndEntityCert::try_from(leaf).context("invalid management TLS certificate")?;
+    end_entity
+        .verify_is_valid_for_subject_name(&name)
+        .map_err(|_| ManagementNameMismatch)?;
+    for cert in &key.cert {
+        let (_, parsed) = X509Certificate::from_der(cert.as_ref())
+            .map_err(|_| anyhow::anyhow!("invalid management certificate chain"))?;
+        ensure!(
+            parsed.validity().is_valid(),
+            "management certificate is not currently valid"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct ManagementNameMismatch;
+
+impl fmt::Display for ManagementNameMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("management public_host does not match certificate SAN")
+    }
+}
+
+impl std::error::Error for ManagementNameMismatch {}
 
 /// Validate an imported identity before any secret is persisted. Parsing and
 /// key consistency use the same provider as file-backed listener identities.

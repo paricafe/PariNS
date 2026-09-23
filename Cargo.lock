@@ -990,12 +990,14 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "idna",
  "ipnet",
  "lru",
  "quinn",
  "rand",
  "rcgen",
  "rustls",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "tempfile",
@@ -1003,6 +1005,7 @@ dependencies = [
  "tokio-rustls",
  "toml",
  "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

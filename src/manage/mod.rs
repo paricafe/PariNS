@@ -2,11 +2,11 @@
 mod auth_budget;
 mod cache;
 mod certificates;
-mod https;
 mod runtime;
 mod settings;
 mod stats;
 mod store;
+mod transport;
 
 use anyhow::Result;
 use axum::{
@@ -32,67 +32,63 @@ use std::{
 };
 use store::{Store, Stored};
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
+use transport::{Scheme, Snapshot};
 
 const BODY_LIMIT: usize = 300 * 1024;
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 3600);
-const SESSION_COOKIE: &str = "__Host-parins_session";
-const COOKIE_ATTRIBUTES: &str = "Path=/; HttpOnly; Secure; SameSite=Strict";
+const HTTPS_COOKIE: &str = "__Host-parins_session";
+const HTTP_COOKIE: &str = "parins_session_http";
 #[derive(Clone)]
 struct Session {
     token: String,
     binding: String,
     created: Instant,
 }
-enum CookieAction {
-    Issue(String),
-    Clear,
+struct Active {
+    snapshot: Arc<Snapshot>,
+    sessions: Vec<Session>,
 }
 struct Shared {
     manager: Arc<tokio::sync::Mutex<Manager>>,
-    sessions: Mutex<Vec<Session>>,
+    active: Arc<Mutex<Active>>,
     auth: auth_budget::Budget,
     mutation: Arc<Semaphore>,
     history: Mutex<stats::History>,
     address: SocketAddr,
 }
 
-fn host_allowed(address: SocketAddr, host: &str) -> bool {
-    if host == format!("localhost:{}", address.port())
-        || address.port() == 443 && host == "localhost"
+fn host_allowed(address: SocketAddr, host: &str, transport: &Snapshot) -> bool {
+    let Some((name, port)) = origin_identity(host, transport.scheme.default_port()) else {
+        return false;
+    };
+    if port != address.port() {
+        return false;
+    }
+    if let Some(public) = &transport.public_host
+        && *public == name
     {
+        return true;
+    }
+    if transport.scheme == Scheme::Https {
+        return false;
+    }
+    if name == "localhost" {
         return true;
     }
     // Literal IPs support both directly assigned addresses and public-IP NAT.
     // Arbitrary domain names remain rejected to prevent DNS rebinding. The Host
     // header is not an identity: setup tokens and Cookie auth are still required.
-    let target = host.parse::<SocketAddr>().ok().or_else(|| {
-        if address.port() != 443 {
-            return None;
-        }
-        let ip = host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(host);
-        ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 443))
-    });
-    target.is_some_and(|target| {
-        target.port() == address.port()
-            && !target.ip().is_unspecified()
-            && !target.ip().is_multicast()
-            && (!address.ip().is_loopback() || target.ip().is_loopback())
+    name.parse::<IpAddr>().is_ok_and(|ip| {
+        !ip.is_unspecified()
+            && !ip.is_multicast()
+            && (!address.ip().is_loopback() || ip.is_loopback())
     })
 }
 
-// Origin and Host must name the same HTTPS origin, including effective port.
+// Origin and Host must name the same actual transport origin, including effective port.
 // Keeping localhost distinct from an IP literal also rejects same-site requests
 // sent from another management port or host.
-fn origin_identity(authority: &str) -> Option<(String, u16)> {
-    if authority == "localhost" {
-        return Some(("localhost".to_owned(), 443));
-    }
-    if let Some(port) = authority.strip_prefix("localhost:") {
-        return Some(("localhost".to_owned(), port.parse().ok()?));
-    }
+fn origin_identity(authority: &str, default_port: u16) -> Option<(String, u16)> {
     if let Ok(address) = authority.parse::<SocketAddr>() {
         return Some((address.ip().to_string(), address.port()));
     }
@@ -101,13 +97,24 @@ fn origin_identity(authority: &str) -> Option<(String, u16)> {
         .and_then(|s| s.strip_suffix(']'))
     {
         let ip = literal.parse::<std::net::Ipv6Addr>().ok()?;
-        return Some((ip.to_string(), 443));
+        return Some((ip.to_string(), default_port));
     }
-    let ip = authority.parse::<std::net::Ipv4Addr>().ok()?;
-    Some((ip.to_string(), 443))
+    if let Ok(ip) = authority.parse::<std::net::Ipv4Addr>() {
+        return Some((ip.to_string(), default_port));
+    }
+    let (name, port) = match authority.rsplit_once(':') {
+        Some((name, port)) if !name.contains(':') => (name, port.parse().ok()?),
+        None => (authority, default_port),
+        _ => return None,
+    };
+    let name = crate::config::public_host(name).ok()?;
+    if name.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    Some((name, port))
 }
 
-fn same_origin(headers: &HeaderMap, host: &str, unsafe_method: bool) -> bool {
+fn same_origin(headers: &HeaderMap, host: &str, unsafe_method: bool, scheme: Scheme) -> bool {
     let origins = headers.get_all(header::ORIGIN);
     let mut origins = origins.iter();
     let Some(origin) = origins.next() else {
@@ -116,14 +123,17 @@ fn same_origin(headers: &HeaderMap, host: &str, unsafe_method: bool) -> bool {
     if origins.next().is_some() {
         return false;
     }
-    let Some(source) = origin
-        .to_str()
-        .ok()
-        .and_then(|s| s.strip_prefix("https://"))
-    else {
+    let Some(source) = origin.to_str().ok().and_then(|s| {
+        s.strip_prefix(if scheme == Scheme::Https {
+            "https://"
+        } else {
+            "http://"
+        })
+    }) else {
         return false;
     };
-    origin_identity(source).is_some_and(|source| Some(source) == origin_identity(host))
+    origin_identity(source, scheme.default_port())
+        .is_some_and(|source| Some(source) == origin_identity(host, scheme.default_port()))
 }
 
 #[derive(Debug)]
@@ -140,12 +150,20 @@ impl IntoResponse for ApiError {
 fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
     ApiError(status, code, message.into())
 }
-fn invalid(err: impl std::fmt::Display) -> ApiError {
-    error(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "INVALID_CONFIG",
-        format!("{err:#}"),
-    )
+fn invalid(err: anyhow::Error) -> ApiError {
+    let code = if err.is::<crate::tls::ManagementNameMismatch>() {
+        "CERTIFICATE_NAME_MISMATCH"
+    } else if err.is::<transport::CertificateInvalid>() {
+        "CERTIFICATE_INVALID"
+    } else if err
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+    {
+        "CONFIG_CONFLICT"
+    } else {
+        "INVALID_CONFIG"
+    };
+    error(StatusCode::UNPROCESSABLE_ENTITY, code, format!("{err:#}"))
 }
 fn internal() -> ApiError {
     error(
@@ -160,35 +178,106 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::result::Result<T,
 }
 
 impl Shared {
-    fn session(&self, previous: Option<&str>) -> Session {
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.retain(|s| {
-            s.created.elapsed() < SESSION_LIFETIME && Some(s.token.as_str()) != previous
-        });
-        if sessions.len() >= 16 {
-            sessions.remove(0);
+    fn ensure_current(&self, transport: &Snapshot) -> std::result::Result<(), ApiError> {
+        if self.active.lock().unwrap().snapshot.realm != transport.realm {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "TRANSPORT_CHANGED",
+                "Management address changed; reconnect",
+            ));
+        }
+        Ok(())
+    }
+
+    fn session(&self, transport: &Snapshot) -> std::result::Result<Session, ApiError> {
+        let mut active = self.active.lock().unwrap();
+        if active.snapshot.realm != transport.realm {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "TRANSPORT_CHANGED",
+                "Management address changed; reconnect",
+            ));
+        }
+        active
+            .sessions
+            .retain(|s| s.created.elapsed() < SESSION_LIFETIME);
+        if active.sessions.len() >= 16 {
+            active.sessions.remove(0);
         }
         let session = Session {
             token: store::secret(),
             binding: store::secret(),
             created: Instant::now(),
         };
-        sessions.push(session.clone());
-        session
+        active.sessions.push(session.clone());
+        Ok(session)
     }
 
-    fn find_session(&self, headers: &HeaderMap) -> Option<Session> {
-        let supplied = session_cookie(headers)?;
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.retain(|s| s.created.elapsed() < SESSION_LIFETIME);
-        sessions.iter().find(|s| s.token == supplied).cloned()
+    fn find_session(
+        &self,
+        headers: &HeaderMap,
+        transport: &Snapshot,
+    ) -> std::result::Result<Option<Session>, ApiError> {
+        let mut active = self.active.lock().unwrap();
+        if active.snapshot.realm != transport.realm {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "TRANSPORT_CHANGED",
+                "Management address changed; reconnect",
+            ));
+        }
+        let Some(supplied) = session_cookie(headers, transport.scheme) else {
+            return Ok(None);
+        };
+        active
+            .sessions
+            .retain(|s| s.created.elapsed() < SESSION_LIFETIME);
+        Ok(active
+            .sessions
+            .iter()
+            .find(|s| s.token == supplied)
+            .cloned())
     }
 
-    fn authorized(&self, headers: &HeaderMap) -> std::result::Result<(), ApiError> {
+    fn authorized(
+        &self,
+        headers: &HeaderMap,
+        transport: &Snapshot,
+    ) -> std::result::Result<(), ApiError> {
         let session = self
-            .find_session(headers)
+            .find_session(headers, transport)?
             .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Sign in required"))?;
         verify_binding(headers, &session)
+    }
+
+    fn revoke_session(
+        &self,
+        headers: &HeaderMap,
+        transport: &Snapshot,
+    ) -> std::result::Result<(), ApiError> {
+        let mut active = self.active.lock().unwrap();
+        if active.snapshot.realm != transport.realm {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "TRANSPORT_CHANGED",
+                "Management address changed; reconnect",
+            ));
+        }
+        active
+            .sessions
+            .retain(|session| session.created.elapsed() < SESSION_LIFETIME);
+        let Some(token) = session_cookie(headers, transport.scheme) else {
+            return Ok(());
+        };
+        if let Some(session) = active
+            .sessions
+            .iter()
+            .find(|session| session.token == token)
+        {
+            verify_binding(headers, session)?;
+            active.sessions.retain(|session| session.token != token);
+        }
+        Ok(())
     }
 }
 
@@ -208,14 +297,19 @@ fn verify_binding(headers: &HeaderMap, session: &Session) -> std::result::Result
     Ok(())
 }
 
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+fn session_cookie(headers: &HeaderMap, scheme: Scheme) -> Option<&str> {
+    let expected = if scheme == Scheme::Https {
+        HTTPS_COOKIE
+    } else {
+        HTTP_COOKIE
+    };
     let mut found = None;
     for header in headers.get_all(header::COOKIE).iter() {
         for part in header.to_str().ok()?.split(';') {
             let Some((name, value)) = part.trim().split_once('=') else {
                 continue;
             };
-            if name == SESSION_COOKIE {
+            if name == expected {
                 if found.is_some() {
                     return None;
                 }
@@ -238,6 +332,11 @@ fn session_view(setup_required: bool, session: Option<&Session>) -> Value {
         }),
         None => json!({"setup_required":setup_required,"authenticated":false,"session":null}),
     }
+}
+
+fn with_transport(mut view: Value, transport: &Snapshot) -> Value {
+    view["transport"] = transport.view();
+    view
 }
 
 #[derive(Deserialize)]
@@ -263,11 +362,15 @@ struct Document {
 struct Change {
     toml: String,
     revision: u64,
+    #[serde(default)]
+    allow_http_downgrade: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Revision {
     revision: u64,
+    #[serde(default)]
+    allow_http_downgrade: bool,
 }
 
 #[derive(Deserialize)]
@@ -278,23 +381,71 @@ struct CertificateImport {
     private_key_pem: String,
 }
 
+struct ApiRequest<'a> {
+    peer: SocketAddr,
+    method: &'a str,
+    path: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+}
+
 async fn api(
     shared: Arc<Shared>,
-    peer: SocketAddr,
-    method: &str,
-    path: &str,
-    headers: &HeaderMap,
-    body: &[u8],
-    cookie: &mut Option<CookieAction>,
+    transport: Arc<Snapshot>,
+    input: ApiRequest<'_>,
+    cookie: &mut Option<String>,
 ) -> std::result::Result<Value, ApiError> {
+    let ApiRequest {
+        peer,
+        method,
+        path,
+        headers,
+        body,
+    } = input;
+    shared.ensure_current(&transport)?;
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     match (method, path) {
         ("GET", "/api/session") => {
             let setup_required = shared.manager.lock().await.saved.is_none();
-            let session = shared.find_session(headers);
-            return Ok(session_view(setup_required, session.as_ref()));
+            let session = shared.find_session(headers, &transport)?;
+            return Ok(with_transport(
+                session_view(setup_required, session.as_ref()),
+                &transport,
+            ));
         }
         ("GET", "/api/template") => {
             return Ok(json!({"toml":include_str!("../../parins.example.toml")}));
+        }
+        ("POST", "/api/setup/preview") => {
+            let document: Document = decode(body)?;
+            let manager = shared.manager.lock().await;
+            if manager.saved.is_some() {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "ALREADY_SETUP",
+                    "Setup is already complete",
+                ));
+            }
+            let supplied = headers
+                .get("x-parins-setup")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            let expected = manager.store.setup_token().map_err(|_| internal())?;
+            if supplied != expected {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "SETUP_TOKEN",
+                    "Invalid setup token",
+                ));
+            }
+            let change = manager
+                .transport_change(&document.toml, host)
+                .map_err(invalid)?;
+            manager.validate(document.toml).await.map_err(invalid)?;
+            return Ok(json!({"valid":true,"transport_change":change}));
         }
         ("POST", "/api/login") => {
             shared.auth.attempt(peer.ip())?;
@@ -328,9 +479,12 @@ async fn api(
                     "Invalid credentials",
                 ));
             }
-            let session = shared.session(session_cookie(headers));
-            *cookie = Some(CookieAction::Issue(session.token.clone()));
-            return Ok(session_view(false, Some(&session)));
+            let session = shared.session(&transport)?;
+            *cookie = Some(session.token.clone());
+            return Ok(with_transport(
+                session_view(false, Some(&session)),
+                &transport,
+            ));
         }
         ("POST", "/api/setup") => {
             shared.auth.attempt(peer.ip())?;
@@ -345,7 +499,8 @@ async fn api(
                     error(StatusCode::CONFLICT, "BUSY", "Another change is running")
                 })?;
             let control = shared.clone();
-            let session = tokio::spawn(async move {
+            let host = host.to_owned();
+            let result = tokio::spawn(async move {
                 let _permit = permit;
                 let mut manager = control.manager.lock().await;
                 if manager.saved.is_some() {
@@ -370,14 +525,17 @@ async fn api(
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                 {
-                    return Err(invalid(
+                    return Err(invalid(anyhow::anyhow!(
                         "Username must be 1..64 ASCII letters, digits, hyphen or underscore",
-                    ));
+                    )));
                 }
                 let hash = control
                     .auth
                     .password_work(move || store::hash_password(&setup.password))
                     .await?
+                    .map_err(invalid)?;
+                let change = manager
+                    .transport_change(&setup.toml, &host)
                     .map_err(invalid)?;
                 manager
                     .apply(Stored {
@@ -389,32 +547,40 @@ async fn api(
                     })
                     .await
                     .map_err(invalid)?;
-                Ok(control.session(None))
+                Ok::<_, ApiError>(change)
             })
             .await
             .map_err(|_| internal())?;
-            let session = session?;
-            *cookie = Some(CookieAction::Issue(session.token.clone()));
-            return Ok(session_view(false, Some(&session)));
+            let change = result?;
+            let next = shared.active.lock().unwrap().snapshot.clone();
+            if next.realm != transport.realm {
+                return Ok(json!({"setup_required":false,"authenticated":false,
+                    "session":null,"transport":next.view(),"transport_change":change}));
+            }
+            let session = shared.session(&transport)?;
+            *cookie = Some(session.token.clone());
+            let mut view = with_transport(session_view(false, Some(&session)), &transport);
+            view["transport_change"] = change;
+            return Ok(view);
         }
         ("POST", "/api/logout") => {
-            if let Some(session) = shared.find_session(headers) {
-                verify_binding(headers, &session)?;
-                shared
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .retain(|s| s.token != session.token);
-            }
-            *cookie = Some(CookieAction::Clear);
+            shared.revoke_session(headers, &transport)?;
             let setup_required = shared.manager.lock().await.saved.is_none();
-            return Ok(session_view(setup_required, None));
+            return Ok(with_transport(
+                session_view(setup_required, None),
+                &transport,
+            ));
         }
         _ => {}
     }
-    shared.authorized(headers)?;
+    shared.authorized(headers, &transport)?;
     match (method, path) {
-        ("GET", "/api/status") => Ok(shared.manager.lock().await.status()),
+        ("GET", "/api/status") => {
+            let manager = shared.manager.lock().await;
+            let mut status = manager.status();
+            status["transport"] = manager.transport();
+            Ok(status)
+        }
         ("GET", "/api/stats") => Ok(shared.history.lock().unwrap().view()),
         ("POST", "/api/query-log/list") => {
             let input: crate::query_log::ListOptions = decode(body)?;
@@ -536,31 +702,61 @@ async fn api(
                 .map_err(invalid)
         }
         ("POST", "/api/config/preview") => {
-            let request = decode(body)?;
-            tokio::task::spawn_blocking(move || settings::preview(request))
+            let request: settings::Preview = decode(body)?;
+            let mut preview = tokio::task::spawn_blocking(move || settings::preview(request))
                 .await
                 .map_err(|_| internal())?
-                .map_err(invalid)
+                .map_err(invalid)?;
+            let manager = shared.manager.lock().await;
+            preview["transport_change"] = manager
+                .transport_change(preview["toml"].as_str().expect("preview TOML"), host)
+                .map_err(invalid)?;
+            Ok(preview)
         }
         ("POST", "/api/config/validate") => {
             let document: Document = decode(body)?;
             let manager = shared.manager.lock().await;
             let restart_required = !manager.cache_only(&document.toml);
+            let change = manager
+                .transport_change(&document.toml, host)
+                .map_err(invalid)?;
             manager.validate(document.toml).await.map_err(invalid)?;
-            Ok(json!({"valid":true,"restart_required":restart_required}))
+            Ok(json!({"valid":true,"restart_required":restart_required,"transport_change":change}))
+        }
+        ("POST", "/api/config/rollback/preview") => {
+            let input: Revision = decode(body)?;
+            let manager = shared.manager.lock().await;
+            let saved = manager.saved.as_ref().ok_or_else(internal)?;
+            if saved.revision != input.revision {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "REVISION",
+                    "Configuration changed; reload before restoring",
+                ));
+            }
+            let previous = saved.previous.as_ref().ok_or_else(|| {
+                error(
+                    StatusCode::CONFLICT,
+                    "NO_BACKUP",
+                    "No previous configuration",
+                )
+            })?;
+            let change = manager.transport_change(previous, host).map_err(invalid)?;
+            Ok(json!({"revision":input.revision,"transport_change":change}))
         }
         ("PUT", "/api/config") | ("POST", "/api/config/rollback") => {
-            let (toml, revision) = if path.ends_with("rollback") {
+            let (toml, revision, allow_http_downgrade) = if path.ends_with("rollback") {
                 let r: Revision = decode(body)?;
-                (None, r.revision)
+                (None, r.revision, r.allow_http_downgrade)
             } else {
                 let r: Change = decode(body)?;
-                (Some(r.toml), r.revision)
+                (Some(r.toml), r.revision, r.allow_http_downgrade)
             };
             let permit =
                 shared.mutation.clone().try_acquire_owned().map_err(|_| {
                     error(StatusCode::CONFLICT, "BUSY", "Another change is running")
                 })?;
+            let host = host.to_owned();
             tokio::spawn(async move {
                 let _permit = permit;
                 let mut manager = shared.manager.lock().await;
@@ -579,6 +775,10 @@ async fn api(
                         "No previous configuration",
                     )
                 })?;
+                let change = manager.transport_change(&toml, &host).map_err(invalid)?;
+                if change["requires_http_confirmation"] == true && !allow_http_downgrade {
+                    return Err(error(StatusCode::CONFLICT, "HTTP_DOWNGRADE_CONFIRMATION_REQUIRED", "Confirm switching management to HTTP"));
+                }
                 let next = Stored {
                     toml,
                     previous: Some(saved.toml.clone()),
@@ -587,7 +787,7 @@ async fn api(
                 };
                 let revision = next.revision;
                 let restarted = manager.apply(next).await.map_err(invalid)?;
-                Ok(json!({"revision":revision,"restart_required":restarted}))
+                Ok(json!({"revision":revision,"restart_required":restarted,"transport_change":change}))
             })
             .await
             .map_err(|_| internal())?
@@ -603,9 +803,10 @@ async fn api(
 async fn handle(
     State(shared): State<Arc<Shared>>,
     Extension(peer): Extension<SocketAddr>,
+    Extension(transport): Extension<Arc<Snapshot>>,
     request: Request<Body>,
 ) -> Response {
-    let mut response = handle_inner(shared, peer, request)
+    let mut response = handle_inner(shared, transport, peer, request)
         .await
         .unwrap_or_else(IntoResponse::into_response);
     let headers = response.headers_mut();
@@ -629,6 +830,7 @@ async fn handle(
 
 async fn handle_inner(
     shared: Arc<Shared>,
+    transport: Arc<Snapshot>,
     peer: SocketAddr,
     request: Request<Body>,
 ) -> std::result::Result<Response, ApiError> {
@@ -637,9 +839,10 @@ async fn handle_inner(
     let mut hosts = hosts.iter();
     let host = hosts.next().and_then(|h| h.to_str().ok()).unwrap_or("");
     let unsafe_method = parts.method != "GET" && parts.method != "HEAD";
-    if !host_allowed(shared.address, host)
+    shared.ensure_current(&transport)?;
+    if !host_allowed(shared.address, host, &transport)
         || hosts.next().is_some()
-        || !same_origin(&parts.headers, host, unsafe_method)
+        || !same_origin(&parts.headers, host, unsafe_method, transport.scheme)
         || parts.headers.get_all("sec-fetch-site").iter().count() > 1
         || parts.headers.get("sec-fetch-site").is_some_and(|site| {
             if unsafe_method {
@@ -713,23 +916,30 @@ async fn handle_inner(
     let mut response = axum::Json(
         api(
             shared,
-            peer,
-            parts.method.as_str(),
-            path,
-            &parts.headers,
-            &bytes,
+            transport.clone(),
+            ApiRequest {
+                peer,
+                method: parts.method.as_str(),
+                path,
+                headers: &parts.headers,
+                body: &bytes,
+            },
             &mut cookie,
         )
         .await?,
     )
     .into_response();
     let cookie = match cookie {
-        Some(CookieAction::Issue(token)) => format!(
-            "{SESSION_COOKIE}={token}; {COOKIE_ATTRIBUTES}; Max-Age={}",
-            SESSION_LIFETIME.as_secs()
-        ),
-        Some(CookieAction::Clear) => {
-            format!("{SESSION_COOKIE}=; {COOKIE_ATTRIBUTES}; Max-Age=0")
+        Some(token) => {
+            let (name, attributes) = if transport.scheme == Scheme::Https {
+                (HTTPS_COOKIE, "Path=/; HttpOnly; Secure; SameSite=Strict")
+            } else {
+                (HTTP_COOKIE, "Path=/; HttpOnly; SameSite=Strict")
+            };
+            format!(
+                "{name}={token}; {attributes}; Max-Age={}",
+                SESSION_LIFETIME.as_secs()
+            )
         }
         None => return Ok(response),
     };
@@ -743,20 +953,11 @@ async fn handle_inner(
 pub async fn serve(
     directory: &Path,
     address: SocketAddr,
-    tls_files: Option<crate::tls::TlsFiles>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
     let listener = TcpListener::bind(address).await?;
     let address = listener.local_addr()?;
     let store = Store::open(directory)?;
-    let acceptor =
-        tokio_rustls::TlsAcceptor::from(https::config(&store, tls_files.as_ref(), address)?);
-    if tls_files.is_none() {
-        eprintln!(
-            "PariNS self-signed management certificate: {} (verify its fingerprint before trusting)",
-            store.dir.join("https-cert.pem").display()
-        );
-    }
     if store.read()?.is_none() {
         store.setup_token()?;
         eprintln!(
@@ -764,21 +965,40 @@ pub async fn serve(
             store.dir.join("setup-token").display()
         );
     }
-    let manager = Arc::new(tokio::sync::Mutex::new(Manager::open(store).await?));
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: Vec::new(),
+    }));
+    let manager = Arc::new(tokio::sync::Mutex::new(
+        Manager::open(store, address, active.clone()).await?,
+    ));
     let shared = Arc::new(Shared {
         manager: manager.clone(),
-        sessions: Mutex::new(Vec::new()),
+        active: active.clone(),
         auth: auth_budget::Budget::new(),
         mutation: Arc::new(Semaphore::new(1)),
         history: Mutex::new(stats::History::default()),
         address,
     });
     let router = Router::new().fallback(handle).with_state(shared.clone());
-    eprintln!("PariNS management: https://{address}");
-    if !address.ip().is_loopback() {
+    let initial = active.lock().unwrap().snapshot.clone();
+    if let Some(origin) = &initial.origin {
+        eprintln!("PariNS management: {origin}/");
+    } else if address.ip().is_unspecified() {
         eprintln!(
-            "Management HTTPS is network-accessible. Use the server IP, not the wildcard address, in your browser; allow the port in your firewall/security group for intended clients."
+            "PariNS management: HTTP listening on {address}; use a concrete server IP with this port"
         );
+    } else {
+        eprintln!("PariNS management: http://{address}/");
+    }
+    if !address.ip().is_loopback() {
+        if initial.scheme == Scheme::Http {
+            eprintln!(
+                "Management HTTP is network-accessible. Enter credentials locally or over an SSH tunnel; use a concrete IP or configured public_host, not the wildcard address."
+            );
+        } else {
+            eprintln!("Management HTTPS is network-accessible. Restrict access to administrators.");
+        }
     }
     let permits = Arc::new(Semaphore::new(32));
     let mut tasks = JoinSet::new();
@@ -806,14 +1026,19 @@ pub async fn serve(
                     Err(error) => break Err(error.into()),
                 };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
-                let service = TowerToHyperService::new(router.clone().layer(Extension(peer)));
-                let acceptor = acceptor.clone();
+                let snapshot = active.lock().unwrap().snapshot.clone();
+                let service = TowerToHyperService::new(router.clone().layer(Extension(peer)).layer(Extension(snapshot.clone())));
                 tasks.spawn(async move {
                     let _permit = permit;
-                    let Ok(Ok(stream)) = timeout(Duration::from_secs(5), acceptor.accept(stream)).await else { return; };
                     let mut builder = hyper::server::conn::http1::Builder::new();
                     builder.keep_alive(false).max_headers(32).timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(5));
-                    let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service)).await;
+                    if let Some(tls) = &snapshot.tls {
+                        let acceptor = tokio_rustls::TlsAcceptor::from(tls.clone());
+                        let Ok(Ok(stream)) = timeout(Duration::from_secs(5), acceptor.accept(stream)).await else { return; };
+                        let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service)).await;
+                    } else {
+                        let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service)).await;
+                    }
                 });
             }
         }
@@ -830,6 +1055,203 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn session_capacity_and_late_logout_do_not_revoke_other_logins() {
+        use axum::http::{HeaderMap, HeaderValue, header};
+        use std::sync::{Arc, Mutex};
+        let temp = tempfile::tempdir().unwrap();
+        let address = "127.0.0.1:3000".parse().unwrap();
+        let active = Arc::new(Mutex::new(super::Active {
+            snapshot: Arc::new(super::Snapshot::initial()),
+            sessions: Vec::new(),
+        }));
+        let manager = Arc::new(tokio::sync::Mutex::new(
+            super::Manager::open(
+                super::Store::open(&temp.path().join("state")).unwrap(),
+                address,
+                active.clone(),
+            )
+            .await
+            .unwrap(),
+        ));
+        let shared = super::Shared {
+            manager,
+            active: active.clone(),
+            auth: super::auth_budget::Budget::new(),
+            mutation: Arc::new(tokio::sync::Semaphore::new(1)),
+            history: Mutex::new(super::stats::History::default()),
+            address,
+        };
+        let current = active.lock().unwrap().snapshot.clone();
+        let first = shared.session(&current).unwrap();
+        let second = shared.session(&current).unwrap();
+        let mut first_headers = HeaderMap::new();
+        first_headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("parins_session_http={}", first.token)).unwrap(),
+        );
+        first_headers.insert(
+            "x-parins-session",
+            HeaderValue::from_str(&first.binding).unwrap(),
+        );
+        shared.revoke_session(&first_headers, &current).unwrap();
+        let mut second_headers = HeaderMap::new();
+        second_headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("parins_session_http={}", second.token)).unwrap(),
+        );
+        assert!(
+            shared
+                .find_session(&second_headers, &current)
+                .unwrap()
+                .is_some()
+        );
+        for _ in 0..16 {
+            shared.session(&current).unwrap();
+        }
+        assert_eq!(active.lock().unwrap().sessions.len(), 16);
+        assert!(
+            shared
+                .find_session(&second_headers, &current)
+                .unwrap()
+                .is_none()
+        );
+        let newest = active.lock().unwrap().sessions.last().unwrap().clone();
+        let mut newest_headers = HeaderMap::new();
+        newest_headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("parins_session_http={}", newest.token)).unwrap(),
+        );
+        shared.revoke_session(&first_headers, &current).unwrap();
+        assert!(
+            shared
+                .find_session(&newest_headers, &current)
+                .unwrap()
+                .is_some()
+        );
+        newest_headers.insert("x-parins-session", HeaderValue::from_static("old-binding"));
+        assert_eq!(
+            shared
+                .revoke_session(&newest_headers, &current)
+                .unwrap_err()
+                .1,
+            "SESSION_CHANGED"
+        );
+        assert!(
+            shared
+                .find_session(&newest_headers, &current)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_cookie_logout_is_idempotent_without_binding() {
+        use axum::http::{HeaderMap, HeaderValue, header};
+        use std::{
+            sync::{Arc, Mutex},
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let address = "127.0.0.1:3000".parse().unwrap();
+        let active = Arc::new(Mutex::new(super::Active {
+            snapshot: Arc::new(super::Snapshot::initial()),
+            sessions: vec![super::Session {
+                token: "expired".into(),
+                binding: "old-binding".into(),
+                created: Instant::now() - Duration::from_secs(8 * 3600 + 1),
+            }],
+        }));
+        let manager = Arc::new(tokio::sync::Mutex::new(
+            super::Manager::open(
+                super::Store::open(&temp.path().join("state")).unwrap(),
+                address,
+                active.clone(),
+            )
+            .await
+            .unwrap(),
+        ));
+        let shared = super::Shared {
+            manager,
+            active: active.clone(),
+            auth: super::auth_budget::Budget::new(),
+            mutation: Arc::new(tokio::sync::Semaphore::new(1)),
+            history: Mutex::new(super::stats::History::default()),
+            address,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("parins_session_http=expired"),
+        );
+        let current = active.lock().unwrap().snapshot.clone();
+        shared.revoke_session(&headers, &current).unwrap();
+        assert!(active.lock().unwrap().sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_waiting_on_manager_rejects_replaced_realm() {
+        use axum::http::HeaderMap;
+        use std::{
+            sync::{Arc, Mutex},
+            task::Poll,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let address = "127.0.0.1:3000".parse().unwrap();
+        let active = Arc::new(Mutex::new(super::Active {
+            snapshot: Arc::new(super::Snapshot::initial()),
+            sessions: Vec::new(),
+        }));
+        let manager = Arc::new(tokio::sync::Mutex::new(
+            super::Manager::open(
+                super::Store::open(&temp.path().join("state")).unwrap(),
+                address,
+                active.clone(),
+            )
+            .await
+            .unwrap(),
+        ));
+        let shared = Arc::new(super::Shared {
+            manager: manager.clone(),
+            active: active.clone(),
+            auth: super::auth_budget::Budget::new(),
+            mutation: Arc::new(tokio::sync::Semaphore::new(1)),
+            history: Mutex::new(super::stats::History::default()),
+            address,
+        });
+        let old = active.lock().unwrap().snapshot.clone();
+        let headers = HeaderMap::new();
+        let mut cookie = None;
+        let guard = manager.lock().await;
+        let future = super::api(
+            shared.clone(),
+            old.clone(),
+            super::ApiRequest {
+                peer: address,
+                method: "GET",
+                path: "/api/session",
+                headers: &headers,
+                body: &[],
+            },
+            &mut cookie,
+        );
+        tokio::pin!(future);
+        assert!(matches!(
+            futures_util::poll!(future.as_mut()),
+            Poll::Pending
+        ));
+        let mut replacement = super::Snapshot::initial();
+        replacement.realm = 1;
+        active.lock().unwrap().snapshot = Arc::new(replacement);
+        drop(guard);
+        let error = future.await.unwrap_err();
+        assert_eq!(error.1, "TRANSPORT_CHANGED");
+        assert!(matches!(
+            shared.session(&old),
+            Err(super::ApiError(_, "TRANSPORT_CHANGED", _))
+        ));
+    }
+
     #[test]
     fn origin_comparison_normalizes_default_https_port_and_ipv6() {
         use axum::http::{HeaderMap, HeaderValue, header};
@@ -842,7 +1264,10 @@ mod tests {
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
-            assert!(super::same_origin(&headers, host, true), "{host} {origin}");
+            assert!(
+                super::same_origin(&headers, host, true, super::Scheme::Https),
+                "{host} {origin}"
+            );
         }
         let mut headers = HeaderMap::new();
         for origin in [
@@ -854,33 +1279,59 @@ mod tests {
             "https://::1",
         ] {
             headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
-            assert!(!super::same_origin(&headers, "localhost", true), "{origin}");
+            assert!(
+                !super::same_origin(&headers, "localhost", true, super::Scheme::Https),
+                "{origin}"
+            );
         }
         headers.insert(header::ORIGIN, HeaderValue::from_static("https://::1"));
-        assert!(!super::same_origin(&headers, "[::1]", true));
+        assert!(!super::same_origin(
+            &headers,
+            "[::1]",
+            true,
+            super::Scheme::Https
+        ));
         headers.remove(header::ORIGIN);
-        assert!(!super::same_origin(&headers, "localhost", true));
+        assert!(!super::same_origin(
+            &headers,
+            "localhost",
+            true,
+            super::Scheme::Https
+        ));
     }
 
     #[test]
     fn host_allowlist_includes_bound_ip_and_https_default_port() {
-        let address = "127.0.0.2:443".parse().unwrap();
-        for host in ["127.0.0.2", "127.0.0.2:443", "localhost", "[::1]:443"] {
-            assert!(super::host_allowed(address, host));
+        let transport = super::Snapshot::initial();
+        let address = "127.0.0.2:80".parse().unwrap();
+        for host in ["127.0.0.2", "127.0.0.2:80", "localhost", "[::1]:80"] {
+            assert!(super::host_allowed(address, host, &transport));
         }
         let address = "[::1]:3000".parse().unwrap();
-        assert!(super::host_allowed(address, "[::1]:3000"));
-        assert!(!super::host_allowed(address, "localhost"));
-        assert!(!super::host_allowed(address, "attacker.test:3000"));
-        assert!(!super::host_allowed(address, "203.0.113.10:3000"));
+        assert!(super::host_allowed(address, "[::1]:3000", &transport));
+        assert!(!super::host_allowed(address, "localhost", &transport));
+        assert!(!super::host_allowed(
+            address,
+            "attacker.test:3000",
+            &transport
+        ));
+        assert!(!super::host_allowed(
+            address,
+            "203.0.113.10:3000",
+            &transport
+        ));
     }
 
     #[test]
     fn public_listener_accepts_literal_ipv4_ipv6_but_not_domains_or_other_ports() {
+        let transport = super::Snapshot::initial();
         for address in ["0.0.0.0:3000", "[::]:3000", "10.0.0.1:3000"] {
             let address = address.parse().unwrap();
             for host in ["203.0.113.10:3000", "[2001:db8::10]:3000", "127.0.0.1:3000"] {
-                assert!(super::host_allowed(address, host), "{address} {host}");
+                assert!(
+                    super::host_allowed(address, host, &transport),
+                    "{address} {host}"
+                );
             }
             for host in [
                 "attacker.test:3000",
@@ -891,11 +1342,14 @@ mod tests {
                 "[::]:3000",
                 "224.0.0.1:3000",
             ] {
-                assert!(!super::host_allowed(address, host), "{address} {host}");
+                assert!(
+                    !super::host_allowed(address, host, &transport),
+                    "{address} {host}"
+                );
             }
         }
-        let address = "0.0.0.0:443".parse().unwrap();
-        assert!(super::host_allowed(address, "203.0.113.10"));
-        assert!(super::host_allowed(address, "[2001:db8::10]"));
+        let address = "0.0.0.0:80".parse().unwrap();
+        assert!(super::host_allowed(address, "203.0.113.10", &transport));
+        assert!(super::host_allowed(address, "[2001:db8::10]", &transport));
     }
 }

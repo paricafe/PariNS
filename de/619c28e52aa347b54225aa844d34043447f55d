@@ -1,0 +1,25 @@
+README.md
+  s_d595d238bbd4ee::t_9c6fe31c600add 703-716,724-728
+  s_d595d238bbd4ee::t_9803d110dea035 183-195,197-199
+  s_d595d238bbd4ee::t_2f838e4c38fabf 729
+CHANGELOG.md
+  s_d595d238bbd4ee::t_775e6b3e3e11aa 3-14
+AGENTS.md
+  s_d595d238bbd4ee::t_9803d110dea035 56-60,62,93-97,137-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "de619c28e52aa347b54225aa844d34043447f55d",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

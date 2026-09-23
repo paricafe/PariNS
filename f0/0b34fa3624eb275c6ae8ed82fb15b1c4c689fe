@@ -1,0 +1,84 @@
+web/src/config/context.tsx
+  s_d595d238bbd4ee::t_f3210c7beb0a31 150,175
+  s_d595d238bbd4ee::t_a4940b3f230903 24,76,283,364
+  s_d595d238bbd4ee::t_db92c2032b2327 304,320,325
+  s_d595d238bbd4ee::t_3c7c2d7d9ee042 195-197,200-202
+  s_d595d238bbd4ee::t_240fc95cf6edd8 3,7-8,23,27-29,49,52-53,75,120,126,131,136,173-174,176-177,207-208,253,266-269,275-277,282,326-333,335,337,344-347,349-350,356,382-383
+  s_d595d238bbd4ee::t_00032b281813e4 79,278,288,358,369
+web/src/components/TransportHint.tsx
+  s_d595d238bbd4ee::t_1f9b2219ddb511 1-17
+web/src/model/__tests__/model.test.ts
+  s_d595d238bbd4ee::t_7105b05d93e082 13-15,59,65
+web/src/AuthPages.tsx
+  s_d595d238bbd4ee::t_fbc1f8e2245631 4
+web/src/i18n/__tests__/i18n.test.ts
+  s_d595d238bbd4ee::t_ec5a735b24b442 56
+web/src/model/settings.ts
+  s_d595d238bbd4ee::t_4359bc2f763c22 84-91,93
+web/src/config/context.test.tsx
+  s_d595d238bbd4ee::t_c5f14974828e3e 9,211,262,268-270
+  s_d595d238bbd4ee::t_338340c4e0c52e 23-24,88-89,91-110
+  s_d595d238bbd4ee::t_43f6698abb8557 157,159-161,184-187
+  s_d595d238bbd4ee::t_efa9b7cbe94787 113-133,306
+  s_d595d238bbd4ee::t_8f983c303c0873 53-71
+  s_d595d238bbd4ee::t_778e3f278a0587 278-305
+  s_d595d238bbd4ee::t_eaa9ca118a980d 28-52,72-87,111-112
+  s_d595d238bbd4ee::t_57edf424ef8c0d 90,156,168,183
+  s_d595d238bbd4ee::t_a898f4716f7830 188
+web/src/i18n/settings.ts
+  s_d595d238bbd4ee::t_2cf531ab21e678 9-13
+web/src/style.css
+  s_d595d238bbd4ee::t_b904b122bf2618 109
+  s_d595d238bbd4ee::t_f44a4053622cfd 181
+web/src/session/context.tsx
+  s_d595d238bbd4ee::t_b84a7d29a30107 2,5,15,29,37-39,94-107,111-112,122,132,138,146,148,159,163,181,184,200
+  s_d595d238bbd4ee::t_1bda669c07fe11 135,145,147,153
+  s_d595d238bbd4ee::t_4982c9acd04b81 154,156
+  s_d595d238bbd4ee::t_19e70ea607c877 4
+  s_d595d238bbd4ee::t_5313110c7d5285 136,144,155
+  s_d595d238bbd4ee::t_09f374a7ef6eb5 66-72
+  s_d595d238bbd4ee::t_76ab6bfb8fc65a 51-53,142-143
+  s_d595d238bbd4ee::t_f15e8b75935300 108-110
+web/src/session/context.test.tsx
+  s_d595d238bbd4ee::t_1a71eb8daa024b 33,45,63
+  s_d595d238bbd4ee::t_4b8e705bc1b744 53,67-68,70-76,85,87-90
+  s_d595d238bbd4ee::t_2e3fa513fb971d 30-32,34-44,46-52,54-62,64-65
+  s_d595d238bbd4ee::t_c2d37ad781a556 66,69,77-84,86,91-93
+  s_d595d238bbd4ee::t_a02d1bf5693c74 6-7,114
+  s_d595d238bbd4ee::t_3fe1c61b7df1fb 13-29
+web/src/session/client.test.ts
+  s_d595d238bbd4ee::t_8857040e0a7768 2,5-6,84-86
+  s_d595d238bbd4ee::t_f6a3f0f9da3fa2 68-78
+web/src/App.tsx
+  s_d595d238bbd4ee::t_ca6fd8845b5733 170,175
+  s_d595d238bbd4ee::t_b834b8520773cd 171
+  s_d595d238bbd4ee::t_23b446a0216dcf 62-63,72-78,172
+  s_d595d238bbd4ee::t_61326f3af0038a 12,83
+  s_d595d238bbd4ee::t_bd2811d1ded0f1 166
+web/src/session/client.ts
+  s_d595d238bbd4ee::t_aa547f7bd974e0 38,106
+  s_d595d238bbd4ee::t_3a81e65ea19b72 5-19,44-47
+web/src/i18n/console.ts
+  s_d595d238bbd4ee::t_f7de45f4196586 7-8,22,58,221,223-226,228-238
+  s_d595d238bbd4ee::t_7214c7ea32dcea 227
+web/src/pages/config/SettingsPage.tsx
+  s_d595d238bbd4ee::t_27dfc7c312e0a5 257,261,266-267,272,277
+  s_d595d238bbd4ee::t_ad32af1ca2159e 11,221,255-256,268-271,273-276,281,292-299
+  s_d595d238bbd4ee::t_159fa7e931ae87 220,258-260,262-265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f00b34fa3624eb275c6ae8ed82fb15b1c4c689fe",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+scripts/test-bootstrap.sh
+  s_d595d238bbd4ee::t_f5c50e5a7631a6 24,41,75,79-81,87
+scripts/bootstrap.sh
+  s_d595d238bbd4ee::t_f5c50e5a7631a6 9-10,38
+README.md
+  s_d595d238bbd4ee::t_f5c50e5a7631a6 33,37-40,105
+Cargo.toml
+  s_d595d238bbd4ee::t_f5c50e5a7631a6 3
+CHANGELOG.md
+  s_d595d238bbd4ee::t_f5c50e5a7631a6 3-5,9-11
+Cargo.lock
+  s_b098854b57084b::t_fc592d8e6e8583 978
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d19bd26e40fe12713677b2611350115a954144ce",
+  "prompts": {},
+  "sessions": {
+    "s_b098854b57084b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-b6f5-7b01-8f3b-6ba56af98fa3",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

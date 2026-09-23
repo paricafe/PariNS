@@ -1,0 +1,48 @@
+CHANGELOG.md
+  s_d595d238bbd4ee::t_c87284a4961733 8-15
+scripts/test-install.sh
+  s_d595d238bbd4ee::t_45600dad8161ae 28-29,44-45
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_f7ff2f22c4f04f 65,79,83,88-90,92,94,98-100,104,113,126,129,137-138,173-174,177,179,183
+  s_d595d238bbd4ee::t_6e4d84cfc7f389 101-103
+README.md
+  s_d595d238bbd4ee::t_0592596a3dd21e 286-288
+  s_d595d238bbd4ee::t_4f67ebbbfb5d3d 198-199,346-348
+  s_d595d238bbd4ee::t_02a950f783ae3c 33-36
+  s_d595d238bbd4ee::t_cf4c6a72244684 4,27-28,38-41,52-53,79-81,84,95-98,112-114
+  s_d595d238bbd4ee::t_2189e0d518dff7 197,344-345
+  s_d595d238bbd4ee::t_6d92699ee123c3 142,163-165,168-170,172,175,182,190-196,216-237
+  s_d595d238bbd4ee::t_fee3e154cb5341 626-628,800
+  s_d595d238bbd4ee::t_a20f0af9c941b8 37
+  s_d595d238bbd4ee::t_ba1b917a882137 289
+scripts/test-bootstrap.sh
+  s_d595d238bbd4ee::t_41d7567f0f8ea5 82-87,91-93
+  s_d595d238bbd4ee::t_58ec9d98cdd4f3 49
+  s_d595d238bbd4ee::t_95877c150863e8 55-57
+  s_d595d238bbd4ee::t_bbe427781af552 88-90
+scripts/install.sh
+  s_d595d238bbd4ee::t_936a5164c2fda9 149,152,157
+  s_d595d238bbd4ee::t_5925811d0dc6ed 151
+scripts/bootstrap.sh
+  s_d595d238bbd4ee::t_c4eb65d7c1cd30 110-114
+  s_d595d238bbd4ee::t_ecef9408f66fb2 99,122
+  s_d595d238bbd4ee::t_706f77a1448455 126-128
+AGENTS.md
+  s_d595d238bbd4ee::t_3302f455098dbb 93-99,106-112,116-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2226ab6074e9a74fda460f89086ee4f990687846",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

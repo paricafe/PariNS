@@ -1,0 +1,19 @@
+tests/upstreams.rs
+  s_d595d238bbd4ee::t_b411261cc5ec27 771-775,786,795,801,809
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d33ee4612f10719e036d885edf2851e68bdd7ca9",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

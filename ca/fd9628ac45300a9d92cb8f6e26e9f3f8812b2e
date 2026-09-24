@@ -1,0 +1,45 @@
+scripts/bootstrap.sh
+  s_d595d238bbd4ee::t_57a9ad1a91ca40 110
+  s_d595d238bbd4ee::t_62a2ab0c8e5579 9-10,38
+README.md
+  s_d595d238bbd4ee::t_62a2ab0c8e5579 33,39,113
+  s_d595d238bbd4ee::t_cb7916a688d255 34-38,42-47,78-80
+  s_d595d238bbd4ee::t_75a4071b20bcc8 40-41
+Cargo.toml
+  s_d595d238bbd4ee::t_62a2ab0c8e5579 3
+  s_d595d238bbd4ee::t_57a9ad1a91ca40 7
+CHANGELOG.md
+  s_d595d238bbd4ee::t_57a9ad1a91ca40 4-13,18-19
+  s_d595d238bbd4ee::t_75a4071b20bcc8 14-17
+  s_d595d238bbd4ee::t_62a2ab0c8e5579 3
+scripts/test-bootstrap.sh
+  s_d595d238bbd4ee::t_cb7916a688d255 82
+  s_d595d238bbd4ee::t_62a2ab0c8e5579 24,41,79,86,89,94-96,102
+  s_d595d238bbd4ee::t_ef0f3180341fce 103
+Cargo.lock
+  s_2860e69cd7fbe5::t_96c9fc51cafac3 978
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "cafd9628ac45300a9d92cb8f6e26e9f3f8812b2e",
+  "prompts": {},
+  "sessions": {
+    "s_2860e69cd7fbe5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d12b-1296-7db0-b70d-e926e4802940",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

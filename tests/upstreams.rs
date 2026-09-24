@@ -768,7 +768,11 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
         }
     });
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
-    config.query_timeout_ms = 80;
+    // This is a real-socket fallback/cooldown test, not a sub-100ms latency
+    // benchmark: leave room for Linux TCP ACK timers and CI scheduling after
+    // the bounded 250ms QUIC probe. The test below separately checks that
+    // short caller deadlines include both connection waiting and fallback.
+    config.query_timeout_ms = 1000;
     let settings = &mut config.upstreams;
     settings.ca_file = Some(ca);
     settings.prefer_h3 = true;
@@ -779,7 +783,7 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
     assert_eq!(
         timeout(
             Duration::from_secs(2),
-            client.exchange_observed(&query(), start + Duration::from_millis(80), &operation)
+            client.exchange_observed(&query(), start + Duration::from_secs(1), &operation)
         )
         .await
         .unwrap()
@@ -788,12 +792,13 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
         .id,
         123
     );
-    assert!(start.elapsed() >= Duration::from_millis(40));
+    assert!(start.elapsed() >= Duration::from_millis(250));
     let trace = operation.trace().unwrap();
     assert_eq!(trace.attempts.len(), 2);
     assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
     assert_eq!(trace.attempts[0].stage, Stage::QuicHandshake);
     assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
+    assert!(trace.attempts[0].elapsed_ms < 500, "{trace:?}");
     assert_eq!(trace.attempts[1].protocol, Some(ActualProtocol::Doh2));
     assert_eq!(trace.attempts[1].outcome, Outcome::Succeeded);
     let operation = Operation::new(true, None);
@@ -801,7 +806,7 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
         client
             .exchange_observed(
                 &query(),
-                tokio::time::Instant::now() + Duration::from_millis(80),
+                tokio::time::Instant::now() + Duration::from_secs(1),
                 &operation
             )
             .await

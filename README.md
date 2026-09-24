@@ -30,22 +30,21 @@ provider or hosted service.
 
 ## Status
 
-Published v0.1.2 is an early release, with automated Linux and macOS tests
-and isolated Linux systemd installation checks. The new console transport
-behavior below is not yet in that release. Production deployment and
-target-machine capacity acceptance have not been performed.
+Version 0.1.3 adds the React management console, Cookie-based sessions, and
+management HTTPS using a validated inbound DoH or DoH3 certificate. It changes
+the default management protocol to HTTP; upgrading an installation without
+inbound DoH/DoH3 can expose port 3000 in plaintext. Restrict access to
+administrator IPs and use local access or an SSH tunnel for credentials and
+private-key entry until HTTPS is configured. See the
+[upgrade notice](CHANGELOG.md#v013--2026-09-24) before installing this version.
+An existing DoH/DoH3 setup also needs `[web].public_host` covered by its
+certificate, or the new managed service will reject that configuration.
 
-The default-HTTP console and DoH certificate reuse described below are changes
-in the unreleased source tree. Published v0.1.2 packages still use the HTTPS
-setup documented in that tag; do not assume an existing installation has
-switched protocol until the new configuration is applied.
-
-Version 0.1.2 improves encrypted listener forms and fixes authentication limits,
-EDE cache invalidation, DoH Age handling, DoQ address rotation and cache-rule drafts.
-It includes the expanded cache controls, query logs, bilingual console, unified
-upstream settings, H3 preference and PEM import. This project is in active
-initial development: `[upstreams]` is required, and old single-upstream settings
-are no longer accepted. Start with the bundled example or the setup wizard.
+PariNS remains in active initial development. Automated Linux and macOS checks
+and isolated Linux systemd installation checks cover releases; production
+deployment and target-machine capacity acceptance have not been performed.
+`[upstreams]` is required, and old single-upstream settings are not accepted.
+Start with the bundled example or the setup wizard.
 
 PariNS forwards to existing resolvers; it is not an authoritative DNS server or
 a standalone iterative resolver, and does not perform DNSSEC validation. DNS
@@ -76,9 +75,9 @@ or a substitute for trusting the release publisher.
 
 ### 2. Open the setup wizard
 
-For the unreleased source build, open `http://SERVER_IP:3000` (or
-<http://127.0.0.1:3000> on the server itself). Published v0.1.2 packages still
-open on HTTPS; use the README shipped with that package.
+Open `http://SERVER_IP:3000` (or <http://127.0.0.1:3000> on the server itself).
+The console switches to HTTPS after inbound DoH or DoH3 is configured with a
+valid certificate and `[web].public_host`.
 Allow inbound TCP 3000 only from your administrator IPs. The installer prints
 local interface URLs; a VPS behind NAT may need its provider-assigned public IP.
 Read the one-time setup token locally:
@@ -111,7 +110,7 @@ The installer does not change your host/router DNS or firewall. Use the dashboar
 to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
 needed. To upgrade, rerun the installer; existing account and configuration are
 preserved. Old self-signed files are not used or automatically deleted by the
-new build. Pin a version with `sudo sh parins-install.sh --version v0.1.2`.
+new build. Pin a version with `sudo sh parins-install.sh --version v0.1.3`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`

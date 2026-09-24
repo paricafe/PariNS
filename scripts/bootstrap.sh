@@ -6,8 +6,8 @@ umask 077
 
 fail() { printf 'PariNS bootstrap: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.2] [--dry-run]' \
-        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.2] [--dry-run]' \
+    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.3] [--dry-run]' \
+        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.3] [--dry-run]' \
         'Linux x86_64/aarch64 and systemd are required for live installation.' \
         '--root stages files only; no service or candidate binary is executed.'
 }
@@ -35,7 +35,7 @@ cleanup() {
     exit "$status"
 }
 main() {
-    version=v0.1.2 root= dry_run=false
+    version=v0.1.3 root= dry_run=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--root)
@@ -107,8 +107,7 @@ main() {
     package="$download_dir/$archive"
     mkdir -m 0700 "$package" "$package/deploy"
     files='parins install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service'
-    # The beUI notice is present in packages built from the new console. The
-    # bootstrap default still points at v0.1.2, whose archive predates beUI.
+    # Older release archives may not contain the beUI notice.
     if grep -Fxq "$archive/LICENSE.beui" "$download_dir/members"; then
         files="$files LICENSE.beui"
     fi

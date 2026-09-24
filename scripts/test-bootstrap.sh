@@ -21,7 +21,7 @@ while [ "$#" -gt 0 ]; do
         --proto-redir) redirect=$2; shift 2 ;;
         --connect-timeout|--max-time) shift 2 ;;
         --fail|--silent|--show-error|--location) shift ;;
-        https://github.com/paricafe/PariNS/releases/download/v0.1.2/*) url=$1; shift ;;
+        https://github.com/paricafe/PariNS/releases/download/v0.1.3/*) url=$1; shift ;;
         *) exit 94 ;;
     esac
 done
@@ -38,7 +38,7 @@ digest() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
     else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
-archive=parins-v0.1.2-linux-x86_64
+archive=parins-v0.1.3-linux-x86_64
 asset="$archive.tar.gz"
 package="$fixture/build/$archive"
 mkdir "$package" "$package/deploy"
@@ -76,32 +76,31 @@ cmp "$package/parins" "$fixture/stage/opt/parins-managed/parins"
 mkdir -p "$fixture/stage/var/lib/parins"
 printf 'keep private state\n' > "$fixture/stage/var/lib/parins/state.json"
 printf 'keep certificate identity\n' > "$fixture/stage/var/lib/parins/https-identity.pem"
-sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.2
+sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.3
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins/state.json"
 grep -Fxq 'keep certificate identity' "$fixture/stage/var/lib/parins/https-identity.pem"
-# The published v0.1.2 format had no beUI notice; its verified package stays
-# installable while newer packages include and verify LICENSE.beui.
+# Archives without a beUI notice remain installable; when present it is verified.
 mv "$package/LICENSE.beui" "$fixture/notice-copy"
 manifest
 pack
-sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.2 --dry-run
+sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.3 --dry-run
 printf '%064d  LICENSE.beui\n' 0 >> "$package/SHA256SUMS"
 pack
-expect_failure --version v0.1.2
+expect_failure --version v0.1.3
 mv "$fixture/notice-copy" "$package/LICENSE.beui"
 manifest
 pack
 # Both architecture mappings select their exact release asset.
-cp -R "$package" "$fixture/build/parins-v0.1.2-linux-aarch64"
-tar -czf "$fixture/downloads/parins-v0.1.2-linux-aarch64.tar.gz" -C "$fixture/build" parins-v0.1.2-linux-aarch64
-printf '%s  parins-v0.1.2-linux-aarch64.tar.gz\n' "$(digest "$fixture/downloads/parins-v0.1.2-linux-aarch64.tar.gz")" > "$fixture/downloads/parins-v0.1.2-linux-aarch64.tar.gz.sha256"
+cp -R "$package" "$fixture/build/parins-v0.1.3-linux-aarch64"
+tar -czf "$fixture/downloads/parins-v0.1.3-linux-aarch64.tar.gz" -C "$fixture/build" parins-v0.1.3-linux-aarch64
+printf '%s  parins-v0.1.3-linux-aarch64.tar.gz\n' "$(digest "$fixture/downloads/parins-v0.1.3-linux-aarch64.tar.gz")" > "$fixture/downloads/parins-v0.1.3-linux-aarch64.tar.gz.sha256"
 BOOTSTRAP_ARCH=aarch64 sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --dry-run
 BOOTSTRAP_ARCH=arm64 sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --dry-run
 BOOTSTRAP_ARCH=riscv64 expect_failure
 BOOTSTRAP_OS=Darwin expect_failure
 expect_failure --version ../../escape
-expect_failure --version 'v0.1.2
-v0.2.0'
+expect_failure --version 'v0.1.3
+v0.1.4'
 expect_failure --version
 expect_failure --root ''
 expect_failure --root /

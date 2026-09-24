@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## v0.1.3 — 2026-09-24
+
+### Upgrade notice
+
+- This release changes the management listener from self-signed HTTPS to HTTP
+  unless inbound DoH or DoH3 is enabled with a valid certificate and
+  `[web].public_host`. On an existing installation without that configuration,
+  upgrading changes port 3000 to plaintext HTTP. Restrict it to administrator
+  IPs and use local access or an SSH tunnel for credentials and private-key
+  entry; configure inbound DoH/DoH3 to restore management HTTPS. Saved state is
+  retained, but old generated self-signed files are no longer used.
+- An existing inbound DoH/DoH3 configuration now also needs a concrete
+  `[web].public_host` covered by its certificate. Without one, managed startup
+  rejects the configuration; update it before upgrading. The installer attempts
+  to restore the prior binary and service if the new one fails to start.
+
+### Changed
 
 - Replace the native-script management page with a React 19/TypeScript console,
   including responsive navigation, light/dark/system appearance, bilingual views,

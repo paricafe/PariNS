@@ -1,0 +1,40 @@
+README.md
+  s_d595d238bbd4ee::t_3a3447e3b63ee6 25,157,166,183,203-204,220-221,235-237,249-254,257-261,272-273,309-311,404-406,426-428,430-437,510,535-538,579-583,611-627,638-640,646-648,663,769-772
+  s_d595d238bbd4ee::t_96a6caa7ca6c3e 88
+  s_d595d238bbd4ee::t_9581fade0bc470 81
+  s_d595d238bbd4ee::t_42c27e558f8651 33-43,113-116
+  s_d595d238bbd4ee::t_745b1dc2123d49 667-713
+scripts/release-notes.mjs
+  s_d595d238bbd4ee::t_42c27e558f8651 1-24
+.github/workflows/release.yml
+  s_d595d238bbd4ee::t_42c27e558f8651 64-65,114-116,130,144
+scripts/bootstrap.sh
+  s_d595d238bbd4ee::t_ad842e206ff12e 9-10,38
+CHANGELOG.md
+  s_d595d238bbd4ee::t_96a6caa7ca6c3e 9-13
+  s_d595d238bbd4ee::t_0920d67332bc19 4,18-44,55,62
+  s_d595d238bbd4ee::t_42c27e558f8651 3,5-8,14-17,45-54,56-61
+scripts/test-bootstrap.sh
+  s_d595d238bbd4ee::t_05cb6108542d7d 76-79,81-83
+  s_d595d238bbd4ee::t_060faabaa99eaa 24,41,80,88,91,96-98,104
+scripts/test-release-notes.mjs
+  s_d595d238bbd4ee::t_42c27e558f8651 1-23
+.github/workflows/ci.yml
+  s_d595d238bbd4ee::t_42c27e558f8651 41-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e721638261ba4809dceeb9533e8a9d5ec4f5103e",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

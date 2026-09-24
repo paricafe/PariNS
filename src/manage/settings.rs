@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(result["settings"]["ecs"]["enabled"], false);
         assert_eq!(result["settings"]["coalescing"]["enabled"], true);
         assert_eq!(result["settings"]["filter"]["block_exact"], json!([]));
-        for key in ["dot", "doh", "doq", "doh3"] {
+        for key in ["dot", "doh", "doq"] {
             assert_eq!(result["settings"][key], Value::Null);
         }
     }
@@ -151,7 +151,13 @@ mod tests {
 
     #[test]
     fn removed_upstream_fields_are_rejected_in_preview() {
-        for key in ["upstream", "upstream_tls", "scheduler", "upstream_pool"] {
+        for key in [
+            "upstream",
+            "upstream_tls",
+            "scheduler",
+            "upstream_pool",
+            "doh3",
+        ] {
             assert!(change(BASE, json!({key: null})).is_err(), "{key}");
         }
     }

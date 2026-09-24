@@ -102,18 +102,7 @@ impl Invalidate {
             .as_ref()
             .map(|value| value.to_ascii_uppercase().parse())
             .transpose()?;
-        let scope = self
-            .scope
-            .as_deref()
-            .map(|scope| {
-                Ok::<_, anyhow::Error>(match scope {
-                    "no_ecs" => Scope::NoEcs,
-                    "privacy_v4" => Scope::Privacy { ipv4: true },
-                    "privacy_v6" => Scope::Privacy { ipv4: false },
-                    text => Scope::Network(text.parse::<ipnet::IpNet>()?.trunc()),
-                })
-            })
-            .transpose()?;
+        let scope = self.scope.as_deref().map(Scope::parse_tag).transpose()?;
         Ok((name, kind, scope))
     }
 }

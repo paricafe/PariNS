@@ -4,8 +4,7 @@ mod cache;
 mod certificates;
 mod runtime;
 mod settings;
-mod stats;
-mod store;
+pub(crate) mod store;
 mod transport;
 
 use anyhow::Result;
@@ -53,7 +52,6 @@ struct Shared {
     active: Arc<Mutex<Active>>,
     auth: auth_budget::Budget,
     mutation: Arc<Semaphore>,
-    history: Mutex<stats::History>,
     address: SocketAddr,
 }
 
@@ -171,6 +169,63 @@ fn internal() -> ApiError {
         "INTERNAL",
         "Management operation failed",
     )
+}
+fn storage_error(err: crate::storage::Error) -> ApiError {
+    use crate::storage::Error;
+    let (status, code) = match &err {
+        Error::Conflict { .. } => (StatusCode::CONFLICT, "EPOCH"),
+        Error::StorageUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "STORAGE_UNAVAILABLE"),
+        Error::Busy => (StatusCode::SERVICE_UNAVAILABLE, "STORAGE_BUSY"),
+        Error::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
+    };
+    error(status, code, err.to_string())
+}
+
+fn history_options(query: &str) -> std::result::Result<crate::storage::HistoryOptions, ApiError> {
+    let mut input = serde_json::Map::new();
+    if !query.is_empty() {
+        for field in query.split('&') {
+            let (name, value) = field.split_once('=').ok_or_else(|| {
+                error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "Invalid history query",
+                )
+            })?;
+            if input.contains_key(name) {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "Duplicate history option",
+                ));
+            }
+            let value = match name {
+                "range" => json!(value),
+                "from_ms" | "to_ms" | "max_points" => {
+                    json!(value.parse::<u64>().map_err(|_| error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_REQUEST",
+                        "Invalid history number"
+                    ))?)
+                }
+                _ => {
+                    return Err(error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_REQUEST",
+                        "Unknown history option",
+                    ));
+                }
+            };
+            input.insert(name.to_owned(), value);
+        }
+    }
+    serde_json::from_value(Value::Object(input)).map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "Invalid history options",
+        )
+    })
 }
 fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::result::Result<T, ApiError> {
     serde_json::from_slice(body)
@@ -381,6 +436,25 @@ struct CertificateImport {
     private_key_pem: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogClear {
+    revision: u64,
+    log_epoch: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TotalsReset {
+    revision: u64,
+    totals_epoch: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryClear {
+    revision: u64,
+    history_epoch: u64,
+}
+
 struct ApiRequest<'a> {
     peer: SocketAddr,
     method: &'a str,
@@ -402,6 +476,7 @@ async fn api(
         headers,
         body,
     } = input;
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
     shared.ensure_current(&transport)?;
     let host = headers
         .get(header::HOST)
@@ -581,37 +656,91 @@ async fn api(
             status["transport"] = manager.transport();
             Ok(status)
         }
-        ("GET", "/api/stats") => Ok(shared.history.lock().unwrap().view()),
+        ("GET", "/api/stats") => {
+            let input = history_options(query)?;
+            let services = shared.manager.lock().await.services.clone();
+            Ok(json!(
+                services.statistics(input).await.map_err(storage_error)?
+            ))
+        }
         ("POST", "/api/query-log/list") => {
             let input: crate::query_log::ListOptions = decode(body)?;
             input.validate().map_err(invalid)?;
             let manager = shared.manager.lock().await;
-            let resolver = manager
-                .resolver()
-                .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
+            let revision = manager.saved.as_ref().map_or(0, |s| s.revision);
+            let services = manager.services.clone();
+            drop(manager);
             Ok(
-                json!({"revision": manager.saved.as_ref().map_or(0, |s| s.revision),
-                "page": resolver.query_log().list(input)}),
+                json!({"revision":revision,"page":services.list_logs(input).await.map_err(storage_error)?}),
             )
         }
-        ("POST", "/api/query-log/clear") => {
-            let input: Revision = decode(body)?;
-            let _permit =
+        ("POST", "/api/query-log/clear" | "/api/stats/reset" | "/api/stats/history/clear") => {
+            let (revision, epoch, action) = match path {
+                "/api/query-log/clear" => {
+                    let v: LogClear = decode(body)?;
+                    (v.revision, v.log_epoch, 0)
+                }
+                "/api/stats/reset" => {
+                    let v: TotalsReset = decode(body)?;
+                    (v.revision, v.totals_epoch, 1)
+                }
+                _ => {
+                    let v: HistoryClear = decode(body)?;
+                    (v.revision, v.history_epoch, 2)
+                }
+            };
+            let permit =
                 shared.mutation.clone().try_acquire_owned().map_err(|_| {
                     error(StatusCode::CONFLICT, "BUSY", "Another change is running")
                 })?;
-            let manager = shared.manager.lock().await;
-            if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
-                return Err(error(
-                    StatusCode::CONFLICT,
-                    "REVISION",
-                    "Configuration changed; refresh before clearing",
-                ));
+            tokio::spawn(async move {
+                let _permit = permit;
+                let manager = shared.manager.lock().await;
+                if manager.saved.as_ref().map(|s| s.revision) != Some(revision) {
+                    return Err(error(
+                        StatusCode::CONFLICT,
+                        "REVISION",
+                        "Configuration changed; refresh before clearing",
+                    ));
+                }
+                let services = manager.services.clone();
+                drop(manager);
+                let result = match action {
+                    0 => services.clear_logs(epoch).await,
+                    1 => services.reset_totals(epoch).await,
+                    _ => services.clear_history(epoch).await,
+                }
+                .map_err(storage_error)?;
+                Ok(json!({"removed":result.removed,"epoch":result.epoch,"revision":revision}))
+            })
+            .await
+            .map_err(|_| internal())?
+        }
+        ("POST", "/api/certificates/reload") => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Reload {
+                revision: u64,
             }
-            let resolver = manager
-                .resolver()
-                .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
-            Ok(json!({"removed": resolver.query_log().clear(), "revision": input.revision}))
+            let input: Reload = decode(body)?;
+            let permit =
+                shared.mutation.clone().try_acquire_owned().map_err(|_| {
+                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
+                })?;
+            tokio::spawn(async move {
+                let _permit = permit;
+                let mut manager = shared.manager.lock().await;
+                if manager.saved.as_ref().map_or(0, |s| s.revision) != input.revision {
+                    return Err(error(
+                        StatusCode::CONFLICT,
+                        "REVISION",
+                        "Configuration changed; refresh before reloading",
+                    ));
+                }
+                manager.reload_certificates("api").await.map_err(invalid)
+            })
+            .await
+            .map_err(|_| internal())?
         }
         ("POST", "/api/certificates/import") => {
             let input: CertificateImport = decode(body)?;
@@ -716,7 +845,7 @@ async fn api(
         ("POST", "/api/config/validate") => {
             let document: Document = decode(body)?;
             let manager = shared.manager.lock().await;
-            let restart_required = !manager.cache_only(&document.toml);
+            let restart_required = manager.hot_update(&document.toml).is_none();
             let change = manager
                 .transport_change(&document.toml, host)
                 .map_err(invalid)?;
@@ -920,7 +1049,10 @@ async fn handle_inner(
             ApiRequest {
                 peer,
                 method: parts.method.as_str(),
-                path,
+                path: parts
+                    .uri
+                    .path_and_query()
+                    .map_or(path, |value| value.as_str()),
                 headers: &parts.headers,
                 body: &bytes,
             },
@@ -955,6 +1087,8 @@ pub async fn serve(
     address: SocketAddr,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
+    #[cfg(unix)]
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let listener = TcpListener::bind(address).await?;
     let address = listener.local_addr()?;
     let store = Store::open(directory)?;
@@ -977,7 +1111,6 @@ pub async fn serve(
         active: active.clone(),
         auth: auth_budget::Budget::new(),
         mutation: Arc::new(Semaphore::new(1)),
-        history: Mutex::new(stats::History::default()),
         address,
     });
     let router = Router::new().fallback(handle).with_state(shared.clone());
@@ -1002,22 +1135,20 @@ pub async fn serve(
     }
     let permits = Arc::new(Semaphore::new(32));
     let mut tasks = JoinSet::new();
-    let mut samples = tokio::time::interval(Duration::from_secs(stats::INTERVAL));
-    samples.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut reload_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut reload_pending = false;
     tokio::pin!(shutdown);
     let result = loop {
         tokio::select! {
+            biased;
             _ = &mut shutdown => break Ok(()),
-            _ = samples.tick() => {
-                // A configuration transaction may drain DNS for seconds. Skip
-                // this tick instead of blocking management accepts or shutdown.
-                if let Ok(manager) = manager.try_lock() {
-                    let (generation, snapshot) = manager.statistics_snapshot();
-                    let timestamp_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
-                        .as_millis().min(u64::MAX as u128) as u64;
-                    shared.history.lock().unwrap().record(Instant::now(), timestamp_ms, generation, snapshot);
-                }
+            _ = async { #[cfg(unix)] { hangup.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => {
+                if reload_task.is_some() { reload_pending = true; }
+                else { reload_task = Some(start_signal_reload(shared.clone())); }
+            },
+            _ = async { if let Some(task) = &mut reload_task { let _ = task.await; } else { std::future::pending::<()>().await; } }, if reload_task.is_some() => {
+                reload_task = None;
+                if reload_pending { reload_pending = false; reload_task = Some(start_signal_reload(shared.clone())); }
             },
             _ = tasks.join_next(), if !tasks.is_empty() => {},
             incoming = listener.accept() => {
@@ -1048,9 +1179,42 @@ pub async fn serve(
     tasks.shutdown().await;
     // Every accepted transaction owns this permit before detaching. Wait for it
     // before stopping DNS, including transactions not yet holding manager.lock.
-    let _transaction = shared.mutation.acquire().await?;
-    manager.lock().await.stop().await;
+    // A blocked filesystem must not keep the process alive indefinitely. On
+    // timeout, leave no clean snapshot and let the process runtime terminate.
+    let _transaction = timeout(Duration::from_secs(65), async {
+        if let Some(task) = reload_task {
+            let _ = task.await;
+        }
+        shared.mutation.acquire().await
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "management transaction did not drain; shutting down without a clean cache snapshot"
+        )
+    })??;
+    manager.lock().await.terminal_shutdown().await;
     result
+}
+
+fn start_signal_reload(shared: Arc<Shared>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(_permit) = shared.mutation.acquire().await else {
+            return;
+        };
+        match shared
+            .manager
+            .lock()
+            .await
+            .reload_certificates("signal")
+            .await
+        {
+            Ok(result) => eprintln!("PariNS certificate reload: {}", result["outcome"]),
+            Err(_) => eprintln!(
+                "PariNS certificate reload failed; previous identities retained (see authenticated status)"
+            ),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1079,7 +1243,6 @@ mod tests {
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
             mutation: Arc::new(tokio::sync::Semaphore::new(1)),
-            history: Mutex::new(super::stats::History::default()),
             address,
         };
         let current = active.lock().unwrap().snapshot.clone();
@@ -1176,7 +1339,6 @@ mod tests {
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
             mutation: Arc::new(tokio::sync::Semaphore::new(1)),
-            history: Mutex::new(super::stats::History::default()),
             address,
         };
         let mut headers = HeaderMap::new();
@@ -1216,7 +1378,6 @@ mod tests {
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
             mutation: Arc::new(tokio::sync::Semaphore::new(1)),
-            history: Mutex::new(super::stats::History::default()),
             address,
         });
         let old = active.lock().unwrap().snapshot.clone();

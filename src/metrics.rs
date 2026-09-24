@@ -6,12 +6,12 @@ use std::{
     time::Instant,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const BOUNDS: [u64; 8] = [
     1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000, 5_000_000,
 ];
-const NAMES: [&str; 31] = [
+const NAMES: [&str; 50] = [
     "requests",
     "completed",
     "cancelled",
@@ -43,6 +43,25 @@ const NAMES: [&str; 31] = [
     "source_queries_rejected",
     "source_connections_rejected",
     "source_table_full",
+    "cache_lookup_fresh",
+    "cache_lookup_stale",
+    "cache_lookup_miss",
+    "cache_lookup_bypass",
+    "cache_lookup_disabled",
+    "cache_store_admitted",
+    "cache_store_replaced",
+    "cache_store_skipped",
+    "cache_store_superseded_only",
+    "cache_reason_unsupported_query",
+    "cache_reason_unsupported_edns",
+    "cache_reason_ecs_unusable",
+    "cache_reason_ttl_zero",
+    "cache_reason_negative_without_soa",
+    "cache_reason_uncacheable_response",
+    "cache_reason_policy_disabled",
+    "cache_reason_capacity",
+    "cache_reason_variant_limit",
+    "cache_reason_epoch_changed",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +97,25 @@ pub enum Counter {
     SourceQueriesRejected,
     SourceConnectionsRejected,
     SourceTableFull,
+    CacheLookupFresh,
+    CacheLookupStale,
+    CacheLookupMiss,
+    CacheLookupBypass,
+    CacheLookupDisabled,
+    CacheStoreAdmitted,
+    CacheStoreReplaced,
+    CacheStoreSkipped,
+    CacheStoreSupersededOnly,
+    CacheReasonUnsupportedQuery,
+    CacheReasonUnsupportedEdns,
+    CacheReasonEcsUnusable,
+    CacheReasonTtlZero,
+    CacheReasonNegativeWithoutSoa,
+    CacheReasonUncacheableResponse,
+    CacheReasonPolicyDisabled,
+    CacheReasonCapacity,
+    CacheReasonVariantLimit,
+    CacheReasonEpochChanged,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -117,14 +155,120 @@ impl Histogram {
     }
 }
 
-#[derive(Default)]
 pub struct Metrics {
+    pub quic: crate::quic::diagnostics::Counters,
+    upstream_attempts: [AtomicU64; 4],
+    upstream_reasons: [AtomicU64; 9],
     counters: [AtomicU64; NAMES.len()],
     inflight: [AtomicU64; 2],
     latency: [Histogram; 2],
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            quic: Default::default(),
+            upstream_attempts: Default::default(),
+            upstream_reasons: Default::default(),
+            counters: std::array::from_fn(|_| AtomicU64::new(0)),
+            inflight: Default::default(),
+            latency: Default::default(),
+        }
+    }
+}
+
 impl Metrics {
+    pub fn record_upstream_attempt(&self, attempt: &crate::upstreams::diagnostics::AttemptRecord) {
+        use crate::upstreams::diagnostics::{Outcome, Reason};
+        let outcome = match attempt.outcome {
+            Outcome::Succeeded => 0,
+            Outcome::Failed => 1,
+            Outcome::Cancelled => 2,
+            Outcome::Skipped => 3,
+        };
+        self.upstream_attempts[outcome].fetch_add(1, Relaxed);
+        if let Some(reason) = attempt.reason {
+            let index = match reason {
+                Reason::Deadline => 0,
+                Reason::ConnectIo => 1,
+                Reason::Tls => 2,
+                Reason::HttpStatus => 3,
+                Reason::ProtocolInvalid => 4,
+                Reason::PeerClosed => 5,
+                Reason::CallerCancelled => 6,
+                Reason::Shutdown => 7,
+                Reason::Internal => 8,
+            };
+            self.upstream_reasons[index].fetch_add(1, Relaxed);
+        }
+    }
+    fn upstream_counters(&self) -> impl Iterator<Item = (String, u64)> + '_ {
+        ["succeeded", "failed", "cancelled", "skipped"]
+            .into_iter()
+            .zip(&self.upstream_attempts)
+            .map(|(name, value)| (format!("upstream_attempt_{name}"), value.load(Relaxed)))
+            .chain(
+                [
+                    "deadline",
+                    "connect_io",
+                    "tls",
+                    "http_status",
+                    "protocol_invalid",
+                    "peer_closed",
+                    "caller_cancelled",
+                    "shutdown",
+                    "internal",
+                ]
+                .into_iter()
+                .zip(&self.upstream_reasons)
+                .map(|(name, value)| {
+                    (
+                        format!("upstream_attempt_reason_{name}"),
+                        value.load(Relaxed),
+                    )
+                }),
+            )
+    }
+    pub fn record_cache_lookup(&self, decision: crate::cache::LookupDecision) {
+        use crate::cache::LookupOutcome;
+        self.inc(match decision.outcome {
+            LookupOutcome::Fresh => Counter::CacheLookupFresh,
+            LookupOutcome::Stale => Counter::CacheLookupStale,
+            LookupOutcome::Miss => Counter::CacheLookupMiss,
+            LookupOutcome::Bypass => Counter::CacheLookupBypass,
+            LookupOutcome::Disabled => Counter::CacheLookupDisabled,
+        });
+        if let Some(reason) = decision.reason {
+            self.record_cache_reason(reason);
+        }
+    }
+    pub fn record_cache_store(&self, decision: crate::cache::StoreDecision) {
+        use crate::cache::StoreOutcome;
+        self.inc(match decision.outcome {
+            StoreOutcome::Admitted => Counter::CacheStoreAdmitted,
+            StoreOutcome::Replaced => Counter::CacheStoreReplaced,
+            StoreOutcome::Skipped => Counter::CacheStoreSkipped,
+            StoreOutcome::SupersededOnly => Counter::CacheStoreSupersededOnly,
+        });
+        if let Some(reason) = decision.reason {
+            self.record_cache_reason(reason);
+        }
+    }
+    fn record_cache_reason(&self, reason: crate::cache::DecisionReason) {
+        use crate::cache::DecisionReason;
+        self.inc(match reason {
+            DecisionReason::UnsupportedQuery => Counter::CacheReasonUnsupportedQuery,
+            DecisionReason::UnsupportedEdns => Counter::CacheReasonUnsupportedEdns,
+            DecisionReason::EcsUnusable => Counter::CacheReasonEcsUnusable,
+            DecisionReason::TtlZero => Counter::CacheReasonTtlZero,
+            DecisionReason::NegativeWithoutSoa => Counter::CacheReasonNegativeWithoutSoa,
+            DecisionReason::UncacheableResponse => Counter::CacheReasonUncacheableResponse,
+            DecisionReason::PolicyDisabled => Counter::CacheReasonPolicyDisabled,
+            DecisionReason::Capacity => Counter::CacheReasonCapacity,
+            DecisionReason::VariantLimit => Counter::CacheReasonVariantLimit,
+            DecisionReason::EpochChanged => Counter::CacheReasonEpochChanged,
+        });
+    }
     pub fn inc(&self, counter: Counter) {
         self.counters[counter as usize].fetch_add(1, Relaxed);
     }
@@ -147,7 +291,10 @@ impl Metrics {
         Snapshot {
             counters: NAMES
                 .into_iter()
+                .map(str::to_owned)
                 .zip(self.counters.iter().map(|v| v.load(Relaxed)))
+                .chain(self.quic.counters())
+                .chain(self.upstream_counters())
                 .collect(),
             request_inflight: self.inflight[Timer::Request as usize].load(Relaxed),
             upstream_inflight: self.inflight[Timer::Upstream as usize].load(Relaxed),
@@ -186,27 +333,91 @@ impl Drop for Guard<'_> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
-    pub counters: BTreeMap<&'static str, u64>,
+    pub counters: BTreeMap<String, u64>,
     pub request_inflight: u64,
     pub upstream_inflight: u64,
     pub request_latency: HistogramSnapshot,
     pub upstream_latency: HistogramSnapshot,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistogramSnapshot {
     pub buckets: [Bucket; 9],
     pub count: u64,
     pub sum_micros: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bucket {
     /// Inclusive upper bound; `None` represents positive infinity.
     pub upper_bound_micros: Option<u64>,
     pub count: u64,
+}
+
+impl Snapshot {
+    /// Durable counters exclude process-local gauges. Saturation makes overflow
+    /// explicit to the sampler without ever manufacturing negative traffic.
+    pub fn delta(&self, previous: &Self) -> Self {
+        let mut result = self.clone();
+        for (name, value) in &mut result.counters {
+            *value = value.saturating_sub(previous.counters.get(name).copied().unwrap_or(0));
+        }
+        result.request_inflight = 0;
+        result.upstream_inflight = 0;
+        result.request_latency = self.request_latency.delta(&previous.request_latency);
+        result.upstream_latency = self.upstream_latency.delta(&previous.upstream_latency);
+        result
+    }
+
+    pub fn plus(&self, other: &Self) -> Self {
+        let mut result = self.clone();
+        for (name, value) in &other.counters {
+            let target = result.counters.entry(name.clone()).or_default();
+            *target = target.saturating_add(*value);
+        }
+        result.request_inflight = 0;
+        result.upstream_inflight = 0;
+        result.request_latency = self.request_latency.plus(&other.request_latency);
+        result.upstream_latency = self.upstream_latency.plus(&other.upstream_latency);
+        result
+    }
+
+    pub fn regressed(&self, previous: &Self) -> bool {
+        self.counters
+            .iter()
+            .any(|(name, value)| *value < previous.counters.get(name).copied().unwrap_or(0))
+            || self.request_latency.count < previous.request_latency.count
+            || self.request_latency.sum_micros < previous.request_latency.sum_micros
+            || self.upstream_latency.count < previous.upstream_latency.count
+            || self.upstream_latency.sum_micros < previous.upstream_latency.sum_micros
+    }
+}
+
+impl HistogramSnapshot {
+    fn delta(&self, previous: &Self) -> Self {
+        Self {
+            buckets: std::array::from_fn(|i| Bucket {
+                upper_bound_micros: self.buckets[i].upper_bound_micros,
+                count: self.buckets[i]
+                    .count
+                    .saturating_sub(previous.buckets[i].count),
+            }),
+            count: self.count.saturating_sub(previous.count),
+            sum_micros: self.sum_micros.saturating_sub(previous.sum_micros),
+        }
+    }
+    fn plus(&self, other: &Self) -> Self {
+        Self {
+            buckets: std::array::from_fn(|i| Bucket {
+                upper_bound_micros: self.buckets[i].upper_bound_micros,
+                count: self.buckets[i].count.saturating_add(other.buckets[i].count),
+            }),
+            count: self.count.saturating_add(other.count),
+            sum_micros: self.sum_micros.saturating_add(other.sum_micros),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -216,7 +427,10 @@ mod tests {
     #[test]
     fn counters_start_at_zero_and_increment_independently() {
         let metrics = Metrics::default();
-        assert_eq!(metrics.snapshot().counters.len(), NAMES.len());
+        assert_eq!(
+            metrics.snapshot().counters.len(),
+            NAMES.len() + metrics.quic.counters().len() + 13
+        );
         assert!(
             metrics
                 .snapshot()

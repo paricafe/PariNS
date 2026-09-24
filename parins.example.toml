@@ -28,14 +28,11 @@ max_tcp_connections = 64
 # key_file = "server.key"
 # [doh]
 # listen = "127.0.0.1:8443"
+# http3 = true # H3 uses UDP on this same address/port; H2 uses TCP
 # cert_file = "server.pem"
 # key_file = "server.key"
 # [doq]
 # listen = "127.0.0.1:8530" # UDP, distinct from DoT's TCP socket
-# cert_file = "server.pem"
-# key_file = "server.key"
-# [doh3]
-# listen = "127.0.0.1:8443" # UDP, distinct from DoH2's TCP socket
 # cert_file = "server.pem"
 # key_file = "server.key"
 
@@ -87,6 +84,11 @@ enabled = false
 retention_secs = 300
 reply_ttl_secs = 30
 
+# Fresh cache restoration after clean process shutdown, never periodic snapshots.
+[cache.persistence]
+enabled = true
+max_bytes = 33554432
+
 # Optional per-domain policies; exact before suffix, then most labels, qtype,
 # then first declaration. Missing optional fields inherit global cache settings.
 # [[cache.rules]]
@@ -115,8 +117,9 @@ max_waiters = 64
 # 0 disables aggregate JSON stderr output; 1..3600 enables periodic/final snapshots.
 interval_secs = 0
 
-# Opt-in private browsing metadata, bounded in memory and lost on DNS restart.
+# Opt-in private browsing metadata, persisted asynchronously in the runtime DB.
 [query_log]
 enabled = false
 max_entries = 1000
+max_bytes = 67108864
 retention_secs = 86400

@@ -104,8 +104,9 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   persist before publishing replacement state; do not promise cache retention after
   arbitrary policy changes. Report restart requirements accurately for other changes.
 - Management defaults to HTTP on its one listener; enabling inbound DoH selects
-  its validated identity for management HTTPS, falling back to DoH3 only when
-  DoH is absent. Share a prepared identity snapshot, not DNS TLS routing/ALPN.
+  its validated identity for management HTTPS. `[doh].http3` shares the DoH TCP
+  address and actual port over UDP; there is no independent `[doh3]` configuration.
+  Share the active CertificateSet's DoH slot, not DNS TLS routing/ALPN.
   A failed candidate or TLS fault never silently downgrades HTTPS to HTTP;
   explicit DoH disablement needs downgrade confirmation. Rust owns validated
   `[web].public_host`, management origin and protocol transaction state.
@@ -127,6 +128,25 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
 - DoH transports normalize HTTP Age into RR TTLs before handing answers to Resolver;
   cache code has no HTTP policy. DoQ in-flight requests retain their endpoint owner
   independently of the current bootstrap-address cache entry.
+- Missing ECS in a response to nonzero outgoing ECS uses only ExactSource reuse;
+  Padding is stripped from cache and regenerated at the final encrypted hop.
+  Cookie/unknown options keep their nonshared boundary. Flight and refresh use
+  one canonical key that ignores Padding bytes while preserving request intent.
+- RuntimeServices owns process metrics and a bounded SQLite worker across DNS
+  generations. Logs, totals and trends have independent durable epochs; status
+  is a cached observation, not a hot-path disk query. Cache/storage-only applies
+  must preserve listeners and may not publish candidate certificate changes.
+- Consume a clean cache snapshot durably before serving. Publish one only at
+  terminal, quiescent shutdown; apply/rollback and abnormal termination never
+  create a restorable cache snapshot. Bound storage work and total shutdown.
+- Manager/Active owns the atomic CertificateSet even when DNS is stopped. API
+  and managed SIGHUP reload current certificates under the existing mutation
+  permit; file-mode SIGHUP also reloads policy. Preparation cannot mutate active
+  material. Reload does not alter config revision, DNS/cache ownership or sessions.
+- Publish DNS terminal health once per generation to both readiness and storage
+  sampling. Attempt diagnostics use bounded endpoint slots and finite typed
+  dimensions; cancellation/shutdown are not upstream faults. Management API 200
+  alone is not DNS readiness.
 - Do not change host DNS, firewall rules, certificate trust, or system services as
   a side effect of development tests. Use isolated fixtures for local acceptance.
 

@@ -6,11 +6,12 @@ import {
 } from "../index";
 
 describe("configuration form model", () => {
-  it("describes the existing settings paths and four encrypted listeners", () => {
+  it("describes the settings paths and one DoH listener with an HTTP/3 switch", () => {
     expect(settingPages.dns.groups[0].fields[0].path).toBe("upstreams.servers");
     expect(settingPages.cache.groups.flatMap((group) => group.fields)
       .find((field) => field.path === "cache.negative_percent")).toMatchObject({ min: 0, max: 90 });
-    expect(settingPages.security.groups.map((group) => group.optional)).toEqual([undefined, "dot", "doh", "doq", "doh3"]);
+    expect(settingPages.security.groups.map((group) => group.optional)).toEqual([undefined, "dot", "doh", "doq"]);
+    expect(settingPages.security.groups[2].fields.at(-1)?.path).toBe('doh.http3');
     expect(settingPages.security.groups[0].fields[0].path).toBe("web.public_host");
     expect(settingPages.security.groups.slice(1).every((group) => group.fields[0].type === "endpoint")).toBe(true);
   });

@@ -11,6 +11,9 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use crate::{ingress::Ingress, metrics::Counter};
 
 pub const PATH: &str = "/dns-query";
+pub(crate) fn alt_svc(port: Option<u16>) -> String {
+    port.map_or_else(|| "clear".into(), |port| format!("h3=\":{port}\"; ma=300"))
+}
 const MAX_DNS: usize = 65535;
 
 /// Shared HTTP/2 and HTTP/3 wire contract. No proxy header is used for identity.
@@ -63,6 +66,7 @@ pub async fn serve(
     listener: TcpListener,
     tls: Arc<rustls::ServerConfig>,
     ingress: Ingress,
+    h3_port: Option<u16>,
 ) -> anyhow::Result<()> {
     let mut stop = ingress.stop.clone();
     let mut connections = JoinSet::new();
@@ -103,7 +107,7 @@ pub async fn serve(
                         }
                     };
                     if tls.get_ref().1.alpn_protocol() != Some(b"h2") { return }
-                    let _ = connection(tls, peer.ip(), ingress).await;
+                    let _ = connection(tls, peer.ip(), ingress, h3_port).await;
                 });
             }
         }
@@ -115,6 +119,7 @@ pub async fn serve(
     .await
     .is_err()
     {
+        ingress.resolver.force_shutdown();
         connections.abort_all();
         while connections.join_next().await.is_some() {}
     }
@@ -125,6 +130,7 @@ async fn connection(
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     peer: IpAddr,
     ingress: Ingress,
+    h3_port: Option<u16>,
 ) -> anyhow::Result<()> {
     let mut builder = h2::server::Builder::new();
     builder
@@ -157,12 +163,15 @@ async fn connection(
                 requests.spawn(async move {
                     let _permit = permit;
                     // One total deadline includes body collection, resolution and response flow control.
-                    let _ = timeout(ingress.io_timeout, request_task(request, respond, peer, ingress)).await;
+                    let _ = timeout(ingress.io_timeout, request_task(request, respond, peer, ingress, h3_port)).await;
                 });
             }
         }
     }
     // JoinSet drop aborts remaining request work; there are no detached collectors.
+    if *stop.borrow() && !requests.is_empty() {
+        ingress.resolver.force_shutdown();
+    }
     requests.abort_all();
     while requests.join_next().await.is_some() {}
     Ok(())
@@ -173,6 +182,7 @@ async fn request_task(
     mut respond: SendResponse<Bytes>,
     peer: IpAddr,
     ingress: Ingress,
+    h3_port: Option<u16>,
 ) -> anyhow::Result<()> {
     let (parts, mut stream) = request.into_parts();
     let mut body = Vec::new();
@@ -196,15 +206,15 @@ async fn request_task(
         Err,
     ) {
         Ok(bytes) => bytes,
-        Err(status) => return send(&mut respond, status, Vec::new()).await,
+        Err(status) => return send(&mut respond, status, Vec::new(), h3_port).await,
     };
     let response = tokio::select! {
         response = ingress.handle_with_transport(&bytes, peer, "doh") => response,
         _ = std::future::poll_fn(|cx| respond.poll_reset(cx)) => return Ok(()),
     };
     match response {
-        Some(bytes) => send(&mut respond, 200, bytes).await,
-        None => send(&mut respond, 400, Vec::new()).await,
+        Some(bytes) => send(&mut respond, 200, bytes, h3_port).await,
+        None => send(&mut respond, 400, Vec::new(), h3_port).await,
     }
 }
 
@@ -212,10 +222,12 @@ async fn send(
     respond: &mut SendResponse<Bytes>,
     status: u16,
     bytes: Vec<u8>,
+    h3_port: Option<u16>,
 ) -> anyhow::Result<()> {
     let mut builder = Response::builder()
         .status(status)
-        .header("cache-control", "no-store");
+        .header("cache-control", "no-store")
+        .header("alt-svc", alt_svc(h3_port));
     if status == 200 {
         builder = builder.header("content-type", "application/dns-message");
     }

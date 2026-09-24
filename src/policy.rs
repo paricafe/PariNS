@@ -104,6 +104,30 @@ impl TryFrom<Rules> for Policy {
 }
 
 impl Policy {
+    /// Digest the loaded rules, independent of declaration and HashMap order.
+    pub fn semantic_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        fn visit(node: &Node, hash: &mut Sha256) {
+            hash.update([
+                node.block_exact as u8,
+                node.block_suffix as u8,
+                node.allow_exact as u8,
+                node.allow_suffix as u8,
+            ]);
+            let mut children: Vec<_> = node.children.iter().collect();
+            children.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            hash.update((children.len() as u64).to_be_bytes());
+            for (label, child) in children {
+                hash.update((label.len() as u64).to_be_bytes());
+                hash.update(label);
+                visit(child, hash);
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update([self.enabled as u8]);
+        visit(&self.root, &mut hash);
+        hash.finalize().into()
+    }
     /// Parse and validate a complete replacement before the caller publishes it.
     pub fn load(path: &Path) -> Result<Self> {
         const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;

@@ -40,6 +40,9 @@ done
 sudo -n true
 [ -z "$(systemctl show --property=FragmentPath --value parins-managed.service)" ]
 ! sudo test -e /var/lib/parins
+! sudo test -e /var/lib/parins-managed
+! sudo test -L /var/lib/parins-managed
+! sudo test -e /var/lib/private/parins-managed
 ! sudo test -e /opt/parins-managed/parins
 # Hosted runners make /opt group-writable for their tool cache. Only this
 # disposable-runner fixture tightens it temporarily; the installer stays strict.
@@ -56,13 +59,13 @@ cleanup() {
     if "$installed" && sudo test -f /etc/systemd/system/parins-managed.service && \
         ! sudo test -L /etc/systemd/system/parins-managed.service && \
         [ "$(sudo stat -c %u /etc/systemd/system/parins-managed.service)" = 0 ] && \
-        sudo grep -Fqx '# PariNS managed installer unit v1' /etc/systemd/system/parins-managed.service; then
+        sudo grep -Fqx '# PariNS managed installer unit v2 (exclusive state directory)' /etc/systemd/system/parins-managed.service; then
         sudo systemctl disable --now parins-managed.service || status=1
     fi
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -81,12 +84,55 @@ http() {
         --cookie "$fixture/cookies.txt" --cookie-jar "$fixture/cookies.txt" "$@"
 }
 session() { http --max-time 5 http://127.0.0.1:3000/api/session; }
+refuse_install() {
+    if sudo sh "$installer" --binary "$binary" > "$fixture/refusal.log" 2>&1; then
+        printf '%s\n' 'Expected installation refusal before changing files or service.' >&2
+        exit 1
+    fi
+    ! sudo test -e /opt/parins-managed/parins
+}
+# Real systemd must never get the chance to claim unknown or legacy state.
+sudo mkdir -m 0700 /var/lib/parins-managed
+refuse_install
+sudo rmdir /var/lib/parins-managed
+sudo ln -s /var/lib/private/parins-managed /var/lib/parins-managed
+refuse_install
+sudo rm /var/lib/parins-managed
+sudo install -d -m 0700 /var/lib/private/parins-managed
+refuse_install
+sudo rmdir /var/lib/private/parins-managed
+sudo install -d -m 0700 /var/lib/parins
+for name in state.json setup-token; do
+    printf 'legacy managed sentinel\n' | sudo tee "/var/lib/parins/$name" >/dev/null
+    refuse_install
+    sudo grep -Fxq 'legacy managed sentinel' "/var/lib/parins/$name"
+    sudo rm "/var/lib/parins/$name"
+done
+printf '# PariNS managed installer unit v1\n[Service]\nDynamicUser=yes\nStateDirectory=parins\n' |
+    sudo tee /etc/systemd/system/parins-managed.service >/dev/null
+refuse_install
+sudo rm /etc/systemd/system/parins-managed.service
+# External TLS files under the old shared path can coexist unchanged.
+sudo install -d -m 0750 /var/lib/parins/tls
+printf 'external certificate sentinel\n' | sudo tee /var/lib/parins/tls/external.pem >/dev/null
+sudo chmod 0640 /var/lib/parins/tls/external.pem
+sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/parins/tls/external.pem > "$fixture/tls-before"
+mkdir -m 0700 "$fixture/account-home"
+if env HOME="$fixture/account-home" "$binary" --manage --state-dir "$fixture/account-home" --web-listen 127.0.0.1:0 > "$fixture/home-error.log" 2>&1; then
+    printf '%s\n' 'HOME state directory was unexpectedly accepted.' >&2
+    exit 1
+fi
+grep -Fq 'dedicated private subdirectory' "$fixture/home-error.log"
+grep -Fq "$fixture/account-home" "$fixture/home-error.log"
+rmdir "$fixture/account-home"
 installed=true
 install_service
 sudo systemd-analyze verify /etc/systemd/system/parins-managed.service
+sudo grep -Fqx 'ExecReload=/bin/kill -HUP $MAINPID' /etc/systemd/system/parins-managed.service
+systemctl show --property=ExecReload --value parins-managed.service | grep -F 'argv[]=/bin/kill -HUP $MAINPID ; ignore_errors=no' >/dev/null
 : > "$fixture/cookies.txt"
-! sudo test -e /var/lib/parins/https-identity.pem
-! sudo test -e /var/lib/parins/https-cert.pem
+! sudo test -e /var/lib/parins-managed/https-identity.pem
+! sudo test -e /var/lib/parins-managed/https-cert.pem
 session | jq -e '.setup_required == true and .transport.scheme == "http"' >/dev/null
 for asset in / /theme-init.js /assets/app.js /assets/app.css; do
     http --max-time 5 "http://127.0.0.1:3000$asset" >/dev/null
@@ -104,14 +150,14 @@ if curl --fail --silent --insecure --noproxy '*' --max-time 5 https://127.0.0.1:
     printf '%s\n' 'Unexpected HTTPS response without inbound DoH.' >&2
     exit 1
 fi
-sudo test -s /var/lib/parins/setup-token
-[ "$(sudo stat -c %a /var/lib/parins/setup-token)" = 600 ]
-[ "$(sudo stat -Lc %a /var/lib/parins)" = 700 ]
-sudo cat /var/lib/parins/setup-token > "$fixture/token-copy"
+sudo test -s /var/lib/parins-managed/setup-token
+[ "$(sudo stat -c %a /var/lib/parins-managed/setup-token)" = 600 ]
+[ "$(sudo stat -Lc %a /var/lib/parins-managed)" = 700 ]
+sudo cat /var/lib/parins-managed/setup-token > "$fixture/token-copy"
 install_service
-sudo cmp "$fixture/token-copy" /var/lib/parins/setup-token
+sudo cmp "$fixture/token-copy" /var/lib/parins-managed/setup-token
 session | jq -e '.setup_required == true and .transport.scheme == "http"' >/dev/null
-! sudo test -e /var/lib/parins/state.json
+! sudo test -e /var/lib/parins-managed/state.json
 
 # No public DNS, certificate authorities or external APIs: blocked .invalid queries are
 # answered locally on a kernel-assigned high port, with a loopback-only upstream.
@@ -129,9 +175,9 @@ http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
     http://127.0.0.1:3000/api/setup > "$fixture/response.json"
 binding=$(jq -er '.session.binding | select(type == "string" and length > 0)' "$fixture/response.json")
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
-sudo test -s /var/lib/parins/state.json
-[ "$(sudo stat -c %a /var/lib/parins/state.json)" = 600 ]
-sudo cat /var/lib/parins/state.json > "$fixture/state-copy"
+sudo test -s /var/lib/parins-managed/state.json
+[ "$(sudo stat -c %a /var/lib/parins-managed/state.json)" = 600 ]
+sudo cat /var/lib/parins-managed/state.json > "$fixture/state-copy"
 
 check_dns() {
     http --max-time 5 -H "X-PariNS-Session: $binding" \
@@ -170,9 +216,9 @@ PY
 }
 check_dns
 install_service
-! sudo test -e /var/lib/parins/https-identity.pem
-! sudo test -e /var/lib/parins/https-cert.pem
-sudo cmp "$fixture/state-copy" /var/lib/parins/state.json
+! sudo test -e /var/lib/parins-managed/https-identity.pem
+! sudo test -e /var/lib/parins-managed/https-cert.pem
+sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 session | jq -e '.setup_required == false and .authenticated == false' >/dev/null
 http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
     -H 'Content-Type: application/json' \
@@ -180,4 +226,16 @@ http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
 binding=$(jq -er '.session.binding' "$fixture/response.json")
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 check_dns
-printf '%s\n' 'Linux systemd install, HTTP on wildcard/non-loopback, setup, UDP/TCP DNS and state-preserving upgrade passed.'
+# A valid native executable that exits immediately exercises real restart
+# failure and rollback, including restoring the previously active service.
+if sudo sh "$installer" --binary /bin/false > "$fixture/refusal.log" 2>&1; then
+    printf '%s\n' 'Expected failed service startup and binary/unit rollback.' >&2
+    exit 1
+fi
+sudo systemctl is-active --quiet parins-managed.service
+sudo cmp "$binary" /opt/parins-managed/parins
+sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
+sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/parins/tls/external.pem > "$fixture/tls-after"
+cmp "$fixture/tls-before" "$fixture/tls-after"
+sudo grep -Fxq 'external certificate sentinel' /var/lib/parins/tls/external.pem
+printf '%s\n' 'Linux systemd directory ownership, external TLS, HOME errors, setup, UDP/TCP DNS, state-preserving upgrade and failed-start rollback passed.'

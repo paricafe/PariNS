@@ -253,17 +253,21 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     config.max_inflight = 2048;
     config.ecs.enabled = true;
     config.dot = Some(cert.listener());
-    config.doh = Some(cert.listener());
+    config.doh = Some(parins::config::DohConfig {
+        listen: cert.listener().listen,
+        files: cert.listener().files,
+        http3: true,
+    });
     config.doq = Some(cert.listener());
-    config.doh3 = Some(cert.listener());
     config.admin_listen = Some("127.0.0.1:0".parse().unwrap());
     let server = Server::bind(config).await.unwrap();
     let address = server.local_addr().unwrap();
     let encrypted = server.encrypted_addrs().unwrap();
     assert_eq!(
         encrypted.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-        ["dot", "doh", "doq", "doh3"]
+        ["dot", "doh3", "doh", "doq"]
     );
+    assert_eq!(encrypted[1].1, encrypted[2].1);
     let dot = encrypted[0].1;
     let admin = server.admin_addr().unwrap().unwrap();
     let mock = tokio::spawn(async move {
@@ -392,7 +396,11 @@ async fn failed_certificate_startup_releases_previously_bound_sockets() {
         config.dot = Some(dot);
         let mut bad = cert.listener();
         bad.files.key_file = cert.directory.path().join("missing-key.pem");
-        config.doh = Some(bad);
+        config.doh = Some(parins::config::DohConfig {
+            listen: bad.listen,
+            files: bad.files,
+            http3: true,
+        });
         let error = match Server::bind(config).await {
             Ok(_) => panic!("missing certificate key unexpectedly accepted"),
             Err(error) => error,
@@ -405,7 +413,10 @@ async fn failed_certificate_startup_releases_previously_bound_sockets() {
             continue;
         }
         assert!(
-            format!("{error:#}").contains("load TLS private key"),
+            error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound),
             "{error:#}"
         );
         let released = async {
@@ -555,6 +566,17 @@ async fn resolver_profiles_keep_same_question_answers_and_warm_caches_isolated()
 #[cfg(unix)]
 #[tokio::test]
 async fn binary_sighup_reloads_rule_file_and_sigterm_exits_cleanly() {
+    sighup_process_case(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn binary_blocked_reload_does_not_hide_sigterm_or_publish_clean_cache() {
+    sighup_process_case(true).await;
+}
+
+#[cfg(unix)]
+async fn sighup_process_case(block_reload: bool) {
     // Always reap the owned child, including when an assertion or deadline fails.
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
@@ -588,6 +610,8 @@ async fn binary_sighup_reloads_rule_file_and_sigterm_exits_cleanly() {
     let mut child = ChildGuard(
         std::process::Command::new(env!("CARGO_BIN_EXE_parins"))
             .args(["--config", path.to_str().unwrap()])
+            .arg("--data-dir")
+            .arg(directory.path().join("data"))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -637,6 +661,28 @@ async fn binary_sighup_reloads_rule_file_and_sigterm_exits_cleanly() {
     })
     .await
     .unwrap();
+    if block_reload {
+        // No writer opens this owned FIFO: Policy::load blocks in File::open,
+        // before the regular-file check. The elapsed assertion below proves
+        // shutdown actually encountered the outstanding reload.
+        std::fs::remove_file(&rules).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&rules)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-HUP", &child.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let stopping = std::time::Instant::now();
     assert!(
         std::process::Command::new("kill")
             .args(["-TERM", &child.0.id().to_string()])
@@ -644,7 +690,7 @@ async fn binary_sighup_reloads_rule_file_and_sigterm_exits_cleanly() {
             .unwrap()
             .success()
     );
-    let status = timeout(WAIT, async {
+    let status = timeout(Duration::from_secs(9), async {
         loop {
             if let Some(status) = child.0.try_wait().unwrap() {
                 break status;
@@ -655,6 +701,16 @@ async fn binary_sighup_reloads_rule_file_and_sigterm_exits_cleanly() {
     .await
     .unwrap();
     assert!(status.success());
+    if block_reload {
+        assert!(stopping.elapsed() >= Duration::from_secs(5));
+    }
+    assert_eq!(
+        directory
+            .path()
+            .join("data/dns-cache-clean.snapshot")
+            .exists(),
+        !block_reload
+    );
     timeout(WAIT, mock).await.unwrap().unwrap();
     TcpListener::bind(address).await.unwrap();
     UdpSocket::bind(address).await.unwrap();

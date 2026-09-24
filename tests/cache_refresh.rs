@@ -301,7 +301,7 @@ async fn negative_and_other_ecs_namespaces_never_supply_stale() {
     resolver.cache().insert(
         &query,
         &answer,
-        context.cache_scope(&answer).unwrap(),
+        context.response_scope(&answer).cache.unwrap(),
         Instant::now() - Duration::from_secs(61),
     );
     upstream.mode.store(4, SeqCst);
@@ -473,7 +473,7 @@ async fn prefetch_keys_keep_ecs_namespaces_separate() {
         resolver.cache().insert(
             &query,
             &answer,
-            context.cache_scope(&answer).unwrap(),
+            context.response_scope(&answer).cache.unwrap(),
             Instant::now() - Duration::from_secs(59),
         );
         for _ in 0..3 {

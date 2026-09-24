@@ -17,7 +17,7 @@ export interface SettingGroup {
   helpKey: string;
   enableKey: string;
   fields: readonly SettingField[];
-  optional?: "dot" | "doh" | "doq" | "doh3";
+  optional?: "dot" | "doh" | "doq";
 }
 
 export interface SettingPage {
@@ -56,6 +56,7 @@ export const settingPages = {
     group("listeners", [field("listen", "text", true), number("query_timeout_ms", 1, 60000), number("tcp_io_timeout_ms", 1, 60000)]),
   ]),
   cache: page("cache", [
+    group("persistence", [field("cache.persistence.enabled", "checkbox", true), number("cache.persistence.max_bytes", 1048576, 536870912)]),
     group("cache", [
       field("cache.enabled", "checkbox"), number("cache.max_entries", 1, 262144),
       number("cache.max_bytes", 512, 1073741824, true), number("cache.max_variants", 1, 256),
@@ -83,16 +84,20 @@ export const settingPages = {
   ]),
   security: page("security", [
     group("web", [field("web.public_host", "text", true)]),
-    ...(["dot", "doh", "doq", "doh3"] as const).map((protocol) => group(
+    ...(["dot", "doh", "doq"] as const).map((protocol) => group(
       protocol,
-      (["listen", "cert_file", "key_file"] as const).map((name) => field(
+      [...(["listen", "cert_file", "key_file"] as const).map((name) => field(
         `${protocol}.${name}`, name === "listen" ? "endpoint" : "text", false, undefined, undefined, `listener.${name}`,
-      )),
+      )), ...(protocol === "doh" ? [field("doh.http3", "checkbox", true)] : [])],
       protocol,
     )),
   ]),
+  storage: page("storage", [
+    group("queryLog", [field("query_log.enabled", "checkbox"), number("query_log.max_entries", 1, 1000000), number("query_log.max_bytes", 1048576, 536870912), number("query_log.retention_secs", 60, 2592000)]),
+    group("statistics", [number("statistics.retention_secs", 3600, 31536000), number("statistics.max_samples", 60, 525600), number("statistics.reset_interval_days", 0, 3650, true)]),
+    group("storageAdvanced", [number("storage.max_database_bytes", 16777216, 4294967296, true), number("storage.flush_interval_ms", 100, 5000), number("storage.cleanup_interval_secs", 10, 3600), number("storage.queue_max_entries", 128, 65536), number("storage.queue_max_bytes", 1048576, 67108864)]),
+  ]),
   runtime: page("runtime", [
-    group("queryLog", [field("query_log.enabled", "checkbox"), number("query_log.max_entries", 1, 10000), number("query_log.retention_secs", 1, 604800)]),
     group("concurrency", [number("max_inflight", 1, 65536), number("max_tcp_connections", 1, 65536), number("shutdown_grace_ms", 1, 60000)]),
     group("sourceLimits", [
       field("source_limits.enabled", "checkbox"), number("source_limits.rate_per_sec", 1, 1000000),

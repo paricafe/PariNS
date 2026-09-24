@@ -6,6 +6,21 @@ const view = { setup_required: false, authenticated: true, session: { binding: '
   transport: { scheme: 'http', origin: null, certificate_source: null } };
 
 describe('management request ownership', () => {
+  it('encodes statistics query values without relaxing API path validation', async () => {
+    const fetcher = vi.fn(async () => json(200, {}));
+    const api = new ApiClient(fetcher as typeof fetch);
+    api.replaceBinding('binding-1');
+    await api.request('stats', 'GET', undefined, undefined, { query: { range: 'custom', from_ms: '1&range=7d', to_ms: '20' } });
+    expect(fetcher).toHaveBeenCalledWith('/api/stats?range=custom&from_ms=1%26range%3D7d&to_ms=20', expect.any(Object));
+    await expect(api.request('stats?range=7d')).rejects.toThrow('Invalid API path');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects the removed standalone DoH3 certificate source', async () => {
+    const api = new ApiClient(vi.fn(async () => json(200, { ...view, transport: { ...view.transport, certificate_source: 'doh3' } })) as typeof fetch);
+    await expect(api.session()).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
+  });
+
   it('calls the browser fetch with its global receiver by default', async () => {
     const fetcher = vi.fn(function (this: unknown) {
       expect(this).toBe(globalThis);

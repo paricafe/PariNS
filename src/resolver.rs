@@ -2,7 +2,10 @@
 
 use std::{
     net::IpAddr,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -55,6 +58,7 @@ impl Generation {
 pub struct Reply {
     pub message: Message,
     pub udp_limit: usize,
+    pub padding: protocol::Padding,
 }
 
 pub struct Resolver {
@@ -66,6 +70,10 @@ pub struct Resolver {
     metrics: Arc<Metrics>,
     policy: RwLock<Policy>,
     query_log: Arc<QueryLog>,
+    services: Arc<crate::runtime_services::RuntimeServices>,
+    retired_refresh: Mutex<Vec<Arc<refresh::Refresh>>>,
+    shutdown_clean: AtomicBool,
+    shutdown_forced: AtomicBool,
 }
 
 impl Resolver {
@@ -74,6 +82,16 @@ impl Resolver {
     }
 
     pub fn try_from_config(config: &Config) -> anyhow::Result<Self> {
+        let services = crate::runtime_services::RuntimeServices::ephemeral(
+            crate::storage::RuntimeSettings::from_config(config),
+        );
+        Self::with_services(config, services)
+    }
+
+    pub fn with_services(
+        config: &Config,
+        services: Arc<crate::runtime_services::RuntimeServices>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             upstream: Arc::new(crate::upstreams::Pool::new(&config.upstreams, config)?),
             timeout: Duration::from_millis(config.query_timeout_ms),
@@ -83,9 +101,13 @@ impl Resolver {
                 &config.coalescing,
             ))),
             coalescing: config.coalescing.clone(),
-            metrics: Arc::new(Metrics::default()),
+            metrics: services.metrics.clone(),
             policy: RwLock::new(config.load_policy()?),
-            query_log: Arc::new(QueryLog::new(config.query_log.clone())),
+            query_log: services.query_log.clone(),
+            services,
+            retired_refresh: Mutex::new(Vec::new()),
+            shutdown_clean: AtomicBool::new(false),
+            shutdown_forced: AtomicBool::new(false),
         })
     }
 
@@ -143,6 +165,32 @@ impl Resolver {
         &self.metrics
     }
 
+    pub fn services(&self) -> &Arc<crate::runtime_services::RuntimeServices> {
+        &self.services
+    }
+    pub fn policy_digest(&self) -> [u8; 32] {
+        self.policy
+            .read()
+            .expect("policy lock poisoned")
+            .semantic_digest()
+    }
+    pub(crate) fn force_shutdown(&self) {
+        self.shutdown_forced.store(true, Ordering::Release);
+        self.upstream.shutdown();
+    }
+    pub fn upstream_diagnostics(&self) -> serde_json::Value {
+        self.upstream.diagnostics_snapshot()
+    }
+    pub(crate) fn finish_shutdown(&self) {
+        self.shutdown_clean.store(
+            !self.shutdown_forced.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+    }
+    pub fn is_quiescent(&self) -> bool {
+        self.shutdown_clean.load(Ordering::Acquire)
+    }
+
     pub fn replace_policy(&self, policy: Policy) {
         *self.policy.write().expect("policy lock poisoned") = policy;
     }
@@ -160,6 +208,9 @@ impl Resolver {
         let next = Arc::new(Generation::new(config, &self.coalescing));
         let mut current = self.generation.write().expect("cache generation poisoned");
         current.refresh.cancel();
+        let mut retired = self.retired_refresh.lock().expect("retired refresh lock");
+        retired.retain(|refresh| refresh.snapshot().active > 0);
+        retired.push(current.refresh.clone());
         *current = next;
     }
 
@@ -172,12 +223,18 @@ impl Resolver {
     }
 
     pub async fn shutdown_refresh(&self) {
+        self.upstream.shutdown();
         let generation = self
             .generation
             .read()
             .expect("cache generation poisoned")
             .clone();
         generation.refresh.shutdown().await;
+        let retired =
+            std::mem::take(&mut *self.retired_refresh.lock().expect("retired refresh lock"));
+        for refresh in retired {
+            refresh.shutdown().await;
+        }
     }
 
     async fn resolve_inner(&self, bytes: &[u8], peer: IpAddr, trace: &mut Trace) -> Option<Reply> {
@@ -197,17 +254,23 @@ impl Resolver {
                 return Some(Reply {
                     message,
                     udp_limit: 512,
+                    padding: protocol::decode(bytes)
+                        .as_ref()
+                        .map(protocol::Padding::from_query)
+                        .unwrap_or_default(),
                 });
             }
             Request::Forward(query) => query,
         };
         let udp_limit = protocol::udp_limit(&query);
+        let padding = protocol::Padding::from_query(&query);
         let (outbound, context) = match Context::prepare(&query, peer, &self.ecs) {
             Ok(prepared) => prepared,
             Err(code) => {
                 return Some(Reply {
                     message: protocol::error_response(&query, code),
                     udp_limit,
+                    padding,
                 });
             }
         };
@@ -216,10 +279,17 @@ impl Resolver {
             self.metrics.inc(Counter::QueryBlocked);
             let mut message = protocol::error_response(&query, ResponseCode::NoError);
             context.finish(&query, &mut message, None);
-            return Some(Reply { message, udp_limit });
+            return Some(Reply {
+                message,
+                udp_limit,
+                padding,
+            });
         }
-        let cached = cache.lookup(&query, context.outgoing, Instant::now(), false);
-        if let Some(hit) = cached {
+        let cached = cache.lookup_with_decision(&query, context.outgoing, Instant::now(), false);
+        self.metrics.record_cache_lookup(cached.decision);
+        trace.cache_lookup = Some(cached.decision);
+        if let Some(hit) = cached.hit {
+            trace.cache_scope = Some(hit.scope.tag());
             trace.cache = Some("fresh");
             self.metrics.inc(Counter::CacheHits);
             if hit.refresh {
@@ -232,6 +302,7 @@ impl Resolver {
                     outbound: outbound.clone(),
                     epoch,
                     metrics: self.metrics.clone(),
+                    trace_enabled: self.query_log.begin().is_some(),
                 };
                 let flights = generation.flights(epoch, &self.coalescing);
                 let metrics = self.metrics.clone();
@@ -258,8 +329,12 @@ impl Resolver {
                 trace.cache = Some("blocked");
                 self.metrics.inc(Counter::ResponseBlocked);
             }
-            context.finish(&query, &mut message, Some(scope.prefix_len()));
-            return Some(Reply { message, udp_limit });
+            context.finish(&query, &mut message, scope.reply_scope());
+            return Some(Reply {
+                message,
+                udp_limit,
+                padding,
+            });
         }
         self.metrics.inc(Counter::CacheMisses);
         let wire_query = outbound.clone();
@@ -272,13 +347,24 @@ impl Resolver {
             outbound,
             epoch,
             metrics: self.metrics.clone(),
+            trace_enabled: self.query_log.begin().is_some(),
         };
         let work = exchange.run(false).boxed();
         let flights = generation.flights(epoch, &self.coalescing);
         let result = match flights.join(&wire_query, work) {
             Ok((future, role)) => {
                 self.metrics.inc(flight_counter(&role));
-                future.await
+                let result = future.await;
+                if !result.cached {
+                    use crate::query_log::UpstreamRelation as Relation;
+                    trace.upstream_relation = Some(match role {
+                        Role::Leader => Relation::Leader,
+                        Role::Bypass => Relation::Bypass,
+                        Role::Joined if result.prefetch => Relation::PrefetchFollower,
+                        Role::Joined => Relation::Follower,
+                    });
+                }
+                result
             }
             Err(()) => {
                 self.metrics.inc(Counter::FlightRejected);
@@ -289,6 +375,12 @@ impl Resolver {
                     upstream: None,
                     outgoing_ecs: None,
                     cached: false,
+                    cache_store: None,
+                    cache_scope: None,
+                    upstream_trace: None,
+                    failure_stage: None,
+                    failure_reason: None,
+                    prefetch: false,
                 }
             }
         };
@@ -301,15 +393,32 @@ impl Resolver {
         });
         trace.upstream = result.upstream;
         trace.outgoing_ecs = result.outgoing_ecs;
+        trace.cache_store = result.cache_store;
+        trace.cache_scope = result.cache_scope;
+        trace.upstream_trace = result.upstream_trace;
+        trace.failure_stage = result.failure_stage;
+        trace.failure_reason = result.failure_reason;
         // Fallback belongs to each foreground consumer, never to the shared work:
         // background refresh reports only actual admissions, and stale-hit counts
         // describe replies even when many callers shared one failed exchange.
         let response = if result.stale_eligible {
             cache
-                .lookup(&query, context.outgoing, Instant::now(), true)
+                .lookup_with_decision(&query, context.outgoing, Instant::now(), true)
+                .hit
                 .map(|hit| {
+                    let decision = crate::cache::LookupDecision {
+                        outcome: if hit.stale {
+                            crate::cache::LookupOutcome::Stale
+                        } else {
+                            crate::cache::LookupOutcome::Fresh
+                        },
+                        reason: None,
+                    };
+                    self.metrics.record_cache_lookup(decision);
+                    trace.cache_lookup = Some(decision);
+                    trace.cache_scope = Some(hit.scope.tag());
                     trace.cache = Some(if hit.stale { "stale" } else { "fresh" });
-                    (hit.message, Some(hit.scope.prefix_len()))
+                    (hit.message, hit.scope.reply_scope())
                 })
                 .map(Ok)
                 .unwrap_or(result.response)
@@ -329,7 +438,11 @@ impl Resolver {
             self.metrics.inc(Counter::ResponseBlocked);
         }
         context.finish(&query, &mut message, scope);
-        Some(Reply { message, udp_limit })
+        Some(Reply {
+            message,
+            udp_limit,
+            padding,
+        })
     }
 }
 
@@ -352,6 +465,7 @@ struct Exchange {
     outbound: Message,
     epoch: u64,
     metrics: Arc<Metrics>,
+    trace_enabled: bool,
 }
 
 impl Exchange {
@@ -364,19 +478,36 @@ impl Exchange {
             && (!refreshing || !hit.refresh)
         {
             return Answer {
-                response: Ok((hit.message, Some(hit.scope.prefix_len()))),
+                response: Ok((hit.message, hit.scope.reply_scope())),
                 stale_eligible: false,
                 admitted: false,
                 upstream: None,
                 outgoing_ecs: None,
                 cached: true,
+                cache_store: None,
+                cache_scope: Some(hit.scope.tag()),
+                upstream_trace: None,
+                failure_stage: None,
+                failure_reason: None,
+                prefetch: refreshing,
             };
         }
         let _timer = self.metrics.track(Timer::Upstream);
+        let metrics = self.metrics.clone();
+        let operation = crate::upstreams::diagnostics::Operation::new(
+            self.trace_enabled,
+            Some(Arc::new(move |attempt| {
+                metrics.record_upstream_attempt(attempt)
+            })),
+        );
         let mut retried = false;
         let mut endpoint = None;
-        let result = tokio::time::timeout(self.timeout, async {
-            let exchange = self.upstream.exchange(&self.outbound).await?;
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let result = tokio::time::timeout_at(deadline, async {
+            let exchange = self
+                .upstream
+                .exchange_observed(&self.outbound, deadline, &operation)
+                .await?;
             endpoint = Some(exchange.upstream);
             let mut response = exchange.message;
             if response.response_code == ResponseCode::Refused
@@ -396,7 +527,10 @@ impl Exchange {
                 });
                 ecs::set_subnet(&mut self.outbound, Some(anonymous));
                 endpoint = None;
-                let exchange = self.upstream.exchange(&self.outbound).await?;
+                let exchange = self
+                    .upstream
+                    .exchange_observed(&self.outbound, deadline, &operation)
+                    .await?;
                 endpoint = Some(exchange.upstream);
                 response = exchange.message;
             }
@@ -409,28 +543,53 @@ impl Exchange {
                 self.metrics.inc(Counter::UpstreamTimeouts);
                 true
             }
-            Ok(Err(_)) => true,
+            Ok(Err(error)) => {
+                if error.is::<tokio::time::error::Elapsed>() {
+                    self.metrics.inc(Counter::UpstreamTimeouts);
+                }
+                true
+            }
         };
         if failed {
             self.metrics.inc(Counter::UpstreamFailures);
         }
+        let upstream_trace = operation.trace();
+        // A valid DNS SERVFAIL is not a fabricated transport failure. Retain
+        // actual operation failures even when a foreground caller serves stale.
+        let failure =
+            (!matches!(&result, Ok(Ok(_))))
+                .then(|| {
+                    upstream_trace
+                        .as_ref()
+                        .and_then(|trace| {
+                            trace.attempts.iter().rev().find(|a| {
+                                a.outcome == crate::upstreams::diagnostics::Outcome::Failed
+                            })
+                        })
+                        .map(|a| (a.stage, a.reason))
+                })
+                .flatten();
         match result {
             Ok(Ok(response)) => {
-                let admitted = !retried
-                    && self.context.cache_scope(&response).is_some_and(|scope| {
-                        self.cache.insert_if_epoch(
-                            &self.query,
-                            &response,
-                            scope,
-                            Instant::now(),
-                            self.epoch,
-                        )
-                    });
-                let scope = if retried {
-                    None
-                } else {
-                    ecs::subnet(&response).map(|ecs| ecs.scope_prefix())
-                };
+                let decision = self.context.response_scope(&response);
+                let store = (!retried).then(|| {
+                    let store = decision.cache.map_or_else(
+                        || self.cache.record_unusable_scope(),
+                        |scope| {
+                            self.cache.insert_decision_if_epoch(
+                                &self.query,
+                                &response,
+                                scope,
+                                Instant::now(),
+                                self.epoch,
+                            )
+                        },
+                    );
+                    self.metrics.record_cache_store(store);
+                    store
+                });
+                let admitted = store.is_some_and(|store| store.admitted());
+                let scope = if retried { None } else { decision.reply };
                 Answer {
                     response: Ok((response, scope)),
                     admitted,
@@ -438,6 +597,16 @@ impl Exchange {
                     upstream: endpoint,
                     outgoing_ecs: crate::query_log::subnet(&self.outbound),
                     cached: false,
+                    cache_store: store,
+                    cache_scope: if retried {
+                        None
+                    } else {
+                        decision.cache.map(|scope| scope.tag())
+                    },
+                    upstream_trace,
+                    failure_stage: failure.map(|f| f.0),
+                    failure_reason: failure.and_then(|f| f.1),
+                    prefetch: refreshing,
                 }
             }
             _ => Answer {
@@ -447,6 +616,12 @@ impl Exchange {
                 upstream: endpoint,
                 outgoing_ecs: crate::query_log::subnet(&self.outbound),
                 cached: false,
+                cache_store: None,
+                cache_scope: None,
+                upstream_trace,
+                failure_stage: failure.map(|f| f.0),
+                failure_reason: failure.and_then(|f| f.1),
+                prefetch: refreshing,
             },
         }
     }

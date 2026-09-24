@@ -30,6 +30,11 @@ use crate::{ingress::Ingress, metrics::Counter, protocol, transport::tcp};
 
 mod pool;
 pub use pool::PoolSettings;
+mod certificates;
+pub use certificates::{
+    CertificateRole, CertificateSet, CertificateSources, CertificateSummary,
+    PreparedCertificateSet, RoleSummary,
+};
 type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -135,19 +140,15 @@ pub fn reloading_server_config(
 }
 
 pub fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
-    let certificates = CertificateDer::pem_file_iter(&files.cert_file)
-        .context("open TLS certificate")?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    ensure!(
-        !certificates.is_empty(),
-        "TLS certificate file has no certificates"
-    );
-    let key = PrivateKeyDer::from_pem_file(&files.key_file).context("load TLS private key")?;
-    checked_identity(certificates, key)
+    let certificate =
+        certificates::read_pem_file(&files.cert_file).context("read TLS certificate")?;
+    let private_key =
+        certificates::read_pem_file(&files.key_file).context("read TLS private key")?;
+    validate_pem_identity(&certificate, &private_key)
 }
 
-/// Only the chosen management identity needs a browser host and current dates.
-/// DNS TLS still uses its existing file/key validation contract.
+/// Only the chosen management identity needs a browser host. Dates and key
+/// consistency are validated by the shared preparation boundary for all roles.
 pub fn validate_management_identity(key: &CertifiedKey, host: &str) -> Result<()> {
     let name = ServerName::try_from(host.to_owned()).context("invalid management TLS name")?;
     let leaf = key.cert.first().context("TLS certificate chain is empty")?;
@@ -156,14 +157,6 @@ pub fn validate_management_identity(key: &CertifiedKey, host: &str) -> Result<()
     end_entity
         .verify_is_valid_for_subject_name(&name)
         .map_err(|_| ManagementNameMismatch)?;
-    for cert in &key.cert {
-        let (_, parsed) = X509Certificate::from_der(cert.as_ref())
-            .map_err(|_| anyhow::anyhow!("invalid management certificate chain"))?;
-        ensure!(
-            parsed.validity().is_valid(),
-            "management certificate is not currently valid"
-        );
-    }
     Ok(())
 }
 
@@ -184,6 +177,11 @@ pub fn validate_pem_identity(
     certificate_pem: &[u8],
     private_key_pem: &[u8],
 ) -> Result<Arc<CertifiedKey>> {
+    ensure!(
+        certificate_pem.len() <= certificates::MAX_PEM_BYTES
+            && private_key_pem.len() <= certificates::MAX_PEM_BYTES,
+        "TLS PEM exceeds the 64 KiB size limit"
+    );
     let certificates = CertificateDer::pem_slice_iter(certificate_pem)
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("invalid PEM certificate chain")?;
@@ -202,6 +200,15 @@ fn checked_identity(
     certificates: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<Arc<CertifiedKey>> {
+    for certificate in &certificates {
+        let (remaining, parsed) = X509Certificate::from_der(certificate.as_ref())
+            .map_err(|_| anyhow::anyhow!("invalid TLS certificate chain"))?;
+        ensure!(remaining.is_empty(), "trailing data in TLS certificate");
+        ensure!(
+            parsed.validity().is_valid(),
+            "TLS certificate is not currently valid"
+        );
+    }
     let key = CertifiedKey::from_der(certificates, key, &rustls::crypto::ring::default_provider())?;
     // from_der permits providers that cannot determine key consistency; ours must prove it.
     key.keys_match()?;
@@ -247,45 +254,94 @@ impl Upstream {
     }
 
     pub async fn exchange(&self, query: &Message, address: SocketAddr) -> Result<Message> {
-        let Some(pool) = &self.pool else {
-            return transaction(&mut self.connect(address).await?, query).await;
-        };
-        let mut slot = pool.checkout(address).await;
-        // Never leave a borrowed/partially consumed stream in shared state. A
-        // cancelled query drops it along with this guard, leaving None.
-        let cached = slot
-            .take()
-            .filter(|idle| idle.address == address && idle.returned.elapsed() < pool.idle_timeout);
-        let reused = cached.is_some();
-        let mut stream = match cached {
-            Some(idle) => idle.stream,
-            None => self.connect(address).await?,
-        };
-        let response = match transaction(&mut stream, query).await {
-            Ok(response) => response,
-            Err(error) if reused && closed_connection(&error) => {
-                // A server may close an idle connection at any time. Retry only
-                // this transport closure, once, within the original query budget.
-                drop(stream);
-                stream = self.connect(address).await?;
-                transaction(&mut stream, query).await?
-            }
-            Err(error) => return Err(error),
-        };
-        *slot = Some(pool::Idle {
-            stream,
-            address,
-            returned: tokio::time::Instant::now(),
-        });
-        Ok(response)
+        self.exchange_inner(query, address, None).await
     }
 
-    async fn connect(&self, address: SocketAddr) -> Result<ClientStream> {
+    pub(crate) async fn exchange_observed(
+        &self,
+        query: &Message,
+        address: SocketAddr,
+        scope: &crate::upstreams::diagnostics::AttemptScope,
+    ) -> Result<Message> {
+        self.exchange_inner(query, address, Some(scope)).await
+    }
+
+    async fn exchange_inner(
+        &self,
+        query: &Message,
+        address: SocketAddr,
+        scope: Option<&crate::upstreams::diagnostics::AttemptScope>,
+    ) -> Result<Message> {
+        use crate::upstreams::diagnostics::{ActualProtocol, Stage};
+        let mut attempt = scope.map(|scope| scope.start(Some(ActualProtocol::Dot)));
+        let result = async {
+            let Some(pool) = &self.pool else {
+                return transaction(
+                    &mut self.connect(address, &mut attempt).await?,
+                    query,
+                    &mut attempt,
+                )
+                .await;
+            };
+            client_stage(&mut attempt, Stage::Wait);
+            let mut slot = pool.checkout(address).await;
+            // Never leave a borrowed/partially consumed stream in shared state. A
+            // cancelled query drops it along with this guard, leaving None.
+            let cached = slot.take().filter(|idle| {
+                idle.address == address && idle.returned.elapsed() < pool.idle_timeout
+            });
+            let reused = cached.is_some();
+            let mut stream = match cached {
+                Some(idle) => idle.stream,
+                None => self.connect(address, &mut attempt).await?,
+            };
+            let response = match transaction(&mut stream, query, &mut attempt).await {
+                Ok(response) => response,
+                Err(error) if reused && closed_connection(&error) => {
+                    // A server may close an idle connection at any time. Retry only
+                    // this transport closure, once, within the original query budget.
+                    drop(stream);
+                    if let Some(attempt) = &mut attempt {
+                        attempt.finish(&Err::<(), _>(error));
+                    }
+                    ensure!(
+                        scope.is_none_or(|scope| scope.remaining()),
+                        "DoT deadline exhausted before reconnect"
+                    );
+                    attempt = scope.map(|scope| scope.start(Some(ActualProtocol::Dot)));
+                    stream = self.connect(address, &mut attempt).await?;
+                    transaction(&mut stream, query, &mut attempt).await?
+                }
+                Err(error) => return Err(error),
+            };
+            *slot = Some(pool::Idle {
+                stream,
+                address,
+                returned: tokio::time::Instant::now(),
+            });
+            Ok(response)
+        }
+        .await;
+        if let Some(attempt) = &mut attempt {
+            attempt.finish(&result);
+        }
+        result
+    }
+
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        attempt: &mut Option<crate::upstreams::diagnostics::Attempt>,
+    ) -> Result<ClientStream> {
+        use crate::upstreams::diagnostics::Stage;
+        client_stage(attempt, Stage::Connect);
         let stream = TcpStream::connect(address).await?;
+        client_stage(attempt, Stage::TlsHandshake);
         let stream = self
             .connector
             .connect(self.server_name.clone(), stream)
             .await?;
+        client_stage(attempt, Stage::Validate);
         // Legacy DoT servers may omit ALPN; an explicitly different protocol is never accepted.
         ensure!(
             stream
@@ -309,12 +365,31 @@ fn closed_connection(error: &anyhow::Error) -> bool {
     })
 }
 
-async fn transaction(stream: &mut ClientStream, query: &Message) -> Result<Message> {
+fn client_stage(
+    attempt: &mut Option<crate::upstreams::diagnostics::Attempt>,
+    stage: crate::upstreams::diagnostics::Stage,
+) {
+    if let Some(attempt) = attempt {
+        attempt.stage(stage);
+    }
+}
+
+async fn transaction(
+    stream: &mut ClientStream,
+    query: &Message,
+    attempt: &mut Option<crate::upstreams::diagnostics::Attempt>,
+) -> Result<Message> {
+    use crate::upstreams::diagnostics::Stage;
     let mut outbound = query.clone();
     outbound.metadata.id = rand::random();
-    tcp::write_frame(stream, &outbound.to_vec()?).await?;
+    client_stage(attempt, Stage::RequestWrite);
+    tcp::write_frame(stream, &protocol::encode_upstream(&outbound, true)?).await?;
     stream.flush().await?;
-    let mut response = protocol::decode(&tcp::read_frame(stream).await?)?;
+    client_stage(attempt, Stage::ResponseRead);
+    let wire = tcp::read_frame(stream).await?;
+    client_stage(attempt, Stage::Decode);
+    let mut response = protocol::decode(&wire)?;
+    client_stage(attempt, Stage::Validate);
     ensure!(
         protocol::matches_response(&outbound, &response),
         "unrelated DoT upstream response"
@@ -371,6 +446,7 @@ pub async fn serve(
     .await
     .is_err()
     {
+        ingress.resolver.force_shutdown();
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
     }

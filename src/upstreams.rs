@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -15,6 +15,7 @@ use hickory_proto::op::{Message, ResponseCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
+pub mod diagnostics;
 mod h3;
 mod transport;
 
@@ -120,18 +121,12 @@ impl Settings {
 fn listeners(
     config: &crate::config::Config,
     protocol: Protocol,
-    prefer_h3: bool,
+    _prefer_h3: bool,
 ) -> Vec<SocketAddr> {
     match protocol {
         Protocol::Udp | Protocol::Tcp => vec![config.listen],
         Protocol::Tls => config.dot.as_ref().map(|v| v.listen).into_iter().collect(),
-        Protocol::Https => config
-            .doh
-            .as_ref()
-            .map(|v| v.listen)
-            .into_iter()
-            .chain(config.doh3.as_ref().filter(|_| prefer_h3).map(|v| v.listen))
-            .collect(),
+        Protocol::Https => config.doh.as_ref().map(|v| v.listen).into_iter().collect(),
         Protocol::Quic => config.doq.as_ref().map(|v| v.listen).into_iter().collect(),
     }
 }
@@ -272,6 +267,8 @@ pub struct Pool {
     scores: Mutex<Vec<i64>>,
     cursor: AtomicUsize,
     extra: Arc<Semaphore>,
+    timeout: std::time::Duration,
+    diagnostics: Arc<diagnostics::Diagnostics>,
 }
 
 impl Pool {
@@ -293,15 +290,61 @@ impl Pool {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
+            diagnostics: diagnostics::Diagnostics::new(endpoints.len()),
             scores: Mutex::new(vec![0; endpoints.len()]),
             endpoints,
             settings: settings.clone(),
             cursor: AtomicUsize::new(0),
             extra: Arc::new(Semaphore::new(settings.max_extra_inflight)),
+            timeout: std::time::Duration::from_millis(config.query_timeout_ms),
         })
     }
 
     pub async fn exchange(&self, query: &Message) -> Result<Exchange> {
+        self.exchange_until(query, tokio::time::Instant::now() + self.timeout)
+            .await
+    }
+
+    pub async fn exchange_until(
+        &self,
+        query: &Message,
+        deadline: tokio::time::Instant,
+    ) -> Result<Exchange> {
+        self.exchange_observed(query, deadline, &diagnostics::Operation::new(false, None))
+            .await
+    }
+
+    pub fn diagnostics_snapshot(&self) -> serde_json::Value {
+        self.diagnostics.snapshot()
+    }
+
+    pub fn shutdown(&self) {
+        self.diagnostics.shutdown();
+    }
+
+    pub async fn exchange_observed(
+        &self,
+        query: &Message,
+        deadline: tokio::time::Instant,
+        operation: &diagnostics::Operation,
+    ) -> Result<Exchange> {
+        tokio::time::timeout_at(deadline, self.exchange_inner(query, deadline, operation)).await?
+    }
+
+    async fn exchange_inner(
+        &self,
+        query: &Message,
+        deadline: tokio::time::Instant,
+        operation: &diagnostics::Operation,
+    ) -> Result<Exchange> {
+        ensure!(
+            !self.diagnostics.is_shutdown(),
+            "upstream pool is shut down"
+        );
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "upstream deadline exhausted"
+        );
         if self.settings.mode == Mode::Weighted {
             // Smooth weighted round-robin: no long runs from large weights.
             let index = {
@@ -318,9 +361,14 @@ impl Pool {
                 scores[selected] -= total;
                 selected
             };
-            return self.endpoints[index].exchange(query).await;
+            let scope =
+                diagnostics::AttemptScope::new(&self.diagnostics, operation, index, deadline);
+            return self.endpoints[index]
+                .exchange(query, deadline, &scope)
+                .await;
         }
         let start = self.cursor.fetch_add(1, Ordering::Relaxed) % self.endpoints.len();
+        let race_lost = Arc::new(AtomicBool::new(false));
         let mut requests = FuturesUnordered::new();
         for offset in 0..self.endpoints.len().min(self.settings.max_parallel) {
             let permit = if offset == 0 {
@@ -331,10 +379,14 @@ impl Pool {
                 };
                 Some(permit)
             };
-            let client = &self.endpoints[(start + offset) % self.endpoints.len()];
+            let index = (start + offset) % self.endpoints.len();
+            let client = &self.endpoints[index];
+            let scope =
+                diagnostics::AttemptScope::new(&self.diagnostics, operation, index, deadline)
+                    .racing(&race_lost);
             requests.push(async move {
                 let _permit = permit;
-                client.exchange(query).await
+                client.exchange(query, deadline, &scope).await
             });
         }
         let mut failure = Err(anyhow::anyhow!("no upstream response"));
@@ -345,6 +397,7 @@ impl Pool {
                     ResponseCode::NoError | ResponseCode::NXDomain
                 )
             }) {
+                race_lost.store(true, Ordering::Release);
                 return result;
             }
             if failure.is_err() || result.is_ok() {

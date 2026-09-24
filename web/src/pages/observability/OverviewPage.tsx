@@ -4,6 +4,10 @@ import { formatDate, formatNumber, translate, type Language } from "../../i18n";
 import { TrendChart } from "./TrendChart";
 import { averageLatencyMillis, cacheHitRate, histogramRows, type StatsView, type StatusView } from "./metrics";
 import "./observability.css";
+import { Tabs } from '../../components/beui';
+import { StorageStatusPanel } from './StorageStatusPanel';
+import { CacheDiagnosticsPanel } from './CacheDiagnosticsPanel';
+import { TransportDiagnostics } from './TransportDiagnostics';
 
 export interface OverviewPageProps {
   api: ApiClient;
@@ -56,7 +60,11 @@ export function OverviewPage({ api, language, onOpenDns }: OverviewPageProps) {
   const [updated, setUpdated] = useState<number | null>(null);
   const [statusFailed, setStatusFailed] = useState(false);
   const [statsFailed, setStatsFailed] = useState(false);
-  const [hours, setHours] = useState<1 | 6 | 24>(1);
+  const [range, setRange] = useState('1h');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [query, setQuery] = useState<Record<string, string>>({ range: '1h' });
+  const [rangeError, setRangeError] = useState(false);
   const [refreshKey, refresh] = useState(0);
 
   useEffect(() => {
@@ -78,7 +86,7 @@ export function OverviewPage({ api, language, onOpenDns }: OverviewPageProps) {
       if (statsBusy) return;
       statsBusy = true;
       try {
-        const next = await api.request<StatsView>("stats");
+        const next = await api.request<StatsView>("stats", 'GET', undefined, undefined, { query });
         if (active) { setStats(next); setStatsFailed(false); lastStats = Date.now(); }
       } catch {
         if (active) setStatsFailed(true);
@@ -93,11 +101,12 @@ export function OverviewPage({ api, language, onOpenDns }: OverviewPageProps) {
     const interval = window.setInterval(tick, 5_000);
     document.addEventListener("visibilitychange", tick);
     return () => { active = false; window.clearInterval(interval); document.removeEventListener("visibilitychange", tick); };
-  }, [api, refreshKey]);
+  }, [api, refreshKey, query]);
 
   const running = status?.running === true;
-  const counters = running ? status.metrics?.counters : null;
-  const latency = running ? status.metrics?.request_latency : null;
+  const counters = stats?.totals.metrics.counters;
+  const latency = stats?.totals.metrics.request_latency;
+  const hours = query.range === 'custom' ? (Number(query.to_ms) - Number(query.from_ms)) / 3_600_000 : query.range === '7d' ? 168 : query.range === '24h' ? 24 : 1;
   const hitRate = cacheHitRate(counters);
   const average = averageLatencyMillis(latency);
   const summary = [
@@ -128,13 +137,16 @@ export function OverviewPage({ api, language, onOpenDns }: OverviewPageProps) {
     </div>
 
     <section aria-label={translate("ui.maintenance", language)} className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-zinc-200 bg-white px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-900">
-      <span className="font-medium">{status === null ? translate("ui.loadingStatus", language) : running ? translate("app.running", language) : translate("app.stopped", language)}</span>
+      <span className="font-medium">{status === null ? translate("ui.loadingStatus", language) : translate(`reliability.${status.dns_health.state === 'failed' ? 'runtimeFailed' : status.dns_health.state}`, language)}</span>
+      {status && <span>{translate(`reliability.${status.dns_health.ready ? 'ready' : 'notReady'}`, language)}</span>}
       {updated !== null && <span className="text-zinc-500 dark:text-zinc-400">{translate("ui.updated", language)} {formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>}
       {status !== null && <span className="text-zinc-500 dark:text-zinc-400">{translate("ui.revision", language)} {status.revision}</span>}
       {statusFailed && <span role="alert" className="text-red-700 dark:text-red-300">{translate("app.statusUnavailable", language)}</span>}
       <span className="text-xs text-zinc-500 dark:text-zinc-400">{translate("ui.statusInterval", language)}</span>
     </section>
     {status?.last_error && <p role="alert" className="rounded-md border border-red-300 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300">{status.last_error}</p>}
+    {status && <p className="small muted">{translate('reliability.runtimeGeneration', language, { generation: status.dns_health.generation, time: formatDate(status.dns_health.changed_at_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}{status.dns_health.code && <> · <code>{status.dns_health.code}</code></>}</p>}
+    {status?.storage && <StorageStatusPanel status={status.storage} language={language} compact />}
 
     <section aria-label={translate("ui.statsScope", language)}>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{summary.map((item) => <div key={item.key} className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -143,21 +155,24 @@ export function OverviewPage({ api, language, onOpenDns }: OverviewPageProps) {
         <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">{item.help}</p>
       </div>)}</div>
       <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">{translate("ui.statsHelp", language)}</p>
+      {stats && <p className="small muted">{translate('storage.totalsSince', language, { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</p>}
     </section>
 
     <section className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900" aria-labelledby="parins-trend-title">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h2 id="parins-trend-title" className="font-semibold">{translate("ui.activity", language)}</h2>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">{translate("ui.activityHelp", language)}</p></div>
-        <div role="group" aria-label={translate("ui.trendRange", language)} className="flex rounded-md border border-zinc-300 p-0.5 dark:border-zinc-700">
-          {([1, 6, 24] as const).map((range) => <button key={range} type="button" aria-pressed={hours === range}
-            onClick={() => setHours(range)} className="min-h-9 rounded px-3 text-sm aria-pressed:bg-zinc-900 aria-pressed:text-white dark:aria-pressed:bg-zinc-100 dark:aria-pressed:text-zinc-900">
-            {translate(`ui.hour${range}`, language)}
-          </button>)}
-        </div>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">{translate("storage.trendHelp", language)}</p></div>
       </div>
+      <Tabs label={translate('ui.trendRange', language)} items={['1h', '24h', '7d', 'custom'].map((value, index) => ({ value, label: translate(`storage.${['hour1', 'hour24', 'day7', 'custom'][index]}`, language) }))} value={range} onChange={(next) => { setRange(next); setRangeError(false); if (next !== 'custom') setQuery({ range: next }); }} />
+      {range === 'custom' && <form className="custom-range" onSubmit={(event) => {
+        event.preventDefault(); const from = new Date(customFrom).getTime(); const to = new Date(customTo).getTime();
+        if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || from < 0) { setRangeError(true); return; }
+        setRangeError(false); setQuery({ range: 'custom', from_ms: String(from), to_ms: String(to) });
+      }}><label className="field">{translate('storage.from', language)}<input type="datetime-local" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} required /></label><label className="field">{translate('storage.to', language)}<input type="datetime-local" value={customTo} onChange={(event) => setCustomTo(event.target.value)} required /></label><button className="button secondary" type="submit">{translate('ui.filter', language)}</button></form>}
+      {rangeError && <p role="alert">{translate('storage.rangeInvalid', language)}</p>}
       <div className="mt-4">{statsFailed && <p role="status" className="text-sm text-zinc-500 dark:text-zinc-400">{translate("app.statsUnavailable", language)}</p>}
-        <TrendChart samples={stats?.samples ?? []} hours={hours} language={language} /></div>
+        <TrendChart samples={stats?.samples ?? []} hours={hours} end={query.range === 'custom' ? Number(query.to_ms) : undefined} language={language} /></div>
+      {stats?.samples.some((sample) => sample.gap) && <p className="small muted">{translate('storage.gapCount', language, { count: stats.samples.filter((sample) => sample.gap).length })}</p>}
       <div className="mt-3 flex flex-wrap gap-4 text-xs text-zinc-600 dark:text-zinc-400">
         {(["legendRequests", "legendCache", "legendBlocked"] as const).map((key) => <span key={key}>{translate(`ui.${key}`, language)}</span>)}
       </div>
@@ -176,6 +191,8 @@ export function OverviewPage({ api, language, onOpenDns }: OverviewPageProps) {
       </section>
     </div>
 
+    {status?.diagnostics.cache && <CacheDiagnosticsPanel value={status.diagnostics.cache} language={language} />}
+    {status && <TransportDiagnostics upstreams={status.diagnostics.upstreams} quic={status.diagnostics.quic} language={language} />}
     <section className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900" aria-labelledby="parins-service-title">
       <div className="flex items-center justify-between gap-3"><h2 id="parins-service-title" className="font-semibold">{translate("ui.maintenance", language)}</h2>
         <button type="button" onClick={onOpenDns} className="min-h-11 text-sm underline underline-offset-4 focus-visible:outline-2">{translate("ui.openDns", language)}</button></div>

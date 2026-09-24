@@ -42,7 +42,7 @@ interface ConfigContextValue {
   setOptional(protocol: string, enabled: boolean): void;
   setRules(rules: CacheRuleDraft[]): void;
   setToml(toml: string): void;
-  importCertificate(target: 'dot' | 'doh' | 'doq' | 'doh3', certificate: string, privateKey: string): Promise<void>;
+  importCertificate(target: 'dot' | 'doh' | 'doq', certificate: string, privateKey: string): Promise<void>;
   preview(): Promise<string>;
   validate(): Promise<ValidationResponse>;
   prepareSave(): Promise<PreparedSave>;
@@ -120,7 +120,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     setDraft((current) => current && ({ ...current, previewTransportChange: null, fields: { ...current.fields, [path]: value } }));
   }, []);
   const setOptional = useCallback((protocol: string, enabled: boolean) => {
-    if (!['dot', 'doh', 'doq', 'doh3'].includes(protocol)) throw new Error('Unknown listener');
+    if (!['dot', 'doh', 'doq'].includes(protocol)) throw new Error('Unknown listener');
     if (writeLock.current) return;
     version.current += 1;
     setDraft((current) => current && ({ ...current, previewTransportChange: null, optional: { ...current.optional, [protocol]: enabled } }));
@@ -136,7 +136,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     setDraft((current) => current && ({ ...current, toml, stale: true, previewTransportChange: null }));
   }, []);
 
-  const importCertificate = useCallback(async (target: 'dot' | 'doh' | 'doq' | 'doh3', certificate: string, privateKey: string) => {
+  const importCertificate = useCallback(async (target: 'dot' | 'doh' | 'doq', certificate: string, privateKey: string) => {
     if (!draft || writeLock.current || busy) throw new Error('Configuration is busy');
     const enabled = draft.optional[target] ?? getPath(draft.settings, target) !== null;
     if (!enabled) throw new Error('app.enableListener');
@@ -177,7 +177,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       }
       const protocol = path.split('.')[0];
       const enabled = draft.optional[protocol] ?? getPath(next, protocol) !== null;
-      if (['dot', 'doh', 'doq', 'doh3'].includes(protocol) && !enabled) continue;
+      if (['dot', 'doh', 'doq'].includes(protocol) && !enabled) continue;
       const field = fieldByPath.get(path)!;
       next = setPath(next, path, convertFieldValue(field, raw));
     }

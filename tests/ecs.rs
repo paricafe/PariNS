@@ -77,7 +77,7 @@ fn derives_masked_ipv4_ipv6_and_honors_opt_out() {
     .unwrap();
     assert_eq!(ecs::subnet(&out).unwrap().source_prefix(), 0);
     assert_eq!(
-        context.cache_scope(&out),
+        context.response_scope(&out).cache,
         Some(Scope::Privacy { ipv4: true })
     );
     let (out, _) = Context::prepare(
@@ -189,15 +189,76 @@ fn mismatched_responses_and_ambiguous_cache_scopes_are_distinct() {
     let (out, context) =
         Context::prepare(&query(None), "192.0.2.123".parse().unwrap(), &enabled()).unwrap();
     let mut response = protocol::error_response(&out, ResponseCode::NoError);
-    assert!(context.cache_scope(&response).is_none());
     ecs::set_subnet(
         &mut response,
         Some(ClientSubnet::new("192.0.2.0".parse().unwrap(), 24, 28)),
     );
     assert!(ecs::response_matches(&out, &response));
-    assert!(context.cache_scope(&response).is_none());
+    assert!(context.response_scope(&response).cache.is_none());
     ecs::set_subnet(&mut response, Some("198.51.100.0/24".parse().unwrap()));
     assert!(!ecs::response_matches(&out, &response));
+    assert!(context.response_scope(&response).cache.is_none());
+}
+
+#[test]
+fn missing_ecs_scope_uses_sent_prefix_for_storage_and_downstream_echo() {
+    for (source, peer, tag, reply) in [
+        (None, "192.0.2.123", "exact_ecs:192.0.2.0/24", Some(24)),
+        (
+            Some("192.0.2.123/32"),
+            "192.0.2.123",
+            "exact_ecs:192.0.2.0/24",
+            Some(24),
+        ),
+        (Some("0.0.0.0/0"), "192.0.2.123", "privacy_v4", Some(0)),
+        (Some("::/0"), "2001:db8::1", "privacy_v6", Some(0)),
+    ] {
+        let input = query(source);
+        let (out, context) = Context::prepare(&input, peer.parse().unwrap(), &enabled()).unwrap();
+        let mut response = protocol::error_response(&out, ResponseCode::NoError);
+        ecs::set_subnet(&mut response, None);
+        let scope = context.response_scope(&response);
+        assert_eq!(scope.cache.unwrap().tag(), tag);
+        assert_eq!(scope.reply, reply);
+        context.finish(&input, &mut response, scope.reply);
+        assert_eq!(
+            ecs::subnet(&response).map(|ecs| ecs.scope_prefix()),
+            source.and(reply)
+        );
+    }
+    for invalid in [
+        "exact_ecs:0.0.0.0/0",
+        "exact_ecs:192.0.2.1/24",
+        "exact_ecs:2001:DB8::/32",
+    ] {
+        assert!(Scope::parse_tag(invalid).is_err());
+    }
+}
+
+#[test]
+fn padding_wire_allows_empty_and_nonzero_bytes_but_rejects_duplicates_and_bad_lengths() {
+    for data in [vec![], vec![7, 8, 9]] {
+        let mut input = query(None);
+        let mut edns = Edns::new();
+        edns.options_mut()
+            .insert(EdnsOption::Unknown(12, data.clone()));
+        input.edns = Some(edns);
+        let wire = input.to_vec().unwrap();
+        assert!(protocol::decode(&wire).is_ok());
+        let mut duplicated = wire.clone();
+        // This fixture has one trailing OPT RR, with its RDLENGTH immediately
+        // before the only option envelope.
+        let length_offset = wire.len() - data.len() - 6;
+        let length = u16::from_be_bytes([wire[length_offset], wire[length_offset + 1]]);
+        duplicated[length_offset..length_offset + 2].copy_from_slice(&(length + 4).to_be_bytes());
+        duplicated.extend_from_slice(&[0, 12, 0, 0]);
+        assert!(protocol::decode(&duplicated).is_err());
+        let mut malformed = wire;
+        let option_length = malformed.len() - data.len() - 2;
+        malformed[option_length..option_length + 2]
+            .copy_from_slice(&(data.len() as u16 + 1).to_be_bytes());
+        assert!(protocol::decode(&malformed).is_err());
+    }
 }
 
 #[tokio::test]

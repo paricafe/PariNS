@@ -386,6 +386,7 @@ async fn bootstrap_resolved_self_loop_is_rejected_before_dns_send() {
 
 #[tokio::test]
 async fn encrypted_upstreams_reject_untrusted_certificate() {
+    use parins::upstreams::diagnostics::{Operation, Reason, Stage};
     for protocol in ["tls", "https"] {
         let (_dir, _ca, tls) = identity(if protocol == "tls" { b"dot" } else { b"h2" });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -402,7 +403,22 @@ async fn encrypted_upstreams_reject_untrusted_certificate() {
                     .is_err()
             );
         });
-        assert!(client(&config).unwrap().exchange(&query()).await.is_err());
+        let operation = Operation::new(true, None);
+        assert!(
+            client(&config)
+                .unwrap()
+                .exchange_observed(
+                    &query(),
+                    tokio::time::Instant::now() + Duration::from_secs(1),
+                    &operation
+                )
+                .await
+                .is_err()
+        );
+        let trace = operation.trace().unwrap();
+        assert_eq!(trace.attempts.len(), 1);
+        assert_eq!(trace.attempts[0].stage, Stage::TlsHandshake);
+        assert_eq!(trace.attempts[0].reason, Some(Reason::Tls));
         task.await.unwrap();
     }
 }
@@ -737,6 +753,7 @@ async fn h3_preferred_reuses_connection_concurrently_preserves_edns_and_closes_o
 
 #[tokio::test]
 async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome, Reason, Stage};
     let (_dir, ca, tls) = identity(b"h2");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -758,17 +775,45 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
     let server = tokio::spawn(serve_h2(listener, tls, 2));
     let client = client(&config).unwrap();
     let start = tokio::time::Instant::now();
+    let operation = Operation::new(true, None);
     assert_eq!(
-        timeout(Duration::from_secs(2), client.exchange(&query()))
+        timeout(
+            Duration::from_secs(2),
+            client.exchange_observed(&query(), start + Duration::from_millis(80), &operation)
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .message
+        .id,
+        123
+    );
+    assert!(start.elapsed() >= Duration::from_millis(40));
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 2);
+    assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+    assert_eq!(trace.attempts[0].stage, Stage::QuicHandshake);
+    assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
+    assert_eq!(trace.attempts[1].protocol, Some(ActualProtocol::Doh2));
+    assert_eq!(trace.attempts[1].outcome, Outcome::Succeeded);
+    let operation = Operation::new(true, None);
+    assert_eq!(
+        client
+            .exchange_observed(
+                &query(),
+                tokio::time::Instant::now() + Duration::from_millis(80),
+                &operation
+            )
             .await
-            .unwrap()
             .unwrap()
             .message
             .id,
         123
     );
-    assert!(start.elapsed() >= Duration::from_millis(40));
-    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts[0].outcome, Outcome::Skipped);
+    assert_eq!(trace.attempts[0].reason, None);
+    assert_eq!(trace.attempts[1].outcome, Outcome::Succeeded);
     assert_eq!(
         peers.lock().unwrap().len(),
         1,
@@ -776,6 +821,80 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
     );
     blackhole.abort();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn dot_slot_wait_and_h3_connecting_wait_consume_original_deadline() {
+    use parins::upstreams::diagnostics::{Operation, Reason, Stage};
+    let (_dir, ca, tls) = identity(b"dot");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(
+        vec![format!("tls://{}", listener.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.dot_pool.enabled = true;
+    config.upstreams.dot_pool.max_connections = 1;
+    let client = client(&config).unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut stream = tokio_rustls::TlsAcceptor::from(tls)
+            .accept(socket)
+            .await
+            .unwrap();
+        read(&mut stream).await;
+        ready_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let first_client = client.clone();
+    let first = tokio::spawn(async move { first_client.exchange(&query()).await });
+    ready_rx.await.unwrap();
+    let operation = Operation::new(true, None);
+    let start = tokio::time::Instant::now();
+    assert!(
+        client
+            .exchange_observed(&query(), start + Duration::from_millis(30), &operation)
+            .await
+            .is_err()
+    );
+    assert!(start.elapsed() < Duration::from_millis(150));
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 1);
+    assert_eq!(trace.attempts[0].stage, Stage::Wait);
+    assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
+    first.abort();
+    let _ = first.await;
+    server.abort();
+    let _ = server.await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent = UdpSocket::bind(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    config.upstreams.servers = vec![format!("https://{}", listener.local_addr().unwrap())];
+    config.upstreams.prefer_h3 = true;
+    let client = Pool::new(&config.upstreams, &config).map(Arc::new).unwrap();
+    let first_client = client.clone();
+    let first = tokio::spawn(async move { first_client.exchange(&query()).await });
+    silent.recv_from(&mut [0; 65535]).await.unwrap();
+    let operation = Operation::new(true, None);
+    let start = tokio::time::Instant::now();
+    assert!(
+        client
+            .exchange_observed(&query(), start + Duration::from_millis(60), &operation)
+            .await
+            .is_err()
+    );
+    assert!(start.elapsed() < Duration::from_millis(180));
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 2);
+    assert_eq!(trace.attempts[0].stage, Stage::Wait);
+    assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
+    assert_eq!(trace.attempts[1].stage, Stage::TlsHandshake);
+    assert_eq!(trace.attempts[1].reason, Some(Reason::Deadline));
+    first.abort();
+    let _ = first.await;
 }
 
 #[tokio::test]
@@ -798,6 +917,7 @@ async fn h3_preference_off_uses_h2_without_quic_packets() {
 
 #[tokio::test]
 async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
+    use parins::upstreams::diagnostics::{Operation, Reason, Stage};
     let (_dir, _ca, tls) = identity(b"h3");
     let (endpoint, listener) = dual_endpoint(&tls).await;
     let address = endpoint.local_addr().unwrap();
@@ -817,15 +937,26 @@ async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
     });
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
     config.upstreams.prefer_h3 = true;
+    let operation = Operation::new(true, None);
     assert!(
         timeout(
             Duration::from_secs(2),
-            client(&config).unwrap().exchange(&query())
+            client(&config).unwrap().exchange_observed(
+                &query(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &operation
+            )
         )
         .await
         .unwrap()
         .is_err()
     );
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 2);
+    assert_eq!(trace.attempts[0].stage, Stage::QuicHandshake);
+    assert_eq!(trace.attempts[0].reason, Some(Reason::Tls));
+    assert_eq!(trace.attempts[1].stage, Stage::TlsHandshake);
+    assert_eq!(trace.attempts[1].reason, Some(Reason::Tls));
     timeout(Duration::from_secs(2), quic_server)
         .await
         .unwrap()
@@ -835,6 +966,7 @@ async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
 
 #[tokio::test]
 async fn h3_invalid_response_falls_back_to_verified_h2() {
+    use parins::upstreams::diagnostics::{Operation, Outcome, Reason};
     for case in 1..=9 {
         let (_dir, ca, tls) = identity(b"h3");
         let (endpoint, listener) = dual_endpoint(&tls).await;
@@ -848,16 +980,40 @@ async fn h3_invalid_response_falls_back_to_verified_h2() {
         settings.ca_file = Some(ca);
         settings.prefer_h3 = true;
         let client = client(&config).unwrap();
+        let operation = Operation::new(true, None);
         assert_eq!(
-            timeout(Duration::from_secs(2), client.exchange(&query()))
-                .await
-                .unwrap()
-                .unwrap()
-                .message
-                .id,
+            timeout(
+                Duration::from_secs(2),
+                client.exchange_observed(
+                    &query(),
+                    tokio::time::Instant::now() + Duration::from_secs(1),
+                    &operation
+                )
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .message
+            .id,
             123,
             "case {case}"
         );
+        let trace = operation.trace().unwrap();
+        assert_eq!(trace.attempts.len(), 2);
+        assert_eq!(trace.attempts[1].outcome, Outcome::Succeeded);
+        match case {
+            1 => {
+                assert_eq!(trace.attempts[0].reason, Some(Reason::HttpStatus));
+                assert_eq!(trace.attempts[0].code, Some(302));
+            }
+            2..=6 => assert_eq!(
+                trace.attempts[0].reason,
+                Some(Reason::ProtocolInvalid),
+                "case {case}"
+            ),
+            8 => assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline)),
+            _ => {}
+        }
         drop(client);
         assert_eq!(
             timeout(Duration::from_secs(2), quic_server)
@@ -991,9 +1147,10 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
 }
 
 #[test]
-fn h3_listener_self_loop_is_checked_only_when_h3_is_enabled() {
+fn unified_doh_listener_self_loop_is_rejected_for_either_upstream_preference() {
     let mut config = config(vec!["https://127.0.0.1:4443".into()], Mode::Weighted);
-    config.doh3 = Some(parins::tls::ListenerConfig {
+    config.doh = Some(parins::config::DohConfig {
+        http3: true,
         listen: "0.0.0.0:4443".parse().unwrap(),
         files: parins::tls::TlsFiles {
             cert_file: "unused.pem".into(),
@@ -1002,7 +1159,7 @@ fn h3_listener_self_loop_is_checked_only_when_h3_is_enabled() {
     });
     let settings = &mut config.upstreams;
     assert!(!settings.prefer_h3);
-    config.upstreams.validate_listeners(&config).unwrap();
+    assert!(config.upstreams.validate_listeners(&config).is_err());
     config.upstreams.prefer_h3 = true;
     assert!(config.upstreams.validate_listeners(&config).is_err());
 }

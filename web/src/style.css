@@ -183,3 +183,26 @@ meter { width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+.nav-item { position: relative; }
+.nav-indicator { position: absolute; inset-block: 10px; left: 0; width: 3px; border-radius: 2px; background: var(--primary); }
+.route-content { min-width: 0; }
+.storage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 16px; margin-block: 16px; }
+.storage-grid dt { color: var(--muted); font-size: 13px; }
+.storage-grid dd { margin: 4px 0 0; font-size: 16px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.storage-status { transition: border-color 160ms ease, background-color 160ms ease; }
+.storage-status[data-health="degraded"], .storage-status[data-health="unavailable"] { border-color: var(--danger); }
+.settings-expand { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows 180ms ease, visibility 180ms ease; }
+.settings-expand[data-open="true"] { grid-template-rows: 1fr; visibility: visible; }
+.settings-expand > div { min-height: 0; overflow: hidden; }
+.settings-expand[data-open="true"] > div { overflow: visible; }
+.cache-persistence-status { border-top: 1px solid var(--divider); margin-top: 20px; padding-top: 20px; }
+.custom-range { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-top: 16px; }
+.custom-range .field { flex: 1 1 180px; min-width: 0; }
+.custom-range input { width: 100%; min-width: 0; }
+.diagnostic-counts > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; border-bottom: 1px solid var(--divider); padding-block: 8px; }
+.diagnostic-counts dt { overflow-wrap: anywhere; }
+.diagnostic-counts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.certificate-summary { margin-block: 16px; padding-block: 12px; border-block: 1px solid var(--divider); }
+.fingerprint { margin: 4px 0; overflow-wrap: anywhere; font-size: 12px; }
+.attempt-list { padding-inline-start: 20px; }
+.attempt-list li { padding-block: 8px; overflow-wrap: anywhere; }

@@ -3,12 +3,115 @@
 use anyhow::{Result, ensure};
 use hickory_proto::{
     op::{Edns, Header, Message, MessageType, OpCode, ResponseCode},
-    rr::RecordType,
+    rr::{
+        DNSClass, RecordType,
+        rdata::opt::{EdnsCode, EdnsOption},
+    },
     serialize::binary::{BinDecodable, BinDecoder},
 };
 
 pub const MAX_MESSAGE: usize = u16::MAX as usize;
 pub const MAX_UDP_PAYLOAD: u16 = 1232;
+
+pub fn has_padding(message: &Message) -> bool {
+    message
+        .edns
+        .as_ref()
+        .is_some_and(|e| e.option(EdnsCode::from(12)).is_some())
+}
+
+pub fn strip_padding(message: &mut Message) {
+    if let Some(edns) = &mut message.edns {
+        edns.options_mut().remove(EdnsCode::from(12));
+    }
+}
+
+/// Per-hop final encoding, after ID, ECS, policy and framing decisions.
+/// The unpadded hot path encodes exactly once. Padding never truncates answers.
+pub fn encode_hop(
+    message: &Message,
+    encrypted: bool,
+    requested: bool,
+    block: usize,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    let pad = encrypted && requested && message.edns.is_some();
+    if !pad && !has_padding(message) {
+        return Ok(message.to_vec()?);
+    }
+    let mut normalized = message.clone();
+    strip_padding(&mut normalized);
+    let bytes = normalized.to_vec()?;
+    let limit = limit.min(MAX_MESSAGE);
+    if !pad || bytes.len().saturating_add(4) > limit {
+        return Ok(bytes);
+    }
+    ensure!(block > 0, "padding block must be nonzero");
+    let with_header = bytes.len() + 4;
+    let length = ((block - with_header % block) % block).min(limit - with_header);
+    normalized
+        .edns
+        .as_mut()
+        .expect("EDNS checked")
+        .options_mut()
+        .insert(EdnsOption::Unknown(12, vec![0; length]));
+    Ok(normalized.to_vec()?)
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Padding {
+    pub requested: bool,
+    pub limit: usize,
+}
+
+impl Padding {
+    pub fn from_query(query: &Message) -> Self {
+        Self {
+            requested: has_padding(query),
+            limit: query
+                .edns
+                .as_ref()
+                .map_or(512, |e| usize::from(e.max_payload()).max(512)),
+        }
+    }
+    pub fn encode_response(self, message: &Message, encrypted: bool) -> Result<Vec<u8>> {
+        encode_hop(message, encrypted, self.requested, 468, self.limit)
+    }
+}
+
+pub fn encode_upstream(message: &Message, encrypted: bool) -> Result<Vec<u8>> {
+    let intent = Padding::from_query(message);
+    encode_hop(message, encrypted, intent.requested, 128, intent.limit)
+}
+
+/// Flight and refresh share one semantic key. Padding intent remains one bit;
+/// its arbitrary payload cannot create unbounded independent work groups.
+pub fn canonical_work_key(query: &Message) -> Option<Vec<u8>> {
+    if query.queries.len() != 1
+        || query.queries[0].query_class() != DNSClass::IN
+        || query.signature.is_some()
+        || query.edns.as_ref().is_some_and(|e| {
+            e.options()
+                .options
+                .iter()
+                .any(|(code, _)| !matches!(u16::from(*code), 8 | 12))
+        })
+    {
+        return None;
+    }
+    let mut normalized = query.clone();
+    normalized.metadata.id = 0;
+    normalized.queries[0].set_name(query.queries[0].name().to_lowercase());
+    if has_padding(&normalized) {
+        strip_padding(&mut normalized);
+        normalized
+            .edns
+            .as_mut()?
+            .options_mut()
+            .insert(EdnsOption::Unknown(12, vec![]));
+    }
+    normalized.to_vec().ok()
+}
 
 pub enum Request {
     Forward(Message),
@@ -119,7 +222,7 @@ pub fn udp_limit(query: &Message) -> usize {
 }
 
 pub fn encode_udp(response: &Message, limit: usize) -> Result<Vec<u8>> {
-    let bytes = response.to_vec()?;
+    let bytes = encode_hop(response, false, false, 468, limit)?;
     if bytes.len() <= limit {
         return Ok(bytes);
     }
@@ -147,6 +250,85 @@ mod tests {
             RecordType::A,
         ));
         query
+    }
+
+    #[test]
+    fn padding_is_per_hop_bounded_and_never_removes_answers() {
+        let mut q = query();
+        let mut edns = Edns::new();
+        edns.set_max_payload(1232);
+        edns.options_mut()
+            .insert(EdnsOption::Unknown(12, vec![77; 19]));
+        edns.options_mut()
+            .insert(EdnsOption::Unknown(10, vec![3; 8]));
+        q.edns = Some(edns);
+        let mut r = error_response(&q, ResponseCode::NoError);
+        r.edns = q.edns.clone();
+        let padded = Padding::from_query(&q).encode_response(&r, true).unwrap();
+        assert_eq!(padded.len() % 468, 0);
+        let decoded = decode(&padded).unwrap();
+        assert_eq!(decoded.id, q.id);
+        assert_eq!(
+            decoded.edns.as_ref().unwrap().option(EdnsCode::from(10)),
+            q.edns.as_ref().unwrap().option(EdnsCode::from(10))
+        );
+        let plain = Padding::from_query(&q).encode_response(&r, false).unwrap();
+        assert!(!has_padding(&decode(&plain).unwrap()));
+        let mut base = r.clone();
+        strip_padding(&mut base);
+        let base_len = base.to_vec().unwrap().len();
+        for spare in 0..10 {
+            let bytes = encode_hop(&r, true, true, 468, base_len + spare).unwrap();
+            assert!(bytes.len() <= base_len + spare);
+            let answer = decode(&bytes).unwrap();
+            assert_eq!(answer.answers, r.answers);
+            assert!(!answer.truncation);
+            assert_eq!(has_padding(&answer), spare >= 4);
+        }
+        assert_eq!(
+            encode_hop(&q, true, true, 128, MAX_MESSAGE).unwrap().len() % 128,
+            0
+        );
+        assert!(!has_padding(
+            &decode(&encode_hop(&r, true, false, 468, MAX_MESSAGE).unwrap()).unwrap()
+        ));
+        let bare = query();
+        assert!(
+            decode(&encode_hop(&bare, true, true, 468, MAX_MESSAGE).unwrap())
+                .unwrap()
+                .edns
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn work_key_ignores_padding_payload_but_preserves_intent_and_edns_boundary() {
+        let mut a = query();
+        a.edns = Some(Edns::new());
+        let no_padding = canonical_work_key(&a).unwrap();
+        a.edns
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .insert(EdnsOption::Unknown(12, vec![]));
+        let padded = canonical_work_key(&a).unwrap();
+        assert_ne!(no_padding, padded);
+        a.edns
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .insert(EdnsOption::Unknown(12, vec![42; 201]));
+        assert_eq!(canonical_work_key(&a).unwrap(), padded);
+        for code in [10, 65001] {
+            let mut other = a.clone();
+            other
+                .edns
+                .as_mut()
+                .unwrap()
+                .options_mut()
+                .insert(EdnsOption::Unknown(code, vec![0; 8]));
+            assert!(canonical_work_key(&other).is_none());
+        }
     }
 
     #[test]

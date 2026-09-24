@@ -6,12 +6,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 DynamicUser=yes
+StateDirectory=parins-file-data
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/parins-file-data
 ExecStartPre=/opt/parins/parins --config /etc/parins/parins.toml --check
-ExecStart=/opt/parins/parins --config /etc/parins/parins.toml
+ExecStart=/opt/parins/parins --config /etc/parins/parins.toml --data-dir /var/lib/parins-file-data
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
-TimeoutStopSec=65
+TimeoutStopSec=80
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

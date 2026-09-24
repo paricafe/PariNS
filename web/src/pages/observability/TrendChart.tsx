@@ -20,7 +20,7 @@ function pathFor(points: readonly TrendPoint[], x: (time: number) => number, y: 
   return path;
 }
 
-export function TrendChart({ samples, hours, language }: { samples: readonly HistorySample[]; hours: 1 | 6 | 24; language: Language }) {
+export function TrendChart({ samples, hours, language, end }: { samples: readonly HistorySample[]; hours: number; language: Language; end?: number }) {
   const container = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(770);
   useEffect(() => {
@@ -32,7 +32,7 @@ export function TrendChart({ samples, hours, language }: { samples: readonly His
     return () => observer.disconnect();
   }, [samples.length]);
 
-  const now = Date.now();
+  const now = end ?? Date.now();
   const series = traces.map((trace) => ({ ...trace, points: trendSeries(samples, trace.key, hours, now) }));
   const requestPoints = series[0].points.filter((point): point is TrendPoint & { value: number } => point.value !== null);
   if (!requestPoints.length) return <p className="py-12 text-center text-sm text-zinc-500 dark:text-zinc-400">{translate("views.chartEmpty", language)}</p>;

@@ -1,4 +1,5 @@
 use super::*;
+mod reliability;
 use hickory_proto::{
     op::{MessageType, OpCode, Query},
     rr::{

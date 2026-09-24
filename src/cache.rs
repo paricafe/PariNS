@@ -27,6 +27,12 @@ use crate::{
     protocol::{self, MAX_UDP_PAYLOAD},
 };
 
+mod decision;
+pub mod persistence;
+pub use decision::{
+    DecisionReason, LookupDecision, LookupOutcome, LookupResult, StoreDecision, StoreOutcome,
+};
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Key {
     name: Box<str>,
@@ -69,8 +75,16 @@ fn plain_edns(message: &Message) -> bool {
                 .options()
                 .options
                 .iter()
-                .all(|(code, _)| *code == EdnsCode::Subnet)
+                .all(|(code, _)| matches!(code, EdnsCode::Subnet | EdnsCode::Padding))
     })
+}
+
+fn query_rejection(query: &Message) -> DecisionReason {
+    if plain_edns(query) {
+        DecisionReason::UnsupportedQuery
+    } else {
+        DecisionReason::UnsupportedEdns
+    }
 }
 
 fn superseding_edns(message: &Message) -> bool {
@@ -80,7 +94,10 @@ fn superseding_edns(message: &Message) -> bool {
                 // EDE (RFC 8914) is diagnostic information, not a transaction-
                 // specific option. It can supersede old knowledge without being
                 // admitted for later replay by plain_edns / prepare_response.
-                matches!(code, EdnsCode::Subnet | EdnsCode::Unknown(15))
+                matches!(
+                    code,
+                    EdnsCode::Subnet | EdnsCode::Padding | EdnsCode::Unknown(15)
+                )
             })
     })
 }
@@ -226,6 +243,7 @@ pub struct Cache {
     rules: Vec<Rule>,
     epoch: AtomicU64,
     bypasses: AtomicU64,
+    diagnostics: decision::Diagnostics,
 }
 
 impl Cache {
@@ -295,6 +313,7 @@ impl Cache {
             rules,
             epoch: AtomicU64::new(0),
             bypasses: AtomicU64::new(0),
+            diagnostics: decision::Diagnostics::default(),
         }
     }
 
@@ -352,7 +371,32 @@ impl Cache {
         now: Instant,
         allow_stale: bool,
     ) -> Option<Hit> {
-        self.lookup_inner(query, outgoing, now, allow_stale, true)
+        self.lookup_with_decision(query, outgoing, now, allow_stale)
+            .hit
+    }
+
+    pub fn lookup_with_decision(
+        &self,
+        query: &Message,
+        outgoing: Option<ClientSubnet>,
+        now: Instant,
+        allow_stale: bool,
+    ) -> LookupResult {
+        let result = self.lookup_inner(query, outgoing, now, allow_stale, true);
+        self.diagnostics.lookup(result.decision);
+        result
+    }
+
+    pub fn diagnostics_snapshot(&self) -> Value {
+        self.diagnostics.snapshot()
+    }
+
+    /// The ECS owner could not identify a safe storage namespace for this
+    /// response. Record that candidate without classifying it as budget failure.
+    pub fn record_unusable_scope(&self) -> StoreDecision {
+        let decision = StoreDecision::skipped(DecisionReason::EcsUnusable);
+        self.diagnostics.store(decision);
+        decision
     }
 
     /// Race-closing checks do not represent another client request or refresh demand.
@@ -364,6 +408,7 @@ impl Cache {
         allow_stale: bool,
     ) -> Option<Hit> {
         self.lookup_inner(query, outgoing, now, allow_stale, false)
+            .hit
     }
 
     fn lookup_inner(
@@ -373,18 +418,25 @@ impl Cache {
         now: Instant,
         allow_stale: bool,
         observe: bool,
-    ) -> Option<Hit> {
+    ) -> LookupResult {
         let Some(key) = Key::of(query) else {
             if observe && !allow_stale {
                 self.bypasses.fetch_add(1, Ordering::Relaxed);
             }
-            return None;
+            return LookupResult::empty(LookupOutcome::Bypass, Some(query_rejection(query)));
         };
         if self.policy(&key, query.queries[0].name()).bypass {
             if observe && !allow_stale {
                 self.bypasses.fetch_add(1, Ordering::Relaxed);
             }
-            return None;
+            return LookupResult::empty(
+                if self.config.enabled {
+                    LookupOutcome::Bypass
+                } else {
+                    LookupOutcome::Disabled
+                },
+                Some(DecisionReason::PolicyDisabled),
+            );
         }
         let entry = {
             let mut shard = self.shards[self.shard(&key)]
@@ -395,7 +447,7 @@ impl Cache {
                 if observe && !allow_stale {
                     shard.counts.misses += 1;
                 }
-                return None;
+                return LookupResult::empty(LookupOutcome::Miss, None);
             };
             if observe {
                 shard.clock += 1;
@@ -426,7 +478,12 @@ impl Cache {
             && entry.lifetime.saturating_sub(age).as_millis() * 100
                 <= entry.lifetime.as_millis() * u128::from(self.config.prefetch.remaining_percent);
         let elapsed = age.as_secs().min(u64::from(u32::MAX)) as u32;
-        let mut message = protocol::decode(&entry.wire).ok()?;
+        let Ok(mut message) = protocol::decode(&entry.wire) else {
+            return LookupResult::empty(
+                LookupOutcome::Bypass,
+                Some(DecisionReason::UncacheableResponse),
+            );
+        };
         for rr in message
             .answers
             .iter_mut()
@@ -449,12 +506,22 @@ impl Cache {
                 .set_dnssec_ok(edns.flags().dnssec_ok);
             message.edns = Some(response_edns);
         }
-        Some(Hit {
-            message,
-            scope: entry.scope,
-            stale,
-            refresh,
-        })
+        LookupResult {
+            hit: Some(Hit {
+                message,
+                scope: entry.scope,
+                stale,
+                refresh,
+            }),
+            decision: LookupDecision {
+                outcome: if stale {
+                    LookupOutcome::Stale
+                } else {
+                    LookupOutcome::Fresh
+                },
+                reason: None,
+            },
+        }
     }
 
     pub fn insert(&self, query: &Message, response: &Message, scope: Scope, now: Instant) {
@@ -469,12 +536,39 @@ impl Cache {
         now: Instant,
         epoch: u64,
     ) -> bool {
+        self.insert_decision_if_epoch(query, response, scope, now, epoch)
+            .admitted()
+    }
+
+    pub fn insert_decision_if_epoch(
+        &self,
+        query: &Message,
+        response: &Message,
+        scope: Scope,
+        now: Instant,
+        epoch: u64,
+    ) -> StoreDecision {
+        let decision = self.admit(query, response, scope, now, epoch, None);
+        self.diagnostics.store(decision);
+        decision
+    }
+
+    fn admit(
+        &self,
+        query: &Message,
+        response: &Message,
+        scope: Scope,
+        now: Instant,
+        epoch: u64,
+        restore_remaining: Option<u32>,
+    ) -> StoreDecision {
+        let restoring = restore_remaining.is_some();
         let Some(key) = Key::of(query) else {
-            return false;
+            return StoreDecision::skipped(query_rejection(query));
         };
         let policy = self.policy(&key, query.queries[0].name());
         if policy.bypass {
-            return false;
+            return StoreDecision::skipped(DecisionReason::PolicyDisabled);
         }
         // Only a complete, transaction-independent successful answer supersedes
         // earlier knowledge. Transient errors and client-specific extensions do not.
@@ -486,23 +580,54 @@ impl Cache {
                 ResponseCode::NoError | ResponseCode::NXDomain
             )
         {
-            return false;
+            return StoreDecision::skipped(if superseding_edns(response) {
+                DecisionReason::UncacheableResponse
+            } else {
+                DecisionReason::UnsupportedEdns
+            });
         }
         // Expensive response preparation remains outside the shard lock. Admission
         // failure is distinct from supersession: TTL=0 is still newer knowledge.
         let prepared = prepare_response(query, response, &policy).and_then(|(stored, lifetime)| {
             let negative =
                 stored.response_code == ResponseCode::NXDomain || stored.answers.is_empty();
-            stored.to_vec().ok().map(|wire| (wire, lifetime, negative))
+            let lifetime = restore_remaining.map_or(lifetime, |remaining| lifetime.min(remaining));
+            if lifetime == 0 {
+                return Err(DecisionReason::TtlZero);
+            }
+            stored
+                .to_vec()
+                .map(|wire| (wire, lifetime, negative))
+                .map_err(|_| DecisionReason::UncacheableResponse)
         });
         let mut shard = self.shards[self.shard(&key)]
             .lock()
             .expect("cache shard poisoned");
         if epoch != self.epoch() {
-            shard.counts.rejections += 1;
-            return false;
+            shard.counts.rejections += u64::from(!restoring);
+            return StoreDecision::skipped(DecisionReason::EpochChanged);
         }
         shard.prune(&key, now);
+        // Snapshot records arrive most-recent first. A restore cannot evict an
+        // already admitted record, supersede live knowledge, or change counters.
+        if restoring {
+            let Ok((wire, _, negative)) = &prepared else {
+                return StoreDecision::skipped(*prepared.as_ref().unwrap_err());
+            };
+            let charge = wire.len() + key.name.len() + size_of::<Entry>() + size_of::<Key>() + 192;
+            let p = &shard.partitions[usize::from(*negative)];
+            if p.lru.len() >= p.max_entries
+                || p.charged.load(Ordering::Relaxed).saturating_add(charge) > p.max_bytes
+                || shard.buckets.get(&key).is_some_and(|entries| {
+                    entries.len() >= self.config.max_variants
+                        || entries
+                            .iter()
+                            .any(|entry| scopes_overlap(entry.scope, scope))
+                })
+            {
+                return StoreDecision::skipped(DecisionReason::Capacity);
+            }
+        }
         // A narrower new scope can invalidate part of an older broad answer.
         // Removing the whole overlapping entry is conservative; retaining it could
         // resurrect known obsolete data after this answer expires or is uncacheable.
@@ -514,11 +639,13 @@ impl Cache {
             .filter(|e| scopes_overlap(e.scope, scope))
             .map(|e| (usize::from(e.negative), e.id))
             .collect();
+        let superseded = !replaced.is_empty();
         for (p, id) in replaced {
             shard.remove(p, id);
         }
-        let Some((wire, lifetime, negative)) = prepared else {
-            return false;
+        let (wire, lifetime, negative) = match prepared {
+            Ok(prepared) => prepared,
+            Err(reason) => return StoreDecision::rejected(reason, superseded),
         };
         // Conservative per-variant estimate includes duplicated indices, Arc controls,
         // HashMap slack and LRU allocation. Live Arc readers retain this charge after eviction.
@@ -526,7 +653,7 @@ impl Cache {
         let part = usize::from(negative);
         if charge > shard.partitions[part].max_bytes || shard.partitions[part].max_entries == 0 {
             shard.counts.rejections += 1;
-            return false;
+            return StoreDecision::rejected(DecisionReason::Capacity, superseded);
         }
         if let Some(ids) = shard.buckets.get(&key)
             && ids.len() >= self.config.max_variants
@@ -538,7 +665,7 @@ impl Cache {
             else {
                 // A variant ceiling must not let negative churn consume positive slots.
                 shard.counts.rejections += 1;
-                return false;
+                return StoreDecision::rejected(DecisionReason::VariantLimit, superseded);
             };
             let (p, id) = (usize::from(entry.negative), entry.id);
             shard.remove(p, id);
@@ -553,7 +680,7 @@ impl Cache {
             }
             let Some((&id, _)) = p.lru.peek_lru() else {
                 shard.counts.rejections += 1;
-                return false;
+                return StoreDecision::rejected(DecisionReason::Capacity, superseded);
             };
             shard.remove(part, id);
             shard.counts.evictions += 1;
@@ -590,7 +717,14 @@ impl Cache {
             .or_default()
             .push(Arc::clone(&entry));
         shard.partitions[part].lru.put(id, entry);
-        true
+        StoreDecision {
+            outcome: if superseded {
+                StoreOutcome::Replaced
+            } else {
+                StoreOutcome::Admitted
+            },
+            reason: None,
+        }
     }
 
     /// Acquiring every shard before advancing the epoch linearizes invalidation
@@ -722,12 +856,7 @@ impl Cache {
 }
 
 fn scope_text(scope: Scope) -> String {
-    match scope {
-        Scope::NoEcs => "no_ecs".into(),
-        Scope::Privacy { ipv4: true } => "privacy_v4".into(),
-        Scope::Privacy { ipv4: false } => "privacy_v6".into(),
-        Scope::Network(network) => network.to_string(),
-    }
+    scope.tag()
 }
 
 fn canonical(name: &str) -> String {
@@ -740,7 +869,9 @@ fn canonical(name: &str) -> String {
 
 fn scopes_overlap(a: Scope, b: Scope) -> bool {
     match (a, b) {
-        (Scope::Network(a), Scope::Network(b)) => a.contains(&b.addr()) || b.contains(&a.addr()),
+        (Scope::Network(a) | Scope::ExactSource(a), Scope::Network(b) | Scope::ExactSource(b)) => {
+            a.contains(&b.addr()) || b.contains(&a.addr())
+        }
         _ => a == b,
     }
 }
@@ -749,7 +880,7 @@ fn prepare_response(
     query: &Message,
     response: &Message,
     config: &Policy,
-) -> Option<(Message, u32)> {
+) -> Result<(Message, u32), DecisionReason> {
     if response.truncation
         || response.signature.is_some()
         || !plain_edns(response)
@@ -758,16 +889,23 @@ fn prepare_response(
             ResponseCode::NoError | ResponseCode::NXDomain
         )
     {
-        return None;
+        return Err(if plain_edns(response) {
+            DecisionReason::UncacheableResponse
+        } else {
+            DecisionReason::UnsupportedEdns
+        });
     }
-    let question = query.queries.first()?;
+    let question = query
+        .queries
+        .first()
+        .ok_or(DecisionReason::UnsupportedQuery)?;
     let negative = response.response_code == ResponseCode::NXDomain || response.answers.is_empty();
     let mut stored = response.clone();
     let mut lifetime = config.max_ttl_secs;
     if negative {
         // CNAME+negative answers need a canonical-target proof; defer that case.
         if !response.answers.is_empty() {
-            return None;
+            return Err(DecisionReason::UncacheableResponse);
         }
         let negative_ttl = response
             .authorities
@@ -781,14 +919,15 @@ fn prepare_response(
                 }
                 _ => None,
             })
-            .min()?;
+            .min()
+            .ok_or(DecisionReason::NegativeWithoutSoa)?;
         lifetime = lifetime.min(config.negative_ttl_cap_secs).min(negative_ttl);
     } else if !response
         .answers
         .iter()
         .any(|rr| rr.record_type() == question.query_type())
     {
-        return None;
+        return Err(DecisionReason::UncacheableResponse);
     }
     for rr in stored
         .answers
@@ -797,11 +936,11 @@ fn prepare_response(
         .chain(&mut stored.additionals)
     {
         if matches!(rr.record_type(), RecordType::SIG | RecordType::TSIG) {
-            return None;
+            return Err(DecisionReason::UncacheableResponse);
         }
         // RFC 2181 TTL high-bit values must be treated as zero, not multi-year TTLs.
         if rr.ttl > i32::MAX as u32 {
-            return None;
+            return Err(DecisionReason::TtlZero);
         }
         rr.ttl = rr.ttl.min(config.max_ttl_secs);
         if negative && rr.record_type() == RecordType::SOA {
@@ -810,12 +949,12 @@ fn prepare_response(
         lifetime = lifetime.min(rr.ttl);
     }
     if lifetime == 0 {
-        return None;
+        return Err(DecisionReason::TtlZero);
     }
     stored.metadata.id = 0;
     stored.metadata.authentic_data = false;
     stored.edns = None;
-    Some((stored, lifetime))
+    Ok((stored, lifetime))
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ while [ "$#" -gt 0 ]; do
         *) usage >&2; fail "unknown option: $1" ;;
     esac
 done
-for command in install mktemp mv cp od stat find; do
+for command in install mktemp mv cp od stat find awk readlink; do
     command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"
 done
 owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1"; }
@@ -74,14 +74,144 @@ for path in "$binary_target" "$unit_target"; do
     check_path "$path"
     [ ! -e "$path" ] || [ -f "$path" ] || fail "not a regular file: $path"
 done
-marker='# PariNS managed installer unit v1'
+marker='# PariNS managed installer unit v2 (exclusive state directory)'
 IFS= read -r line < "$unit_source" || fail 'empty service template'
 [ "$line" = "$marker" ] || fail 'unrecognized managed service template'
 if [ -f "$unit_target" ]; then
     IFS= read -r line < "$unit_target" || fail 'empty existing service unit'
-    [ "$line" = "$marker" ] || fail 'existing managed service name is not installer-owned'
+    [ "$line" = "$marker" ] || fail 'existing managed unit uses an unknown or old state-directory contract; arrange an explicit manual handoff before installing'
 elif [ -e "$binary_target" ]; then
     fail 'existing binary without a managed service marker; migrate explicitly'
+fi
+# Ownership must be established before replacing files or asking systemd to
+# prepare StateDirectory. DynamicUser may chown a directory before ExecStart.
+state_dir="$root/var/lib/parins-managed"
+private_dir="$root/var/lib/private/parins-managed"
+for path in "$root/var" "$root/var/lib" "$root/var/lib/private"; do
+    check_path "$path"
+    [ ! -e "$path" ] || [ -d "$path" ] || fail "not a directory: $path"
+done
+for legacy in "$root/var/lib/parins" "$root/var/lib/private/parins"; do
+    for name in state.json setup-token; do
+        [ ! -e "$legacy/$name" ] && [ ! -L "$legacy/$name" ] ||
+            fail "old managed state exists at $legacy/$name; arrange an explicit manual handoff (no automatic migration)"
+    done
+done
+if [ ! -f "$unit_target" ]; then
+    for path in "$state_dir" "$private_dir"; do
+        [ ! -e "$path" ] && [ ! -L "$path" ] || fail "state directory is not installer-owned: $path"
+    done
+else
+    # The base unit owns the identity/directory contract. Other service keys
+    # remain installer-owned; a drop-in may only add read-only certificate groups.
+    awk '
+        /^[[:space:]]*([#;]|$)/ { next }
+        /^\[/ { section=$0; next }
+        section == "[Service]" {
+            n=split($0, parts, "="); key=parts[1]
+            if (key == "DynamicUser") expected="yes"
+            else if (key == "StateDirectory") expected="parins-managed"
+            else if (key == "StateDirectoryMode") expected="0700"
+            else if (key == "WorkingDirectory") expected="/var/lib/parins-managed"
+            else if (key == "ExecStart") expected="/opt/parins-managed/parins --manage --state-dir /var/lib/parins-managed --web-listen 0.0.0.0:3000"
+            else if (key == "ExecReload") expected="/bin/kill -HUP $MAINPID"
+            else if (key ~ /^(Type|Restart|RestartSec|TimeoutStopSec|CapabilityBoundingSet|AmbientCapabilities|NoNewPrivileges|ProtectSystem|ProtectHome|PrivateTmp|PrivateDevices|ProtectKernelTunables|ProtectKernelModules|ProtectControlGroups|RestrictAddressFamilies|RestrictSUIDSGID|LockPersonality|UMask)$/) next
+            else { bad=1; next }
+            if (++seen[key] != 1 || substr($0, length(key)+2) != expected) bad=1
+        }
+        END { exit (bad || seen["DynamicUser"] != 1 || seen["StateDirectory"] != 1 || seen["StateDirectoryMode"] != 1 || seen["WorkingDirectory"] != 1 || seen["ExecStart"] != 1 || seen["ExecReload"] != 1) }
+    ' "$unit_target" || fail 'existing unit changes the managed identity/directory/executable contract; use an explicit manual handoff'
+    if [ -L "$state_dir" ]; then
+        link=$(readlink "$state_dir")
+        [ "$link" = /var/lib/private/parins-managed ] || [ "$link" = private/parins-managed ] ||
+            fail "unexpected managed state link: $state_dir -> $link"
+        [ -d "$private_dir" ] && [ ! -L "$private_dir" ] || fail "managed state link has no regular private backing: $private_dir"
+    else
+        [ ! -e "$state_dir" ] || [ -d "$state_dir" ] || fail "managed state is not a directory: $state_dir"
+        [ ! -e "$private_dir" ] && [ ! -L "$private_dir" ] || fail "orphaned managed private backing: $private_dir"
+    fi
+fi
+check_dropin() {
+    check_path "$1"
+    [ -f "$1" ] || fail "not a regular drop-in: $1"
+    awk '
+        /^[[:space:]]*([#;]|$)/ { next }
+        /^\[Service\]$/ { service=1; next }
+        service && /^SupplementaryGroups=[A-Za-z0-9_. -]+$/ { next }
+        { bad=1 }
+        END { exit bad }
+    ' "$1" || fail "drop-in changes the managed contract (only SupplementaryGroups is supported): $1"
+}
+# Include the service-wide and dash-prefix drop-in hierarchies, including when
+# a fresh service is not yet loaded and systemctl cannot report DropInPaths.
+for base in "$root/etc/systemd/system" "$root/run/systemd/system" "$root/usr/local/lib/systemd/system" "$root/usr/lib/systemd/system" "$root/lib/systemd/system"; do
+    for suffix in service.d parins-.service.d parins-managed.service.d; do
+        directory="$base/$suffix"
+        [ ! -e "$directory" ] && [ ! -L "$directory" ] && continue
+        check_path "$directory"
+        [ -d "$directory" ] || fail "not a drop-in directory: $directory"
+        for dropin in "$directory"/*.conf; do
+            [ ! -e "$dropin" ] && [ ! -L "$dropin" ] && continue
+            check_dropin "$dropin"
+        done
+    done
+done
+if [ -n "$root" ]; then
+    for account_file in "$root/etc/passwd" "$root/etc/group"; do
+        if [ -f "$account_file" ] && awk -F: '$1 == "parins-managed" { found=1 } END { exit !found }' "$account_file"; then
+            fail "static parins-managed identity conflicts with DynamicUser: $account_file"
+        fi
+    done
+else
+    command -v getent >/dev/null 2>&1 || fail 'getent is required to inspect service identity'
+    # Exclude nss-systemd, which legitimately reports the running dynamic user;
+    # check every other configured NSS source, including directory accounts.
+    for database in passwd group; do
+        sources=$(awk -F: -v database="$database" '
+            $1 == database { sub(/#.*/, "", $2); gsub(/\[[^]]*\]/, "", $2); print $2 }
+        ' /etc/nsswitch.conf) || fail 'cannot inspect service identity sources'
+        [ -n "$sources" ] || sources=files
+        for source in $sources; do
+            [ "$source" != systemd ] || continue
+            if getent -s "$source" "$database" parins-managed >/dev/null; then
+                fail "static parins-managed $database identity from $source conflicts with DynamicUser"
+            else
+                result=$?
+                [ "$result" = 2 ] || fail "cannot inspect $source $database identities (getent: $result)"
+            fi
+        done
+    done
+    loaded_dropins=$(systemctl show --property=DropInPaths --value parins-managed.service) || fail 'cannot inspect effective drop-ins'
+    for dropin in $loaded_dropins; do
+        check_dropin "$dropin"
+    done
+    if [ -f "$unit_target" ]; then
+        effective() {
+            actual=$(systemctl show --property="$1" --value parins-managed.service) || fail "cannot query systemd property $1"
+            [ "$actual" = "$2" ] || fail "effective $1 changes the managed contract: $actual"
+        }
+        effective DynamicUser yes
+        effective User parins-managed
+        effective Group parins-managed
+        effective StateDirectory parins-managed
+        effective StateDirectoryMode 0700
+        effective WorkingDirectory /var/lib/parins-managed
+        command_line=$(systemctl show --property=ExecStart --value parins-managed.service) || fail 'cannot inspect effective ExecStart'
+        [ "$(printf '%s\n' "$command_line" | awk '{ print gsub(/\{/, "") }')" = 1 ] || fail 'effective ExecStart must contain exactly one command'
+        case "$command_line" in
+            '{ path=/opt/parins-managed/parins ; argv[]=/opt/parins-managed/parins --manage --state-dir /var/lib/parins-managed --web-listen 0.0.0.0:3000 ; ignore_errors=no ; '*'}') ;;
+            *) fail 'effective ExecStart changes the managed executable contract' ;;
+        esac
+        reload_line=$(systemctl show --property=ExecReload --value parins-managed.service) || fail 'cannot inspect effective ExecReload'
+        [ "$(printf '%s\n' "$reload_line" | awk '{ print gsub(/\{/, "") }')" = 1 ] || fail 'effective ExecReload must contain exactly one command'
+        case "$reload_line" in
+            '{ path=/bin/kill ; argv[]=/bin/kill -HUP $MAINPID ; ignore_errors=no ; '*'}') ;;
+            *) fail 'effective ExecReload changes the managed reload contract' ;;
+        esac
+        for property in RootDirectory RootImage Environment EnvironmentFiles ExecStartPre ExecStartPost ExecStop ExecStopPost; do
+            effective "$property" ''
+        done
+    fi
 fi
 if [ -z "$root" ]; then
     registered=$(systemctl show --property=FragmentPath --value parins-managed.service) || fail 'cannot query systemd'
@@ -150,7 +280,7 @@ else
         'Allow TCP 3000 in the host firewall/cloud security group for your admin IP; no firewall rules are changed here.' \
         'HTTP is unencrypted: prefer local access or an SSH tunnel for initial setup, especially when entering passwords or private keys.' \
         'If an existing or new configuration enables inbound DoH, use the HTTPS management address shown by PariNS instead.' \
-        'Read the one-time setup token locally: sudo cat /var/lib/parins/setup-token' \
+        'Read the one-time setup token locally: sudo cat /var/lib/parins-managed/setup-token' \
         'Open the console to initialize. DNS starts only after setup; no host DNS or firewall was changed.'
     # Local interface addresses are useful hints, not a claim about public NAT.
     if command -v ip >/dev/null 2>&1; then

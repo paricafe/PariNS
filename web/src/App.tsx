@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { motion, useAnimationControls, useReducedMotion } from 'motion/react';
+import { EASE_OUT } from './components/beui/motion';
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { Activity, BookOpenText, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
@@ -19,6 +21,7 @@ const navigation = [
   { path: '/dns', key: 'dns', icon: Network, group: 'config' },
   { path: '/filters', key: 'filters', icon: Filter, group: 'config' },
   { path: '/security', key: 'security', icon: LockKeyhole, group: 'config' },
+  { path: '/storage', key: 'storage', icon: Database, group: 'config' },
   { path: '/runtime', key: 'runtime', icon: Settings2, group: 'config' },
   { path: '/advanced', key: 'advanced', icon: FileCode2, group: 'config' },
 ] as const;
@@ -59,6 +62,7 @@ function Preferences({ language, theme, changeLanguage, changeTheme }: ReturnTyp
 }
 
 function SaveBar({ language }: { language: Language }) {
+  const reduced = useReducedMotion();
   const { draft, dirty, busy, prepareSave, commitPrepared, reload, resolveUnknown, setError, discard } = useConfig();
   const { transportChanged } = useSession();
   const confirmAction = useConfirm();
@@ -78,7 +82,7 @@ function SaveBar({ language }: { language: Language }) {
       setNotice(result.refreshed ? t('app.configSaved') : null);
     } catch (reason) { setError(toConfigIssue(reason)); }
   };
-  return <div className="save-bar" role="region" aria-label={t('ui.draft')}>
+  return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reduced ? 0 : 0.16, ease: EASE_OUT }}>
     <div className="save-bar-content"><div><strong>{draft.unknownApply ? t(draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown') : dirty ? t('app.dirty') : notice}</strong>
       {draft.unknownApply && draft.pendingTransportChange && <TransportHint change={draft.pendingTransportChange} language={language} link />}
       {notice && (dirty || draft.unknownApply) && <span className="small">{notice}</span>}</div>
@@ -86,7 +90,7 @@ function SaveBar({ language }: { language: Language }) {
         <button type="button" className="button quiet" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button>
         <Button variant="primary" disabled={busy} onClick={(event) => void runSave(event.currentTarget)}>{t('app.save')}</Button></>}</div>
     </div>
-  </div>;
+  </motion.div>;
 }
 
 function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppearance> }) {
@@ -96,6 +100,12 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
   const confirmAction = useConfirm();
   const navigate = useNavigate();
   const location = useLocation();
+  const reduced = useReducedMotion();
+  const pageAnimation = useAnimationControls();
+  useEffect(() => {
+    pageAnimation.set({ opacity: reduced ? 1 : 0, y: reduced ? 0 : 7 });
+    void pageAnimation.start({ opacity: 1, y: 0, transition: { duration: reduced ? 0 : 0.18, ease: EASE_OUT } });
+  }, [location.pathname, pageAnimation, reduced]);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);
@@ -113,7 +123,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
     try { await logout(); } catch (reason) { setLogoutError(reason instanceof Error ? reason.message : String(reason)); }
   };
   const current = navigation.find((item) => item.path === location.pathname);
-  const nav = <nav className="nav-groups" aria-label={t('pagesLabel')}>
+  const nav = (scope: string) => <nav className="nav-groups" aria-label={t('pagesLabel')}>
     {(['observe', 'config'] as const).map((group) => <div className="nav-group" key={group}>
       <span className="nav-caption">{group === 'observe' ? language === 'en' ? 'Observe' : '观察' : t('configuration')}</span>
       {navigation.filter((item) => item.group === group).map((item) => <NavLink key={item.path} to={item.path} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`} onClick={(event) => {
@@ -129,15 +139,15 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
           return;
         }
         setMobileOpen(false);
-      }}><item.icon size={18} strokeWidth={1.8} aria-hidden="true" /><span>{t(item.key)}</span></NavLink>)}
+      }}>{({ isActive }) => <><item.icon size={18} strokeWidth={1.8} aria-hidden="true" /><span>{t(item.key)}</span>{isActive && <motion.i className="nav-indicator" aria-hidden="true" layoutId={`navigation-${scope}`} transition={{ duration: reduced ? 0 : 0.15, ease: EASE_OUT }} />}</>}</NavLink>)}
     </div>)}
   </nav>;
   return <div className="app-shell">
     <aside className="sidebar" aria-label={t('navLabel')}>
       <div className="sidebar-brand"><span className="brand-mark">P</span><span><strong>PariNS</strong><small>{t('brand')}</small></span><button type="button" className="icon-button mobile-close" onClick={() => setMobileOpen(false)} aria-label={t('closeNavigation')}><X size={20} /></button></div>
-      {nav}
+      {nav('desktop')}
     </aside>
-    <Drawer open={mobileOpen} onClose={() => setMobileOpen(false)} title="PariNS" side="left" closeLabel={t('closeNavigation')}>{nav}</Drawer>
+    <Drawer open={mobileOpen} onClose={() => setMobileOpen(false)} title="PariNS" side="left" closeLabel={t('closeNavigation')}>{nav('mobile')}</Drawer>
     <div className="shell-main"><header className="topbar">
       <button type="button" className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label={t('showNavigation')}><Menu size={20} /></button>
       <span className="topbar-title">{current ? t(current.key) : t('overview')}</span><span className="spacer" />
@@ -146,12 +156,12 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
       <a className="skip-target sr-only" id="main-content-start" href="#main-content">{t('skip')}</a>
       {logoutError && <p role="alert" className="notice error">{logoutError}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
-      <Routes>
+      <motion.div animate={pageAnimation} className="route-content"><Routes>
         <Route path="/overview" element={<OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} />} />
-        <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/runtime')} />} />
-        {(['dns', 'cache', 'filters', 'security', 'runtime', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
+        <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} />} />
+        {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />
-      </Routes>
+      </Routes></motion.div>
     </main></div><SaveBar language={language} />
   </div>;
 }

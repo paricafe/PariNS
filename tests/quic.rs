@@ -230,6 +230,14 @@ async fn doq_real_tls_round_trip_and_connection_reuse() {
         assert_eq!(message.response_code, ResponseCode::NoError);
     }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+    let counters = fixture.resolver.metrics().snapshot().counters;
+    assert_eq!(counters["quic_doq_handshake_established"], 1);
+    assert_eq!(counters["quic_doq_stream_full_frame"], 2);
+    assert_eq!(counters["quic_doq_stream_response_handed_to_transport"], 2);
+    assert_eq!(
+        fixture.resolver.metrics().quic.snapshot()["doq"]["stream_inflight"],
+        0
+    );
     fixture.close().await;
     assert!(
         timeout(Duration::from_secs(1), connection.closed())
@@ -285,6 +293,16 @@ async fn doq_rejects_nonzero_id_extra_frames_and_missing_fin_before_dns() {
             quinn::ConnectionError::ApplicationClosed(_)
         ));
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        let counters = fixture.resolver.metrics().snapshot().counters;
+        assert_eq!(
+            counters["quic_doq_stream_protocol_invalid"],
+            u64::from(case != 2)
+        );
+        assert_eq!(
+            counters["quic_doq_stream_read_deadline"],
+            u64::from(case == 2)
+        );
+        assert_eq!(counters["requests"], 0);
         fixture.close().await;
         client.close(0u32.into(), b"done");
     }
@@ -436,6 +454,20 @@ async fn h3_real_get_post_and_http_errors() {
         }
     }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let counters = fixture.resolver.metrics().snapshot().counters;
+            if counters["quic_doh3_http_response_2xx"] == 2
+                && counters["quic_doh3_http_response_4xx"] == 3
+            {
+                assert_eq!(counters["quic_doh3_stream_protocol_invalid"], 0);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     fixture.close().await;
     connection.close(0u32.into(), b"done");
     client.close(0u32.into(), b"done");
@@ -470,6 +502,10 @@ async fn doq_inflight_stop_sending_cancels_dns_and_preserves_connection() {
     fixture.wait_for_upstream_query().await;
     recv.stop(3u32.into()).unwrap();
     fixture.wait_for_cancelled_query().await;
+    assert_eq!(
+        fixture.resolver.metrics().snapshot().counters["quic_doq_stream_peer_cancelled"],
+        1
+    );
     assert!(
         fixture
             .source_limits

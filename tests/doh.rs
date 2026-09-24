@@ -135,7 +135,7 @@ async fn real_h2_tls_get_post_errors_and_shutdown() {
         max_streams: 4,
     };
     let (server_tls, client_tls) = certificates();
-    let server = tokio::spawn(doh::serve(listener, server_tls, ingress));
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
     let tls = TlsConnector::from(client_tls)
         .connect(
             "localhost".try_into().unwrap(),
@@ -249,7 +249,7 @@ async fn incomplete_body_expires_and_shutdown_releases_admission() {
         max_streams: 2,
     };
     let (server_tls, client_tls) = certificates();
-    let server = tokio::spawn(doh::serve(listener, server_tls, ingress));
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
     let tls = TlsConnector::from(client_tls)
         .connect(
             "localhost".try_into().unwrap(),
@@ -318,7 +318,7 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
         max_streams: 2,
     };
     let (server_tls, client_tls) = certificates();
-    let server = tokio::spawn(doh::serve(listener, server_tls, ingress));
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
     let tls = TlsConnector::from(client_tls)
         .connect(
             "localhost".try_into().unwrap(),
@@ -413,7 +413,7 @@ async fn h2_source_limits_cover_pre_tls_admission_and_ignore_forwarded_identity(
         max_streams: 4,
     };
     let (server_tls, client_tls) = certificates();
-    let server = tokio::spawn(doh::serve(listener, server_tls, ingress));
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
     // One raw TCP client already consumes its source's connection budget even
     // though it has sent no TLS ClientHello. Global capacity still has room.
     let stalled = TcpStream::connect(address).await.unwrap();

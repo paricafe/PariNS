@@ -3,10 +3,7 @@
 
 use crate::config::CoalescingConfig;
 use futures_util::future::{BoxFuture, FutureExt, Shared, WeakShared};
-use hickory_proto::{
-    op::Message,
-    rr::{DNSClass, rdata::opt::EdnsCode},
-};
+use hickory_proto::op::Message;
 use std::{collections::HashMap, sync::Mutex};
 
 /// Raw shared work result. Per-client stale fallback is intentionally not shared.
@@ -18,6 +15,12 @@ pub struct Answer {
     pub upstream: Option<String>,
     pub outgoing_ecs: Option<String>,
     pub cached: bool,
+    pub cache_store: Option<crate::cache::StoreDecision>,
+    pub cache_scope: Option<String>,
+    pub upstream_trace: Option<crate::upstreams::diagnostics::Trace>,
+    pub failure_stage: Option<crate::upstreams::diagnostics::Stage>,
+    pub failure_reason: Option<crate::upstreams::diagnostics::Reason>,
+    pub prefetch: bool,
 }
 type Work = BoxFuture<'static, Answer>;
 pub enum Role {
@@ -64,21 +67,7 @@ impl Flights {
 }
 
 fn key(query: &Message) -> Option<Vec<u8>> {
-    if query.queries.len() != 1
-        || query.queries[0].query_class() != DNSClass::IN
-        || query.edns.as_ref().is_some_and(|e| {
-            e.options()
-                .options
-                .iter()
-                .any(|(code, _)| *code != EdnsCode::Subnet)
-        })
-    {
-        return None;
-    }
-    let mut normalized = query.clone();
-    normalized.metadata.id = 0;
-    normalized.queries[0].set_name(query.queries[0].name().to_lowercase());
-    normalized.to_vec().ok()
+    crate::protocol::canonical_work_key(query)
 }
 
 #[cfg(test)]

@@ -23,27 +23,35 @@ stage="$fixture/stage"
 mkdir -m 0700 "$stage"
 sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary" --dry-run
 [ ! -e "$stage/opt" ]
-mkdir -p "$stage/var/lib/parins" "$stage/etc/systemd/system"
-printf 'private existing state\n' > "$stage/var/lib/parins/state.json"
-printf 'legacy private HTTPS identity\n' > "$stage/var/lib/parins/https-identity.pem"
-printf 'legacy public HTTPS certificate\n' > "$stage/var/lib/parins/https-cert.pem"
+mkdir -p "$stage/var/lib/parins/tls" "$stage/etc/systemd/system"
+printf 'external private HTTPS identity\n' > "$stage/var/lib/parins/tls/identity.pem"
+printf 'external public HTTPS certificate\n' > "$stage/var/lib/parins/tls/cert.pem"
 printf 'legacy service unchanged\n' > "$stage/etc/systemd/system/parins.service"
 chmod 0750 "$stage/etc"
 sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
 cmp "$binary" "$stage/opt/parins-managed/parins"
 cmp "$repo/deploy/parins-managed.service" "$stage/etc/systemd/system/parins-managed.service"
 grep -Fq -- '--web-listen 0.0.0.0:3000' "$stage/etc/systemd/system/parins-managed.service"
+grep -Fqx 'ExecReload=/bin/kill -HUP $MAINPID' "$stage/etc/systemd/system/parins-managed.service"
 [ "$(mode "$stage/opt/parins-managed/parins")" = 755 ]
 [ "$(mode "$stage/etc/systemd/system/parins-managed.service")" = 644 ]
 [ "$(mode "$stage/etc")" = 750 ]
-[ "$(mode "$stage/var/lib/parins/state.json")" = 600 ]
+[ ! -e "$stage/var/lib/parins-managed" ]
+mkdir -p "$stage/var/lib/parins-managed/certificates" "$stage/var/lib/parins-managed/runtime"
+printf 'private existing state\n' > "$stage/var/lib/parins-managed/state.json"
+printf 'private imported certificate\n' > "$stage/var/lib/parins-managed/certificates/import.pem"
+printf 'private running history\n' > "$stage/var/lib/parins-managed/runtime/observability.sqlite3"
+mkdir "$stage/etc/systemd/system/parins-managed.service.d"
+printf '[Service]\nSupplementaryGroups=certificate-readers\n' > "$stage/etc/systemd/system/parins-managed.service.d/certificates.conf"
 printf 'second candidate, must never execute\n' > "$binary"
 sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
 cmp "$binary" "$stage/opt/parins-managed/parins"
-[ "$(sed -n 1p "$stage/var/lib/parins/state.json")" = 'private existing state' ]
-[ "$(sed -n 1p "$stage/var/lib/parins/https-identity.pem")" = 'legacy private HTTPS identity' ]
-[ "$(sed -n 1p "$stage/var/lib/parins/https-cert.pem")" = 'legacy public HTTPS certificate' ]
-[ "$(mode "$stage/var/lib/parins/https-identity.pem")" = 600 ]
+[ "$(sed -n 1p "$stage/var/lib/parins-managed/state.json")" = 'private existing state' ]
+[ "$(sed -n 1p "$stage/var/lib/parins-managed/certificates/import.pem")" = 'private imported certificate' ]
+[ "$(sed -n 1p "$stage/var/lib/parins-managed/runtime/observability.sqlite3")" = 'private running history' ]
+[ "$(sed -n 1p "$stage/var/lib/parins/tls/identity.pem")" = 'external private HTTPS identity' ]
+[ "$(sed -n 1p "$stage/var/lib/parins/tls/cert.pem")" = 'external public HTTPS certificate' ]
+[ "$(mode "$stage/var/lib/parins/tls/identity.pem")" = 600 ]
 [ "$(sed -n 1p "$stage/etc/systemd/system/parins.service")" = 'legacy service unchanged' ]
 # Fail the second atomic rename after the binary changed; both old files return.
 cp "$stage/opt/parins-managed/parins" "$fixture/previous-binary"
@@ -55,6 +63,51 @@ expect_failure --root "$stage" --binary "$binary"
 cmp "$fixture/previous-binary" "$stage/opt/parins-managed/parins"
 cmp "$repo/deploy/parins-managed.service" "$stage/etc/systemd/system/parins-managed.service"
 rm "$fixture/tools/mv"
+# DynamicUser logical links are accepted only with the known private backing.
+mkdir "$stage/var/lib/private"
+mv "$stage/var/lib/parins-managed" "$stage/var/lib/private/parins-managed"
+ln -s private/parins-managed "$stage/var/lib/parins-managed"
+sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
+[ "$(sed -n 1p "$stage/var/lib/parins-managed/state.json")" = 'private existing state' ]
+# Every rejected preflight must precede replacement, backups and service calls.
+cp "$stage/opt/parins-managed/parins" "$fixture/preflight-binary"
+cp "$stage/etc/systemd/system/parins-managed.service" "$fixture/preflight-unit"
+backups=$(find "$stage/opt/parins-managed" -name '.install-backup.*' | wc -l)
+for directive in 'User=someone' 'Group=someone' 'DynamicUser=no' 'StateDirectory=elsewhere' 'WorkingDirectory=/tmp' 'ExecStart=/bin/true' 'ExecReload=/bin/kill -HUP $MAINPID' 'Environment=HOME=/tmp' 'BindPaths=/tmp' 'SupplementaryGroups='; do
+    printf '[Service]\n%s\n' "$directive" > "$stage/etc/systemd/system/parins-managed.service.d/override.conf"
+    expect_failure --root "$stage" --binary "$binary"
+    cmp "$fixture/preflight-binary" "$stage/opt/parins-managed/parins"
+    cmp "$fixture/preflight-unit" "$stage/etc/systemd/system/parins-managed.service"
+done
+rm "$stage/etc/systemd/system/parins-managed.service.d/override.conf"
+[ "$(find "$stage/opt/parins-managed" -name '.install-backup.*' | wc -l)" = "$backups" ]
+# Changing the base unit itself also invalidates its ownership contract.
+sed '/DynamicUser=yes/a\
+User=custom
+' "$fixture/preflight-unit" > "$stage/etc/systemd/system/parins-managed.service"
+expect_failure --root "$stage" --binary "$binary"
+cp "$fixture/preflight-unit" "$stage/etc/systemd/system/parins-managed.service"
+for reload in '' 'ExecReload=/bin/true' 'ExecReload=-/bin/kill -HUP $MAINPID' 'ExecReload=/bin/kill -HUP $MAINPID; /bin/true'; do
+    awk -v replacement="$reload" '/^ExecReload=/ { if (replacement != "") print replacement; next } { print }' "$fixture/preflight-unit" > "$stage/etc/systemd/system/parins-managed.service"
+    expect_failure --root "$stage" --binary "$binary"
+    cmp "$fixture/preflight-binary" "$stage/opt/parins-managed/parins"
+done
+awk '/^ExecReload=/ { print } { print }' "$fixture/preflight-unit" > "$stage/etc/systemd/system/parins-managed.service"
+expect_failure --root "$stage" --binary "$binary"
+cp "$fixture/preflight-unit" "$stage/etc/systemd/system/parins-managed.service"
+printf 'parins-managed:x:1234:1234::/var/lib/parins-managed:/bin/false\n' > "$stage/etc/passwd"
+expect_failure --root "$stage" --binary "$binary"
+rm "$stage/etc/passwd"
+printf 'parins-managed:x:1234:\n' > "$stage/etc/group"
+expect_failure --root "$stage" --binary "$binary"
+rm "$stage/etc/group"
+for hierarchy in service.d parins-.service.d; do
+    mkdir "$stage/etc/systemd/system/$hierarchy"
+    printf '[Service]\nStateDirectory=outside\n' > "$stage/etc/systemd/system/$hierarchy/override.conf"
+    expect_failure --root "$stage" --binary "$binary"
+    rm "$stage/etc/systemd/system/$hierarchy/override.conf"
+    rmdir "$stage/etc/systemd/system/$hierarchy"
+done
 printf 'unowned service\n' > "$stage/etc/systemd/system/parins-managed.service"
 expect_failure --root "$stage" --binary "$binary"
 [ "$(sed -n 1p "$stage/etc/systemd/system/parins-managed.service")" = 'unowned service' ]
@@ -76,5 +129,34 @@ expect_failure --root relative --binary "$binary"
 expect_failure --root / --binary "$binary"
 expect_failure --root /. --binary "$binary"
 expect_failure --root "$fixture/missing" --binary "$binary"
+for scenario in unknown-directory dangling-link orphaned-private legacy-state legacy-token legacy-private legacy-unit; do
+    target="$fixture/$scenario"
+    mkdir -p "$target/var/lib" "$target/etc/systemd/system"
+    case "$scenario" in
+        unknown-directory) mkdir "$target/var/lib/parins-managed" ;;
+        dangling-link) ln -s private/parins-managed "$target/var/lib/parins-managed" ;;
+        orphaned-private) mkdir -p "$target/var/lib/private/parins-managed" ;;
+        legacy-state|legacy-token)
+            mkdir "$target/var/lib/parins"
+            case "$scenario" in legacy-state) name=state.json ;; *) name=setup-token ;; esac
+            printf 'legacy sentinel\n' > "$target/var/lib/parins/$name" ;;
+        legacy-private)
+            mkdir -p "$target/var/lib/private/parins"
+            printf 'legacy sentinel\n' > "$target/var/lib/private/parins/state.json" ;;
+        legacy-unit)
+            printf '# PariNS managed installer unit v1\n[Service]\nStateDirectory=parins\n' > "$target/etc/systemd/system/parins-managed.service" ;;
+    esac
+    expect_failure --root "$target" --binary "$binary"
+    expect_failure --root "$target" --binary "$binary" --dry-run
+    [ ! -e "$target/opt" ]
+done
+# Even an owned unit cannot legitimize an unexpected logical or backing link.
+cp "$fixture/preflight-unit" "$stage/etc/systemd/system/parins-managed.service"
+rm "$stage/var/lib/parins-managed"
+ln -s "$fixture/outside" "$stage/var/lib/parins-managed"
+expect_failure --root "$stage" --binary "$binary"
+rm "$stage/var/lib/parins-managed"
+# The same private backing without its logical link is not silently adopted.
+expect_failure --root "$stage" --binary "$binary"
 [ ! -e "$fixture/systemctl-called" ]
 printf 'Installer fixture checks passed. Retained fixtures: %s\n' "$fixture"

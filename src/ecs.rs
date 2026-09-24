@@ -18,8 +18,18 @@ use crate::{config::EcsConfig, protocol::MAX_UDP_PAYLOAD};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     NoEcs,
-    Privacy { ipv4: bool },
+    Privacy {
+        ipv4: bool,
+    },
     Network(IpNet),
+    /// Missing upstream ECS is reusable only for this exact sent source prefix.
+    ExactSource(IpNet),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResponseScope {
+    pub cache: Option<Scope>,
+    pub reply: Option<u8>,
 }
 
 #[derive(Clone)]
@@ -111,24 +121,39 @@ impl Context {
         ))
     }
 
-    pub fn cache_scope(&self, response: &Message) -> Option<Scope> {
-        match (self.outgoing, subnet(response)) {
+    /// Storage and downstream scopes come from the same response decision.
+    /// The caller still excludes the original namespace after a privacy retry.
+    pub fn response_scope(&self, response: &Message) -> ResponseScope {
+        let received = subnet(response);
+        let cache = match (self.outgoing, received) {
             (None, None) => Some(Scope::NoEcs),
-            (Some(sent), Some(received)) if received.scope_prefix() <= sent.source_prefix() => {
+            (Some(sent), None) if sent.source_prefix() == 0 => Some(Scope::Privacy {
+                ipv4: sent.addr().is_ipv4(),
+            }),
+            (Some(sent), None) => IpNet::new(sent.addr(), sent.source_prefix())
+                .ok()
+                .map(|network| Scope::ExactSource(network.trunc())),
+            (Some(sent), Some(received))
+                if received.addr() == sent.addr()
+                    && received.source_prefix() == sent.source_prefix()
+                    && received.scope_prefix() <= sent.source_prefix() =>
+            {
                 if sent.source_prefix() == 0 {
                     Some(Scope::Privacy {
                         ipv4: sent.addr().is_ipv4(),
                     })
                 } else {
-                    Some(Scope::Network(
-                        IpNet::new(sent.addr(), received.scope_prefix())
-                            .ok()?
-                            .trunc(),
-                    ))
+                    IpNet::new(sent.addr(), received.scope_prefix())
+                        .ok()
+                        .map(|network| Scope::Network(network.trunc()))
                 }
             }
             _ => None,
-        }
+        };
+        let reply = cache
+            .and_then(Scope::reply_scope)
+            .or_else(|| received.map(|ecs| ecs.scope_prefix()));
+        ResponseScope { cache, reply }
     }
 
     /// Rebuild ECS for the original caller, not the cache-filling client.
@@ -185,15 +210,60 @@ impl Scope {
                     && network.prefix_len() <= ecs.source_prefix()
                     && network.contains(&ecs.addr())
             }
+            (Self::ExactSource(network), Some(ecs)) => {
+                ecs.source_prefix() > 0
+                    && network.prefix_len() == ecs.source_prefix()
+                    && IpNet::new(ecs.addr(), ecs.source_prefix())
+                        .is_ok_and(|sent| sent.trunc() == network)
+            }
             _ => false,
         }
     }
 
     pub fn prefix_len(self) -> u8 {
         match self {
-            Self::Network(network) => network.prefix_len(),
+            Self::Network(network) | Self::ExactSource(network) => network.prefix_len(),
             _ => 0,
         }
+    }
+
+    pub fn reply_scope(self) -> Option<u8> {
+        match self {
+            Self::NoEcs => None,
+            _ => Some(self.prefix_len()),
+        }
+    }
+
+    pub fn tag(self) -> String {
+        match self {
+            Self::NoEcs => "no_ecs".into(),
+            Self::Privacy { ipv4: true } => "privacy_v4".into(),
+            Self::Privacy { ipv4: false } => "privacy_v6".into(),
+            Self::Network(network) => network.to_string(),
+            Self::ExactSource(network) => format!("exact_ecs:{network}"),
+        }
+    }
+
+    pub fn parse_tag(text: &str) -> Result<Self> {
+        Ok(match text {
+            "no_ecs" => Self::NoEcs,
+            "privacy_v4" => Self::Privacy { ipv4: true },
+            "privacy_v6" => Self::Privacy { ipv4: false },
+            _ => {
+                if let Some(network) = text.strip_prefix("exact_ecs:") {
+                    let parsed: IpNet = network.parse()?;
+                    ensure!(
+                        parsed.prefix_len() > 0
+                            && parsed == parsed.trunc()
+                            && network == parsed.to_string(),
+                        "exact ECS scope requires a nonzero canonical CIDR"
+                    );
+                    Self::ExactSource(parsed)
+                } else {
+                    Self::Network(text.parse::<IpNet>()?.trunc())
+                }
+            }
+        })
     }
 }
 
@@ -209,6 +279,7 @@ pub fn validate_wire(bytes: &[u8]) -> Result<()> {
         + u32::from(header.counts.authorities)
         + u32::from(header.counts.additionals);
     let mut ecs_count = 0;
+    let mut padding_count = 0;
     for _ in 0..records {
         Name::read(&mut decoder)?;
         let kind = decoder.read_u16()?.unverified();
@@ -224,6 +295,10 @@ pub fn validate_wire(bytes: &[u8]) -> Result<()> {
             let code = options.read_u16()?.unverified();
             let length = options.read_u16()?.unverified() as usize;
             let data = options.read_slice(length)?.unverified();
+            if code == 12 {
+                padding_count += 1;
+                ensure!(padding_count == 1, "duplicate EDNS Padding");
+            }
             if code != 8 {
                 continue;
             }

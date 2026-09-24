@@ -8,7 +8,7 @@ export interface SessionView {
 export interface TransportView {
   scheme: 'http' | 'https';
   origin: string | null;
-  certificate_source: 'doh' | 'doh3' | null;
+  certificate_source: 'doh' | null;
 }
 
 export interface TransportChange {
@@ -44,7 +44,7 @@ function hasSession(value: unknown): value is SessionView {
   const transport = view.transport as Record<string, unknown> | undefined;
   if (!transport || !['http', 'https'].includes(String(transport.scheme)) ||
     !(transport.origin === null || typeof transport.origin === 'string') ||
-    ![null, 'doh', 'doh3'].includes(transport.certificate_source as null | string)) return false;
+    ![null, 'doh'].includes(transport.certificate_source as null | string)) return false;
   if (view.session === null) return !view.authenticated;
   const session = view.session as Record<string, unknown> | undefined;
   return Boolean(view.authenticated && session && typeof session.binding === 'string' && session.binding.length > 0 && typeof session.expires_in_seconds === 'number');
@@ -70,7 +70,7 @@ export class ApiClient {
     this.pending.clear();
   }
 
-  async request<T = unknown>(path: string, method: ApiMethod = 'GET', body?: unknown, extraHeaders?: Record<string, string>, options?: { unauthenticated?: boolean }): Promise<T> {
+  async request<T = unknown>(path: string, method: ApiMethod = 'GET', body?: unknown, extraHeaders?: Record<string, string>, options?: { unauthenticated?: boolean; query?: Record<string, string> }): Promise<T> {
     if (!/^[a-z0-9/-]+$/i.test(path) || path.startsWith('/')) throw new Error('Invalid API path');
     const owner = this.epoch;
     const binding = this.binding;
@@ -83,7 +83,8 @@ export class ApiClient {
     const controller = new AbortController();
     this.pending.add(controller);
     try {
-      const response = await this.fetcher(`/api/${path}`, {
+      const query = options?.query ? new URLSearchParams(options.query).toString() : '';
+      const response = await this.fetcher(`/api/${path}${query ? `?${query}` : ''}`, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),

@@ -3,7 +3,7 @@
 use std::{fmt, net::SocketAddr, sync::Arc};
 
 use anyhow::{Result, ensure};
-use rustls::{ServerConfig, sign::CertifiedKey};
+use rustls::ServerConfig;
 use serde_json::{Value, json};
 
 use crate::{
@@ -40,7 +40,7 @@ pub(super) struct Snapshot {
     pub public_host: Option<String>,
     pub source: Option<&'static str>,
     pub tls: Option<Arc<ServerConfig>>,
-    pub selected: Option<(&'static str, Arc<CertifiedKey>)>,
+    pub certificates: Option<Arc<tls::CertificateSet>>,
     pub realm: u64,
 }
 
@@ -52,7 +52,7 @@ impl Snapshot {
             public_host: None,
             source: None,
             tls: None,
-            selected: None,
+            certificates: None,
             realm: 0,
         }
     }
@@ -71,7 +71,7 @@ impl Snapshot {
             .transpose()?;
         ensure!(
             scheme == Scheme::Http || public_host.is_some(),
-            "web.public_host is required when DoH or DoH3 is enabled in managed mode"
+            "web.public_host is required when DoH is enabled in managed mode"
         );
         let origin = public_host
             .as_deref()
@@ -82,32 +82,27 @@ impl Snapshot {
             public_host,
             source,
             tls: None,
-            selected: None,
+            certificates: None,
             realm: 0,
         })
     }
 
     pub fn prepare(config: &Config, address: SocketAddr) -> Result<Self> {
         let mut candidate = Self::describe(config, address)?;
-        if let (Some(source), Some(files)) = selected_files(config) {
-            let key = tls::load_identity(files).map_err(CertificateInvalid)?;
-            tls::validate_management_identity(
-                &key,
-                candidate
-                    .public_host
-                    .as_deref()
-                    .expect("HTTPS requires public_host"),
-            )
-            .map_err(|error| {
-                if error.is::<tls::ManagementNameMismatch>() {
-                    error
-                } else {
-                    CertificateInvalid(error).into()
-                }
-            })?;
-            candidate.tls = Some(tls::server_config_with_key(key.clone(), &[b"http/1.1"])?);
-            candidate.selected = Some((source, key));
+        let mut sources = config.certificate_sources();
+        sources.doh_public_host = candidate.public_host.clone();
+        let certificates = tls::CertificateSet::prepare(sources).map_err(|error| {
+            if error.is::<tls::ManagementNameMismatch>() {
+                error
+            } else {
+                CertificateInvalid(error).into()
+            }
+        })?;
+        if candidate.source.is_some() {
+            candidate.tls =
+                Some(certificates.server_config(tls::CertificateRole::Doh, &[b"http/1.1"])?);
         }
+        candidate.certificates = Some(certificates);
         Ok(candidate)
     }
 
@@ -156,8 +151,6 @@ impl std::error::Error for CertificateInvalid {}
 fn selected_files(config: &Config) -> (Option<&'static str>, Option<&tls::TlsFiles>) {
     if let Some(doh) = &config.doh {
         (Some("doh"), Some(&doh.files))
-    } else if let Some(doh3) = &config.doh3 {
-        (Some("doh3"), Some(&doh3.files))
     } else {
         (None, None)
     }
@@ -181,45 +174,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn doh_is_preferred_and_doh3_only_is_a_management_identity() {
+    fn http3_toggle_keeps_the_doh_management_identity_and_realm() {
         let temp = tempfile::tempdir().unwrap();
         let doh = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
-        let doh3 = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
         let doh_cert = temp.path().join("doh-cert.pem");
         let doh_key = temp.path().join("doh-key.pem");
-        let doh3_cert = temp.path().join("doh3-cert.pem");
-        let doh3_key = temp.path().join("doh3-key.pem");
         std::fs::write(&doh_cert, doh.cert.pem()).unwrap();
         std::fs::write(&doh_key, doh.signing_key.serialize_pem()).unwrap();
-        std::fs::write(&doh3_cert, doh3.cert.pem()).unwrap();
-        std::fs::write(&doh3_key, doh3.signing_key.serialize_pem()).unwrap();
         let example = include_str!("../../parins.example.toml");
         let listeners = format!(
-            "\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n[doh3]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+            "\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
             serde_json::json!(doh_cert),
-            serde_json::json!(doh_key),
-            serde_json::json!(doh3_cert),
-            serde_json::json!(doh3_key)
+            serde_json::json!(doh_key)
         );
         let config = Config::parse_in(&format!("{example}{listeners}"), temp.path()).unwrap();
         let address = "127.0.0.1:3000".parse().unwrap();
         let chosen = Snapshot::prepare(&config, address).unwrap();
         assert_eq!(chosen.source, Some("doh"));
         assert_eq!(
-            chosen.selected.as_ref().unwrap().1.cert[0].as_ref(),
+            chosen
+                .certificates
+                .as_ref()
+                .unwrap()
+                .key(tls::CertificateRole::Doh)
+                .unwrap()
+                .cert[0]
+                .as_ref(),
             doh.cert.der().as_ref()
         );
-        let only_doh3 = format!(
-            "{example}\n[web]\npublic_host='dns.test'\n[doh3]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
-            serde_json::json!(doh3_cert),
-            serde_json::json!(doh3_key)
-        );
-        let config = Config::parse_in(&only_doh3, temp.path()).unwrap();
-        let chosen = Snapshot::prepare(&config, address).unwrap();
-        assert_eq!(chosen.source, Some("doh3"));
+        let mut config = config;
+        config.doh.as_mut().unwrap().http3 = true;
+        let enabled = Snapshot::prepare(&config, address).unwrap();
+        assert_eq!(enabled.source, Some("doh"));
+        assert!(!chosen.changes_realm(&enabled));
         assert_eq!(
-            chosen.selected.as_ref().unwrap().1.cert[0].as_ref(),
-            doh3.cert.der().as_ref()
+            chosen
+                .certificates
+                .unwrap()
+                .key(tls::CertificateRole::Doh)
+                .unwrap()
+                .cert,
+            enabled
+                .certificates
+                .unwrap()
+                .key(tls::CertificateRole::Doh)
+                .unwrap()
+                .cert
         );
     }
 }

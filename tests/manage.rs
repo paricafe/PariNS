@@ -22,6 +22,9 @@ use tokio_rustls::TlsConnector;
 const PASSWORD: &str = "local-integration-password";
 const DEADLINE: Duration = Duration::from_secs(10);
 
+#[path = "manage/certificate_reload.rs"]
+mod certificate_reload;
+
 struct Response {
     status: u16,
     headers: String,
@@ -620,7 +623,7 @@ async fn configuration_forms_are_authenticated_read_only_and_apply_with_revision
         .await
         .expect(200);
     assert_eq!(stats["interval_seconds"], 60);
-    assert_eq!(stats["retention_seconds"], 86400);
+    assert_eq!(stats["retention_seconds"], 604800);
     assert!(stats["samples"].is_array());
     let status = server
         .request("GET", "/api/status", Some(&token), None)
@@ -1491,7 +1494,7 @@ async fn https_rejects_host_origin_and_http_cookie_confusion() {
 }
 
 #[tokio::test]
-async fn doh3_only_serves_management_https_and_verified_h3_with_same_certificate() {
+async fn doh_http3_serves_management_https_and_verified_h3_with_same_certificate() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
@@ -1504,14 +1507,14 @@ async fn doh3_only_serves_management_https_and_verified_h3_with_same_certificate
     let h3_address = reservation.local_addr().unwrap();
     drop(reservation);
     let candidate = format!(
-        "{}\n[web]\npublic_host='dns.test'\n[doh3]\nlisten='{h3_address}'\ncert_file={}\nkey_file={}\n",
+        "{}\n[web]\npublic_host='dns.test'\n[doh]\nhttp3=true\nlisten='{h3_address}'\ncert_file={}\nkey_file={}\n",
         configuration(),
         json!(cert_path),
         json!(key_path)
     );
     let token = std::fs::read_to_string(directory.join("setup-token")).unwrap();
     let setup = server.setup_with(&token, &candidate).await;
-    assert_eq!(setup.expect(200)["transport"]["certificate_source"], "doh3");
+    assert_eq!(setup.expect(200)["transport"]["certificate_source"], "doh");
     assert!(!setup.headers.contains("set-cookie:"));
     let request = https_wire(
         server.address,
@@ -1905,7 +1908,7 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
     let config = format!(
-        "{}\n[query_log]\nenabled=true\nmax_entries=2\nretention_secs=60\n",
+        "{}\n[query_log]\nenabled=true\nmax_entries=2\nretention_secs=60\n[storage]\nflush_interval_ms=100\n",
         configuration()
     );
     let token = server.setup(&directory, &config).await;
@@ -1917,6 +1920,20 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
     for _ in 0..3 {
         assert_dns(address).await;
     }
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let status = server
+                .request("GET", "/api/status", Some(&token), None)
+                .await
+                .expect(200);
+            if status["storage"]["query_log_entries"] == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     let page = server
         .request(
             "POST",
@@ -1973,7 +1990,7 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
             "POST",
             "/api/query-log/clear",
             Some(&token),
-            Some(json!({"revision":0})),
+            Some(json!({"revision":0,"log_epoch":page["page"]["log_epoch"]})),
         )
         .await
         .expect(409);
@@ -1982,7 +1999,7 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
             "POST",
             "/api/query-log/clear",
             Some(&token),
-            Some(json!({"revision":1})),
+            Some(json!({"revision":1,"log_epoch":page["page"]["log_epoch"]})),
         )
         .await
         .expect(200);

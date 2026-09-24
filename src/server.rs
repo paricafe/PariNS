@@ -38,9 +38,10 @@ pub struct Server {
 #[derive(Clone)]
 pub struct ReloadHandle {
     resolver: Arc<Resolver>,
-    identities: Vec<crate::tls::Identity>,
+    certificates: Arc<crate::tls::CertificateSet>,
     filter_file: Option<PathBuf>,
     serial: Arc<Mutex<()>>,
+    publication_closed: Arc<Mutex<bool>>,
 }
 
 impl ReloadHandle {
@@ -52,102 +53,113 @@ impl ReloadHandle {
             .as_deref()
             .map(crate::policy::Policy::load)
             .transpose()?;
-        let keys = self
-            .identities
-            .iter()
-            .map(crate::tls::Identity::prepare)
-            .collect::<Result<Vec<_>>>()?;
-        for (identity, key) in self.identities.iter().zip(keys) {
-            identity.install(key);
-        }
+        let prepared = self.certificates.prepare_reload()?;
+        let closed = self
+            .publication_closed
+            .lock()
+            .expect("reload publication lock");
+        anyhow::ensure!(!*closed, "DNS generation stopped before reload publication");
+        self.certificates.publish(prepared)?;
         if let Some(policy) = policy {
             self.resolver.replace_policy(policy);
         }
         Ok(())
     }
+
+    fn close(&self) {
+        *self
+            .publication_closed
+            .lock()
+            .expect("reload publication lock") = true;
+    }
 }
 
 enum Encrypted {
     Dot(TcpListener, Arc<rustls::ServerConfig>),
-    Doh(TcpListener, Arc<rustls::ServerConfig>),
+    Doh(TcpListener, Arc<rustls::ServerConfig>, Option<u16>),
     Quic(quinn::Endpoint, crate::quic::Protocol),
 }
 
 impl Server {
     /// Bind both protocols before accepting traffic. Port zero selects one shared port.
     pub async fn bind(config: Config) -> Result<Self> {
-        Self::bind_with_identity(config, None).await
+        let services = crate::runtime_services::RuntimeServices::ephemeral(
+            crate::storage::RuntimeSettings::from_config(&config),
+        );
+        Self::bind_with_services(config, None, services).await
     }
 
-    /// Managed mode can pass its already verified DoH/DoH3 identity. This keeps
-    /// DNS and management certificates from diverging between file reads.
-    pub async fn bind_with_identity(
-        config: Config,
-        selected: Option<(&'static str, Arc<rustls::sign::CertifiedKey>)>,
+    pub async fn bind_with_services(
+        mut config: Config,
+        certificates: Option<Arc<crate::tls::CertificateSet>>,
+        services: Arc<crate::runtime_services::RuntimeServices>,
     ) -> Result<Self> {
         config.validate()?;
+        let certificates = match certificates {
+            Some(prepared) => prepared,
+            None => {
+                let sources = config.certificate_sources();
+                tokio::task::spawn_blocking(move || crate::tls::CertificateSet::prepare(sources))
+                    .await??
+            }
+        };
+        use crate::tls::CertificateRole as Role;
         let tcp = TcpListener::bind(config.listen).await?;
         let udp = Arc::new(UdpSocket::bind(tcp.local_addr()?).await?);
-        let resolver = Arc::new(Resolver::try_from_config(&config)?);
+        config.listen = tcp.local_addr()?;
         let admin = match config.admin_listen {
             Some(address) => Some(TcpListener::bind(address).await?),
             None => None,
         };
         let mut encrypted = Vec::new();
-        let mut identities = Vec::new();
-        if let Some(settings) = &config.dot {
-            let (tls, identity) = crate::tls::reloading_server_config(&settings.files, &[b"dot"])?;
-            identities.push(identity);
-            encrypted.push(Encrypted::Dot(
-                TcpListener::bind(settings.listen).await?,
-                tls,
-            ));
+        if let Some(settings) = &mut config.dot {
+            let tls = certificates.server_config(Role::Dot, &[b"dot"])?;
+            let listener = TcpListener::bind(settings.listen).await?;
+            settings.listen = listener.local_addr()?;
+            encrypted.push(Encrypted::Dot(listener, tls));
         }
-        if let Some(settings) = &config.doh {
-            let (tls, identity) = if let Some(("doh", key)) = &selected {
-                let identity = crate::tls::Identity::from_key(&settings.files, key.clone());
-                (identity.server_config(&[b"h2"])?, identity)
-            } else {
-                crate::tls::reloading_server_config(&settings.files, &[b"h2"])?
-            };
-            identities.push(identity);
-            encrypted.push(Encrypted::Doh(
-                TcpListener::bind(settings.listen).await?,
-                tls,
-            ));
-        }
-        for (settings, protocol, alpn) in [
-            (&config.doq, crate::quic::Protocol::Doq, b"doq".as_slice()),
-            (&config.doh3, crate::quic::Protocol::H3, b"h3".as_slice()),
-        ] {
-            if let Some(settings) = settings {
-                let (tls, identity) = if matches!(protocol, crate::quic::Protocol::H3) {
-                    if let Some(("doh3", key)) = &selected {
-                        let identity = crate::tls::Identity::from_key(&settings.files, key.clone());
-                        (identity.server_config(&[alpn])?, identity)
-                    } else {
-                        crate::tls::reloading_server_config(&settings.files, &[alpn])?
-                    }
-                } else {
-                    crate::tls::reloading_server_config(&settings.files, &[alpn])?
-                };
-                identities.push(identity);
+        if let Some(settings) = &mut config.doh {
+            let tls = certificates.server_config(Role::Doh, &[b"h2"])?;
+            // Select the TCP port first. H3 must bind the exact same address;
+            // failure drops the whole candidate before it can serve requests.
+            let listener = TcpListener::bind(settings.listen).await?;
+            let address = listener.local_addr()?;
+            settings.listen = address;
+            if settings.http3 {
                 encrypted.push(Encrypted::Quic(
                     crate::quic::bind(
-                        settings.listen,
-                        tls,
+                        address,
+                        certificates.server_config(Role::Doh, &[b"h3"])?,
                         config.max_inflight.min(1024),
-                        protocol,
+                        crate::quic::Protocol::H3,
                     )?,
-                    protocol,
+                    crate::quic::Protocol::H3,
                 ));
             }
+            encrypted.push(Encrypted::Doh(
+                listener,
+                tls,
+                settings.http3.then_some(address.port()),
+            ));
         }
+        if let Some(settings) = &mut config.doq {
+            let tls = certificates.server_config(Role::Doq, &[b"doq"])?;
+            let endpoint = crate::quic::bind(
+                settings.listen,
+                tls,
+                config.max_inflight.min(1024),
+                crate::quic::Protocol::Doq,
+            )?;
+            settings.listen = endpoint.local_addr()?;
+            encrypted.push(Encrypted::Quic(endpoint, crate::quic::Protocol::Doq));
+        }
+        let resolver = Arc::new(Resolver::with_services(&config, services)?);
         let reload = ReloadHandle {
             resolver: resolver.clone(),
-            identities,
+            certificates,
             filter_file: config.filter_file.clone(),
             serial: Arc::new(Mutex::new(())),
+            publication_closed: Arc::new(Mutex::new(false)),
         };
         Ok(Self {
             config,
@@ -190,7 +202,7 @@ impl Server {
             .map(|listener| {
                 Ok(match listener {
                     Encrypted::Dot(listener, _) => ("dot", listener.local_addr()?),
-                    Encrypted::Doh(listener, _) => ("doh", listener.local_addr()?),
+                    Encrypted::Doh(listener, _, _) => ("doh", listener.local_addr()?),
                     Encrypted::Quic(endpoint, protocol) => (
                         match protocol {
                             crate::quic::Protocol::Doq => "doq",
@@ -212,10 +224,6 @@ impl Server {
         let period = Duration::from_secs(self.config.metrics.interval_secs.max(1));
         let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let log = resolver.query_log();
-        let log_enabled = self.config.query_log.enabled;
-        let mut log_cleanup = tokio::time::interval(Duration::from_secs(1));
-        log_cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let queries = Arc::new(Semaphore::new(self.config.max_inflight));
         let connections = Arc::new(Semaphore::new(self.config.max_tcp_connections));
         let io_timeout = Duration::from_millis(self.config.tcp_io_timeout_ms);
@@ -239,8 +247,8 @@ impl Server {
                     Encrypted::Dot(listener, tls) => {
                         crate::tls::serve(listener, tls, ingress).await
                     }
-                    Encrypted::Doh(listener, tls) => {
-                        crate::doh::serve(listener, tls, ingress).await
+                    Encrypted::Doh(listener, tls, h3_port) => {
+                        crate::doh::serve(listener, tls, ingress, h3_port).await
                     }
                     Encrypted::Quic(endpoint, protocol) => {
                         crate::quic::serve(endpoint, protocol, ingress).await
@@ -265,7 +273,6 @@ impl Server {
                     };
                 }
                 _ = ticker.tick(), if report => emit_metrics(&metrics, run_id, started, "periodic"),
-                _ = log_cleanup.tick(), if log_enabled => log.purge_expired(),
                 Some(result) = tasks.join_next(), if !tasks.is_empty() => {
                     if let Err(error) = result { break Err(error.into()); }
                 }
@@ -314,6 +321,7 @@ impl Server {
                 }
             }
         };
+        self.reload.close();
         drop(self.tcp);
         let _ = stopping.send(true);
         let drained = timeout(
@@ -329,9 +337,13 @@ impl Server {
             },
         )
         .await;
+        if !matches!(&drained, Ok(Ok(()))) || outcome.is_err() {
+            resolver.force_shutdown();
+        }
         tasks.shutdown().await;
         adapters.shutdown().await;
         resolver.shutdown_refresh().await;
+        resolver.finish_shutdown();
         if report {
             emit_metrics(&metrics, run_id, started, "shutdown");
         }
@@ -382,7 +394,10 @@ async fn serve_tcp(
             }
         };
         let Some(response) = response else { return };
-        let Ok(bytes) = response.to_vec() else { return };
+        let Ok(bytes) = protocol::encode_hop(&response, false, false, 468, protocol::MAX_MESSAGE)
+        else {
+            return;
+        };
         if !matches!(
             timeout(io_timeout, tcp::write_frame(&mut stream, &bytes)).await,
             Ok(Ok(()))

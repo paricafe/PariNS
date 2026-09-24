@@ -1,6 +1,8 @@
 import { apiMessages, appMessages, uiMessages } from "./console";
 import { settingsMessages } from "./settings";
 import { viewsMessages } from "./views";
+import { storageMessages } from "./storage";
+import { reliabilityMessages } from './reliability';
 import { ModelError } from "../model/errors";
 import { ApiError } from "../session/client";
 
@@ -14,6 +16,8 @@ const catalog: Record<string, MessagePair> = {
   ...Object.fromEntries(Object.entries(uiMessages).map(([key, value]) => [`ui.${key}`, value])),
   ...Object.fromEntries(Object.entries(settingsMessages).map(([key, value]) => [`settings.${key}`, value])),
   ...Object.fromEntries(Object.entries(viewsMessages).map(([key, value]) => [`views.${key}`, value])),
+  ...Object.fromEntries(Object.entries(storageMessages).map(([key, value]) => [`storage.${key}`, value])),
+  ...Object.fromEntries(Object.entries(reliabilityMessages).map(([key, value]) => [`reliability.${key}`, value])),
 };
 
 export function translate(key: string, language: Language, params: TranslationParams = {}): string {

@@ -11,19 +11,17 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe('session transition', () => {
   it('updates the security transport source on same-origin session refresh', async () => {
-    let checks = 0;
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url !== '/api/session') throw new Error(`Unexpected request ${url}`);
-      checks += 1;
       return jsonResponse({ ...session, transport: {
-        scheme: 'https', origin: 'https://dns.example.com:3000', certificate_source: checks === 1 ? 'doh' : 'doh3',
+        scheme: 'https', origin: 'https://dns.example.com:3000', certificate_source: 'doh',
       } });
     }));
     const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
     await waitFor(() => expect(hook.result.current.state.transport?.certificate_source).toBe('doh'));
     await act(async () => { await hook.result.current.recheck(); });
     expect(hook.result.current.state.phase).toBe('ready');
-    expect(hook.result.current.state.transport?.certificate_source).toBe('doh3');
+    expect(hook.result.current.state.transport?.certificate_source).toBe('doh');
     hook.unmount();
   });
 

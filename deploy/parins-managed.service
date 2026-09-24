@@ -1,4 +1,4 @@
-# PariNS managed installer unit v1
+# PariNS managed installer unit v2 (exclusive state directory)
 [Unit]
 Description=PariNS DNS forwarder and management console
 After=network-online.target
@@ -7,15 +7,16 @@ Wants=network-online.target
 [Service]
 Type=simple
 DynamicUser=yes
-StateDirectory=parins
+StateDirectory=parins-managed
 StateDirectoryMode=0700
-WorkingDirectory=/var/lib/parins
-ExecStart=/opt/parins-managed/parins --manage --state-dir /var/lib/parins --web-listen 0.0.0.0:3000
+WorkingDirectory=/var/lib/parins-managed
+ExecStart=/opt/parins-managed/parins --manage --state-dir /var/lib/parins-managed --web-listen 0.0.0.0:3000
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
 # An accepted configuration transaction may drain the old DNS instance before
-# shutdown drains its replacement (up to 62 seconds each).
-TimeoutStopSec=130
+# shutdown drains its replacement (65s transaction + 62s DNS + 10s storage).
+TimeoutStopSec=145
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes

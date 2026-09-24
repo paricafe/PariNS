@@ -15,6 +15,10 @@ pub struct Config {
     pub upstreams: crate::upstreams::Settings,
     #[serde(default)]
     pub query_log: crate::query_log::Settings,
+    #[serde(default)]
+    pub storage: crate::storage::Settings,
+    #[serde(default)]
+    pub statistics: crate::storage::StatisticsSettings,
     pub query_timeout_ms: u64,
     pub tcp_io_timeout_ms: u64,
     pub shutdown_grace_ms: u64,
@@ -36,11 +40,9 @@ pub struct Config {
     #[serde(default)]
     pub dot: Option<crate::tls::ListenerConfig>,
     #[serde(default)]
-    pub doh: Option<crate::tls::ListenerConfig>,
+    pub doh: Option<DohConfig>,
     #[serde(default)]
     pub doq: Option<crate::tls::ListenerConfig>,
-    #[serde(default)]
-    pub doh3: Option<crate::tls::ListenerConfig>,
     #[serde(default)]
     pub web: Option<WebConfig>,
     #[serde(default)]
@@ -53,6 +55,16 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct WebConfig {
     pub public_host: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DohConfig {
+    pub listen: SocketAddr,
+    #[serde(flatten)]
+    pub files: crate::tls::TlsFiles,
+    #[serde(default)]
+    pub http3: bool,
 }
 
 /// A concrete browser host, never an authority or URL. The returned value is
@@ -118,6 +130,7 @@ impl Default for CoalescingConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
+    pub persistence: CachePersistenceConfig,
     pub enabled: bool,
     pub max_entries: usize,
     pub max_bytes: usize,
@@ -129,6 +142,22 @@ pub struct CacheConfig {
     pub prefetch: PrefetchConfig,
     pub stale: StaleConfig,
     pub rules: Vec<CacheRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CachePersistenceConfig {
+    pub enabled: bool,
+    pub max_bytes: usize,
+}
+
+impl Default for CachePersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_bytes: 32 * 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -189,6 +218,7 @@ pub struct CacheRule {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            persistence: CachePersistenceConfig::default(),
             enabled: true,
             max_entries: 4096,
             max_bytes: 8 * 1024 * 1024,
@@ -238,16 +268,15 @@ impl Config {
         {
             *file = base.join(&*file);
         }
-        for listener in [
-            &mut config.dot,
-            &mut config.doh,
-            &mut config.doq,
-            &mut config.doh3,
+        for files in [
+            config.dot.as_mut().map(|v| &mut v.files),
+            config.doh.as_mut().map(|v| &mut v.files),
+            config.doq.as_mut().map(|v| &mut v.files),
         ]
         .into_iter()
         .flatten()
         {
-            for file in [&mut listener.files.cert_file, &mut listener.files.key_file] {
+            for file in [&mut files.cert_file, &mut files.key_file] {
                 if file.is_relative() {
                     *file = base.join(&*file);
                 }
@@ -263,13 +292,21 @@ impl Config {
 
     /// Load all cryptographic material without opening a listener.
     pub fn check_files(&self) -> Result<()> {
-        self.load_policy()?;
-        for listener in [&self.dot, &self.doh, &self.doq, &self.doh3]
-            .into_iter()
-            .flatten()
-        {
-            crate::tls::server_config(&listener.files, &[])?;
+        crate::tls::CertificateSet::prepare(self.certificate_sources())?;
+        self.check_non_identity_files()
+    }
+
+    pub fn certificate_sources(&self) -> crate::tls::CertificateSources {
+        crate::tls::CertificateSources {
+            dot: self.dot.as_ref().map(|v| v.files.clone()),
+            doh: self.doh.as_ref().map(|v| v.files.clone()),
+            doq: self.doq.as_ref().map(|v| v.files.clone()),
+            doh_public_host: None,
         }
+    }
+
+    pub fn check_non_identity_files(&self) -> Result<()> {
+        self.load_policy()?;
         crate::upstreams::Pool::new(&self.upstreams, self)?;
         Ok(())
     }
@@ -292,6 +329,16 @@ impl Config {
             public_host(&web.public_host)?;
         }
         self.query_log.validate()?;
+        self.storage.validate()?;
+        self.statistics.validate()?;
+        ensure!(
+            self.query_log.max_bytes <= self.storage.max_database_bytes,
+            "query_log.max_bytes must not exceed storage.max_database_bytes"
+        );
+        ensure!(
+            (1024 * 1024..=512 * 1024 * 1024).contains(&self.cache.persistence.max_bytes),
+            "cache.persistence.max_bytes must be 1..=512 MiB"
+        );
         self.upstreams.validate()?;
         self.upstreams.validate_listeners(self)?;
         self.source_limits.validate()?;

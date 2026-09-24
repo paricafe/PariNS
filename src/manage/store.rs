@@ -50,14 +50,18 @@ impl Store {
             .context("resolve management directory")?;
         ensure!(
             dir.parent().is_some(),
-            "management directory cannot be filesystem root"
+            "management directory input '{}' resolves to filesystem root '{}'; use a dedicated private subdirectory",
+            path.display(),
+            dir.display()
         );
         if let Some(home) = std::env::var_os("HOME")
             && let Ok(home) = Path::new(&home).canonicalize()
         {
             ensure!(
                 dir != home,
-                "management directory cannot be the home directory"
+                "management directory input '{}' resolves to HOME '{}'; use a dedicated private subdirectory, not the account home",
+                path.display(),
+                dir.display()
             );
         }
         let metadata = fs::metadata(&dir)?;
@@ -159,7 +163,7 @@ fn validate_stored(stored: &Stored) -> Result<()> {
     Ok(())
 }
 
-fn create_private(path: &Path) -> std::io::Result<File> {
+pub(crate) fn create_private(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
     #[cfg(unix)]
@@ -170,7 +174,7 @@ fn create_private(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-fn checked_open(path: &Path, writable: bool) -> Result<Option<File>> {
+pub(crate) fn checked_open(path: &Path, writable: bool) -> Result<Option<File>> {
     let before = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -196,7 +200,7 @@ fn checked_open(path: &Path, writable: bool) -> Result<Option<File>> {
     Ok(Some(file))
 }
 
-fn private_permissions(metadata: &fs::Metadata, mode: u32) -> Result<()> {
+pub(crate) fn private_permissions(metadata: &fs::Metadata, mode: u32) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -305,6 +309,32 @@ mod tests {
             toml: "listen = '127.0.0.1:5353'".into(),
             previous: None,
             revision: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_and_home_rejections_identify_input_and_resolved_directory() {
+        let error = Store::open(Path::new("/"))
+            .err()
+            .expect("root must not be used as private state")
+            .to_string();
+        assert!(
+            error.contains("input '/'")
+                && error.contains("filesystem root '/'")
+                && error.contains("subdirectory")
+        );
+        if let Some(home) = std::env::var_os("HOME") {
+            let path = Path::new(&home);
+            if let Ok(resolved) = path.canonicalize() {
+                let error = Store::open(path)
+                    .err()
+                    .expect("HOME must not be used as private state")
+                    .to_string();
+                assert!(error.contains(&format!("input '{}'", path.display())));
+                assert!(error.contains(&format!("HOME '{}'", resolved.display())));
+                assert!(error.contains("dedicated private subdirectory"));
+            }
         }
     }
 

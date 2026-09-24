@@ -9,6 +9,10 @@ import { Switch, Tabs, Button, Drawer } from '../../components/beui';
 import { useConfirm } from '../../components/ConfirmProvider';
 import { lineDiff } from './lineDiff';
 import { TransportHint, transportChangeText } from '../../components/TransportHint';
+import { StorageTools } from './StorageTools';
+import { DohRuntime } from './DohRuntime';
+import { CertificateTools } from './CertificateTools';
+import type { SnapshotReport } from '../observability/storage';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
 type CacheTab = typeof cacheTabs[number];
@@ -33,7 +37,7 @@ function Field({ field, language, value, onChange, disabled }: { field: SettingF
   }
   if (field.type === 'checkbox') return <div className="switch-field">
     <Switch id={id} checked={value === true} disabled={disabled} onCheckedChange={onChange} label={t(field.labelKey)} />
-    {field.helpKey && <small>{t(field.helpKey)}</small>}
+    {field.helpKey && (field.path === 'doh.http3' ? <div className="settings-expand" data-open={value === true} inert={value !== true}><div><small>{t(field.helpKey)}</small></div></div> : <small>{t(field.helpKey)}</small>)}
   </div>;
   const textValue = typeof value === 'string' ? value : '';
   return <div className={`field ${field.type === 'lines' ? 'wide' : ''}`}>
@@ -48,22 +52,32 @@ function Field({ field, language, value, onChange, disabled }: { field: SettingF
 }
 
 function GenericSettings({ pageId, language }: { pageId: SettingPageId; language: Language }) {
-  const { draft, locked, updateField, setOptional } = useConfig();
+  const { draft, locked, updateField, setOptional, error } = useConfig();
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  useEffect(() => { if (error instanceof ModelError && error.path?.startsWith('storage.')) setAdvancedOpen(true); }, [error]);
   if (!draft) return <p className="muted">{translate('app.connecting', language)}</p>;
   const page = settingPages[pageId];
   const t = (key: string) => translate(key, language);
   return <div className="settings-stack">{page.groups.map((group) => {
     const enabled = group.optional ? draft.optional[group.optional] ?? getPath(draft.settings, group.optional) !== null : true;
     const filterExternal = group.id === 'filterRules' && Boolean(draft.fields.filter_file ?? getPath(draft.settings, 'filter_file'));
+    const expanded = group.id !== 'storageAdvanced' || advancedOpen;
+    const h3 = draft.fields['doh.http3'] ?? getPath(draft.settings, 'doh.http3');
+    const endpoint = draft.fields['doh.listen'] ?? fieldDisplayValue(getPath(draft.settings, 'doh.listen'), settingPages.security.groups.find((candidate) => candidate.id === 'doh')!.fields[0]);
+    const port = typeof endpoint === 'object' ? endpoint.port : '';
     return <section className="panel settings-group" key={group.id}>
       <div className="group-head"><div><h2>{t(group.titleKey)}</h2><p className="muted small">{t(group.helpKey)}</p></div>
         {group.optional && <Switch checked={enabled} disabled={locked} onCheckedChange={(next) => setOptional(group.optional!, next)} label={t(group.enableKey)} />}
+        {group.id === 'storageAdvanced' && <button className="button secondary" type="button" aria-expanded={advancedOpen} aria-controls="storage-advanced-fields" onClick={() => setAdvancedOpen((open) => !open)}>{t(group.titleKey)}</button>}
       </div>
+      <div className="settings-expand" data-open={expanded} id={group.id === 'storageAdvanced' ? 'storage-advanced-fields' : undefined} inert={!expanded}><div>
       <fieldset disabled={locked || !enabled || filterExternal} className="fields-grid"><legend className="sr-only">{t(group.titleKey)}</legend>
         {group.fields.map((field) => <Field key={field.path} field={field} language={language} disabled={locked || !enabled || filterExternal}
           value={draft.fields[field.path] ?? fieldDisplayValue(getPath(draft.settings, field.path), field)}
           onChange={(value) => updateField(field.path, value)} />)}
       </fieldset>
+      </div></div>
+      {group.id === 'doh' && <div className="settings-expand" data-open={enabled} inert={!enabled}><div><p className="notice small">{translate(h3 === true ? 'storage.draftDoh3' : 'storage.draftDoh', language, { port: /^0+$/.test(port.trim()) ? t('storage.automaticPort') : port || '—' })}</p></div></div>}
       {filterExternal && <p className="muted small">{t('settings.filter_file.help')}</p>}
     </section>;
   })}</div>;
@@ -98,7 +112,7 @@ function CacheRules({ language }: { language: Language }) {
   </section>;
 }
 
-interface CacheStatus { revision: number; running: boolean; cache?: Record<string, number>; refresh?: Record<string, number> }
+interface CacheStatus { revision: number; running: boolean; cache?: Record<string, number>; refresh?: Record<string, number>; cache_persistence?: SnapshotReport }
 interface Inspection { revision: number; epoch: number; explanation: { state: string; reason: string; scope: string; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean } }
 
 function CacheUsage({ language }: { language: Language }) {
@@ -124,6 +138,9 @@ function CacheUsage({ language }: { language: Language }) {
       <div className="detail-list">{rows.map(([key, first, second]) => <div className="detail-row" key={key}><span>{t(key)}</span><strong>{formatNumber(first ?? 0, language)} / {formatNumber(second ?? 0, language)}</strong></div>)}</div>
       <p className="muted small">{t('bytesNote')}</p>
     </>}
+    <div className="cache-persistence-status"><h3>{translate('settings.group.persistence.title', language)}</h3><p className="small muted">{translate('storage.cacheBoundary', language)}</p>
+      {status?.cache_persistence && <><dl className="storage-grid">{(['saved', 'restored', 'skipped'] as const).map((key) => <div key={key}><dt>{translate(`storage.${{ saved: 'cacheSaved', restored: 'cacheRestored', skipped: 'cacheSkipped' }[key]}`, language)}</dt><dd>{formatNumber(status.cache_persistence![key], language)}</dd></div>)}</dl><p className="small">{translate('storage.snapshot', language)}: {formatNumber(status.cache_persistence.bytes, language)} B</p>{status.cache_persistence.reason && <p className="small muted">{translate('storage.cacheReason', language)}: {status.cache_persistence.reason}</p>}</>}
+    </div>
     <div className="danger-zone"><button type="button" className="button danger" disabled={!cache || working} onClick={async () => {
       if (!status?.cache || !await confirmAction('views.clearAllConfirm', 'views.clearAll')) return;
       setWorking(true); try { await api.request('cache/invalidate', 'POST', { all: true, revision: status.revision, epoch: status.cache.epoch }); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setWorking(false); }
@@ -174,12 +191,12 @@ function CacheInspect({ language, dirty }: { language: Language; dirty: boolean 
 function CertificateImport({ language }: { language: Language }) {
   const { draft, locked, busy: configBusy, importCertificate } = useConfig();
   const confirmAction = useConfirm();
-  const [target, setTarget] = useState<'dot' | 'doh' | 'doq' | 'doh3' | null>(null);
+  const [target, setTarget] = useState<'dot' | 'doh' | 'doq' | null>(null);
   const [certificate, setCertificate] = useState(''); const [privateKey, setPrivateKey] = useState('');
   const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   const t = (key: string) => translate(key, language);
   if (!draft) return null;
-  const protocols = ['dot', 'doh', 'doq', 'doh3'] as const;
+  const protocols = ['dot', 'doh', 'doq'] as const;
   const close = async () => {
     if (busy) return;
     if ((certificate || privateKey) && !await confirmAction('app.discardPem', 'ui.closeDialog')) return;
@@ -217,8 +234,8 @@ function CertificateImport({ language }: { language: Language }) {
 }
 
 export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'advanced'; language: Language }) {
-  const { draft, dirty, setToml, preview, validate, prepareSave, commitPrepared, ensureParsed, previewRollback, rollback, exportDraft, busy, error, setError, discard } = useConfig();
-  const { state, transportChanged } = useSession();
+  const { draft, dirty, setToml, preview, validate, ensureParsed, previewRollback, rollback, exportDraft, busy, error, setError, discard } = useConfig();
+  const { state, transportChanged, api } = useSession();
   const confirmAction = useConfirm();
   const navigate = useNavigate();
   const [cacheTab, setCacheTab] = useState<CacheTab>('usage');
@@ -254,16 +271,6 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
         <Button variant="secondary" disabled={!draft || busy} onClick={() => { const source = draft?.original; if (source === undefined) return; void preview().then((result) => { setPreviewed({ source, result }); setNotice(null); }).catch(() => {}); }}>{t('ui.preview')}</Button>
         <button type="button" className="button secondary" disabled={!draft || busy} onClick={() => void validate().then((result) => setNotice(result.transport_change
           ? transportChangeText(result.transport_change, language) : t(result.restart_required ? 'app.validRestart' : 'app.validCache'))).catch(() => {})}>{t('ui.validate')}</button>
-        {pageId === 'security' && !dirty && <button type="button" className="button secondary" disabled={!draft || busy || draft.unknownApply} onClick={(event) => { const trigger = event.currentTarget; void (async () => {
-          try {
-            const prepared = await prepareSave();
-            const impact = prepared.restart_required ? t('app.saveRestartHelp') : t('app.saveCacheHelp');
-            if (!await confirmAction(impact, 'app.reapply', trigger)) return;
-            const result = await commitPrepared(prepared);
-            if (result.transportChange) { discard(); transportChanged(result.transportChange); }
-            else if (result.refreshed) setNotice(t('app.configSaved'));
-          } catch (reason) { setError(reason instanceof ModelError || reason instanceof ApiError ? reason : reason instanceof Error ? reason.message : String(reason)); }
-        })(); }}>{t('app.reapply')}</button>}
         <button type="button" className="button quiet" disabled={!draft?.hasBackup || busy} onClick={(event) => { const trigger = event.currentTarget; void (async () => {
           try {
             const prepared = await previewRollback();
@@ -296,6 +303,6 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
         <p className="muted small">{t(state.transport?.scheme === 'https' ? 'app.transportHttpsHelp' : 'app.transportHttpHelp')}</p>
         <p className="muted small">{t('app.transportCertificateSource')}: {state.transport?.certificate_source?.toUpperCase() ?? t('app.transportNoCertificate')}</p>
       </section>}
-      <GenericSettings pageId={pageId} language={language} />{pageId === 'security' && <CertificateImport language={language} />}</>}
+      {pageId === 'security' && <><DohRuntime api={api} language={language} /><CertificateTools language={language} /></>}{pageId === 'storage' && <StorageTools language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'security' && <CertificateImport language={language} />}</>}
   </div>;
 }

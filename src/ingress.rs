@@ -58,25 +58,32 @@ impl Ingress {
             let reply = rejected_response(bytes);
             self.resolver
                 .log_rejected(bytes, peer, transport, reply.as_ref());
-            return reply?.to_vec().ok();
+            return encode_rejected(bytes, &reply?);
         };
         let permit = self.queries.clone().try_acquire_owned();
-        let message = match permit {
+        match permit {
             Ok(ref _permit) => self
                 .resolver
                 .resolve_with_transport(bytes, peer, transport)
                 .await
-                .map(|r| r.message),
+                .and_then(|r| r.padding.encode_response(&r.message, true).ok()),
             Err(_) => {
                 self.resolver.metrics().inc(Counter::EncryptedRejected);
                 let reply = rejected_response(bytes);
                 self.resolver
                     .log_rejected(bytes, peer, transport, reply.as_ref());
-                reply
+                reply.and_then(|reply| encode_rejected(bytes, &reply))
             }
-        };
-        message?.to_vec().ok()
+        }
     }
+}
+
+fn encode_rejected(bytes: &[u8], reply: &hickory_proto::op::Message) -> Option<Vec<u8>> {
+    let padding = protocol::decode(bytes)
+        .as_ref()
+        .map(protocol::Padding::from_query)
+        .unwrap_or_default();
+    padding.encode_response(reply, true).ok()
 }
 
 pub(crate) fn rejected_response(bytes: &[u8]) -> Option<hickory_proto::op::Message> {

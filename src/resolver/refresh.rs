@@ -64,10 +64,7 @@ impl Refresh {
     ) where
         F: Future<Output = bool> + Send + 'static,
     {
-        let mut normalized = query.clone();
-        normalized.metadata.id = 0;
-        normalized.queries[0].set_name(query.queries[0].name().to_lowercase());
-        let Ok(mut key) = normalized.to_vec() else {
+        let Some(mut key) = crate::protocol::canonical_work_key(query) else {
             return;
         };
         key.extend_from_slice(&epoch.to_be_bytes());

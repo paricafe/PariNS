@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { ApiError, StaleRequest, type ApiClient } from "../../session/client";
 import { formatDate, formatNumber, hasTranslation, translate, type Language } from "../../i18n";
-import { pathLabel, statusLabel, type LogEntry, type LogFilter, type LogListResponse } from "./logs";
+import { pathLabel, statusLabel, type CacheFilter, type LogEntry, type LogFilter, type LogListResponse } from "./logs";
+import { Drawer, Tabs } from '../../components/beui';
+import { StorageStatusPanel } from './StorageStatusPanel';
+import { isUnknownStorageMutation } from './storage';
+import { decisionLabel, diagnosticLabel } from './diagnostics';
+import { UpstreamAttempts } from './TransportDiagnostics';
 
 export interface LogsPageProps {
   api: ApiClient;
@@ -40,10 +45,16 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
       <dl className="mt-2">
         <DetailRow label={translate("ui.result", language)}>{translate(statusLabel(entry.status), language)}</DetailRow>
         <DetailRow label={translate("views.path", language)}>{translate(pathLabel(entry.cache), language)}</DetailRow>
+        <DetailRow label={translate('reliability.lookup', language)}>{decisionLabel('lookup', entry.cache_lookup, language)}</DetailRow>
+        <DetailRow label={translate('reliability.store', language)}>{decisionLabel('store', entry.cache_store, language)}</DetailRow>
+        <DetailRow label={translate('reliability.cacheScope', language)}>{entry.cache_scope ?? none}{entry.cache_scope?.startsWith('exact_ecs:') && <p className="muted small">{translate('reliability.exactEcs', language)}</p>}</DetailRow>
         <DetailRow label={translate("views.upstream", language)}>{entry.upstream || none}</DetailRow>
+        <DetailRow label={translate('reliability.relation', language)}>{entry.upstream_relation ? diagnosticLabel(`relation_${entry.upstream_relation}`, language) : none}</DetailRow>
+        {entry.failure_stage && <DetailRow label={translate('reliability.operationFailure', language)}>{diagnosticLabel(`stage_${entry.failure_stage}`, language)}{entry.failure_reason && ` · ${diagnosticLabel(`upstream_reason_${entry.failure_reason}`, language)}`}</DetailRow>}
         <DetailRow label={translate("views.rcode", language)}>{entry.rcode || translate("views.noResponse", language)}</DetailRow>
         <DetailRow label={translate("views.duration", language)}>{formatNumber(entry.duration_ms, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms</DetailRow>
       </dl></section>
+    {entry.upstream_attempts && <UpstreamAttempts trace={{ attempts: entry.upstream_attempts, omitted: entry.upstream_attempts_omitted ?? 0 }} language={language} />}
     <section aria-labelledby="log-detail-dns"><h3 id="log-detail-dns" className="font-semibold">{translate("views.flags", language)}</h3>
       <dl className="mt-2">
         <DetailRow label={translate("views.incomingEcs", language)}>{entry.incoming_ecs || none}</DetailRow>
@@ -60,7 +71,7 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
 export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
-  const [applied, setApplied] = useState<LogFilter>({ search: "", status: null });
+  const [applied, setApplied] = useState<LogFilter>({ search: "", status: null, cache: null });
   const appliedRef = useRef<LogFilter>(applied);
   const [result, setResult] = useState<LogListResponse | null>(null);
   const [updated, setUpdated] = useState<number | null>(null);
@@ -68,14 +79,10 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [failure, setFailure] = useState("");
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<LogEntry | null>(null);
-  const [confirmRevision, setConfirmRevision] = useState<number | null>(null);
+  const [confirmation, setConfirmation] = useState<{ revision: number; epoch: number } | null>(null);
+  const [unknownEpoch, setUnknownEpoch] = useState<number | null>(null);
   const [clearing, setClearing] = useState(false);
   const requestId = useRef(0);
-  const drawer = useRef<HTMLDialogElement>(null);
-  const clearDialog = useRef<HTMLDialogElement>(null);
-  const detailClose = useRef<HTMLButtonElement>(null);
-  const clearCancel = useRef<HTMLButtonElement>(null);
-  const opener = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async (before: number | null, filter: LogFilter) => {
     const owner = ++requestId.current;
@@ -83,7 +90,9 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
     setFailure("");
     try {
       const next = await api.request<LogListResponse>("query-log/list", "POST", { ...filter, before_id: before, limit: 50 });
-      if (owner === requestId.current) { setResult(next); setUpdated(Date.now()); }
+      if (owner === requestId.current) {
+        setResult(next); setUpdated(Date.now());
+      }
     } catch (error) {
       if (owner === requestId.current && !(error instanceof StaleRequest)) setFailure(localizedError(error, language));
     } finally {
@@ -97,28 +106,15 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
     document.addEventListener("visibilitychange", onVisible);
     return () => { requestId.current += 1; document.removeEventListener("visibilitychange", onVisible); };
   }, [load]);
-
   useEffect(() => {
-    const dialog = drawer.current;
-    if (!dialog) return;
-    if (selected) {
-      if (!dialog.open) dialog.showModal();
-      detailClose.current?.focus();
-    } else if (dialog.open) dialog.close();
-  }, [selected]);
-
-  useEffect(() => {
-    const dialog = clearDialog.current;
-    if (!dialog) return;
-    if (confirmRevision !== null) {
-      if (!dialog.open) dialog.showModal();
-      clearCancel.current?.focus();
-    } else if (dialog.open) dialog.close();
-  }, [confirmRevision]);
+    if (unknownEpoch !== null && result && result.page.log_epoch > unknownEpoch) {
+      setUnknownEpoch(null); setNotice(translate('app.logsCleared', language));
+    }
+  }, [unknownEpoch, result, language]);
 
   function submitFilter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const filter = { search: search.trim(), status: statusFilter || null };
+    const filter = { search: search.trim(), status: statusFilter || null, cache: applied.cache };
     appliedRef.current = filter;
     setApplied(filter);
     setNotice("");
@@ -126,23 +122,27 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   }
 
   function openDetail(entry: LogEntry, event: MouseEvent<HTMLButtonElement>) {
-    opener.current = event.currentTarget;
+    event.currentTarget.focus();
     setSelected(structuredClone(entry));
   }
 
   async function clearLogs() {
-    const revision = confirmRevision;
-    if (revision === null) return;
-    setConfirmRevision(null);
+    if (confirmation === null || unknownEpoch !== null) return;
+    const { revision, epoch } = confirmation;
+    setConfirmation(null);
     setClearing(true);
     setNotice("");
     try {
-      await api.request("query-log/clear", "POST", { revision });
+      await api.request("query-log/clear", "POST", { revision, log_epoch: epoch });
+      setSelected(null);
       setNotice(translate("app.logsCleared", language));
       await load(null, applied);
     } catch (error) {
-      if (!(error instanceof StaleRequest)) setFailure(error instanceof ApiError && error.status === 0
-        ? translate("app.clearLogsUnknown", language) : localizedError(error, language));
+      if (!(error instanceof StaleRequest)) {
+        const unknown = isUnknownStorageMutation(error);
+        if (unknown) setUnknownEpoch(epoch);
+        setFailure(unknown ? translate("app.clearLogsUnknown", language) : localizedError(error, language));
+      }
     } finally { setClearing(false); }
   }
 
@@ -169,24 +169,29 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
         </select></label>
       <button type="submit" className="min-h-11 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-700 focus-visible:outline-2 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">{translate("ui.filter", language)}</button>
     </form>
+    <Tabs label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} items={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
+      const filter = { search: search.trim(), status: statusFilter || null, cache: cache === 'all' ? null : cache as CacheFilter };
+      appliedRef.current = filter; setApplied(filter); setNotice(''); setSelected(null); void load(null, filter);
+    }} />
+    {page?.storage && <StorageStatusPanel status={page.storage} language={language} compact />}
+    {page && !page.enabled && <p className="notice">{translate('app.logsDisabled', language)} {translate('storage.recorded', language)}</p>}
 
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <p role="status" className="text-sm text-zinc-600 dark:text-zinc-400">{loading ? translate("app.reading", language)
-        : page && updated !== null ? page.enabled
+      <p role="status" className="text-sm text-zinc-600 dark:text-zinc-400">{loading ? translate(page ? 'storage.filterPending' : "app.reading", language)
+        : page && updated !== null
           ? translate("app.logSummary", language, { count: formatNumber(entries.length, language), total: formatNumber(page.total, language), time: formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })
-          : translate("app.logsDisabled", language)
           : translate("ui.logsUnread", language)}</p>
       <div className="flex flex-wrap gap-2">
         <button type="button" onClick={() => void load(null, applied)} disabled={loading} className="min-h-11 rounded-md border border-zinc-400 px-3 text-sm disabled:opacity-50 dark:border-zinc-600">{translate("ui.refreshLatest", language)}</button>
-        <button type="button" onClick={() => result && setConfirmRevision(result.revision)} disabled={!page?.total || clearing}
+        <button type="button" onClick={() => result && setConfirmation({ revision: result.revision, epoch: result.page.log_epoch })} disabled={!page?.total || clearing || unknownEpoch !== null}
           className="min-h-11 rounded-md border border-zinc-400 px-3 text-sm disabled:opacity-50 dark:border-zinc-600">{translate("ui.clearLogs", language)}</button>
       </div>
     </div>
     {failure && <p role="alert" className="rounded-md border border-red-300 p-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300">{failure}</p>}
     {notice && <p role="status" className="rounded-md border border-zinc-300 p-3 text-sm dark:border-zinc-700">{notice}</p>}
+    {unknownEpoch !== null && <button type="button" className="button secondary" disabled={loading} onClick={() => void load(null, applied)}>{translate('storage.checkResult', language)}</button>}
 
     {page === null ? <p className="rounded-lg border border-zinc-200 bg-white p-8 text-center text-sm dark:border-zinc-800 dark:bg-zinc-900">{translate(failure ? "app.loadFailed" : "app.reading", language)}</p>
-      : !page.enabled ? <p className="rounded-lg border border-zinc-200 bg-white p-8 text-center text-sm dark:border-zinc-800 dark:bg-zinc-900">{translate("views.logsDisabled", language)}</p>
       : entries.length === 0 ? <p className="rounded-lg border border-zinc-200 bg-white p-8 text-center text-sm dark:border-zinc-800 dark:bg-zinc-900">{translate("views.logsEmpty", language)}</p>
         : <>
           <div className="space-y-2 md:hidden">{entries.map((entry) => <article key={entry.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
@@ -212,24 +217,15 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
     {page?.next_cursor && <button type="button" onClick={() => void load(page.next_cursor, applied)} disabled={loading}
       className="min-h-11 rounded-md border border-zinc-400 px-4 text-sm disabled:opacity-50 dark:border-zinc-600">{translate("ui.earlier", language)}</button>}
 
-    <dialog ref={drawer} aria-labelledby="log-detail-title" onCancel={(event) => { event.preventDefault(); setSelected(null); }}
-      onClose={() => { setSelected(null); opener.current?.focus(); }}
-      className="fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-dvh w-full max-w-[36rem] border-l border-zinc-300 bg-white p-0 text-zinc-900 shadow-xl backdrop:bg-black/50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100">
-      {selected && <div className="flex h-full flex-col"><div className="flex items-center justify-between border-b border-zinc-200 p-4 dark:border-zinc-800">
-        <h2 id="log-detail-title" className="text-lg font-semibold">{translate("views.details", language)}</h2>
-        <button ref={detailClose} type="button" onClick={() => setSelected(null)} aria-label={translate("ui.closeDetails", language)} className="min-h-10 rounded-md border border-zinc-400 px-3 text-sm dark:border-zinc-600">{translate("ui.cancel", language)}</button>
-      </div><div className="min-h-0 flex-1 overflow-y-auto p-4"><LogDetail entry={selected} language={language} /></div></div>}
-    </dialog>
-
-    <dialog ref={clearDialog} aria-labelledby="log-clear-title" aria-describedby="log-clear-help"
-      onCancel={(event) => { event.preventDefault(); setConfirmRevision(null); }}
-      className="w-full max-w-md rounded-xl border border-zinc-300 bg-white p-5 text-zinc-900 shadow-xl backdrop:bg-black/50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100">
-      <h2 id="log-clear-title" className="text-lg font-semibold">{translate("app.clearLogsTitle", language)}</h2>
+    <Drawer open={selected !== null} title={translate('views.details', language)} closeLabel={translate('ui.closeDetails', language)} onClose={() => setSelected(null)}>
+      {selected && <LogDetail entry={selected} language={language} />}
+    </Drawer>
+    <Drawer open={confirmation !== null} title={translate('app.clearLogsTitle', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => setConfirmation(null)}>
       <p id="log-clear-help" className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">{translate("app.clearLogsHelp", language)}</p>
       <div className="mt-5 flex justify-end gap-2">
-        <button ref={clearCancel} type="button" onClick={() => setConfirmRevision(null)} className="min-h-11 rounded-md border border-zinc-400 px-4 text-sm dark:border-zinc-600">{translate("ui.cancel", language)}</button>
+        <button type="button" onClick={() => setConfirmation(null)} className="min-h-11 rounded-md border border-zinc-400 px-4 text-sm dark:border-zinc-600">{translate("ui.cancel", language)}</button>
         <button type="button" onClick={() => void clearLogs()} className="min-h-11 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white dark:bg-zinc-100 dark:text-zinc-900">{translate("app.clearLogs", language)}</button>
       </div>
-    </dialog>
+    </Drawer>
   </div>;
 }

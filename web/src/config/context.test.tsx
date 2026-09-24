@@ -6,7 +6,7 @@ import { ConfigProvider, useConfig } from './context';
 
 const original = 'max_inflight = 10\n';
 const edited = 'max_inflight = 11\n';
-const baseSettings = { max_inflight: 10, cache: { rules: [] }, web: null, dot: null, doh: null, doq: null, doh3: null };
+const baseSettings = { max_inflight: 10, cache: { rules: [] }, web: null, dot: null, doh: null, doq: null };
 
 function fixture(handler?: (path: string, method: string, body: unknown) => Promise<unknown>) {
   const request = vi.fn(async (path: string, method = 'GET', body?: unknown) => {
@@ -25,6 +25,35 @@ function mount(api: ApiClient, refreshSession: () => Promise<void> = async () =>
 }
 
 describe('single configuration draft', () => {
+  it('previews storage, persistence and HTTP/3 through the existing shared draft', async () => {
+    const settings = { ...baseSettings, cache: { rules: [], persistence: { enabled: false, max_bytes: 1048576 } },
+      storage: { flush_interval_ms: 1000 }, statistics: { retention_secs: 3600 },
+      doh: { listen: '[::]:0', cert_file: '/cert.pem', key_file: '/key.pem', http3: false } };
+    const { api, request } = fixture(async (path, method, body) => {
+      if (path === 'config' && method === 'GET') return { toml: original, revision: 1, has_backup: false };
+      if (path === 'config/parse') return { toml: original, settings };
+      if (path === 'config/preview') return { toml: edited, settings, transport_change: null };
+      if (path === 'config/validate') return { restart_required: false, transport_change: null };
+      throw new Error(`Unexpected ${method} ${path}: ${JSON.stringify(body)}`);
+    });
+    const hook = mount(api);
+    await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+    act(() => {
+      hook.result.current.updateField('cache.persistence.enabled', true);
+      hook.result.current.updateField('storage.flush_interval_ms', '500');
+      hook.result.current.updateField('statistics.retention_secs', '7200');
+      hook.result.current.updateField('doh.http3', true);
+    });
+    let prepared!: Awaited<ReturnType<typeof hook.result.current.prepareSave>>;
+    await act(async () => { prepared = await hook.result.current.prepareSave(); });
+    expect(request.mock.calls.find(([path]) => path === 'config/preview')?.[2]).toEqual({ toml: original, changes: {
+      cache: { persistence: { enabled: true } }, storage: { flush_interval_ms: 500 },
+      statistics: { retention_secs: 7200 }, doh: { http3: true },
+    } });
+    expect(prepared.restart_required).toBe(false);
+    expect(request.mock.calls.some(([path, method]) => path === 'config' && method === 'PUT')).toBe(false);
+  });
+
   it('projects a new console access name and confirms an HTTPS to HTTP save explicitly', async () => {
     const change = { from: 'https', to: 'http', next_origin: 'http://192.0.2.20:3000', reauthenticate: true, requires_http_confirmation: true } as const;
     const { api, request } = fixture(async (path, method, body) => {

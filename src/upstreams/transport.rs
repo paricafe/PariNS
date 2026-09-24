@@ -21,6 +21,7 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
+use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, Stage};
 use super::{Endpoint, Protocol, Settings, valid_address};
 use crate::{protocol, transport::tcp};
 
@@ -83,7 +84,7 @@ impl Client {
         spec: Endpoint,
         settings: &Settings,
         listeners: Vec<SocketAddr>,
-        query_timeout: Duration,
+        _query_timeout: Duration,
     ) -> Result<Self> {
         let mut roots = RootCertStore::empty();
         if let Some(path) = &settings.ca_file {
@@ -116,7 +117,7 @@ impl Client {
             })
             .transpose()?;
         let h3 = (settings.prefer_h3 && spec.protocol == Protocol::Https)
-            .then(|| super::h3::Client::new(tls.clone(), query_timeout));
+            .then(|| super::h3::Client::new(tls.clone()));
         Ok(Self {
             spec,
             bootstrap: settings.bootstrap.clone(),
@@ -129,10 +130,8 @@ impl Client {
         })
     }
 
-    async fn addresses(&self) -> Result<Vec<SocketAddr>> {
-        if let Ok(ip) = self.spec.host.parse::<IpAddr>() {
-            return Ok(vec![SocketAddr::new(ip, self.spec.port)]);
-        }
+    async fn addresses(&self, deadline: Instant, attempt: &mut Attempt) -> Result<Vec<SocketAddr>> {
+        attempt.stage(Stage::Wait);
         let mut cached = self.addresses.lock().await;
         if let Some((_, addresses)) = cached
             .as_ref()
@@ -142,21 +141,37 @@ impl Client {
         }
         // Explicit bootstrap, never the host's system resolver. The caller's
         // remaining overall deadline encloses lookup and every transport step.
+        attempt.stage(Stage::Bootstrap);
         let name = Name::from_ascii(format!("{}.", self.spec.host))?;
         let mut addresses = Vec::new();
         let mut ttl = 3600;
+        let mut missing_reason = super::diagnostics::Reason::ProtocolInvalid;
         for server in &self.bootstrap {
             for qtype in [RecordType::A, RecordType::AAAA] {
+                ensure!(Instant::now() < deadline, "bootstrap deadline exhausted");
                 let mut query = Message::new(0, MessageType::Query, OpCode::Query);
                 query.metadata.recursion_desired = true;
                 query.add_query(Query::query(name.clone(), qtype));
-                let Ok(Ok(response)) = timeout(
-                    Duration::from_millis(500),
+                let response = match timeout(
+                    Duration::from_millis(500)
+                        .min(deadline.saturating_duration_since(Instant::now())),
                     crate::upstream::exchange(&query, *server),
                 )
                 .await
-                else {
-                    continue;
+                {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => {
+                        missing_reason = if error.downcast_ref::<std::io::Error>().is_some() {
+                            super::diagnostics::Reason::ConnectIo
+                        } else {
+                            super::diagnostics::Reason::ProtocolInvalid
+                        };
+                        continue;
+                    }
+                    Err(_) => {
+                        missing_reason = super::diagnostics::Reason::Deadline;
+                        continue;
+                    }
                 };
                 // Accept only the queried owner or a proven in-message CNAME chain.
                 let mut owner = name.clone();
@@ -186,8 +201,11 @@ impl Client {
                         _ => continue,
                     };
                     let address = SocketAddr::new(ip, self.spec.port);
-                    valid_address(address)?;
-                    super::not_self(address, &self.listeners)?;
+                    valid_address(address)
+                        .and_then(|()| super::not_self(address, &self.listeners))
+                        .inspect_err(|_| {
+                            attempt.reason(super::diagnostics::Reason::ProtocolInvalid)
+                        })?;
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
@@ -201,6 +219,9 @@ impl Client {
                 break;
             }
         }
+        if addresses.is_empty() {
+            attempt.reason(missing_reason);
+        }
         ensure!(
             !addresses.is_empty(),
             "bootstrap returned no upstream addresses"
@@ -212,29 +233,61 @@ impl Client {
         Ok(addresses)
     }
 
-    pub async fn exchange(&self, query: &Message) -> Result<super::Exchange> {
+    pub async fn exchange(
+        &self,
+        query: &Message,
+        deadline: Instant,
+        scope: &AttemptScope,
+    ) -> Result<super::Exchange> {
         let mut error = anyhow::anyhow!("no upstream address");
-        for address in self.addresses().await? {
+        let addresses = if self.spec.host.parse::<IpAddr>().is_err() {
+            let mut attempt = scope.start(None);
+            let result = self.addresses(deadline, &mut attempt).await;
+            attempt.finish(&result);
+            result?
+        } else {
+            vec![SocketAddr::new(
+                self.spec.host.parse::<IpAddr>()?,
+                self.spec.port,
+            )]
+        };
+        for address in addresses {
+            ensure!(scope.remaining(), "upstream deadline exhausted");
             let response = match self.spec.protocol {
-                Protocol::Udp => crate::upstream::exchange(query, address).await,
-                Protocol::Tcp => crate::upstream::exchange_tcp(query, address).await,
+                Protocol::Udp => {
+                    crate::upstream::exchange_observed(query, address, Some(scope)).await
+                }
+                Protocol::Tcp => {
+                    crate::upstream::exchange_tcp_observed(query, address, Some(scope)).await
+                }
                 Protocol::Tls => {
                     self.dot
                         .as_ref()
                         .expect("DoT client")
-                        .exchange(query, address)
+                        .exchange_observed(query, address, scope)
                         .await
                 }
                 Protocol::Https => {
                     if let Some(h3) = &self.h3
-                        && let Ok(response) = h3.exchange(&self.spec, query, address).await
+                        && let Ok(response) = h3
+                            .exchange(&self.spec, query, address, deadline, scope)
+                            .await
                     {
                         Ok(response)
                     } else {
-                        self.https(query, address).await
+                        ensure!(scope.remaining(), "upstream deadline exhausted before H2");
+                        let mut attempt = scope.start(Some(ActualProtocol::Doh2));
+                        let result = self.https(query, address, &mut attempt).await;
+                        attempt.finish(&result);
+                        result
                     }
                 }
-                Protocol::Quic => self.quic(query, address).await,
+                Protocol::Quic => {
+                    let mut attempt = scope.start(Some(ActualProtocol::Doq));
+                    let result = self.quic(query, address, &mut attempt).await;
+                    attempt.finish(&result);
+                    result
+                }
             };
             match response {
                 Ok(message) => {
@@ -249,20 +302,30 @@ impl Client {
         Err(error)
     }
 
-    async fn https(&self, query: &Message, address: SocketAddr) -> Result<Message> {
+    async fn https(
+        &self,
+        query: &Message,
+        address: SocketAddr,
+        attempt: &mut Attempt,
+    ) -> Result<Message> {
+        attempt.stage(Stage::Connect);
         let socket = TcpStream::connect(address).await?;
+        attempt.stage(Stage::TlsHandshake);
         let stream = TlsConnector::from(self.tls.clone())
             .connect(ServerName::try_from(self.spec.host.clone())?, socket)
             .await?;
+        attempt.stage(Stage::Validate);
         ensure!(
             stream.get_ref().1.alpn_protocol() == Some(b"h2"),
             "DoH upstream must negotiate HTTP/2"
         );
+        attempt.stage(Stage::RequestWrite);
         let (sender, connection) = h2::client::Builder::new()
             .max_header_list_size(16 * 1024)
             .handshake(stream)
             .await?;
         let transaction = async {
+            attempt.stage(Stage::Wait);
             let mut sender = sender.ready().await?;
             let host = if self.spec.host.contains(':') {
                 format!("[{}]", self.spec.host)
@@ -280,14 +343,23 @@ impl Client {
                 .body(())?;
             let mut outbound = query.clone();
             outbound.metadata.id = 0;
+            attempt.stage(Stage::RequestWrite);
             let (response, mut body) = sender.send_request(request, false)?;
-            body.send_data(Bytes::from(outbound.to_vec()?), true)?;
+            body.send_data(
+                Bytes::from(protocol::encode_upstream(&outbound, true)?),
+                true,
+            )?;
+            attempt.stage(Stage::ResponseHeaders);
             let response = response.await?;
+            if response.status() != http::StatusCode::OK {
+                attempt.http_status(response.status().as_u16());
+            }
             ensure!(
                 response.status() == http::StatusCode::OK,
                 "DoH HTTP status {}",
                 response.status()
             );
+            attempt.stage(Stage::Validate);
             ensure!(
                 response
                     .headers()
@@ -304,8 +376,12 @@ impl Client {
             let age = http_age(response.headers());
             let mut body = response.into_body();
             let mut bytes = Vec::new();
+            attempt.stage(Stage::ResponseRead);
             while let Some(chunk) = body.data().await {
                 let chunk = chunk?;
+                if bytes.len() + chunk.len() > protocol::MAX_MESSAGE {
+                    attempt.reason(super::diagnostics::Reason::ProtocolInvalid);
+                }
                 ensure!(
                     bytes.len() + chunk.len() <= protocol::MAX_MESSAGE,
                     "DoH response too large"
@@ -313,7 +389,9 @@ impl Client {
                 bytes.extend_from_slice(&chunk);
                 body.flow_control().release_capacity(chunk.len())?;
             }
+            attempt.stage(Stage::Decode);
             let mut response = protocol::decode(&bytes)?;
+            attempt.stage(Stage::Validate);
             ensure!(
                 protocol::matches_response(&outbound, &response) && !response.truncation,
                 "invalid DoH response"
@@ -327,7 +405,12 @@ impl Client {
         tokio::select! { biased; result = &mut transaction => result, result = &mut connection => { result?; transaction.await } }
     }
 
-    async fn quic_connection(&self, address: SocketAddr) -> Result<Arc<QuicConnection>> {
+    async fn quic_connection(
+        &self,
+        address: SocketAddr,
+        attempt: &mut Attempt,
+    ) -> Result<Arc<QuicConnection>> {
+        attempt.stage(Stage::Wait);
         let mut cached = self.quic.lock().await;
         if let Some(current) = cached.as_ref().filter(|c| {
             c.connection.remote_address() == address && c.connection.close_reason().is_none()
@@ -340,6 +423,7 @@ impl Client {
         } else {
             "[::]:0"
         };
+        attempt.stage(Stage::Connect);
         let mut endpoint = quinn::Endpoint::client(bind.parse()?)?;
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*self.tls).clone())?;
         let mut config = quinn::ClientConfig::new(Arc::new(crypto));
@@ -352,6 +436,7 @@ impl Client {
             .max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
         config.transport_config(Arc::new(transport));
         endpoint.set_default_client_config(config);
+        attempt.stage(Stage::QuicHandshake);
         let connection = endpoint.connect(address, &self.spec.host)?.await?;
         let connection = Arc::new(QuicConnection {
             endpoint,
@@ -361,10 +446,16 @@ impl Client {
         Ok(connection)
     }
 
-    async fn quic(&self, query: &Message, address: SocketAddr) -> Result<Message> {
-        let connection = self.quic_connection(address).await?;
+    async fn quic(
+        &self,
+        query: &Message,
+        address: SocketAddr,
+        attempt: &mut Attempt,
+    ) -> Result<Message> {
+        let connection = self.quic_connection(address, attempt).await?;
         // Retain the endpoint owner for this entire request. Bootstrap rotation
         // may replace the cached owner while this stream is still in flight.
+        attempt.stage(Stage::Wait);
         let (mut send, mut recv) = connection.connection.open_bi().await?;
         let mut outbound = query.clone();
         outbound.metadata.id = 0;
@@ -373,15 +464,20 @@ impl Client {
             edns.options_mut()
                 .remove(hickory_proto::rr::rdata::opt::EdnsCode::from(11));
         }
-        tcp::write_frame(&mut send, &outbound.to_vec()?).await?;
+        attempt.stage(Stage::RequestWrite);
+        tcp::write_frame(&mut send, &protocol::encode_upstream(&outbound, true)?).await?;
         send.finish()?;
+        attempt.stage(Stage::ResponseRead);
         let frame = recv.read_to_end(protocol::MAX_MESSAGE + 2).await?;
+        attempt.stage(Stage::Validate);
         ensure!(
             frame.len() >= 14
                 && usize::from(u16::from_be_bytes([frame[0], frame[1]])) == frame.len() - 2,
             "invalid DoQ response length"
         );
+        attempt.stage(Stage::Decode);
         let mut response = protocol::decode(&frame[2..])?;
+        attempt.stage(Stage::Validate);
         ensure!(
             protocol::matches_response(&outbound, &response) && !response.truncation,
             "invalid DoQ response"

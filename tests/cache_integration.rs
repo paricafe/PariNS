@@ -179,27 +179,80 @@ async fn privacy_global_scope_and_address_families_do_not_cross() {
 }
 
 #[tokio::test]
-async fn missing_ecs_and_narrower_than_source_responses_are_not_cached() {
-    for missing in [true, false] {
-        let upstream = Upstream::start(move |q| {
-            let mut reply = answer(q, 1, 28);
-            if missing {
-                ecs::set_subnet(&mut reply, None);
-            }
-            reply
-        })
-        .await;
-        let resolver = upstream.resolver();
-        for id in [1, 2] {
-            assert_eq!(
-                resolve(&resolver, None, "192.0.2.1", id)
-                    .await
-                    .answers
-                    .len(),
-                1
-            );
-        }
-        assert_eq!(upstream.count(), 2);
+async fn narrower_than_source_response_is_still_not_cached() {
+    let upstream = Upstream::start(|q| answer(q, 1, 28)).await;
+    let resolver = upstream.resolver();
+    for id in [1, 2] {
+        assert_eq!(
+            resolve(&resolver, None, "192.0.2.1", id)
+                .await
+                .answers
+                .len(),
+            1
+        );
+    }
+    assert_eq!(upstream.count(), 2);
+}
+
+#[tokio::test]
+async fn missing_ecs_uses_exact_sent_subnet_and_consistent_miss_hit_reply_scope() {
+    let upstream = Upstream::start(|q| {
+        let mut reply = answer(q, 1, 0);
+        ecs::set_subnet(&mut reply, None);
+        reply
+    })
+    .await;
+    let resolver = upstream.resolver();
+    for (peer, expected) in [("192.0.2.10", 1), ("192.0.2.20", 1), ("192.0.3.20", 2)] {
+        let response = resolve(&resolver, None, peer, 1).await;
+        assert_eq!(response.answers.len(), 1);
+        assert!(response.edns.is_none());
+        assert_eq!(upstream.count(), expected);
+    }
+    for (source, peer, expected) in [
+        ("192.0.2.10/32", "192.0.2.10", 3),
+        ("192.0.2.20/32", "192.0.2.20", 3),
+    ] {
+        let response = resolve(&resolver, Some(source), peer, 2).await;
+        let echoed = ecs::subnet(&response).unwrap();
+        assert_eq!((echoed.source_prefix(), echoed.scope_prefix()), (32, 24));
+        assert_eq!(upstream.count(), expected);
+    }
+}
+
+#[tokio::test]
+async fn missing_ecs_exact_source_does_not_share_contained_prefix_or_privacy_family() {
+    let upstream = Upstream::start(|q| {
+        let mut reply = answer(q, 1, 0);
+        ecs::set_subnet(&mut reply, None);
+        reply
+    })
+    .await;
+    let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+    config.upstreams.servers = vec![upstream.address.to_string()];
+    config.ecs.enabled = true;
+    config.ecs.ipv4_prefix = 32;
+    let resolver = Resolver::from_config(&config);
+    // /24 and /25 overlap for supersession, but they are never cache hits for
+    // each other. The last two entries are separate family privacy namespaces.
+    for (source, peer, count) in [
+        ("192.0.2.0/24", "192.0.2.10", 1),
+        ("192.0.2.0/24", "192.0.2.20", 1),
+        ("192.0.2.0/25", "192.0.2.10", 2),
+        ("192.0.2.0/24", "192.0.2.10", 3),
+        ("0.0.0.0/0", "192.0.2.10", 4),
+        ("::/0", "2001:db8::1", 5),
+        ("0.0.0.0/0", "192.0.3.10", 5),
+        ("::/0", "2001:db9::1", 5),
+    ] {
+        assert_eq!(
+            resolve(&resolver, Some(source), peer, 3)
+                .await
+                .answers
+                .len(),
+            1
+        );
+        assert_eq!(upstream.count(), count, "{source}");
     }
 }
 

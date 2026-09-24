@@ -3,11 +3,13 @@ import { chooseLanguage, hasTranslation, normalizeLanguage, translate, translati
 import { apiMessages, appMessages, uiMessages } from "../console";
 import { settingsMessages } from "../settings";
 import { viewsMessages } from "../views";
+import { storageMessages } from '../storage';
+import { reliabilityMessages } from '../reliability';
 import { settingPages } from "../../model";
 
 describe("bilingual console catalog", () => {
   it("includes both languages and matching interpolation fields", () => {
-    const catalogs = [apiMessages, appMessages, uiMessages, settingsMessages, viewsMessages];
+    const catalogs = [apiMessages, appMessages, uiMessages, settingsMessages, viewsMessages, storageMessages, reliabilityMessages];
     for (const entries of catalogs) for (const [key, pair] of Object.entries(entries)) {
       expect(pair[0], key).toBeTruthy();
       expect(pair[1], key).toBeTruthy();

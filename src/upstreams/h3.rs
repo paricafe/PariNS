@@ -12,6 +12,7 @@ use hickory_proto::op::Message;
 use tokio::time::{Instant, timeout};
 
 use super::Endpoint;
+use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, Reason, Stage};
 use crate::protocol;
 
 type Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
@@ -19,7 +20,6 @@ type Stream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 pub(super) struct Client {
     tls: rustls::ClientConfig,
-    budget: Duration,
     state: Mutex<State>,
     connecting: tokio::sync::Mutex<()>,
 }
@@ -64,11 +64,10 @@ impl Drop for RequestGuard {
 }
 
 impl Client {
-    pub fn new(mut tls: rustls::ClientConfig, query_timeout: Duration) -> Self {
+    pub fn new(mut tls: rustls::ClientConfig) -> Self {
         tls.alpn_protocols = vec![b"h3".to_vec()];
         Self {
             tls,
-            budget: Duration::from_millis(250).min(query_timeout / 2),
             state: Mutex::new(State::default()),
             connecting: tokio::sync::Mutex::new(()),
         }
@@ -79,11 +78,25 @@ impl Client {
         spec: &Endpoint,
         query: &Message,
         address: SocketAddr,
+        deadline: Instant,
+        scope: &AttemptScope,
     ) -> Result<Message> {
-        let result = timeout(self.budget, self.request(spec, query, address))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result);
+        let mut attempt = scope.start(Some(ActualProtocol::Doh3));
+        if self.cooling_down() {
+            attempt.skipped();
+            anyhow::bail!("HTTP/3 cooling down");
+        }
+        let budget =
+            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now()) / 2);
+        ensure!(!budget.is_zero(), "HTTP/3 deadline exhausted");
+        let result = match timeout(budget, self.request(spec, query, address, &mut attempt)).await {
+            Ok(result) => result,
+            Err(error) => {
+                attempt.reason(Reason::Deadline);
+                Err(error.into())
+            }
+        };
+        attempt.finish(&result);
         if result.is_err() {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             // Skipped requests must not extend the cooldown indefinitely.
@@ -97,14 +110,16 @@ impl Client {
         result
     }
 
+    fn cooling_down(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retry_after
+            .is_some_and(|until| until > Instant::now())
+    }
+
     fn cached(&self, address: SocketAddr) -> Result<Option<Arc<Connection>>> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        ensure!(
-            state
-                .retry_after
-                .is_none_or(|until| until <= Instant::now()),
-            "HTTP/3 cooling down"
-        );
         if state
             .connection
             .as_ref()
@@ -119,11 +134,21 @@ impl Client {
             .cloned())
     }
 
-    async fn connection(&self, spec: &Endpoint, address: SocketAddr) -> Result<Arc<Connection>> {
+    async fn connection(
+        &self,
+        spec: &Endpoint,
+        address: SocketAddr,
+        attempt: &mut Attempt,
+    ) -> Result<Arc<Connection>> {
         if let Some(connection) = self.cached(address)? {
             return Ok(connection);
         }
+        attempt.stage(Stage::Wait);
         let _connecting = self.connecting.lock().await;
+        if self.cooling_down() {
+            attempt.skipped();
+            anyhow::bail!("HTTP/3 cooling down");
+        }
         if let Some(connection) = self.cached(address)? {
             return Ok(connection);
         }
@@ -132,6 +157,7 @@ impl Client {
         } else {
             "[::]:0"
         };
+        attempt.stage(Stage::Connect);
         let mut endpoint = EndpointGuard(quinn::Endpoint::client(bind.parse()?)?);
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(self.tls.clone())?;
         let mut config = quinn::ClientConfig::new(Arc::new(crypto));
@@ -144,7 +170,9 @@ impl Client {
             .max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
         config.transport_config(Arc::new(transport));
         endpoint.0.set_default_client_config(config);
+        attempt.stage(Stage::QuicHandshake);
         let quic = endpoint.0.connect(address, &spec.host)?.await?;
+        attempt.stage(Stage::RequestWrite);
         let (mut driver, sender) = h3::client::builder()
             .max_field_section_size(16 * 1024)
             .build(h3_quinn::Connection::new(quic.clone()))
@@ -170,8 +198,9 @@ impl Client {
         spec: &Endpoint,
         query: &Message,
         address: SocketAddr,
+        attempt: &mut Attempt,
     ) -> Result<Message> {
-        let connection = self.connection(spec, address).await?;
+        let connection = self.connection(spec, address, attempt).await?;
         let mut sender = connection.sender.clone();
         let host = if spec.host.contains(':') {
             format!("[{}]", spec.host)
@@ -186,15 +215,24 @@ impl Client {
             .body(())?;
         let mut outbound = query.clone();
         outbound.metadata.id = 0;
+        attempt.stage(Stage::RequestWrite);
         let mut stream = RequestGuard(sender.send_request(request).await?, false);
-        stream.0.send_data(Bytes::from(outbound.to_vec()?)).await?;
+        stream
+            .0
+            .send_data(Bytes::from(protocol::encode_upstream(&outbound, true)?))
+            .await?;
         stream.0.finish().await?;
+        attempt.stage(Stage::ResponseHeaders);
         let response = stream.0.recv_response().await?;
+        if response.status() != http::StatusCode::OK {
+            attempt.http_status(response.status().as_u16());
+        }
         ensure!(
             response.status() == http::StatusCode::OK,
             "DoH HTTP status {}",
             response.status()
         );
+        attempt.stage(Stage::Validate);
         ensure!(
             response
                 .headers()
@@ -210,14 +248,20 @@ impl Client {
         );
         let age = super::transport::http_age(response.headers());
         let mut bytes = Vec::new();
+        attempt.stage(Stage::ResponseRead);
         while let Some(mut chunk) = stream.0.recv_data().await? {
+            if bytes.len() + chunk.remaining() > protocol::MAX_MESSAGE {
+                attempt.reason(Reason::ProtocolInvalid);
+            }
             ensure!(
                 bytes.len() + chunk.remaining() <= protocol::MAX_MESSAGE,
                 "DoH response too large"
             );
             bytes.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
         }
+        attempt.stage(Stage::Decode);
         let mut response = protocol::decode(&bytes)?;
+        attempt.stage(Stage::Validate);
         ensure!(
             protocol::matches_response(&outbound, &response) && !response.truncation,
             "invalid DoH response"

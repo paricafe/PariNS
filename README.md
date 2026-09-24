@@ -22,7 +22,7 @@ provider or hosted service.
 - **Local filtering:** exact-name and suffix rules, allow exceptions, and CNAME
   response checks; no external rule service is required.
 - **Web management:** first-run setup, administrator authentication, visual
-  statistics with 24-hour aggregate history, grouped configuration forms and
+  persistent statistics and aggregate history, grouped configuration forms and
   advanced TOML editing, validation, export, and one-generation rollback.
 - **Self-hosted operations:** HTTP console by default, optional management HTTPS
   using an inbound DoH identity, a Linux systemd installer, aggregate metrics, and
@@ -30,15 +30,17 @@ provider or hosted service.
 
 ## Status
 
-Version 0.1.3 adds the React management console, Cookie-based sessions, and
-management HTTPS using a validated inbound DoH or DoH3 certificate. It changes
-the default management protocol to HTTP; upgrading an installation without
-inbound DoH/DoH3 can expose port 3000 in plaintext. Restrict access to
-administrator IPs and use local access or an SSH tunnel for credentials and
-private-key entry until HTTPS is configured. See the
-[upgrade notice](CHANGELOG.md#v013--2026-09-24) before installing this version.
-An existing DoH/DoH3 setup also needs `[web].public_host` covered by its
-certificate, or the new managed service will reject that configuration.
+Version 0.1.4 adds persistent history and statistics, clean cache snapshots,
+certificate reload, exact-subnet caching for missing ECS, and unified DoH HTTP/3.
+The installer uses the exclusive `/var/lib/parins-managed` state directory and
+rejects old managed layouts and unknown directories before making changes.
+There is no automatic migration. Read the
+[upgrade notice](CHANGELOG.md#v014--2026-09-24) before installing over an older version.
+
+Management uses HTTP unless inbound DoH has a valid certificate and a matching
+`[web].public_host`. Restrict access to administrators and use local access or an
+SSH tunnel for credentials and private-key entry until HTTPS is configured.
+The former standalone `[doh3]` setting is replaced by `[doh].http3 = true`.
 
 PariNS remains in active initial development. Automated Linux and macOS checks
 and isolated Linux systemd installation checks cover releases; production
@@ -76,14 +78,14 @@ or a substitute for trusting the release publisher.
 ### 2. Open the setup wizard
 
 Open `http://SERVER_IP:3000` (or <http://127.0.0.1:3000> on the server itself).
-The console switches to HTTPS after inbound DoH or DoH3 is configured with a
+The console switches to HTTPS after inbound DoH (with optional HTTP/3) is configured with a
 valid certificate and `[web].public_host`.
 Allow inbound TCP 3000 only from your administrator IPs. The installer prints
 local interface URLs; a VPS behind NAT may need its provider-assigned public IP.
 Read the one-time setup token locally:
 
 ```sh
-sudo cat /var/lib/parins/setup-token
+sudo cat /var/lib/parins-managed/setup-token
 ```
 
 Enter the token, create an administrator, and enter your upstream DNS servers,
@@ -108,9 +110,10 @@ sudo systemctl status parins-managed.service
 
 The installer does not change your host/router DNS or firewall. Use the dashboard
 to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
-needed. To upgrade, rerun the installer; existing account and configuration are
-preserved. Old self-signed files are not used or automatically deleted by the
-new build. Pin a version with `sudo sh parins-install.sh --version v0.1.3`.
+needed. Reinstalling the current managed layout preserves the account and
+configuration. Upgrading an older layout requires explicit preparation as
+described in the upgrade notice; the installer will reject it without migration.
+Pin a version with `sudo sh parins-install.sh --version v0.1.4`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`
@@ -151,7 +154,7 @@ aarch64 ELF binaries are accepted, with architecture checked before installation
 Use `--dry-run` to inspect planned targets without writes.
 
 The installer enables and starts `parins-managed.service`, using
-`/opt/parins-managed/parins` and private state under `/var/lib/parins`. It does not
+`/opt/parins-managed/parins` and private state under `/var/lib/parins-managed`. It does not
 stop `systemd-resolved`, change host DNS, open firewall ports, or modify the legacy
 `parins.service`. Re-running upgrades the managed binary/unit while retaining
 state and keeping a private prior binary/unit backup. An installation/startup
@@ -160,7 +163,7 @@ failure attempts to restore the prior service; inspect the reported backup and
 
 The first start serves only the console; **DNS starts after successful setup**.
 The CLI and installed service default to **`0.0.0.0:3000`, HTTP** until inbound
-DoH or DoH3 is enabled with a valid certificate and `[web].public_host`.
+DoH is enabled with a valid certificate and `[web].public_host`.
 Open `http://SERVER_PUBLIC_IP:3000` after allowing inbound TCP 3000 in the host
 firewall and cloud security group for your intended administrator IPs. The
 installer does not change those rules, configure NAT, or prove Internet routing.
@@ -177,7 +180,7 @@ local-only access. An SSH tunnel protects a remote HTTP setup connection:
 ssh -N -L 3000:127.0.0.1:3000 USER@HOST
 ```
 
-Read `sudo cat /var/lib/parins/setup-token` on the server. If using the tunnel,
+For a source installation, read `sudo cat /var/lib/parins-managed/setup-token` on the server. If using the tunnel,
 open <http://127.0.0.1:3000>. Enter the one-time token, choose an
 administrator name and a password of at least 12 bytes, and set the DNS listen
 address and upstream list. The wizard defaults to loopback DNS;
@@ -197,8 +200,8 @@ does not promise to erase the browser's now-unusable Cookie value. The browser
 never stores the session credential or binding in local/session storage. The
 management origin is tied to the exact scheme, host and port; each protected request also
 uses a per-session binding to prevent stale tabs from writing under a new login.
-There are no external frontend assets. Opt-in query history is held in server
-memory, not browser storage. An unsaved configuration draft does not survive a
+There are no external frontend assets. Opt-in query history is held in private
+server-side SQLite storage, not browser storage. An unsaved configuration draft does not survive a
 full page refresh.
 
 The React console supports Simplified Chinese and English, plus light, dark and
@@ -214,8 +217,8 @@ raw server diagnostic details keep their original text.
 
 The console does not create a certificate. When inbound `[doh]` is enabled,
 PariNS verifies its certificate/key and the `[web].public_host` name, then serves
-HTTPS on the same management port with that identity. If `[doh]` is absent and
-`[doh3]` is enabled, it uses the DoH3 identity instead. DoT, DoQ and encrypted
+HTTPS on the same management port with that identity. `[doh].http3` adds HTTP/3
+to that same DNS identity and port; standalone `[doh3]` is rejected. DoT, DoQ and encrypted
 upstreams do not change the console protocol. The DoH DNS listener and management
 listener keep separate ports, routes and ALPN. For example, DoH on 443 and the
 console on 3000 can use the same certificate for `dns.example.com`; the console
@@ -229,9 +232,9 @@ returned HTTPS address and log in with the newly created administrator account.
 Disabling all inbound DoH switches to HTTP only after explicit downgrade
 confirmation. A failed candidate or TLS material fault never silently exposes
 the management API over HTTP. Renew external certificate files through your
-issuer, then reapply the same configuration or restart PariNS to load them;
-there is no built-in ACME or certificate watcher. An unchanged management
-origin can keep its session during certificate replacement. Old generated
+issuer, then use **Reload certificates** or the new managed SIGHUP hook described
+below. There is no built-in ACME or certificate watcher. Reload preserves the
+management session and does not save configuration drafts. Old generated
 `https-identity.pem`/`https-cert.pem` files are unused and not automatically
 removed; check their purpose before manually cleaning them up.
 
@@ -243,17 +246,19 @@ by the server into the current draft, preserving unedited settings; TOML comment
 and formatting may be normalized. File-backed filtering is clearly separated
 from inline rules.
 
-The dashboard shows instance counters, cache/blocking rates, average latency,
-response codes, latency distribution, and up to 24 hours of aggregate trends.
-History is sampled once per minute, bounded to 1440 points in memory, and cleared
-when the management process restarts. DNS instance restarts appear as gaps rather
-than negative rates. No query names or client IPs are collected for these charts;
+The dashboard shows persistent totals, cache/blocking rates, average latency,
+response codes, latency distribution, and bounded aggregate trends.
+History is sampled once per minute and defaults to seven days/10080 samples;
+completed checkpoints survive process restarts. Missing intervals appear as gaps,
+not zero traffic. Process metrics and persistent totals are separate scopes.
+No query names or client IPs are collected for these charts;
 there are no per-domain/client rankings. The separate opt-in query log described
 below records per-request data; aggregate charts remain free of query identities.
-Changing only the cache section publishes new cache/refresh state without
-restarting DNS listeners or resetting instance metrics; existing cache contents
-are deliberately cleared. Other changes, and reapplying an unchanged document,
-drain/restart DNS and clear cache/metrics. Binding or persistence failures restore
+Changing cache policy publishes new cache/refresh state without restarting DNS.
+Changing only storage, history or cache-persistence settings preserves both
+listeners and memory cache. Other changes, and reapplying an unchanged document,
+drain/restart DNS and clear cache, but preserve process metrics and runtime history.
+None of these hot changes implicitly reloads certificates. Binding or persistence failures restore
 the prior configuration when possible, and an unavailable DNS instance is shown
 as an error. Stale edits are rejected by revision; after a disconnected save,
 reload the current configuration to determine its result before retrying.
@@ -264,8 +269,8 @@ exclusive process lock and atomic replacement. Exported TOML excludes account
 data. Relative rule/certificate paths resolve against the state directory;
 provision those files separately with permissions readable by the service.
 Do not manually edit live state or use `--config` with `--manage`. Back up the
-whole private state directory while the service is stopped. Managed mode uses
-console reapplication for DNS file/certificate changes, not SIGHUP. Password changes
+whole private state directory while the service is stopped. Managed SIGHUP only
+reloads the current certificate paths; rules and configuration still use apply. Password changes
 and account recovery are not exposed in this first console version; keep your
 password and private state backup safe.
 
@@ -301,7 +306,9 @@ dig @127.0.0.1 -p 5353 example.com A
 dig @127.0.0.1 -p 5353 example.com A +tcp
 ```
 
-Use `--config PATH` to select a different configuration file. `listen` selects
+Use `--config PATH` to select a different configuration file and `--data-dir PATH`
+for private runtime storage (default `parins-data`, not shared with managed state).
+`--check` creates no runtime directory, database or cache snapshot. `listen` selects
 the same address and port for UDP and TCP; port zero selects a shared ephemeral
 port, printed on startup. Set `[upstreams].servers` to one or more endpoints
 (see [Upstream DNS settings](#upstream-dns-settings)). UDP endpoints
@@ -394,6 +401,9 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   clients to miss a previously broad entry. IPv4, IPv6, no-ECS, and privacy `/0`
   are isolated; a normal
   scope `/0` answer may be shared across ordinary queries of its address family.
+  If an upstream omits ECS after a nonzero ECS request, `ExactSource` permits reuse
+  only for the identical actual outgoing family/network/source-prefix. It does
+  not invent broader scope or mix privacy and no-ECS namespaces.
 - Defaults: 4096 answers, 8 MiB charged bytes, 64 subnet variants per query,
   four concurrent shards and a 20% negative-cache reservation. Each shard has
   separate positive/negative entry and byte budgets; unused partitions are not
@@ -413,11 +423,18 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   Negative answers remain query-type-specific; CNAME plus negative answers
   are not cached. These are conservative limits, not full RFC cache conformance.
 - Truncated answers, errors such as SERVFAIL/REFUSED, zero TTL, missing SOA for
-  negative answers, missing expected ECS, and scope longer than source bypass
-  caching. Non-ECS EDNS options (including cookies) also bypass caching to avoid
-  replaying client-specific state.
+  negative answers, unusable ECS, and scope longer than source bypass caching.
+  Cookie/unknown EDNS options bypass caching to avoid replaying client-specific
+  state. Padding is allowed but removed from the stored canonical answer.
 - Hits restore the current request's ID/question and original ECS, with aged
-  TTLs and normalized EDNS. There is no disk persistence or local DNSSEC validation.
+  TTLs and normalized EDNS. There is no local DNSSEC validation.
+  `[cache.persistence]` defaults to enabled with a 32 MiB snapshot budget: only
+  fresh entries are saved at terminal, quiescent shutdown. Startup ages all TTLs
+  and consumes the file durably before serving. Incompatible/corrupt snapshots
+  are consumed and skipped; a failed consume prevents DNS startup. No periodic
+  snapshot can resurrect entries after clear, TTL0, EDE or a crash. Forced drain,
+  SIGKILL and abnormal exit start cold. Normal configuration apply is not restart
+  restoration; stale-only entries are never restored.
 - `[[cache.rules]]` selects exact names before suffixes, then most labels,
   record-type-specific before wildcard type, then first declaration. DNS labels
   (including escaped labels) determine boundaries; suffix includes the named
@@ -490,7 +507,7 @@ Adblock syntax, hosts lines, URLs and regex are rejected, including when disable
 Limits are 100000 rules and 8 MiB of rule text. Set the top-level `filter_file`
 to use a standalone TOML file with these same fields (without `[filter]`). It
 becomes authoritative instead of inline rules and is limited to 8 MiB total.
-On Unix, SIGHUP reloads this file and configured listener certificates. Every
+In file-configured mode on Unix, SIGHUP reloads this file and configured listener certificates. Every
 candidate is checked before publication; errors retain the previous generation.
 Each DNS request keeps its starting policy snapshot. Inline configuration changes
 require restart. There is no rule download or third-party list import.
@@ -515,7 +532,10 @@ Identical eligible cache misses share one upstream operation, keyed by the actua
 outbound ECS subnet and DNS semantics (not the eventual response scope). `[coalescing]`
 defaults to enabled, 128 groups and 64 callers per group, including the first caller.
 At either limit, new requests return SERVFAIL without extra upstream IO. Requests
-with non-ECS EDNS options or non-IN class bypass sharing; ingress budgets still apply.
+with Cookie/unknown EDNS options or non-IN class bypass sharing; ingress budgets still apply.
+The shared flight/refresh key ignores Padding bytes and length, but preserves
+whether Padding was requested. Cache keys ignore that intent; each final client
+response independently restores ID/ECS and generates padding when appropriate.
 Waiters share the first operation's timeout. Cancelling one does not cancel others;
 cancelling the last releases IO without a detached background task. Each caller
 still receives independent policy checks, ID/question and ECS restoration.
@@ -556,7 +576,11 @@ metrics. No OpenTelemetry tracing or alert setup is included.
 
 ## Encrypted transports and reload
 
-Uncomment individual `[dot]`, `[doh]`, `[doq]`, `[doh3]` sections in the example.
+Uncomment individual `[dot]`, `[doh]`, `[doq]` sections in the example.
+Set `[doh].http3 = true` for HTTP/3 on the same address and actual port as HTTP/2
+(UDP plus TCP, including port 0). Allow both protocols at your network boundary.
+DNS responses advertise `Alt-Svc: h3=":PORT"` when enabled and `clear` when disabled;
+the management HTTP listener does not advertise DNS H3. Outbound `prefer_h3` is independent.
 Certificate, key, CA and rule paths resolve relative to the configuration file.
 All sockets and certificates must initialize successfully before traffic is served;
 `--check` validates files without opening listeners. PEM private keys and local
@@ -584,12 +608,23 @@ configuration are ignored by Git. Provision certificates outside this repository
   `[upstreams].ca_file` replaces built-in WebPKI roots. Certificate failures never
   downgrade to plaintext. DoT opens a fresh connection per transaction by default;
   optional bounded reuse is configured under `[upstreams.dot_pool]`.
-- SIGHUP validates all new rule/certificate candidates before replacing them.
-  Each listener's new full handshakes see its atomic certificate replacement;
-  established connections and resumed sessions may retain previous TLS identity
-  context. Publication is not one global transaction across all listeners and
-  rules. Listener addresses, resource limits, upstream/CA settings and inline
-  configuration require restart, which creates fresh resolver/cache ownership.
+- Certificate preparation validates bounded regular PEM files, matching keys and
+  current dates; the DoH role also checks the management public host. One atomic
+  CertificateSet publication updates the DoH slot shared by Web/H2/H3 and the
+  independent DoT/DoQ slots. Any failure keeps every previous identity. New full
+  handshakes see the new roles; established connections remain usable.
+- Managed `POST /api/certificates/reload` uses the saved revision and existing
+  authenticated mutation boundary. Managed SIGHUP uses that same serialized
+  operation, only for certificates; file-mode SIGHUP also reloads rules. Neither
+  reload moves listeners, resets cache/history, changes config revision nor logs
+  out users. `status.certificates` reports active fingerprints and the last result.
+
+After your external issuer atomically publishes a complete key/chain pair, a
+new-build renewal hook can run `systemctl reload parins-managed.service`.
+**Do not use this hook on managed v0.1.3.** Signal delivery is not completion:
+check the authenticated reload result and a new handshake's public fingerprint.
+Configure read-only service access to external TLS files yourself; the installer
+does not chown or relocate them. No private key is returned by status.
 
 ## Query logs and certificate paste
 
@@ -600,14 +635,17 @@ settings (disabled by default):
 ```toml
 [query_log]
 enabled = true
-max_entries = 1000 # 1..10000
-retention_secs = 86400 # 1..604800
+max_entries = 1000 # independently limits actual coverage
+max_bytes = 67108864
+retention_secs = 86400 # 60..2592000; an upper bound, not promised coverage
 ```
 
 Logs contain client IP, name/type, transport, response code, duration, actual
 cache/filter path, winning upstream (if any), input/output ECS and EDNS flags,
 and bounded answer details (16 records, capped strings). They are authenticated,
-memory-only, periodically expired, and cleared on DNS restart. Requests cancelled
+persisted asynchronously, periodically expired, and retained across DNS/process restart.
+Logs expose the actual oldest/latest record times, coverage and cleanup/drop reasons;
+count/byte/database limits may shorten retention. Requests cancelled
 after entering the resolver are recorded as dropped; malformed transport requests
 that never reach the DNS resolver are not DNS query entries. Background prefetch
 is not counted as a client request. Clearing rejects old in-flight log writes;
@@ -622,9 +660,56 @@ returned by the API or included in TOML/export. Save/apply uses the existing
 configuration transaction. Certificate expiry, hostname and trust must still be
 checked by clients. At most 32 identities are retained; normalized repeats reuse
 the same file. Remove unused files manually only after checking current/rollback
-configurations. Enabling inbound DoH or DoH3 with a validated `[web].public_host`
+configurations. Enabling inbound DoH with a validated `[web].public_host`
 also chooses the identity for management HTTPS; importing PEM alone does not
 switch the console protocol.
+
+### Runtime storage and diagnostics
+
+Managed runtime data lives under `STATE_DIR/runtime`; file mode uses `--data-dir`.
+A private single-writer lock protects each directory. SQLite uses one worker,
+bounded queues, DELETE journaling and FULL synchronization. DNS never waits for
+log writes; overload drops new records and exposes finite drop reasons. A clear
+or reset succeeds only after commit. Logs, totals and trend history have separate
+epochs, so clearing one does not reset the others or admit pre-clear queued work.
+
+```toml
+[storage]
+max_database_bytes = 134217728
+flush_interval_ms = 1000
+cleanup_interval_secs = 60
+queue_max_entries = 4096
+queue_max_bytes = 8388608
+
+[statistics]
+retention_secs = 604800
+max_samples = 10080
+reset_interval_days = 0 # disabled; reset totals and clear trends separately
+```
+
+The database limit excludes rollback journal and temporary cache-snapshot peaks.
+The console shows configured/applied settings, actual committed data and bounded
+pending work. Filesystem capacity is sampled at most once per minute off the DNS
+path; unavailable or stale observations are explicit, never zero free space.
+Low-space warnings use less than 10% available, or less than the database budget
+plus twice the snapshot budget plus 64 MiB. This is an early warning, not a promise
+that writes will succeed. No other application's files are cleaned up.
+
+Authenticated `GET /api/status.dns_health` is managed DNS readiness; a reachable
+management API alone is not proof that DNS is running. Unexpected listener exits
+publish a generation-scoped failure also used by statistics sampling. Reapply
+configuration after diagnosing the failure; there is no automatic restart loop
+inside the manager. Process-local typed cache/upstream/QUIC counters remain usable
+with query logging disabled. Upstream endpoint slots belong to their displayed
+pool generation, and bounded query traces contain at most eight attempts, keeping
+the winning or final failure result. Caller cancellation, parallel race losers and
+shutdown are separate from network failures. Public `/healthz` stays liveness only.
+
+Before deployment, choose management/DNS network access rules, provision readable
+external certificates, inspect capacity/backups, and validate independent encrypted
+clients. The installer never changes host DNS, firewall, trust stores or other
+applications. No measured local loopback result proves public DoQ reachability or
+capacity on a 2 vCPU/2 GiB VPS.
 
 ## Upstream DNS settings
 
@@ -681,7 +766,10 @@ copied: disabled ECS removes the client subnet; enabled ECS validates it against
 the socket peer and caps the prefix (explicit /0 remains private). Invalid or
 spoofed subnets are rejected. ECS privacy retry and response normalization remain
 in effect; AD is cleared because PariNS does not validate DNSSEC. Requests with
-non-ECS EDNS options bypass shared cache and request coalescing. These boundaries
+Cookie/unknown EDNS options bypass shared cache and request coalescing. Padding is
+regenerated only for encrypted hops: 128-byte upstream request blocks and 468-byte
+client response blocks when requested, bounded by the advertised payload limit.
+Plaintext hops remove Padding; non-EDNS requests do not gain an OPT record. These boundaries
 follow [RFC 6891](https://www.rfc-editor.org/rfc/rfc6891),
 [RFC 7871](https://www.rfc-editor.org/rfc/rfc7871) and
 [RFC 9250](https://www.rfc-editor.org/rfc/rfc9250); forwarding is not byte-for-byte

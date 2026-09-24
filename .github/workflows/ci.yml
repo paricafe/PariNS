@@ -38,6 +38,8 @@ jobs:
         run: npm audit --registry https://registry.npmjs.org --audit-level=high
       - name: Install pinned toolchain
         run: rustup show active-toolchain
+      - name: Release notes regression
+        run: node --test scripts/test-release-notes.mjs
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets

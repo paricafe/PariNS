@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.1.4 — 2026-09-24
+
+### Upgrade notice
+
+- This initial-development release intentionally changes the managed state
+  directory and DoH configuration. The installer rejects the old managed layout
+  before changing files. Back up the old state and explicitly retire the old
+  managed unit and its state markers, retaining operator-owned TLS files. Let
+  the new installer create `/var/lib/parins-managed`, then initialize again and
+  re-enter the updated configuration. Do not pre-create the target directory or
+  copy the old `state.json` into it; there is no automatic migration.
+- Replace `[doh3]` with `[doh]` plus `http3 = true`. Keep a valid DoH certificate
+  and matching `[web].public_host` for management HTTPS. Do not downgrade to an
+  old binary against the new runtime database; retain a separate pre-upgrade backup.
+
+### Changed
+
+- Use an exclusive `/var/lib/parins-managed` directory for the managed installer.
+  Existing old-layout managed state and unknown target directories are rejected
+  before installation; no automatic migration is provided. External certificate
+  directories remain operator-owned and are never moved or changed by installation.
+- Replace independent `[doh3]` configuration with `[doh].http3 = true`, serving
+  HTTP/2 and HTTP/3 on the same address/actual port and certificate. Update TOML
+  explicitly; retired configuration is rejected.
+- Persist opt-in query history, cumulative totals and aggregate trends in bounded
+  SQLite storage. Separate clear/reset actions preserve their independent epochs.
+  File mode now owns `--data-dir` (default `parins-data`); `--check` creates no state.
+
+### Added
+
+- Restore fresh cache entries only after a clean, quiescent process shutdown.
+  Startup consumes the snapshot before serving; crash/forced shutdown starts cold.
+- Cache exact outgoing subnets when an upstream omits ECS, without sharing answers
+  across prefixes. Support EDNS Padding without storing or replaying padding bytes.
+- Typed upstream attempt, cache decision and QUIC diagnostics, generation-scoped
+  DNS readiness, actual query-history coverage and cached filesystem capacity.
+- Atomic certificate reload for Web, DoH H2/H3, DoT and DoQ using the current saved
+  paths: management API or managed SIGHUP. Failures retain every previous identity;
+  unchanged material does not advance the certificate generation. Configuration,
+  sessions, DNS listeners, cache and history are preserved.
+- Bilingual runtime/storage controls, certificate status and diagnostics in the
+  existing console, with reduced-motion support.
+
+### Fixed
+
+- Preserve the total upstream deadline through bootstrap, connection waits and
+  HTTP/3 fallback; distinguish cancellation from actual transport failures.
+- Preserve current totals and new history during wall-clock rollback, and keep
+  DNS shutdown responsive even when a file-mode reload is blocked on IO.
+- Show only the selected version's changes on its GitHub Release page.
+
+### Operational notes
+
+- Certificate reload is available starting with v0.1.4; do not send SIGHUP to a
+  managed v0.1.3 process expecting this behavior.
+- Query logs use bounded asynchronous storage and can drop records under overload.
+  Retention time is a maximum, not guaranteed coverage or a lossless audit trail.
+- Local tests and release CI are not a production capacity guarantee. Public
+  DoQ paths, external renewal hooks and target-VPS resources need operator acceptance.
+
 ## v0.1.3 — 2026-09-24
 
 ### Upgrade notice

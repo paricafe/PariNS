@@ -849,3 +849,24 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     assert_eq!(totals.metrics.counters["requests"], 2);
     reopened.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn shutdown_releases_directory_lock_even_with_a_duplicated_descriptor() {
+    let directory = private_dir();
+    let (path, lock) = private_directory(directory.path()).unwrap();
+    // A concurrent process spawn may briefly inherit this open file description.
+    // Closing only the worker's descriptor must not keep the directory locked.
+    let duplicate = lock.try_clone().unwrap();
+    let handle = Handle::start(
+        Some((path, lock)),
+        settings(),
+        1,
+        Arc::new(Metrics::default()),
+    )
+    .unwrap();
+    assert!(RuntimeServices::open(directory.path(), settings(), 2).is_err());
+    handle.shutdown().await.unwrap();
+    let reopened = RuntimeServices::open(directory.path(), settings(), 2).unwrap();
+    reopened.shutdown().await.unwrap();
+    drop(duplicate);
+}

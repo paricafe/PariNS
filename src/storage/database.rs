@@ -78,8 +78,17 @@ pub(super) fn run(
                     Err(Error::StorageUnavailable("database unavailable".into()))
                 };
                 drop(database);
+                // close alone retains flock while a duplicated/inherited descriptor lives.
+                let unlocked = _lock
+                    .as_ref()
+                    .map_or(Ok(()), File::unlock)
+                    .map_err(|error| {
+                        Error::StorageUnavailable(format!(
+                            "release runtime directory lock: {error}"
+                        ))
+                    });
                 drop(_lock);
-                let _ = reply.send(result);
+                let _ = reply.send(result.and(unlocked));
                 return;
             }
             if let Some(db) = database.as_mut() {

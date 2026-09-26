@@ -27,6 +27,41 @@ def command(args, **kwargs):
     return subprocess.check_output(args, stderr=subprocess.PIPE, timeout=kwargs.pop('timeout', 60), **kwargs)
 
 
+def probe_failure(error):
+    """Classify captured stderr without returning any captured text or arguments."""
+    if isinstance(error, subprocess.TimeoutExpired):
+        return {'error': 'timeout'}
+    detail = {'error': 'command_failed', 'returncode': error.returncode}
+    stderr = error.stderr or b''
+    for marker, category in ((b'Connection refused', 'connection_refused'),
+                             (b'Connection timed out', 'connection_timeout'),
+                             (b'Host key verification failed', 'host_key_rejected'),
+                             (b'REMOTE HOST IDENTIFICATION HAS CHANGED', 'host_key_rejected'),
+                             (b'Permission denied', 'authentication_rejected'),
+                             (b'Connection reset', 'connection_reset')):
+        if marker in stderr:
+            detail['error'] = category
+            break
+    return detail
+
+
+def serial_markers(path):
+    # Only fixed booleans leave the private log. Never publish raw serial text:
+    # cloud-init can print identities and user data when its own setup fails.
+    if not path.exists():
+        return {'present': False}
+    size = path.stat().st_size
+    with path.open('rb') as stream:
+        stream.seek(max(0, size - 131072))
+        tail = stream.read(131072)
+    return {'present': True, 'bytes': size,
+            'kernel_started_seen_in_tail': b'Linux version ' in tail,
+            'kernel_panic_seen_in_tail': b'Kernel panic' in tail,
+            'cloud_init_started_seen_in_tail': b'Cloud-init v.' in tail,
+            'cloud_init_finished_seen_in_tail': b'Cloud-init v.' in tail and b' finished at ' in tail,
+            'login_prompt_seen_in_tail': b'parins-up6 login:' in tail}
+
+
 def qmp(path, operation):
     with socket.socket(socket.AF_UNIX) as sock:
         sock.settimeout(5)
@@ -125,15 +160,26 @@ def main():
 
             def wait_boot(previous=None):
                 deadline = time.monotonic() + 300
+                observation = {'stage': stage, 'attempts': 0, 'boot_observed': False}
+                result['boot_wait'] = observation
                 while time.monotonic() < deadline:
+                    observation['attempts'] += 1
+                    observation['probe'] = 'ssh_boot_id'
                     assert vm.poll() is None, 'owned QEMU exited'
                     try:
                         boot = command(ssh + ['cat', '/proc/sys/kernel/random/boot_id'], timeout=8).decode().strip()
+                        observation.pop('last_failure', None)
+                        observation['boot_observed'] = True
+                        observation['boot_changed'] = previous is None or boot != previous
                         if previous is None or boot != previous:
+                            observation['probe'] = 'cloud_init'
                             command(ssh + ['sudo', '-n', 'cloud-init', 'status', '--wait'], timeout=120)
+                            observation['ready'] = True
+                            observation.pop('last_failure', None)
                             return boot
-                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                        pass  # Read-only readiness probes only, never replay mutations.
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                        observation['last_failure'] = probe_failure(error)
+                        # Read-only readiness probes only, never replay mutations.
                     time.sleep(2)
                 raise TimeoutError('guest boot readiness')
 
@@ -182,6 +228,17 @@ def main():
             result['result'] = 'passed'
         except Exception as error:
             result.update(result='failed', failed_stage=stage, error_type=type(error).__name__)
+            if vm is not None:
+                result['qemu_returncode'] = vm.poll()
+                try:
+                    status = qmp(root / 'qmp.sock', 'query-status')
+                    result['qemu_running'] = status.get('running') is True
+                    allowed = ('running', 'paused', 'shutdown', 'prelaunch', 'internal-error',
+                               'io-error', 'guest-panicked', 'watchdog')
+                    result['qemu_status'] = status.get('status') if status.get('status') in allowed else 'other'
+                except Exception as diagnostic_error:
+                    result['qmp_error_type'] = type(diagnostic_error).__name__
+                result['serial_markers'] = serial_markers(root / 'serial.log')
             raise
         finally:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -198,6 +255,8 @@ def main():
                         vm.kill()
                         vm.wait(timeout=10)
             save()
+            if result['result'] == 'failed':
+                print(json.dumps(result), flush=True)
     print(json.dumps(result))
 
 

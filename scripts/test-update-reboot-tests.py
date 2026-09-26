@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -18,6 +19,27 @@ def load(name):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_boot_diagnostics_never_return_private_command_or_log_text(self):
+        host = load('test-update-reboot')
+        private = b'PRIVATE_KEY_SEED_CREDENTIAL'
+        error = subprocess.CalledProcessError(255, ['secret-command'],
+                                             output=private, stderr=b'Permission denied ' + private)
+        self.assertEqual(host.probe_failure(error),
+                         {'error': 'authentication_rejected', 'returncode': 255})
+        self.assertEqual(host.probe_failure(subprocess.CalledProcessError(2, ['cloud-init'],
+                         output=private, stderr=private)), {'error': 'command_failed', 'returncode': 2})
+        self.assertEqual(host.probe_failure(subprocess.TimeoutExpired(['secret-command'], 8,
+                         output=private, stderr=private)), {'error': 'timeout'})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'serial.log'
+            self.assertEqual(host.serial_markers(path), {'present': False})
+            path.write_bytes(b'Linux version test\nCloud-init v. test finished at now\n' + private)
+            diagnostic = host.serial_markers(path)
+            self.assertTrue(diagnostic['kernel_started_seen_in_tail'])
+            self.assertTrue(diagnostic['cloud_init_finished_seen_in_tail'])
+            self.assertFalse(diagnostic['kernel_panic_seen_in_tail'])
+            self.assertNotIn(private.decode(), json.dumps(diagnostic))
+
     def test_unauthenticated_session_null_is_read_only_and_does_not_create_auth(self):
         guest = load('test-update-reboot-guest')
         response = Mock(status=200)

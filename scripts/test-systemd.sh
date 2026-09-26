@@ -590,7 +590,8 @@ check_dns
 if "$filter_subscriptions"; then
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" unfrozen "$fixture"
     # Mount only an idle, empty staging child inside this running service's
-    # existing private/slave namespace. Catalog, objects and lock stay in place.
+    # namespace. Isolate its exact state mount first when it has shared peers.
+    # Catalog, objects and lock stay in place.
     fs_fault_pid=$(systemctl show --property=MainPID --value parins-managed.service)
     fs_fault_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
     fs_fault_ns=$(sudo readlink "/proc/$fs_fault_pid/ns/mnt")
@@ -610,7 +611,29 @@ if "$filter_subscriptions"; then
     fs_timeout=$(command -v timeout)
     fs_staging=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- readlink -f /var/lib/parins-managed/filter-subscriptions/staging)
     case "$fs_staging" in /var/lib/parins-managed/filter-subscriptions/staging|/var/lib/private/parins-managed/filter-subscriptions/staging) ;; *) printf '%s\n' 'FS7 ENOSPC refused: unexpected canonical staging path.' >&2; exit 1 ;; esac
+    fs_host_staging=$(sudo "$fs_stat" -c '%d:%i' "$fs_staging")
+    fs_host_mount=$(sudo "$fs_findmnt" -rn -T "$fs_staging" -o ID,TARGET,PROPAGATION)
     fs_propagation=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -T "$fs_staging" -o PROPAGATION)
+    case "$fs_propagation" in shared|shared,slave)
+        # shared+slave still forwards mounts to its own peers. --make-private
+        # changes this one existing mount, not descendants or the host's mount.
+        # Its namespace is destroyed by fixture cleanup; do not rejoin peers.
+        fs_state_mount=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -T "$fs_staging" -o TARGET)
+        case "$fs_state_mount" in /var/lib/parins-managed|/var/lib/private/parins-managed) ;; *)
+            printf 'FS7 ENOSPC refused: containing mount=%s is not the exact service state mount.\n' "$fs_state_mount" >&2; exit 1 ;;
+        esac
+        [ "$(sudo readlink "/proc/$fs_fault_pid/ns/mnt")" = "$fs_fault_ns" ] || {
+            printf '%s\n' 'FS7 ENOSPC refused: service mount namespace changed.' >&2; exit 1;
+        }
+        sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_mount" --make-private "$fs_state_mount"
+        [ "$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -T "$fs_staging" -o TARGET,PROPAGATION)" = "$fs_state_mount private" ] && \
+            [ "$(sudo "$fs_findmnt" -rn -T "$fs_staging" -o ID,TARGET,PROPAGATION)" = "$fs_host_mount" ] && \
+            [ "$(sudo "$fs_stat" -c '%d:%i' "$fs_staging")" = "$fs_host_staging" ] || {
+            printf '%s\n' 'FS7 ENOSPC isolation failed: expected private service state mount and unchanged host mount/inode.' >&2; exit 1;
+        }
+        printf 'FS7 ENOSPC state mount isolated: target=%s, before=%s, after=private, host unchanged.\n' "$fs_state_mount" "$fs_propagation"
+        fs_propagation=private
+    esac
     case "$fs_propagation" in private|slave) ;; *) printf 'FS7 ENOSPC refused: propagation=%s, expected private or slave.\n' "$fs_propagation" >&2; exit 1 ;; esac
     if sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -M "$fs_staging" >/dev/null; then
         printf '%s\n' 'FS7 ENOSPC refused: staging is already a mount point.' >&2; exit 1
@@ -623,11 +646,11 @@ assert stat.S_ISDIR(s.st_mode) and not stat.S_ISLNK(s.st_mode)
 assert (s.st_uid, s.st_gid, stat.S_IMODE(s.st_mode)) == (uid, gid, 0o700)
 assert os.listdir(p) == [], 'staging must be empty before covering it'
 PY
-    fs_host_staging=$(sudo "$fs_stat" -c '%d:%i' "$fs_staging")
     fs_tmpfs_active=true
     sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_mount" -t tmpfs \
         -o "size=4096,nr_inodes=64,mode=0700,uid=$fs_uid,gid=$fs_gid,nodev,nosuid,noexec" parins-fs7-enospc "$fs_staging"
-    [ "$(sudo "$fs_stat" -c '%d:%i' "$fs_staging")" = "$fs_host_staging" ] || {
+    [ "$(sudo "$fs_stat" -c '%d:%i' "$fs_staging")" = "$fs_host_staging" ] && \
+        [ "$(sudo "$fs_findmnt" -rn -T "$fs_staging" -o ID,TARGET,PROPAGATION)" = "$fs_host_mount" ] || {
         printf '%s\n' 'FS7 ENOSPC failed isolation: host staging mount changed.' >&2; exit 1;
     }
     sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_python" - "$fs_staging" "$fs_uid" "$fs_gid" <<'PY'

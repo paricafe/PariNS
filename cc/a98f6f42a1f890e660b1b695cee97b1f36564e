@@ -1,0 +1,31 @@
+scripts/test-install.sh
+  s_d595d238bbd4ee::t_69fd3342b64195 26-37
+CHANGELOG.md
+  s_d595d238bbd4ee::t_f81e82b5970511 17-20
+tests/runtime.rs
+  s_d595d238bbd4ee::t_25da4102fbd90d 354-374,376
+  s_d595d238bbd4ee::t_f7bee4836f7d0c 375
+src/manage/updates.rs
+  s_d595d238bbd4ee::t_a4d864f72a3240 518
+  s_d595d238bbd4ee::t_bbdf21a8da4e70 163-166
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_726648c0e18120 16,35,38-39,72,80-85,88,98,256-259,262,269
+scripts/install.sh
+  s_d595d238bbd4ee::t_726648c0e18120 351
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "cca98f6f42a1f890e660b1b695cee97b1f36564e",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

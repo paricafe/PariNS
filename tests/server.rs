@@ -108,6 +108,88 @@ async fn finish(stop: oneshot::Sender<()>, task: JoinHandle<anyhow::Result<()>>)
         .unwrap();
 }
 
+// CI may supply secondary addresses created only in its disposable network
+// namespace. Ordinary tests never add addresses or change host networking.
+fn udp_test_addresses(variable: &str, defaults: &str) -> Vec<SocketAddr> {
+    std::env::var(variable)
+        .unwrap_or_else(|_| defaults.into())
+        .split(',')
+        .map(|value| {
+            if value.contains(':') {
+                format!("[{value}]:0").parse().unwrap()
+            } else {
+                format!("{value}:0").parse().unwrap()
+            }
+        })
+        .collect()
+}
+
+async fn wildcard_udp_sources(listen: &str, targets: Vec<SocketAddr>) {
+    let mut cfg = config("127.0.0.1:9".parse().unwrap());
+    cfg.listen = listen.parse().unwrap();
+    cfg.filter = toml::from_str("enabled=true\nblock_exact=['example.test']").unwrap();
+    let (address, stop, task) = start(cfg).await;
+    for mut target in targets {
+        target.set_port(address.port());
+        let bind = match target {
+            SocketAddr::V6(address) if address.scope_id() != 0 => {
+                format!("[fe80::1%{}]:0", address.scope_id())
+            }
+            SocketAddr::V6(_) => "[::1]:0".into(),
+            SocketAddr::V4(_) => "127.0.0.1:0".into(),
+        };
+        let client = UdpSocket::bind(bind).await.unwrap();
+        client
+            .send_to(&query().to_vec().unwrap(), target)
+            .await
+            .unwrap();
+        let mut buffer = [0; 512];
+        let (length, source) = timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source, target,
+            "UDP reply must use the query's local destination"
+        );
+        assert_eq!(protocol::decode(&buffer[..length]).unwrap().id, query().id);
+    }
+    finish(stop, task).await;
+}
+
+#[tokio::test]
+async fn wildcard_udp_preserves_ipv4_destination() {
+    let defaults = if cfg!(target_os = "linux") {
+        "127.0.0.1,127.0.0.2"
+    } else {
+        "127.0.0.1"
+    };
+    wildcard_udp_sources(
+        "0.0.0.0:0",
+        udp_test_addresses("PARINS_UDP_TEST_IPV4", defaults),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn wildcard_udp_preserves_ipv6_destination() {
+    wildcard_udp_sources("[::]:0", udp_test_addresses("PARINS_UDP_TEST_IPV6", "::1")).await;
+}
+
+#[tokio::test]
+async fn wildcard_dual_stack_udp_preserves_ipv4_destination() {
+    let defaults = if cfg!(target_os = "linux") {
+        "127.0.0.1,127.0.0.2"
+    } else {
+        "127.0.0.1"
+    };
+    wildcard_udp_sources(
+        "[::]:0",
+        udp_test_addresses("PARINS_UDP_TEST_IPV4", defaults),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn udp_truncation_tcp_fallback_and_connection_reuse() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

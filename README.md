@@ -376,6 +376,9 @@ allows active queries up to `shutdown_grace_ms` to finish before cancellation.
   ID. Only responses matching the upstream endpoint, ID, opcode, and question
   are accepted. Upstream truncation triggers TCP fallback under the same
   `query_timeout_ms` deadline. Failures return SERVFAIL.
+- Linux/macOS UDP listeners retain the query's destination IP and interface for
+  replies, including wildcard and dual-stack binds. Other platforms require a
+  specific local listen address; wildcard UDP binds are rejected.
 - UDP replies respect the client's payload limit, capped at 1232 bytes (512
   without EDNS). Larger replies return a question-only TC response; retry over
   TCP for the complete answer. Downstream TCP connections support sequential

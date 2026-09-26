@@ -92,6 +92,9 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
 - QUIC listener ownership includes Quinn drivers and final socket release. Server
   retains cleanup across adapter cancellation; peer close notification stays within
   the existing shutdown grace, and a completed shutdown permits immediate rebinding.
+- UDP adapters retain each datagram's local destination and interface for replies;
+  address selection never belongs to Resolver or cache. Linux/macOS use packet info;
+  unsupported platforms must reject wildcard binds rather than choose a reply source.
 - Keep cache byte accounting distinct from process RSS. Preserve separate positive
   and negative budgets; document capacity/utilization trade-offs when changing them.
 - Management mutations must retain authentication, Host/Origin checks, and relevant
@@ -208,6 +211,8 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   `sh scripts/test-bootstrap.sh`. Run `scripts/test-systemd.sh --ephemeral-ci`
   only on a disposable Linux environment, not a developer's host, using native
   musl binaries for the managed updater's installation contract.
+  Run `sh scripts/test-udp.sh --ephemeral-ci` on a disposable GitHub Linux runner
+  for isolated network-namespace IPv4/IPv6 source-address acceptance.
 - Dependency/security changes: use the dependency audit configured in CI.
 - Documentation-only changes: check referenced paths/commands, review the diff, and
   run `git diff --check`; a full application build is not required.

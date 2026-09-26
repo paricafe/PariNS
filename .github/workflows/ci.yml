@@ -43,11 +43,14 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+      - name: Isolated UDP source-address acceptance
+        if: runner.os == 'Linux'
+        run: sh scripts/test-udp.sh --ephemeral-ci
       - run: cargo build --locked --release
       - run: ./target/release/parins --config parins.example.toml --check
       - name: Installer fixture tests
         run: |
-          sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh
+          sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/test-udp.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh
           sh scripts/test-install.sh
           sh scripts/test-bootstrap.sh
       - name: Linux managed service acceptance

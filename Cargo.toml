@@ -45,6 +45,9 @@ url = "2"
 webpki-roots = "1"
 x509-parser = "0.18"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["net", "uio"] }
+
 [dev-dependencies]
 tempfile = "3"
 

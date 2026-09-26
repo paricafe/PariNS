@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::{TcpListener, TcpStream},
     sync::{Semaphore, watch},
     task::JoinSet,
     time::timeout,
@@ -21,12 +21,12 @@ use crate::{
     metrics::{Counter, Metrics},
     protocol,
     resolver::Resolver,
-    transport::tcp,
+    transport::{tcp, udp},
 };
 
 pub struct Server {
     config: Config,
-    udp: Arc<UdpSocket>,
+    udp: Arc<udp::Socket>,
     tcp: TcpListener,
     resolver: Arc<Resolver>,
     encrypted: Vec<Encrypted>,
@@ -186,7 +186,7 @@ impl Server {
         };
         use crate::tls::CertificateRole as Role;
         let tcp = TcpListener::bind(config.listen).await?;
-        let udp = Arc::new(UdpSocket::bind(tcp.local_addr()?).await?);
+        let udp = Arc::new(udp::Socket::bind(tcp.local_addr()?).await?);
         config.listen = tcp.local_addr()?;
         let admin = match config.admin_listen {
             Some(address) => Some(TcpListener::bind(address).await?),
@@ -383,9 +383,13 @@ impl Server {
                         serve_tcp(stream, peer.ip(), context).await;
                     });
                 }
-                received = self.udp.recv_from(&mut buffer) => {
-                    let (length, peer) = match received { Ok(value) => value, Err(error) => break Err(error.into()) };
+                received = self.udp.recv(&mut buffer) => {
+                    let received = match received { Ok(value) => value, Err(error) => break Err(error.into()) };
                     metrics.inc(Counter::UdpReceived);
+                    let Some((length, peer, source_address)) = received else {
+                        metrics.inc(Counter::UdpDropped);
+                        continue;
+                    };
                     let Some(source) = ingress.admit_query(peer.ip()) else {
                         metrics.inc(Counter::UdpDropped);
                         resolver.log_rejected(&buffer[..length], peer.ip(), "udp", None);
@@ -405,7 +409,7 @@ impl Server {
                         if let Some(reply) = resolver.resolve_with_transport(&bytes, peer.ip(), "udp").await
                             && let Ok(bytes) = protocol::encode_udp(&reply.message, reply.udp_limit)
                         {
-                            let _ = timeout(io_timeout, socket.send_to(&bytes, peer)).await;
+                            let _ = timeout(io_timeout, socket.reply(&bytes, peer, source_address)).await;
                         }
                     });
                 }

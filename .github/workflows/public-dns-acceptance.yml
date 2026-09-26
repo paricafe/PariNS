@@ -1,0 +1,51 @@
+name: Public DNS acceptance
+# Explicit operator-selected public endpoint; never a routine CI or capacity gate.
+on:
+  workflow_dispatch:
+    inputs:
+      address:
+        description: Public IPv4 or IPv6 address to test
+        required: true
+        type: string
+      server_name:
+        description: Certificate hostname (SNI)
+        required: true
+        type: string
+      port:
+        description: DoQ UDP port
+        required: true
+        default: '853'
+        type: string
+permissions:
+  contents: read
+jobs:
+  doq:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare isolated client
+        run: |
+          python3 -m venv "$RUNNER_TEMP/parins-doq-client"
+          "$RUNNER_TEMP/parins-doq-client/bin/pip" install --disable-pip-version-check --only-binary=:all: aioquic==1.2.0 dnspython==2.7.0 certifi==2026.7.22
+          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("scripts/test-public-doq.py").read_text())'
+      - name: One verified DoQ query
+        env:
+          DOQ_ADDRESS: ${{ inputs.address }}
+          DOQ_SERVER_NAME: ${{ inputs.server_name }}
+          DOQ_PORT: ${{ inputs.port }}
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/public-dns
+          "$RUNNER_TEMP/parins-doq-client/bin/python" scripts/test-public-doq.py \
+            --address "$DOQ_ADDRESS" --server-name "$DOQ_SERVER_NAME" --port "$DOQ_PORT" \
+            | tee artifacts/public-dns/doq.json
+      - name: Preserve probe evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-doq-${{ github.run_id }}
+          if-no-files-found: warn
+          path: artifacts/public-dns/doq.json

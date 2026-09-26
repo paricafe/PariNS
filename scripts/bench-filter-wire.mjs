@@ -1,7 +1,7 @@
 // FS1e: test-only Policy injection through the real Server/Resolver, never production.
-// Usage: node scripts/bench-filter-wire.mjs RELEASE_LIBTEST FIXED_NATSUKI_LIST [--native-acceptance|--diagnose] [--smoke|--profile|--driver-comparison]
+// Linux isolation is launched only by test-filter-performance.sh --ephemeral-ci.
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import dgram from 'node:dgram';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
@@ -9,15 +9,24 @@ import { cpus, totalmem, tmpdir, platform, release } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance, PerformanceObserver, monitorEventLoopDelay } from 'node:perf_hooks';
-import { query, parse, bounded, resource, metrics } from './lib/wire-bench.mjs';
+import { query, parse, bounded, resource, metrics, cpuList, linuxConstraints, verifyLinuxServer, linuxUsage } from './lib/wire-bench.mjs';
 
-assert(process.argv.length >= 4 && process.argv.length <= 7, 'need libtest executable and fixed corpus');
+assert(process.argv.length >= 4 && process.argv.length <= 8, 'need libtest executable and fixed corpus');
 const flags = process.argv.slice(4);
-assert(flags.every(flag => ['--smoke', '--native-acceptance', '--diagnose', '--profile', '--driver-comparison'].includes(flag)) && new Set(flags).size === flags.length, 'unknown or repeated benchmark mode');
+assert(flags.every(flag => ['--smoke', '--native-acceptance', '--diagnose', '--profile', '--driver-comparison', '--linux-isolated'].includes(flag)) && new Set(flags).size === flags.length, 'unknown or repeated benchmark mode');
 assert(!(flags.includes('--native-acceptance') && flags.includes('--diagnose')), 'diagnostic is not acceptance');
 const smoke = flags.includes('--smoke'), diagnose = flags.includes('--diagnose'), native = flags.includes('--native-acceptance') || diagnose;
 const profile = flags.includes('--profile');
 const driverComparison = flags.includes('--driver-comparison');
+const isolated = flags.includes('--linux-isolated');
+assert(!isolated || (platform() === 'linux' && flags.includes('--native-acceptance') && process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted' && process.env.RUNNER_OS === 'Linux'), '--linux-isolated requires native acceptance on a disposable hosted Linux runner');
+const serviceCpus = isolated ? cpuList(process.env.PARINS_FS_SERVER_CPUS) : null;
+const driverCpus = isolated ? cpuList(process.env.PARINS_FS_DRIVER_CPUS) : null;
+if (isolated) {
+  assert.equal(serviceCpus.length, 2, 'exactly two service CPUs required');
+  assert(driverCpus.length >= 2 && serviceCpus.every(cpu => !driverCpus.includes(cpu)), 'at least two separate driver CPUs required');
+  assert.deepEqual(cpuList((await linuxConstraints('self')).allowed_cpus), driverCpus, 'launch driver with the declared affinity');
+}
 assert(!profile || (diagnose && !smoke), '--profile requires --diagnose without --smoke');
 assert(!driverComparison || (diagnose && !profile), '--driver-comparison requires --diagnose without --profile');
 assert(!diagnose || platform() === 'darwin', '--diagnose ps sampler currently requires macOS');
@@ -52,13 +61,15 @@ const modes = driverComparison ? ['root', 'worker'].map(driver => ({ name: `clos
   { name: native ? 'closed_8' : 'closed_32', concurrency: native ? 8 : 32, offered_qps: null, count: smoke ? 32 : native ? 60000 : 4096 },
 ].filter(mode => !profile || mode.name === 'closed_8');
 const root = await mkdtemp(path.join(tmpdir(), 'parins-filter-wire-'));
-const sources = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'src/policy.rs', 'src/policy/wire.rs', 'src/policy/wire_diagnose.rs', 'src/policy/canonical.rs', 'src/policy/compact.rs', 'src/policy/radix.rs', 'src/server.rs', 'src/resolver.rs', 'src/cache.rs', 'src/ecs.rs', 'src/protocol.rs', 'scripts/bench-filter-wire.mjs', 'scripts/lib/wire-bench.mjs'];
+const sources = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', ...execFileSync('git', ['ls-files', 'src'], { cwd: repo, encoding: 'utf8' }).trim().split('\n'), 'scripts/bench-filter-wire.mjs', 'scripts/lib/wire-bench.mjs', 'scripts/test-filter-performance.sh'];
 const sourceHashes = Object.fromEntries(await Promise.all(sources.map(async file => [file, sha(await readFile(path.join(repo, file)))])));
 const manifest = {
   command: process.argv, smoke, native_acceptance: native && !diagnose, diagnostic: diagnose, sampling_profile: profile, driver_comparison: driverComparison, binary, binary_sha256: sha(await readFile(binary)), source_sha256: sourceHashes,
   platform: platform(), os_release: release(), cpu_model: cpus()[0]?.model, logical_cpus: cpus().length, host_memory_bytes: totalmem(),
   rustc: execFileSync('rustc', ['--version'], { encoding: 'utf8' }).trim(), build_profile: 'cargo test --locked --release --lib --no-run; default release opt-level=3; cfg(test)',
-  worker_threads: 2, os_cpu_limit: null, scope: 'Darwin exploratory when on Darwin; not Linux isolated 2-core capacity or subscription lifecycle acceptance',
+  worker_threads: 2, os_cpu_limit: isolated ? { requested_service_cpus: serviceCpus, requested_driver_cpus: driverCpus, memory_max_bytes: 4294967296, swap_max_bytes: 0, mechanism: 'systemd transient cgroup v2 plus per-thread affinity; actual constraints verified before each measured process' } : null,
+  driver_constraints: isolated ? await linuxConstraints('self') : null,
+  scope: isolated ? 'Linux resource-isolated static trie/radix comparison; host IRQ/other-process interference is not excluded; not subscription lifecycle or capacity acceptance' : 'Darwin exploratory when on Darwin; not Linux isolated 2-core capacity or subscription lifecycle acceptance',
   rules_sha256: sha(corpus), rules_bytes: corpus.length, input_rules: domains.length + 6,
   first_line: 1, last_line: domains.length,
   modes: modes.map(mode => ({ ...mode, sample_indices_zero_based: indicesFor(mode.count), sampled_lines: mode.count, sample_fraction: mode.count / domains.length,
@@ -121,11 +132,18 @@ async function run(engine, round, mode) {
   const config = `listen='127.0.0.1:0'\nadmin_listen='127.0.0.1:0'\nquery_timeout_ms=1000\ntcp_io_timeout_ms=1000\nshutdown_grace_ms=1000\nmax_inflight=128\nmax_tcp_connections=32\n[upstreams]\nservers=['udp://127.0.0.1:${upstream.address().port}']\n[ecs]\nenabled=true\nipv4_prefix=24\n[cache]\nmax_entries=16384\nmax_bytes=67108864\nshards=4\n[cache.prefetch]\nenabled=false\n[cache.stale]\nenabled=false\n[cache.persistence]\nenabled=false\n[coalescing]\nenabled=false\n[query_log]\nenabled=false\n`;
   await writeFile(path.join(dir, 'config.toml'), config, { mode: 0o600 });
   const started = performance.now();
-  const child = spawn('/usr/bin/time', [platform() === 'darwin' ? '-l' : '-v', binary, '--exact', 'policy::wire::serve', '--ignored', '--nocapture', '--test-threads=1'], {
+  const fixtureEnv = { PARINS_FS_WIRE_CONFIG: path.join(dir, 'config.toml'), PARINS_FS_WIRE_RULES: rules, PARINS_FS_WIRE_ENGINE: engine, PARINS_FS_WIRE_DRIVER: mode.driver ?? 'root', LC_ALL: 'C' };
+  const fixtureArgs = [platform() === 'darwin' ? '-l' : '-v', binary, '--exact', 'policy::wire::serve', '--ignored', '--nocapture', '--test-threads=1'];
+  const unit = isolated ? `parins-fs-wire-${process.pid}-${path.basename(dir)}.service` : null;
+  const child = spawn(isolated ? 'sudo' : '/usr/bin/time', isolated ? ['-n', 'systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--service-type=exec', `--unit=${unit}`, `--uid=${process.getuid()}`, `--gid=${process.getgid()}`, `--working-directory=${dir}`, `--property=AllowedCPUs=${serviceCpus.join(',')}`, `--property=CPUAffinity=${serviceCpus.join(' ')}`, '--property=MemoryMax=4294967296', '--property=MemorySwapMax=0', '--property=KillMode=control-group', '--property=TimeoutStopSec=10s', '--property=RuntimeMaxSec=300s', ...Object.entries(fixtureEnv).map(([key, value]) => `--setenv=${key}=${value}`), '--', '/usr/bin/time', ...fixtureArgs] : fixtureArgs, {
     cwd: dir, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PARINS_FS_WIRE_CONFIG: path.join(dir, 'config.toml'), PARINS_FS_WIRE_RULES: rules, PARINS_FS_WIRE_ENGINE: engine, PARINS_FS_WIRE_DRIVER: mode.driver ?? 'root' },
+    env: { ...process.env, ...fixtureEnv },
   });
   let stdout = '', stderr = '', stopped = false, sampling;
+  const cancelOwnedUnit = () => {
+    if (isolated) spawnSync('sudo', ['-n', 'systemctl', 'stop', unit], { encoding: 'utf8', timeout: 15000 });
+  };
+  if (isolated) { process.on('SIGTERM', cancelOwnedUnit); process.on('SIGINT', cancelOwnedUnit); }
   child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
   const exited = new Promise((resolve, reject) => { child.on('close', resolve); child.on('error', reject); });
   const socket = dgram.createSocket('udp4');
@@ -139,8 +157,10 @@ async function run(engine, round, mode) {
     assert.equal(ready.driver, mode.driver ?? 'root');
     semanticDigest ??= ready.semantic_digest; assert.equal(ready.semantic_digest, semanticDigest);
     const port = Number(ready.dns.split(':').at(-1)), adminPort = Number(ready.metrics.split(':').at(-1));
-    const pid = Number(execFileSync('pgrep', ['-P', String(child.pid)], { encoding: 'utf8' }).trim().split('\n')[0]);
+    const pid = ready.pid;
     assert(Number.isSafeInteger(pid) && pid > 1, 'missing owned fixture PID');
+    const constraints = isolated ? await verifyLinuxServer(pid, unit, serviceCpus, driverCpus) : null;
+    if (isolated) await writeFile(path.join(dir, 'constraints-before.json'), JSON.stringify(constraints, null, 2), { mode: 0o600 });
     await new Promise(resolve => socket.bind(0, '127.0.0.1', resolve));
     const pending = new Map(); let active;
     socket.on('message', (wire, peer) => {
@@ -220,6 +240,7 @@ async function run(engine, round, mode) {
         sampling = new Promise(resolve => { sampler.on('error', error => resolve({ error: error.message, output })); sampler.on('close', code => resolve({ exit_code: code, output })); });
       }
       active = counters(); const upstreamBefore = upstreamCount, ecsBefore = ecsCount, errorsBefore = fixtureErrors.length;
+      const cgroupBefore = isolated ? await linuxUsage(constraints.hierarchy[0].directory) : null;
       const serverCpuBefore = diagnose ? serverCpu(pid) : null;
       const eventLoop = diagnose ? monitorEventLoopDelay({ resolution: 1 }) : null;
       eventLoop?.enable();
@@ -236,6 +257,7 @@ async function run(engine, round, mode) {
         }
       }));
       const end = performance.now(), elapsedMs = end - begin, cpu = process.cpuUsage(cpuBefore);
+      const cgroupAfter = isolated ? await linuxUsage(constraints.hierarchy[0].directory) : null;
       const utilization = performance.eventLoopUtilization(utilizationBefore);
       eventLoop?.disable();
       const serverCpuAfter = diagnose ? serverCpu(pid) : null;
@@ -252,6 +274,7 @@ async function run(engine, round, mode) {
         cache: delta.cache_hits === (hit ? count : 0) && delta.cache_misses === expectedUpstream,
         filtering: delta.query_blocked === (group.kind === 'query_blocked' ? count : 0) && delta.response_blocked === (group.kind.startsWith('cname') ? count : 0),
         no_server_drops: delta.udp_dropped === 0 && delta.dropped === 0,
+        no_cgroup_memory_failure: !isolated || ['max', 'oom', 'oom_kill'].every(key => cgroupAfter.memory_events[key] === cgroupBefore.memory_events[key]),
         diagnostic_timer_counts: !diagnose || (delta.request_duration_count === count && delta.upstream_duration_count === expectedUpstream),
       };
       const record = { engine, round, mode: mode.name, concurrency: mode.concurrency, offered_qps: mode.offered_qps, group: group.name, count, ...counts,
@@ -259,6 +282,7 @@ async function run(engine, round, mode) {
         p50_us: percentile(latencies, .5), p95_us: percentile(latencies, .95), p99_us: percentile(latencies, .99),
         scheduled_p50_us: percentile(scheduledLatencies, .5), scheduled_p95_us: percentile(scheduledLatencies, .95), scheduled_p99_us: percentile(scheduledLatencies, .99),
         client_cpu_user_secs: cpu.user / 1e6, client_cpu_system_secs: cpu.system / 1e6, client_cpu_percent_one_core: (cpu.user + cpu.system) / (elapsedMs * 10),
+        linux_cgroup: isolated ? { before: cgroupBefore, after: cgroupAfter, cpu_percent_one_core: (cgroupAfter.cpu.usage_usec - cgroupBefore.cpu.usage_usec) / (elapsedMs * 10), scope: 'service cgroup sample around group, including small sample-boundary scheduling overhead; memory.current is not process RSS' } : null,
         schedule_lag_p99_us: percentile(scheduleLags, .99), upstream: upstreamCount - upstreamBefore, upstream_ecs_verified: ecsCount - ecsBefore,
         warmup_requests: warming, warmup_upstream: warmupUpstream, warmup_checks: warmupChecks, metric_deltas: delta, fixture_errors: fixtureErrors.slice(errorsBefore), checks, correctness_passed: Object.values(checks).every(Boolean), fixture: dir,
         diagnostic: diagnose ? { receive_us: distribution(receiveLatencies), validation_us: distribution(validationLatencies), scheduled_us: distribution(scheduledLatencies), server_cpu_seconds: serverCpuAfter - serverCpuBefore,
@@ -275,12 +299,25 @@ async function run(engine, round, mode) {
       await writeFile(path.join(dir, 'sampler.json'), JSON.stringify(result));
       assert.equal(result.exit_code, 0, 'native sampler failed');
     }
+    const constraintsAfter = isolated ? await verifyLinuxServer(pid, unit, serviceCpus, driverCpus) : null;
+    if (isolated) await writeFile(path.join(dir, 'constraints-after.json'), JSON.stringify(constraintsAfter, null, 2), { mode: 0o600 });
     const stopping = performance.now(); process.kill(pid, 'SIGTERM'); const code = await bounded(exited, 15000, 'shutdown timeout'); stopped = true;
-    const lifecycle = { engine, round, mode: mode.name, startup_ms: startupMs, stop_ms: performance.now() - stopping, exit_code: code, semantic_digest: semanticDigest, ...resource(stderr), fixture: dir };
+    const lifecycle = { engine, round, mode: mode.name, startup_ms: startupMs, stop_ms: performance.now() - stopping, exit_code: code, semantic_digest: semanticDigest, ...resource(stderr), constraints_before: constraints, constraints_after: constraintsAfter, fixture: dir };
     await writeFile(path.join(dir, 'lifecycle.json'), JSON.stringify(lifecycle, null, 2), { mode: 0o600 }); console.log(JSON.stringify({ event: 'lifecycle', ...lifecycle }));
+    if (isolated) assert(lifecycle.max_rss_bytes > 0 && lifecycle.cpu_user_secs !== null && lifecycle.cpu_system_secs !== null, 'missing Linux resource measurements');
     assert.equal(code, 0);
   } finally {
+    if (isolated) { process.off('SIGTERM', cancelOwnedUnit); process.off('SIGINT', cancelOwnedUnit); }
     try { socket.close(); } catch { /* startup may fail before bind */ }
+    if (isolated && !stopped) {
+      // systemd owns this service, so killing the systemd-run client process
+      // group alone would leave the fixture running after an assertion fails.
+      const state = spawnSync('systemctl', ['show', '--property=LoadState', '--value', unit], { encoding: 'utf8', timeout: 5000 });
+      if (state.stdout?.trim() !== 'not-found') {
+        const cleanup = spawnSync('sudo', ['-n', 'systemctl', 'stop', unit], { encoding: 'utf8', timeout: 15000 });
+        if (cleanup.status !== 0) stderr += `\nOwned unit cleanup failed (${unit}): ${cleanup.error ?? cleanup.stderr}`;
+      }
+    }
     if (!stopped) { try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } await bounded(exited.catch(() => null), 2000, 'owned process group did not exit'); }
     await writeFile(path.join(dir, 'server.stdout'), stdout, { mode: 0o600 }); await writeFile(path.join(dir, 'server.stderr'), stderr, { mode: 0o600 });
   }

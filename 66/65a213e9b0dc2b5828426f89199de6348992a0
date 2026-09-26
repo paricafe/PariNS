@@ -1,0 +1,24 @@
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_1b7025976757e9 759
+scripts/test-certificate-renewal-systemd.py
+  s_d595d238bbd4ee::t_910b193f25e383 305-306
+  s_d595d238bbd4ee::t_1b7025976757e9 1-14,16-74,76-137,162-262,266-269,271-284,287-289,291-295,297-304,307-344,348,350-354
+  s_d595d238bbd4ee::t_e3236edfa2803f 75,263-265,270,285-286,290,345-347,349
+  s_d595d238bbd4ee::t_c4f1b07e6fbbe0 15,138-161,296
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6665a213e9b0dc2b5828426f89199de6348992a0",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

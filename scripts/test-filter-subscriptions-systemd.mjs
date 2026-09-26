@@ -58,10 +58,11 @@ function privilegedRead(file, maxBuffer = 256 * 1024) {
   return execFileSync('sudo', ['-n', 'cat', file], { maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-function selected(evidence) {
+function selected(evidence, rootsSynchronized = true) {
   const catalog = JSON.parse(privilegedRead(`${directory}/catalog.json`));
   const record = catalog.records.find(item => item.fingerprint === evidence.fingerprint);
-  assert(record && catalog.current.includes(record.fingerprint), 'Config-selected source remains rooted');
+  assert(record, 'catalog retains the selected source content');
+  if (rootsSynchronized) assert(catalog.current.includes(record.fingerprint), 'Config-selected source remains rooted');
   assert.equal(record.sha256, evidence.sha256);
   return catalog;
 }
@@ -129,7 +130,11 @@ if (stage === 'activate') {
   const toml = `${config.toml}\n[updates]\nauto_check = false\n[filter_subscriptions]\nenabled = true\nmax_rules = 1000000\nmax_memory_bytes = 268435456\nmax_disk_bytes = 268435456\n[[filter_subscriptions.sources]]\nid = "${source.id}"\nname = "Pinned CI source"\nurl = "${source.url}"\nformat = "domain_list"\nenabled = true\nauto_update = false\nupdate_interval_hours = 24\n`;
   await request('POST', '/api/config/validate', { toml });
   await request('PUT', '/api/config', { revision: config.revision, toml });
+  const saved = await request('GET', '/api/config');
+  assert(saved.toml === toml, 'Config save retains the enabled source');
+  assert.equal(saved.revision, config.revision + 1);
   const state = await snapshot();
+  assert.equal(state.config_revision, saved.revision);
   const active = state.sources.find(item => item.id === source.id);
   assert(active?.active && active.ready && active.input_rules > 0);
   assert.equal(state.unavailable_reason, null);
@@ -137,7 +142,10 @@ if (stage === 'activate') {
     sha256: prepared.sha256, fingerprint: active.fingerprint, domain,
     config_revision: state.config_revision, content_revision: state.content_revision,
     input_rules: state.input_rules, index_rules: state.index_rules };
-  selected(evidence);
+  // Config owns activation. Its successful commit has no second catalog commit:
+  // GC roots are synchronized at the next worker admission or non-frozen open.
+  // Keep the root assertion for the following actual restart/refresh stages.
+  selected(evidence, false);
   await blocked(evidence);
   await writeFile(evidencePath, JSON.stringify(evidence) + '\n', { mode: 0o600, flag: 'wx' });
   return { stage, result: 'passed', ...evidence };

@@ -1,0 +1,19 @@
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_e43a01bfb3f8fa 593-594,614-615,617-636,652-653
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f0b499465e0ebe8fd370967472878e28868420cd",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

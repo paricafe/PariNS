@@ -332,17 +332,40 @@ if "$filter_subscriptions"; then
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" activate "$fixture"
     revision=$(jq -er '.config_revision' "$fixture/filter-evidence.json")
     sudo cat /var/lib/parins-managed/state.json > "$fixture/state-copy"
-    test "$(systemctl show --property=DynamicUser --value parins-managed.service)" = yes
+    fs_dynamic=$(systemctl show --property=DynamicUser --value parins-managed.service)
     fs_pid=$(systemctl show --property=MainPID --value parins-managed.service)
+    printf 'FS7 permissions: DynamicUser=%s MainPID=%s\n' "$fs_dynamic" "$fs_pid"
+    [ "$fs_dynamic" = yes ] && [ "$fs_pid" -gt 0 ] || {
+        printf '%s\n' 'FS7 permissions: expected DynamicUser=yes and live MainPID.' >&2
+        exit 1
+    }
+    sudo awk '/^(Uid|Gid):/ {print "FS7 process credentials: " $0}' "/proc/$fs_pid/status"
     fs_uid=$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_pid/status")
-    test "$fs_uid" -gt 0
+    [ "$fs_uid" -gt 0 ] || { printf 'FS7 permissions: expected non-root UID, actual=%s\n' "$fs_uid" >&2; exit 1; }
     fs_hash=$(jq -er '.sha256' "$fixture/filter-evidence.json")
-    for relative in filter-subscriptions filter-subscriptions/objects filter-subscriptions/indexes; do
-        test "$(sudo "$fs_nsenter" --target "$fs_pid" --mount -- "$fs_stat" -c '%u:%a' "/var/lib/parins-managed/$relative")" = "$fs_uid:700"
+    fs_permission_errors=0
+    for relative in filter-subscriptions filter-subscriptions/objects filter-subscriptions/indexes \
+        filter-subscriptions/catalog.json "filter-subscriptions/objects/$fs_hash.txt"; do
+        case "$relative" in *.json|*.txt) fs_mode=600 ;; *) fs_mode=700 ;; esac
+        fs_path="/var/lib/parins-managed/$relative"
+        fs_mnt=$(sudo "$fs_nsenter" --target "$fs_pid" --mount -- "$fs_stat" -c '%u:%g:%a:%d:%i' "$fs_path") || fs_mnt=stat_failed
+        fs_actual=$(printf '%s\n' "$fs_mnt" | awk -F: '{print $1 ":" $3}')
+        printf 'FS7 permissions: %s expected uid:mode=%s:%s actual=%s\n' \
+            "$relative" "$fs_uid" "$fs_mode" "$fs_actual"
+        if [ "$fs_actual" != "$fs_uid:$fs_mode" ]; then
+            printf 'FS7 permissions FAILED: %s expected uid:mode=%s:%s actual=%s\n' \
+                "$relative" "$fs_uid" "$fs_mode" "$fs_actual" >&2
+            # Failure-only numeric metadata. Distinguish id-mapped backing from
+            # the process root without following leaf symlinks or dumping env.
+            fs_host=$(sudo "$fs_stat" -c '%u:%g:%a:%d:%i' "$fs_path") || fs_host=stat_failed
+            fs_proc=$(sudo "$fs_stat" -c '%u:%g:%a:%d:%i' "/proc/$fs_pid/root$fs_path") || fs_proc=stat_failed
+            fs_root=$(sudo "$fs_nsenter" --target "$fs_pid" --mount --root --wd=/ -- "$fs_stat" -c '%u:%g:%a:%d:%i' "$fs_path") || fs_root=stat_failed
+            printf 'FS7 stat %s (uid:gid:mode:dev:ino): host=%s mount=%s process_root=%s entered_root=%s\n' \
+                "$relative" "$fs_host" "$fs_mnt" "$fs_proc" "$fs_root" >&2
+            fs_permission_errors=$((fs_permission_errors + 1))
+        fi
     done
-    for relative in filter-subscriptions/catalog.json "filter-subscriptions/objects/$fs_hash.txt"; do
-        test "$(sudo "$fs_nsenter" --target "$fs_pid" --mount -- "$fs_stat" -c '%u:%a' "/var/lib/parins-managed/$relative")" = "$fs_uid:600"
-    done
+    [ "$fs_permission_errors" -eq 0 ] || exit 1
     # Reject only this DynamicUser's external HTTPS. Both families are covered;
     # the already-present rules precede restart. A changed UID fails this fixture
     # instead of incorrectly claiming that the new process started offline.

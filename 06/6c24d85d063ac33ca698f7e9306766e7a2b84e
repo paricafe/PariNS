@@ -1,0 +1,24 @@
+scripts/test-update-reboot.py
+  s_d595d238bbd4ee::t_58cb4903b1c5d0 250-256,264
+scripts/test-update-reboot-guest.py
+  s_d595d238bbd4ee::t_58cb4903b1c5d0 20-49,175,178-179,182,247-250
+  s_d595d238bbd4ee::t_d7ddcc890c58e2 176-177
+scripts/test-update-reboot-tests.py
+  s_d595d238bbd4ee::t_58cb4903b1c5d0 10,23-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "066c24d85d063ac33ca698f7e9306766e7a2b84e",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

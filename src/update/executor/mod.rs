@@ -377,14 +377,7 @@ impl Executor {
                 }
                 self.commit(&mut journal).await
             }
-            Request::Abort {} => {
-                let op = matching(&journal, &request)?;
-                if op.status.phase.precommit() {
-                    self.finish(&mut journal, Phase::Aborted, Some("preflight_failed"))?;
-                }
-                // Persisted terminal is the irreversible fence against late commit.
-                self.publish(&journal)
-            }
+            Request::Abort {} => self.abort(&mut journal, &request),
             Request::VerifyRecovery {} => {
                 let op = matching(&journal, &request)?;
                 ensure!(
@@ -403,6 +396,15 @@ impl Executor {
             }
         }
     }
+    fn abort(&self, journal: &mut Journal, inbox: &Inbox) -> Result<()> {
+        let op = matching(journal, inbox)?;
+        if op.status.phase.precommit() {
+            self.finish(journal, Phase::Aborted, Some("preflight_failed"))?;
+        }
+        // Persisted terminal is the irreversible fence against late commit.
+        self.publish(journal)
+    }
+
     async fn stage(&mut self, journal: &mut Journal, inbox: &Inbox) -> Result<()> {
         let Request::Stage {
             download,
@@ -1050,6 +1052,59 @@ async fn validate_units() -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn consume_abort_fixture(
+    path: &Path,
+    status: &PublicStatus,
+    inbox: &[u8],
+) -> Result<PublicStatus> {
+    // Only the filesystem/installation fixture is substituted: parsing, matching,
+    // Abort arbitration, journal durability and public-status publication are real.
+    let executor = Executor {
+        root: Dir::open(path, false)?,
+        private: Dir::open(path, false)?,
+        live: Dir::open(path, false)?,
+        staging: Dir::open(path, false)?,
+        _lock: std::fs::File::create(path.join("lock"))?,
+    };
+    let mut journal = Journal {
+        schema: 1,
+        installed: status.installed.clone(),
+        operation: Some(Operation {
+            status: status
+                .active_operation
+                .clone()
+                .context("fixture active operation")?,
+            old: status.installed.clone(),
+            candidate: status.installed.clone(),
+            invocation_id: "f".repeat(32),
+            config_revision: 2,
+            started_at_ms: now_ms(),
+            rollback_attempted: false,
+            rollback_started: false,
+            pending_launch: status.pending_launch.clone(),
+        }),
+        last_operation: status.last_operation.clone(),
+        installation_pending: None,
+    };
+    executor.persist(&journal)?;
+    let request = Inbox::parse(inbox)?;
+    ensure!(
+        matches!(request.request, Request::Abort {}),
+        "expected abort"
+    );
+    executor.abort(&mut journal, &request)?;
+    let saved: Journal = serde_json::from_slice(&std::fs::read(path.join("journal.json"))?)?;
+    let published: PublicStatus =
+        serde_json::from_slice(&std::fs::read(path.join("status.json"))?)?;
+    ensure!(
+        serde_json::to_value(saved.status().last_operation)?
+            == serde_json::to_value(&published.last_operation)?,
+        "fence not durable"
+    );
+    Ok(published)
 }
 
 #[cfg(test)]

@@ -18,6 +18,8 @@
   old requests still hold a retired policy, including with unavailable source storage.
 - Reclaim unreferenced prepared subscriptions under disk pressure before admitting
   downloads, while preserving configured sources and work-pinned material.
+- Recover interrupted update intents through root Abort arbitration after a
+  management restart; retain the freeze until the matching durable outcome is known.
 - Avoid hashing the executable at startup for independent management instances
   that cannot participate in the Linux updater installation protocol.
 - Fix successful managed reinstalls reporting a cleanup error after releasing

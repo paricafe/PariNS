@@ -304,4 +304,128 @@ sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/parins/tls/external.pem > "$fixture/tls-after"
 cmp "$fixture/tls-before" "$fixture/tls-after"
 sudo grep -Fxq 'external certificate sentinel' /var/lib/parins/tls/external.pem
-printf '%s\n' 'Linux systemd directory ownership, external TLS, HOME errors, setup, UDP/TCP DNS, state-preserving upgrade and read-only preflight rejection passed.'
+
+# Reproduce a crash after durable app intent, before Commit reaches the inbox.
+# Only this disposable fixture injects journal state; no candidate is executed
+# or downloaded, and the root installed identity remains the actual binary.
+old_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
+recovery_invocation=$(systemctl show --property=InvocationID --value parins-update-recovery.service)
+sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
+sudo python3 - "$old_invocation" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+app = Path('/var/lib/parins-managed')
+private = Path('/var/lib/parins-updater/private')
+journal_path = private / 'journal.json'
+journal = json.loads(journal_path.read_text())
+assert journal['operation'] is None and journal['installation_pending'] is None
+assert not (app / 'update-request.json').exists()
+installed = journal['installed']
+build = installed['build']
+operation_id, nonce = 'b' * 32, 'c' * 32
+stamp = int(time.time() * 1000)
+size = Path('/opt/parins-managed/parins').stat().st_size
+tag = 'v' + build['version']
+# Export the installed schema/contract values rather than guessing a release
+# identity. Both artifact descriptors are inert: this fixture only sends Abort.
+manifest = {key: build[key] for key in (
+    'version', 'source_commit', 'update_protocol', 'install_contract',
+    'durable_contract_epoch', 'runtime_database_format',
+    'cache_snapshot_format', 'cache_semantics')}
+manifest.update(schema=1, repository='paricafe/PariNS', tag=tag,
+                min_helper_protocol=build['helper_protocol'], upgrade_mode='in_place',
+                artifacts=[dict(target=arch + '-unknown-linux-musl',
+                                name=f'parins-{tag}-linux-{arch}.bin',
+                                size=size, sha256=installed['sha256'])
+                           for arch in ('x86_64', 'aarch64')])
+asset = next(a for a in manifest['artifacts'] if a['target'] == build['target'])
+download = dict(release_id=1, tag=tag, asset_id=1, asset_name=asset['name'],
+                size=size, sha256=installed['sha256'],
+                manifest_sha256=hashlib.sha256(json.dumps(manifest).encode()).hexdigest())
+status = dict(operation_id=operation_id, phase_nonce=nonce, phase='staged',
+              version=build['version'], reason=None, updated_at_ms=stamp,
+              downloaded_bytes=size, total_bytes=size)
+journal['operation'] = dict(status=status, old=installed, candidate=installed,
+                            invocation_id=sys.argv[1], config_revision=1,
+                            started_at_ms=stamp, rollback_attempted=False,
+                            rollback_started=False, pending_launch=None)
+state_path = app / 'update-state.json'
+# These are AppState/CheckState's current serialized defaults. A prior checker
+# envelope is retained if present; no release lookup is needed for this fixture.
+state = json.loads(state_path.read_text()) if state_path.exists() else dict(
+    schema=1, check=dict(validated=False, etag=None, last_check_at_ms=None,
+                        last_success_at_ms=None, next_check_at_ms=0, retry_at_ms=0,
+                        failures=0, error=None, manual=False),
+    candidate=None, plan=None, operation=None, commit_intent=None)
+state['check']['next_check_at_ms'] = stamp + 3600000
+state['plan'] = None
+state['commit_intent'] = operation_id
+state['operation'] = dict(plan_id='a' * 32, expected_version=build['version'],
+                          config_revision=1, operation_id=operation_id, phase_nonce=nonce,
+                          invocation_id=sys.argv[1], download=download, manifest=manifest,
+                          phase='committing', reason=None, finished=False)
+
+def replace(path, value, owner):
+    temporary = path.with_name('.recovery-fixture-' + path.name)
+    with temporary.open('x') as output:
+        os.fchmod(output.fileno(), 0o600)
+        os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
+        json.dump(value, output)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+replace(journal_path, journal, journal_path.stat())
+replace(state_path, state, (app / 'state.json').stat())
+PY
+test "$(sudo stat -c '%u:%g:%a' /var/lib/parins-managed/update-state.json)" = "$(sudo stat -c '%u:%g:%a' /var/lib/parins-managed/state.json)"
+test "$(sudo stat -c '%u:%a' /var/lib/parins-updater/private/journal.json)" = '0:600'
+test "$(sudo stat -c '%u:%a' /var/lib/parins-updater/private)" = '0:700'
+sudo /usr/libexec/parins-updater recover
+sudo systemctl start parins-managed.service
+test "$(systemctl show --property=InvocationID --value parins-managed.service)" != "$old_invocation"
+test "$(systemctl show --property=InvocationID --value parins-update-recovery.service)" = "$recovery_invocation"
+attempt=0
+until sudo test -f /var/lib/parins-managed/update-request.json; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 15 ] || { printf '%s\n' 'Restart did not request root abort arbitration.' >&2; exit 1; }
+    sleep 1
+done
+sudo jq -e '.operation_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .phase_nonce == "cccccccccccccccccccccccccccccccc" and .request.kind == "abort"' /var/lib/parins-managed/update-request.json >/dev/null
+sudo jq -e '.commit_intent != null and .operation.finished == false' /var/lib/parins-managed/update-state.json >/dev/null
+http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' \
+    --data-binary "@$fixture/credentials.json" http://127.0.0.1:3000/api/login > "$fixture/response.json"
+binding=$(jq -er '.session.binding' "$fixture/response.json")
+reload_status=$(curl --silent --show-error --noproxy '*' --max-time 5 \
+    --cookie "$fixture/cookies.txt" -H 'Origin: http://127.0.0.1:3000' \
+    -H "X-PariNS-Session: $binding" -H 'Content-Type: application/json' \
+    --data '{"revision":1}' --output "$fixture/response.json" --write-out '%{http_code}' \
+    http://127.0.0.1:3000/api/certificates/reload)
+[ "$reload_status" = 409 ]
+jq -e '.error.code == "update_in_progress"' "$fixture/response.json" >/dev/null
+sudo systemctl start parins-updater.path
+attempt=0
+until sudo jq -e '.commit_intent == null and .operation.finished == true and .operation.phase == "aborted"' /var/lib/parins-managed/update-state.json >/dev/null; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 15 ] || { printf '%s\n' 'Root abort fence did not reconcile interrupted intent.' >&2; exit 1; }
+    sleep 1
+done
+sudo jq -e '.operation.status.operation_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .operation.status.phase_nonce == "cccccccccccccccccccccccccccccccc" and .operation.status.phase == "aborted" and .last_operation == .operation.status and .installed == .operation.old' /var/lib/parins-updater/private/journal.json >/dev/null
+! sudo test -e /var/lib/parins-managed/update-request.json
+http --max-time 5 -H 'Origin: http://127.0.0.1:3000' -H "X-PariNS-Session: $binding" \
+    -H 'Content-Type: application/json' --data '{"revision":1}' \
+    http://127.0.0.1:3000/api/certificates/reload | jq -e '.outcome == "unchanged"' >/dev/null
+sudo cmp "$binary" /opt/parins-managed/parins
+sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
+check_dns
+printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

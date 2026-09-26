@@ -156,6 +156,8 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   Check the freeze under the existing mutation permit; release that permit
   before root waits for normal SIGTERM. Unknown helper outcomes never unlock by
   timeout. Only a matching terminal fence and installed identity resolve intent.
+  A new invocation drives existing Abort arbitration for unfinished old work;
+  root fences precommit work without changing an already committed operation.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners. Candidate preflight runs as the existing app user;
   root never executes the candidate. Root journal is the sole installed anchor,

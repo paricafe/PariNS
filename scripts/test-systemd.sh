@@ -756,4 +756,5 @@ PY
     fs_fault_identity
     printf '%s\n' 'FS7 download, activation, DNS, DynamicUser, offline LKG, UP freeze and actual staging-write ENOSPC/recovery passed. Performance remains a separate gate.'
 fi
+python3 "$repo/scripts/test-certificate-renewal-systemd.py" --ephemeral-ci "$fixture"
 printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

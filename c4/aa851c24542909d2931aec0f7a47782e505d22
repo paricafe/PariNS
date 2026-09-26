@@ -1,0 +1,23 @@
+AGENTS.md
+  s_d595d238bbd4ee::t_a42c067e1055b6 207-208
+.github/workflows/ci.yml
+  s_d595d238bbd4ee::t_a42c067e1055b6 55-64
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_66d39dddad7499 199-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c4aa851c24542909d2931aec0f7a47782e505d22",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

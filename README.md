@@ -826,6 +826,18 @@ clients. The installer never changes host DNS, firewall, trust stores or other
 applications. No measured local loopback result proves public DoQ reachability or
 capacity on a 2 vCPU/2 GiB VPS.
 
+For an independent public DoQ check, manually run **Public DNS acceptance** in
+GitHub Actions with your server's public IP, certificate hostname and UDP port.
+It sends one `example.com. A` query, verifies the public CA, hostname, ALPN and DNS
+response, and retains a small JSON result. No server credentials are needed. A
+pass proves that address family and network path at that time, not capacity or
+reachability from every client; ordinary CI does not contact your deployment.
+
+**Update boot recovery** runs a separate, disposable Linux VM controlled by a
+GitHub runner. It checks normal reboot and interrupted precommit recovery using
+a development package. It does not reboot the runner or a deployment, and does
+not establish official-version upgrade/rollback, power-loss recovery or capacity.
+
 ## Upstream DNS settings
 
 **Upstream DNS settings** is the sole visual upstream editor, for one or more

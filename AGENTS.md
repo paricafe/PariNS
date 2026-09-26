@@ -218,6 +218,15 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   `.github/workflows/filter-acceptance.yml` runs the isolated subscription service
   and fixed-resource wire fixtures; their `--ephemeral-ci` guards must remain intact.
   Static trie/radix comparisons do not establish subscription lifecycle or VPS capacity.
+  `public-dns-acceptance.yml` is manual-only and takes an explicitly selected public
+  endpoint. Keep its one-query deadline and normal certificate verification; never
+  hardcode deployment targets or add production credentials to CI. A successful
+  probe proves only that address family and external path, not capacity.
+  `update-recovery.yml` controls a disposable QEMU guest from a hosted runner.
+  Keep the host guard, pinned image digest, pinned guest SSH identity and private
+  cleanup. Never reboot the runner or fake hosted-runner flags inside a guest.
+  Development-build boot/precommit recovery is not official upgrade/rollback,
+  hard-power-loss recovery or a capacity measurement.
 - Dependency/security changes: use the dependency audit configured in CI.
 - Documentation-only changes: check referenced paths/commands, review the diff, and
   run `git diff --check`; a full application build is not required.

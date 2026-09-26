@@ -1,0 +1,30 @@
+.gitignore
+  s_d595d238bbd4ee::t_080227abc2e58e 6-7
+AGENTS.md
+  s_d595d238bbd4ee::t_60d958ad02a837 218-220
+.github/workflows/filter-acceptance.yml
+  s_d595d238bbd4ee::t_080227abc2e58e 67-68
+  s_d595d238bbd4ee::t_0fba6a63aa2c78 48-50
+  s_d595d238bbd4ee::t_3dcade2edae79a 1,4-47,51-66,69-77
+  s_d595d238bbd4ee::t_24a044fb7e8b95 2-3
+.github/workflows/release.yml
+  s_d595d238bbd4ee::t_0fba6a63aa2c78 80-82
+.github/workflows/ci.yml
+  s_d595d238bbd4ee::t_0fba6a63aa2c78 53-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "33042a283bfc4a1cf5231c2335cf681fdee2065d",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

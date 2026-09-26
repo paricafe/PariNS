@@ -1,0 +1,19 @@
+scripts/test-filter-subscriptions-systemd.mjs
+  s_d595d238bbd4ee::t_6f1b40e1db4ed7 25-37,53-56,225,227-228,230-231
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8b000c551ff32b5b67f756f7e9b0e57047cffecb",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

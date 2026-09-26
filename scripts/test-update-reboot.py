@@ -45,6 +45,59 @@ def probe_failure(error):
     return detail
 
 
+def cloud_init_summary(payload):
+    """Only fixed status/category names and counts may leave cloud-init output."""
+    if len(payload) > 1048576:
+        return {'format': 'oversized'}
+    try:
+        value = json.loads(payload)
+    except (ValueError, UnicodeError):
+        return {'format': 'invalid_json'}
+    if not isinstance(value, dict):
+        return {'format': 'invalid_json'}
+    statuses = ('not started', 'running', 'done', 'error - done', 'error - running',
+                'degraded done', 'degraded running', 'disabled')
+    detail = {key: value.get(key) if value.get(key) in statuses else 'unknown'
+              for key in ('status', 'extended_status')}
+    detail['stages'] = {}
+    for name in ('overall', 'init-local', 'init', 'modules-config', 'modules-final'):
+        stage = value if name == 'overall' else value.get(name)
+        if not isinstance(stage, dict):
+            continue
+        errors = stage.get('errors', [])
+        warnings = stage.get('recoverable_errors', {})
+        messages = list(errors) if isinstance(errors, list) else []
+        counts = {}
+        if isinstance(warnings, dict):
+            for level in ('WARNING', 'DEPRECATED', 'ERROR'):
+                items = warnings.get(level, [])
+                if isinstance(items, list) and items:
+                    counts[level] = len(items)
+                    messages.extend(items)
+        # No dynamic module names, schema paths, messages or keys are echoed.
+        text = '\n'.join(item[:4096].lower() for item in messages[:32] if isinstance(item, str))
+        categories = [category for marker, category in (
+            ('schema', 'schema'), ('ssh_genkeytypes', 'ssh_genkeytypes'),
+            ('deprecat', 'deprecated'), ('cc_ssh', 'ssh_module'),
+            ('cc_users_groups', 'users_groups_module'), ('cc_write_files', 'write_files_module'))
+            if marker in text]
+        detail['stages'][name] = {'errors': len(errors) if isinstance(errors, list) else 0,
+                                 'recoverable_counts': counts, 'categories': categories}
+    return detail
+
+
+def wait_cloud_init(ssh, observation):
+    try:
+        command(ssh + ['sudo', '-n', 'cloud-init', 'status', '--wait', '--format=json'], timeout=120)
+    except subprocess.CalledProcessError as error:
+        if error.returncode not in (1, 2):
+            raise  # SSH transport failures remain bounded readiness probes.
+        observation['last_failure'] = probe_failure(error)
+        observation['cloud_init'] = cloud_init_summary(error.output)
+        # --wait has completed with an error. Repeating cannot repair this boot.
+        raise RuntimeError('cloud-init terminal failure') from None
+
+
 def serial_markers(path):
     # Only fixed booleans leave the private log. Never publish raw serial text:
     # cloud-init can print identities and user data when its own setup fails.
@@ -130,7 +183,7 @@ def main():
                      'ssh_pwauth': False, 'disable_root': True,
                      'ssh_keys': {'ed25519_private': (root / 'host').read_text(),
                                   'ed25519_public': (root / 'host.pub').read_text().strip()},
-                     'ssh_genkeytypes': [], 'ssh_deletekeys': False,
+                     'ssh_deletekeys': False,
                      'write_files': [{'path': '/etc/parins-up6-fixture', 'owner': 'root:root',
                                       'permissions': '0600', 'content': marker + '\n'}]}
             (root / 'user-data').write_text('#cloud-config\n' + json.dumps(cloud))
@@ -173,7 +226,7 @@ def main():
                         observation['boot_changed'] = previous is None or boot != previous
                         if previous is None or boot != previous:
                             observation['probe'] = 'cloud_init'
-                            command(ssh + ['sudo', '-n', 'cloud-init', 'status', '--wait'], timeout=120)
+                            wait_cloud_init(ssh, observation)
                             observation['ready'] = True
                             observation.pop('last_failure', None)
                             return boot

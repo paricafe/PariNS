@@ -19,6 +19,29 @@ def load(name):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_cloud_init_terminal_error_is_not_retried_or_accepted(self):
+        host = load('test-update-reboot')
+        private = 'PRIVATE_KEY_SEED_CREDENTIAL'
+        payload = json.dumps({'status': 'done', 'extended_status': 'degraded done',
+            'detail': private, 'init': {'errors': [], 'recoverable_errors': {'WARNING': [
+                'cloud config schema: ssh_genkeytypes invalid ' + private], private: [private]}}}).encode()
+        for code in (1, 2):
+            observation = {}
+            with patch.object(host, 'command', side_effect=subprocess.CalledProcessError(
+                    code, ['private-command'], output=payload, stderr=private.encode())) as command:
+                with self.assertRaises(RuntimeError):
+                    host.wait_cloud_init(['ssh'], observation)
+                command.assert_called_once()
+            self.assertEqual(observation['last_failure']['returncode'], code)
+            summary = observation['cloud_init']
+            self.assertEqual(summary['extended_status'], 'degraded done')
+            self.assertEqual(summary['stages']['init']['categories'], ['schema', 'ssh_genkeytypes'])
+            self.assertNotIn(private, json.dumps(observation))
+        with patch.object(host, 'command', side_effect=subprocess.CalledProcessError(255, ['ssh'])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                host.wait_cloud_init(['ssh'], {})
+        self.assertEqual(host.cloud_init_summary(private.encode()), {'format': 'invalid_json'})
+
     def test_boot_diagnostics_never_return_private_command_or_log_text(self):
         host = load('test-update-reboot')
         private = b'PRIVATE_KEY_SEED_CREDENTIAL'

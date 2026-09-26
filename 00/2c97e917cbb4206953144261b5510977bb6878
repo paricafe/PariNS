@@ -1,0 +1,39 @@
+scripts/test-update-reboot.py
+  s_d595d238bbd4ee::t_530f2deee8d440 8,49-52,141-153,187-188
+  s_d595d238bbd4ee::t_0592e0fb030406 1-7,9-48,53-55,59-140,154-186,189-210
+  s_d595d238bbd4ee::t_3335e905667b83 56-58
+AGENTS.md
+  s_d595d238bbd4ee::t_ea38c02d6d7880 221-224
+  s_d595d238bbd4ee::t_6ee9f9703c4d98 225-229
+scripts/test-update-reboot-guest.py
+  s_d595d238bbd4ee::t_1bd56c28f258b9 1-12,14-75,78,80-91,101,111-123,125-159,161-218,222
+  s_d595d238bbd4ee::t_530f2deee8d440 13,92-100,102-110
+  s_d595d238bbd4ee::t_3335e905667b83 76-77,79,160,219-221
+  s_d595d238bbd4ee::t_a0d8fd9ddbe215 124
+.github/workflows/update-recovery.yml
+  s_d595d238bbd4ee::t_0592e0fb030406 1-35,37-38,40-50
+  s_d595d238bbd4ee::t_530f2deee8d440 36,39
+README.md
+  s_d595d238bbd4ee::t_ea38c02d6d7880 829-835
+  s_d595d238bbd4ee::t_6ee9f9703c4d98 836-840
+scripts/test-update-reboot-tests.py
+  s_d595d238bbd4ee::t_3335e905667b83 10,21-32
+  s_d595d238bbd4ee::t_da3393c5336fbd 1-3,5,9,11-20,61-89
+  s_d595d238bbd4ee::t_09b73ebf9145fd 4,6-8,33-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "002c97e917cbb4206953144261b5510977bb6878",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+src/update/executor/fs_tests.rs
+  s_d595d238bbd4ee::t_cb1ceac2d944d6 69-75,78-82,88-94,96-97
+  s_d595d238bbd4ee::t_50e50a978cf422 83
+  s_d595d238bbd4ee::t_d9a1869de9dc98 84-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "be54348040fcca8030d7757feb375b050adc6709",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

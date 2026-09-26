@@ -338,6 +338,24 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
     let directory = temporary.path().join("state");
     let setup_server = Management::start(&directory).await;
     let address = setup_server.address;
+    // DNS binds TCP first and then UDP on the same port. Preselect a port
+    // available to both protocols; release it before the public setup API binds.
+    let (dns_tcp, dns_udp) = {
+        let mut pair = None;
+        for _ in 0..16 {
+            let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            match UdpSocket::bind(tcp.local_addr().unwrap()).await {
+                Ok(udp) => {
+                    pair = Some((tcp, udp));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                Err(error) => panic!("DNS UDP reservation failed: {error}"),
+            }
+        }
+        pair.expect("reserve a DNS port available to TCP and UDP")
+    };
+    let dns_address = dns_tcp.local_addr().unwrap();
     let first = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
     let second = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
     let cert = temporary.path().join("signal-cert.pem");
@@ -345,11 +363,12 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
     write_identity(&cert, &key, &first);
     let candidate = format!(
         "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
-        configuration(),
+        configuration().replacen("127.0.0.1:0", &dns_address.to_string(), 1),
         json!(cert),
         json!(key)
     );
     let setup = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    drop((dns_tcp, dns_udp));
     setup_server
         .setup_with(&setup, &candidate)
         .await

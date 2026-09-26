@@ -30,6 +30,8 @@ struct Node {
 pub struct Policy {
     enabled: bool,
     root: Arc<Node>,
+    #[cfg(test)]
+    wire: Option<Arc<wire::Injection>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -99,6 +101,8 @@ impl TryFrom<Rules> for Policy {
         Ok(Self {
             enabled: rules.enabled,
             root: Arc::new(root),
+            #[cfg(test)]
+            wire: None,
         })
     }
 }
@@ -106,6 +110,10 @@ impl TryFrom<Rules> for Policy {
 impl Policy {
     /// Digest the loaded rules, independent of declaration and HashMap order.
     pub fn semantic_digest(&self) -> [u8; 32] {
+        #[cfg(test)]
+        if let Some(injection) = &self.wire {
+            return injection.digest;
+        }
         use sha2::{Digest, Sha256};
         fn visit(node: &Node, hash: &mut Sha256) {
             hash.update([
@@ -149,6 +157,17 @@ impl Policy {
     pub fn blocks(&self, name: &Name) -> bool {
         if !self.enabled {
             return false;
+        }
+        #[cfg(test)]
+        if let Some(injection) = &self.wire
+            && let Some(index) = &injection.radix
+        {
+            return index.lookup(name).is_some_and(|matched| {
+                matches!(
+                    matched.group,
+                    compact::Group::BlockSuffix | compact::Group::BlockExact
+                )
+            });
         }
         let normalized = name.to_lowercase();
         let mut labels = normalized.iter().rev().peekable();
@@ -209,3 +228,13 @@ impl Policy {
 
 #[cfg(test)]
 mod tests;
+
+// Subscription parsing is available independently of the experimental indexes.
+#[allow(dead_code)]
+pub(crate) mod canonical;
+
+#[cfg(test)]
+mod compact;
+
+#[cfg(test)]
+mod wire;

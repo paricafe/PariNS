@@ -5,8 +5,10 @@ import http.client
 import json
 import os
 from pathlib import Path
+import pwd
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -17,6 +19,7 @@ JOURNAL = Path('/var/lib/parins-updater/private/journal.json')
 EVIDENCE = Path('/root/up6-evidence.json')
 CREDS = Path('/root/up6-credentials.json')
 UNIT = 'parins-managed.service'
+CHECK_CONFIG = Path('/home/up6/up6-config-check.toml')
 SETUP_CONFIG = ('listen = "127.0.0.1:15353"\nquery_timeout_ms = 100\n'
                 'tcp_io_timeout_ms = 1000\nshutdown_grace_ms = 1000\n'
                 'max_inflight = 16\nmax_tcp_connections = 8\n'
@@ -47,6 +50,27 @@ def setup(api, credentials, token):
         if status != 409 or rejected.diagnostic['code'] != 'update_in_progress' or attempt == 3:
             raise rejected
         time.sleep(1)  # Only an explicit non-accepted rejection may be retried.
+
+
+def check_config():
+    user = pwd.getpwnam('up6')
+    # A dropped-UID process cannot reopen the root-owned stdin pipe on Linux.
+    # This exact guest-only file contains the same configuration sent to setup.
+    with CHECK_CONFIG.open('x') as output:
+        os.fchmod(output.fileno(), 0o600)
+        os.fchown(output.fileno(), user.pw_uid, user.pw_gid)
+        output.write(SETUP_CONFIG)
+    try:
+        info = CHECK_CONFIG.lstat()
+        assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+        assert (info.st_uid, info.st_gid) == (user.pw_uid, user.pw_gid)
+        assert CHECK_CONFIG.resolve(strict=True) == CHECK_CONFIG
+        subprocess.run(['sudo', '-n', '-u', 'up6', '/opt/parins-managed/parins',
+                        '--config', str(CHECK_CONFIG), '--check'],
+                       check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=60)
+    finally:
+        CHECK_CONFIG.unlink()
 
 
 def run(*args):
@@ -173,10 +197,7 @@ def main():
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         run('sh', '/home/up6/package/install.sh')
         # Exercise the actual Config parser before sending a setup mutation.
-        subprocess.run(['sudo', '-n', '-u', 'up6', '/opt/parins-managed/parins',
-                        '--config', '/dev/stdin', '--check'],
-                       input=SETUP_CONFIG.encode(), check=True, stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, timeout=60)
+        check_config()
         atomic(CREDS, dict(username='up6-admin', password=secrets.token_hex(24)))
         api = API()
         setup(api, json.loads(CREDS.read_text()), (APP / 'setup-token').read_text().strip())

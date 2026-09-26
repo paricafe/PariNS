@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import tomllib
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
@@ -20,6 +22,29 @@ def load(name):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_config_precheck_uses_private_owned_file_and_cleans_after_failure(self):
+        guest = load('test-update-reboot-guest')
+        user = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / 'up6-config-check.toml'
+
+            def checked(args, **kwargs):
+                self.assertEqual(args, ['sudo', '-n', '-u', 'up6', '/opt/parins-managed/parins',
+                                        '--config', str(path), '--check'])
+                self.assertEqual(path.read_text(), guest.SETUP_CONFIG)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual((path.stat().st_uid, path.stat().st_gid), (user.pw_uid, user.pw_gid))
+                self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+                self.assertNotIn('input', kwargs)
+                raise subprocess.CalledProcessError(1, args)
+
+            with patch.object(guest, 'CHECK_CONFIG', path), patch.object(guest.pwd, 'getpwnam', return_value=user), \
+                    patch.object(guest.subprocess, 'run', side_effect=checked) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    guest.check_config()
+                run.assert_called_once()
+            self.assertFalse(path.exists())
+
     def test_setup_config_and_rejection_preserve_bounded_mutation_contract(self):
         guest = load('test-update-reboot-guest')
         config = tomllib.loads(guest.SETUP_CONFIG)

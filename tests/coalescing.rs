@@ -208,24 +208,43 @@ async fn different_subnets_and_cookie_requests_do_not_share() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn late_joiner_does_not_restart_the_upstream_deadline() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = config(&socket);
     cfg.query_timeout_ms = 100;
     let resolver = Resolver::from_config(&cfg);
     let wire = query(1, "192.0.2.10");
+    let started = tokio::time::Instant::now();
     let mut first = Box::pin(resolver.resolve(&wire, "192.0.2.10".parse().unwrap()));
     assert!(poll!(&mut first).is_pending());
-    receive_while(&socket, &mut first).await;
-    tokio::time::sleep(Duration::from_millis(70)).await;
+    // Real UDP readiness must not let paused time auto-advance to the deadline.
+    // Keep a task runnable until receipt, with a wall-clock watchdog for IO.
+    tokio::select! {
+        _ = receive_while(&socket, &mut first) => {},
+        _ = async {
+            let io_started = std::time::Instant::now();
+            loop {
+                assert!(io_started.elapsed() < Duration::from_secs(1), "mock UDP receive stalled");
+                tokio::task::yield_now().await;
+            }
+        } => unreachable!(),
+    }
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    tokio::time::advance(Duration::from_millis(70)).await;
     let mut second = Box::pin(resolver.resolve(&wire, "192.0.2.10".parse().unwrap()));
     assert!(poll!(&mut second).is_pending());
-    let (a, b) = timeout(Duration::from_millis(70), async {
+    assert_eq!(resolver.metrics().snapshot().counters["flight_joined"], 1);
+    tokio::time::advance(Duration::from_millis(29)).await;
+    assert!(poll!(&mut first).is_pending());
+    assert!(poll!(&mut second).is_pending());
+    tokio::time::advance(Duration::from_millis(2)).await;
+    let (a, b) = timeout(Duration::from_millis(1), async {
         tokio::join!(first, second)
     })
     .await
     .unwrap();
+    assert_eq!(started.elapsed(), Duration::from_millis(101));
     assert_eq!(a.unwrap().message.response_code, ResponseCode::ServFail);
     assert_eq!(b.unwrap().message.response_code, ResponseCode::ServFail);
     let metrics = resolver.metrics().snapshot();

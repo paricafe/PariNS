@@ -329,6 +329,29 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
 
 #[tokio::test]
 async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
+    #[cfg(target_os = "linux")]
+    fn udp_inode(address: SocketAddr) -> std::io::Result<Option<u64>> {
+        let std::net::IpAddr::V4(ip) = address.ip() else {
+            unreachable!("this fixture binds IPv4 loopback")
+        };
+        let local = format!(
+            "{:08X}:{:04X}",
+            u32::from_ne_bytes(ip.octets()),
+            address.port()
+        );
+        for line in std::fs::read_to_string("/proc/net/udp")?.lines().skip(1) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.get(1) == Some(&local.as_str()) {
+                return fields
+                    .get(9)
+                    .and_then(|value| value.parse().ok())
+                    .map(Some)
+                    .ok_or_else(|| std::io::Error::other("missing UDP inode in procfs row"));
+            }
+        }
+        Ok(None)
+    }
+
     let cert = Certificate::new();
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(upstream.local_addr().unwrap());
@@ -336,6 +359,8 @@ async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
     config.shutdown_grace_ms = 1;
     let server = Server::bind(config).await.unwrap();
     let address = server.encrypted_addrs().unwrap()[0].1;
+    #[cfg(target_os = "linux")]
+    let listener_inode = udp_inode(address);
     let metrics = server.metrics().clone();
     let (stop, task) = run(server);
     let mut roots = RootCertStore::empty();
@@ -360,8 +385,29 @@ async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
     finish(stop, task).await;
     if let Err(error) = UdpSocket::bind(address).await {
         // Keep the immediate rebind assertion: a later successful bind would
-        // hide incomplete cleanup. Capture ownership only after it has failed
+        // hide incomplete cleanup. Inspect current owners only after it has failed
         // so CI can distinguish a retained listener from ephemeral-port reuse.
+        #[cfg(target_os = "linux")]
+        {
+            eprintln!(
+                "UDP inode for {address}: originally {listener_inode:?}, after rebind failure {:?}",
+                udp_inode(address),
+            );
+            let owners = std::process::Command::new("ss")
+                .args(["-H", "-aunp", &format!("sport = :{}", address.port())])
+                .output();
+            match owners {
+                Ok(output) => eprintln!(
+                    "UDP owners for {address} (ss status {}, bounded output):\n{}{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(8192)]),
+                    String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(2048)]),
+                ),
+                Err(diagnostic_error) => {
+                    eprintln!("UDP owner diagnostic unavailable for {address}: {diagnostic_error}");
+                }
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             let owners = std::process::Command::new("lsof")

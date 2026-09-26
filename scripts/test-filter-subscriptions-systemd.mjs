@@ -22,6 +22,19 @@ const source = { id: 'fs-ci', format: 'domain_list',
 const directory = '/var/lib/parins-managed/filter-subscriptions';
 const evidencePath = path.join(fixture, 'filter-evidence.json');
 let auth;
+function safeCode(value, fallback = 'unknown') {
+  return typeof value === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(value) ? value : fallback;
+}
+function httpDiagnostic(method, apiPath, actualStatus, expectedStatus, errorCode) {
+  const paths = ['/api/login', '/api/config', '/api/config/validate', '/api/status',
+    '/api/filter/check', '/api/filter/subscriptions',
+    '/api/filter/subscriptions/prepare', '/api/filter/subscriptions/refresh'];
+  if (!['GET', 'POST', 'PUT'].includes(method) || !paths.includes(apiPath)
+    || !Number.isInteger(actualStatus) || actualStatus < 100 || actualStatus > 599
+    || !Number.isInteger(expectedStatus) || expectedStatus < 100 || expectedStatus > 599) return undefined;
+  return { method, api_path: apiPath, actual_status: actualStatus,
+    expected_status: expectedStatus, api_error_code: safeCode(errorCode) };
+}
 function request(method, endpoint, body, expected = 200) {
   return new Promise((resolve, reject) => {
     const headers = { Origin: base, 'Content-Type': 'application/json' };
@@ -37,8 +50,10 @@ function request(method, endpoint, body, expected = 200) {
         try {
           const value = JSON.parse(bytes);
           if (res.statusCode !== expected) {
-            const code = /^[A-Za-z0-9_]{1,64}$/.test(value.error?.code) ? value.error.code : 'unknown';
-            throw new Error(`${method} ${endpoint}: HTTP ${res.statusCode}, code ${code}`);
+            const error = new Error('unexpected API HTTP status');
+            error.code = 'unexpected_http_status';
+            error.http = httpDiagnostic(method, endpoint, res.statusCode, expected, value.error?.code);
+            throw error;
           }
           if (value.session?.binding) {
             assert(res.headers['set-cookie']?.length === 1, 'one session cookie required');
@@ -207,10 +222,12 @@ try {
   console.log(JSON.stringify(result));
 } catch (error) {
   // Error messages can contain assertion values; only store a stable identifier.
-  const code = /^[A-Za-z0-9_]{1,64}$/.test(error.code) ? error.code : 'fixture_failed';
+  const code = safeCode(error.code, 'fixture_failed');
   const location = String(error.stack).match(/test-filter-subscriptions-systemd\.mjs:\d+:\d+/)?.[0] ?? 'unknown';
+  const http = httpDiagnostic(error.http?.method, error.http?.api_path,
+    error.http?.actual_status, error.http?.expected_status, error.http?.api_error_code);
   await writeFile(artifact, JSON.stringify({ ...initial, result: 'failed', code,
-    location, finished_at: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
-  console.error(`${stage}: ${code} at ${location}; response and credential values omitted`);
+    location, ...http, finished_at: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
+  console.error(JSON.stringify({ stage, code, location, ...http }));
   process.exitCode = 1;
 }

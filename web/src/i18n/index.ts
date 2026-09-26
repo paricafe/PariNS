@@ -3,6 +3,7 @@ import { settingsMessages } from "./settings";
 import { viewsMessages } from "./views";
 import { storageMessages } from "./storage";
 import { reliabilityMessages } from './reliability';
+import { updatesMessages } from './updates';
 import { ModelError } from "../model/errors";
 import { ApiError } from "../session/client";
 
@@ -18,6 +19,7 @@ const catalog: Record<string, MessagePair> = {
   ...Object.fromEntries(Object.entries(viewsMessages).map(([key, value]) => [`views.${key}`, value])),
   ...Object.fromEntries(Object.entries(storageMessages).map(([key, value]) => [`storage.${key}`, value])),
   ...Object.fromEntries(Object.entries(reliabilityMessages).map(([key, value]) => [`reliability.${key}`, value])),
+  ...Object.fromEntries(Object.entries(updatesMessages).map(([key, value]) => [`updates.${key}`, value])),
 };
 
 export function translate(key: string, language: Language, params: TranslationParams = {}): string {

@@ -13,6 +13,7 @@ import { StorageTools } from './StorageTools';
 import { DohRuntime } from './DohRuntime';
 import { CertificateTools } from './CertificateTools';
 import type { SnapshotReport } from '../observability/storage';
+import { UpdatePanel } from '../../features/updates/UpdatePanel';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
 type CacheTab = typeof cacheTabs[number];
@@ -303,6 +304,6 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
         <p className="muted small">{t(state.transport?.scheme === 'https' ? 'app.transportHttpsHelp' : 'app.transportHttpHelp')}</p>
         <p className="muted small">{t('app.transportCertificateSource')}: {state.transport?.certificate_source?.toUpperCase() ?? t('app.transportNoCertificate')}</p>
       </section>}
-      {pageId === 'security' && <><DohRuntime api={api} language={language} /><CertificateTools language={language} /></>}{pageId === 'storage' && <StorageTools language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'security' && <CertificateImport language={language} />}</>}
+      {pageId === 'security' && <><DohRuntime api={api} language={language} /><CertificateTools language={language} /></>}{pageId === 'storage' && <StorageTools language={language} />}{pageId === 'runtime' && <UpdatePanel language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'security' && <CertificateImport language={language} />}</>}
   </div>;
 }

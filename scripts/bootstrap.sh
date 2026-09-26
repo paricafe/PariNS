@@ -6,7 +6,7 @@ umask 077
 
 fail() { printf 'PariNS bootstrap: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.4] [--dry-run]' \
+    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.4] [--enable-updater] [--dry-run]' \
         '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.4] [--dry-run]' \
         'Linux x86_64/aarch64 and systemd are required for live installation.' \
         '--root stages files only; no service or candidate binary is executed.'
@@ -35,7 +35,7 @@ cleanup() {
     exit "$status"
 }
 main() {
-    version=v0.1.4 root= dry_run=false
+    version=v0.1.4 root= dry_run=false enable_updater=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--root)
@@ -43,11 +43,12 @@ main() {
                 case "$1" in --version) version=$2 ;; --root) root=$2; [ -n "$root" ] || fail 'empty staging root' ;; esac
                 shift 2 ;;
             --dry-run) dry_run=true; shift ;;
+            --enable-updater) enable_updater=true; shift ;;
             --help|-h) usage; exit 0 ;;
             *) usage >&2; fail "unknown option: $1" ;;
         esac
     done
-    printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'version must be vMAJOR.MINOR.PATCH'
+    printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'version must be vMAJOR.MINOR.PATCH'
     [ "$(printf '%s' "$version" | wc -l | tr -d ' ')" = 0 ] || fail 'invalid version'
     for command in curl tar awk grep mktemp stat find id uname mkdir rm sh; do
         command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"
@@ -96,7 +97,7 @@ main() {
         $0 == prefix || $0 == prefix "deploy/" { next }
         index($0, prefix) != 1 { exit 1 }
         { name = substr($0, length(prefix) + 1) }
-        name !~ /^(SHA256SUMS|parins|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed)?\.service)$/ { exit 1 }
+        name !~ /^(SHA256SUMS|parins|parins-updater|install-build-info\.json|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed|-updater|-update-recovery)?\.service|deploy\/parins-updater\.path)$/ { exit 1 }
         END { if (NR == 0) exit 1 }
     ' "$download_dir/members" || fail 'unsafe or unexpected archive path'
     tar -tvzf "$download_dir/$asset" > "$download_dir/types" || fail 'cannot inspect archive types'
@@ -106,11 +107,7 @@ main() {
     ' "$download_dir/types" || fail 'archive links and special files are forbidden'
     package="$download_dir/$archive"
     mkdir -m 0700 "$package" "$package/deploy"
-    files='parins install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service'
-    # Older release archives may not contain the beUI notice.
-    if grep -Fxq "$archive/LICENSE.beui" "$download_dir/members"; then
-        files="$files LICENSE.beui"
-    fi
+    files='parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service'
     # Extract exact regular-file contents, never archive paths or permissions.
     for name in SHA256SUMS $files; do
         grep -Fxq "$archive/$name" "$download_dir/members" || fail "missing package member: $name"
@@ -118,13 +115,10 @@ main() {
     done
     awk '
         NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ { exit 1 }
-        $2 !~ /^(parins|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed)?\.service)$/ { exit 1 }
+        $2 !~ /^(parins|parins-updater|install-build-info\.json|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed|-updater|-update-recovery)?\.service|deploy\/parins-updater\.path)$/ { exit 1 }
         ++seen[$2] != 1 { exit 1 }
         END { if (NR == 0) exit 1 }
     ' "$package/SHA256SUMS" || fail 'invalid package checksum manifest'
-    if ! grep -Fxq "$archive/LICENSE.beui" "$download_dir/members"; then
-        ! grep -Eq '  LICENSE\.beui$' "$package/SHA256SUMS" || fail 'manifest lists a missing beUI notice'
-    fi
     for name in $files; do
         expected=$(awk -v name="$name" '$2 == name {print tolower($1)}' "$package/SHA256SUMS")
         [ -n "$expected" ] && [ "$(digest "$package/$name")" = "$expected" ] || fail "package checksum mismatch: $name"
@@ -132,6 +126,7 @@ main() {
     set --
     if [ -n "$root" ]; then set -- "$@" --root "$root"; fi
     if "$dry_run"; then set -- "$@" --dry-run; fi
+    if "$enable_updater"; then set -- "$@" --enable-updater; fi
     # The installer owns platform validation, atomic replacement and rollback.
     sh "$package/install.sh" "$@"
 }

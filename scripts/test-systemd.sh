@@ -59,7 +59,8 @@ cleanup() {
     if "$installed" && sudo test -f /etc/systemd/system/parins-managed.service && \
         ! sudo test -L /etc/systemd/system/parins-managed.service && \
         [ "$(sudo stat -c %u /etc/systemd/system/parins-managed.service)" = 0 ] && \
-        sudo grep -Fqx '# PariNS managed installer unit v2 (exclusive state directory)' /etc/systemd/system/parins-managed.service; then
+        sudo grep -Fqx '# PariNS managed installer unit v3 (restricted updater contract)' /etc/systemd/system/parins-managed.service; then
+        sudo systemctl disable --now parins-updater.path || status=1
         sudo systemctl disable --now parins-managed.service || status=1
     fi
     sudo chmod "$opt_mode" /opt || status=1
@@ -128,6 +129,23 @@ rmdir "$fixture/account-home"
 installed=true
 install_service
 sudo systemd-analyze verify /etc/systemd/system/parins-managed.service
+sudo systemd-analyze verify /etc/systemd/system/parins-updater.service /etc/systemd/system/parins-updater.path /etc/systemd/system/parins-update-recovery.service
+systemctl is-active --quiet parins-updater.path
+systemctl is-active --quiet parins-update-recovery.service
+test "$(systemctl show --property=RemainAfterExit --value parins-update-recovery.service)" = yes
+test "$(systemctl show --property=TimeoutStopUSec --value parins-managed.service)" = '2min 25s'
+systemctl show --property=After,Before,Requires parins-managed.service | grep -Fq parins-update-recovery.service
+! systemctl show --property=After,Before,Requires parins-managed.service | grep -E '(^| )parins-updater.service( |$)'
+sudo jq -e '.schema == 1 and .operation == null and .installed.build.install_contract == "linux-managed-updater-v1"' /var/lib/parins-updater/private/journal.json >/dev/null
+test "$(sudo stat -c %a /var/lib/parins-updater/private)" = 700
+test "$(sudo stat -c %a /var/lib/parins-updater/status.json)" = 644
+# Invalid untrusted inbox is consumed without repeating activations or touching
+# business files. This runs only in this disposable, real-systemd environment.
+printf '{"schema":1,"command":"/bin/false"}\n' | sudo tee /var/lib/parins-managed/update-request.json >/dev/null
+sleep 2
+! sudo test -e /var/lib/parins-managed/update-request.json
+systemctl is-active --quiet parins-managed.service
+sudo systemctl reset-failed parins-updater.service
 sudo grep -Fqx 'ExecReload=/bin/kill -HUP $MAINPID' /etc/systemd/system/parins-managed.service
 systemctl show --property=ExecReload --value parins-managed.service | grep -F 'argv[]=/bin/kill -HUP $MAINPID ; ignore_errors=no' >/dev/null
 : > "$fixture/cookies.txt"

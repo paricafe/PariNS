@@ -25,6 +25,26 @@ function mount(api: ApiClient, refreshSession: () => Promise<void> = async () =>
 }
 
 describe('single configuration draft', () => {
+  it('shares update settings and prevents new edits while an installation is active', async () => {
+    const { api, request } = fixture();
+    const hook = mount(api);
+    await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+    act(() => {
+      hook.result.current.updateField('updates.auto_check', false);
+      hook.result.current.updateField('updates.check_interval_hours', '12');
+    });
+    await act(async () => { await hook.result.current.preview(); });
+    expect(request.mock.calls.find(([path]) => path === 'config/preview')?.[2]).toMatchObject({ changes: { updates: { auto_check: false, check_interval_hours: 12 } } });
+    act(() => hook.result.current.setUpdateLocked(true));
+    const before = hook.result.current.draft;
+    act(() => { hook.result.current.updateField('max_inflight', '50'); hook.result.current.setToml('changed'); });
+    expect(hook.result.current.draft).toBe(before);
+    expect(hook.result.current.locked).toBe(true);
+    expect(hook.result.current.busy).toBe(true);
+    act(() => hook.result.current.setUpdateLocked(false));
+    expect(hook.result.current.locked).toBe(false);
+    hook.unmount();
+  });
   it('previews storage, persistence and HTTP/3 through the existing shared draft', async () => {
     const settings = { ...baseSettings, cache: { rules: [], persistence: { enabled: false, max_bytes: 1048576 } },
       storage: { flush_interval_ms: 1000 }, statistics: { retention_secs: 3600 },

@@ -18,7 +18,7 @@ while [ "$#" -gt 0 ]; do
 done
 if [ -n "$version" ] || [ -n "$target" ]; then
     [ -n "$version" ] && [ -n "$target" ] || fail '--version and --target must be provided together'
-    printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'version must be vX.Y.Z'
+    printf '%s\n' "$version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'version must be vX.Y.Z'
     cargo_version=$(cargo pkgid --locked | sed 's/.*[@#]//')
     [ "$version" = "v$cargo_version" ] || fail 'release version does not match Cargo.toml'
     [ -z "$(git status --porcelain --untracked-files=no)" ] || fail 'release requires clean tracked files'
@@ -42,19 +42,23 @@ fi
     npm run build
 )
 if [ "$release_mode" = true ]; then
-    cargo build --locked --release --target "$target"
+    cargo build --locked --release --bins --target "$target"
     binary="target/$target/release/parins"
-    [ "$(od -An -tx1 -N6 "$binary" | tr -d ' \n')" = 7f454c460201 ] || fail 'not an ELF64 little-endian binary'
-    [ "$(od -An -tx1 -j18 -N2 "$binary" | tr -d ' \n')" = "$machine" ] || fail 'wrong ELF architecture'
-    program_headers=$(readelf --program-headers "$binary")
-    dynamic_section=$(readelf --dynamic "$binary")
-    if printf '%s\n' "$program_headers" | grep -q INTERP || printf '%s\n' "$dynamic_section" | grep -q NEEDED; then
-        fail 'release binary must be fully static (no interpreter or shared-library dependencies)'
-    fi
+    helper="target/$target/release/parins-updater"
+    for executable in "$binary" "$helper"; do
+        [ "$(od -An -tx1 -N6 "$executable" | tr -d ' \n')" = 7f454c460201 ] || fail 'not an ELF64 little-endian binary'
+        [ "$(od -An -tx1 -j18 -N2 "$executable" | tr -d ' \n')" = "$machine" ] || fail 'wrong ELF architecture'
+        program_headers=$(readelf --program-headers "$executable")
+        dynamic_section=$(readelf --dynamic "$executable")
+        if printf '%s\n' "$program_headers" | grep -q INTERP || printf '%s\n' "$dynamic_section" | grep -q NEEDED; then
+            fail 'release binary must be fully static (no interpreter or shared-library dependencies)'
+        fi
+    done
     archive="parins-$version-linux-$arch"
 else
-    cargo build --locked --release
+    cargo build --locked --release --bins
     binary=target/release/parins
+    helper=target/release/parins-updater
     revision=$(git rev-parse --short=12 HEAD)
     case "$(git status --porcelain --untracked-files=no)" in
         '') ;; *) revision="$revision-dirty" ;;
@@ -64,11 +68,19 @@ fi
 "./$binary" --config parins.example.toml --check
 staging=$(mktemp -d "${TMPDIR:-/tmp}/parins-package.XXXXXX")
 mkdir -p "$staging/$archive" target/packages
-cp "$binary" parins.example.toml LICENSE README.md CHANGELOG.md "$staging/$archive/"
+cp "$binary" "$helper" parins.example.toml LICENSE README.md CHANGELOG.md "$staging/$archive/"
+"./$binary" --build-info=json > "$staging/$archive/install-build-info.json"
 cp web/src/components/beui/LICENSE.beui "$staging/$archive/"
 cp scripts/install.sh "$staging/$archive/"
-cp -R deploy "$staging/$archive/"
-(cd "$staging/$archive" && shasum -a 256 parins install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/*.service) > "$staging/$archive/SHA256SUMS"
+mkdir "$staging/$archive/deploy"
+units='parins.service parins-managed.service parins-updater.service parins-updater.path parins-update-recovery.service'
+for unit in $units; do cp "deploy/$unit" "$staging/$archive/deploy/$unit"; done
+(cd "$staging/$archive" && shasum -a 256 parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/parins.service deploy/parins-managed.service deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service) > "$staging/$archive/SHA256SUMS"
+if [ "$release_mode" = true ]; then
+    cp "$binary" "target/packages/$archive.bin"
+    cp "$staging/$archive/install-build-info.json" "target/packages/$archive.build-info.json"
+    cmp "$staging/$archive/parins" "target/packages/$archive.bin" || fail 'raw and package binary mismatch'
+fi
 tar -czf "target/packages/$archive.tar.gz" -C "$staging" "$archive"
 (cd target/packages && shasum -a 256 "$archive.tar.gz") > "target/packages/$archive.tar.gz.sha256"
 printf 'Package: target/packages/%s.tar.gz\nChecksum: target/packages/%s.tar.gz.sha256\n' "$archive" "$archive"

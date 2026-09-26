@@ -19,6 +19,8 @@ pub struct Config {
     pub storage: crate::storage::Settings,
     #[serde(default)]
     pub statistics: crate::storage::StatisticsSettings,
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     pub query_timeout_ms: u64,
     pub tcp_io_timeout_ms: u64,
     pub shutdown_grace_ms: u64,
@@ -49,6 +51,22 @@ pub struct Config {
     pub filter_file: Option<PathBuf>,
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    pub auto_check: bool,
+    pub check_interval_hours: u16,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            check_interval_hours: 6,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -325,6 +343,10 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=168).contains(&self.updates.check_interval_hours),
+            "updates.check_interval_hours must be 1..=168"
+        );
         if let Some(web) = &self.web {
             public_host(&web.public_host)?;
         }

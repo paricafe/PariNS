@@ -56,6 +56,57 @@ deploying.
 
 ## Quick start
 
+### Unreleased development: software updates
+
+The working development version adds managed-mode release checks and a restricted
+Linux updater. These changes are **not included in v0.1.4**. Real Linux update,
+recovery and resource acceptance must pass before this feature is released.
+
+`[updates]` defaults to `auto_check = true` and `check_interval_hours = 6`
+(1–168 hours). Checks begin only after managed setup, contact the official GitHub
+repository without credentials, and never install automatically. File mode does
+not run this scheduler. Changing these settings does not restart DNS or clear its
+cache. `parins --build-info=json` reports the current source/official build identity;
+`parins --manage --check --state-dir PATH` checks saved materials without starting
+services, opening the runtime database, or consuming a cache snapshot.
+
+One-click installation requires an official Linux managed installation and the
+trusted updater components, not just a new console. The initial-development
+v0.1.4 has no updater: first enrollment requires a verified newer installation
+package and an explicit administrator action. A software update interrupts DNS
+briefly and requires signing in again. Only matching durable-data contracts can
+use automatic binary rollback; it does not restore an old database or discard
+new query history. HTTPS and SHA256 establish transport and content integrity,
+not an independent publisher signature.
+
+The development installer accepts `--enable-updater` only for the exact official
+v0.1.4 managed unit and fixed installation paths. Run it from a verified **newer**
+package; the v0.1.4 download does not implement this option. The installer keeps
+the same state directory and certificate access, performs read-only preflight as
+the service user, and registers the new main binary, helper and systemd units
+together. It does not translate old settings or migrate the database. Unknown or
+custom layouts require a manual installation plan. If the first enrollment fails
+after the new program ran, the old files can be restored but v0.1.4 is not started
+automatically against potentially changed data: it has no verified rollback epoch.
+
+For an interrupted update, inspect the console's operation reason and the
+read-only service status before taking manual action:
+
+```sh
+sudo systemctl status parins-managed.service parins-updater.service parins-update-recovery.service
+sudo journalctl -u parins-managed.service -u parins-updater.service -u parins-update-recovery.service
+sudo cat /var/lib/parins-updater/status.json
+```
+
+Retain the private updater journal, reported backup, and business state when
+diagnosing a `manual_required` result. Do not delete the journal to force a new
+attempt, reset the database, or blindly start an older binary. Resolve the stated
+cause and verify that the selected binary can read the retained data before a
+manual reinstall. Root's journal is authoritative; the public status is derived.
+The release reader requires public GitHub addresses and does not use proxy
+environment variables. DNS interception that returns private or synthetic
+addresses is rejected rather than silently bypassed.
+
 ### 1. Install on Linux
 
 Requires a Linux x86_64 or ARM64 host running systemd, `curl`, `tar`, a SHA256
@@ -158,8 +209,9 @@ The installer enables and starts `parins-managed.service`, using
 stop `systemd-resolved`, change host DNS, open firewall ports, or modify the legacy
 `parins.service`. Re-running upgrades the managed binary/unit while retaining
 state and keeping a private prior binary/unit backup. An installation/startup
-failure attempts to restore the prior service; inspect the reported backup and
-`journalctl -u parins-managed.service` if recovery itself fails.
+failure restores the prior service only when its data contract permits that
+recovery; first updater enrollment has the limits described above. Inspect the
+reported backup and `journalctl -u parins-managed.service` if recovery fails.
 
 The first start serves only the console; **DNS starts after successful setup**.
 The CLI and installed service default to **`0.0.0.0:3000`, HTTP** until inbound

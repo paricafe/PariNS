@@ -1,0 +1,30 @@
+# PariNS updater contract v1
+[Unit]
+Description=PariNS restricted update transaction
+StartLimitIntervalSec=60
+StartLimitBurst=8
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/parins-updater run
+ExecStopPost=/usr/libexec/parins-updater recover
+TimeoutStartSec=600
+# One 145s stop, 60s start job, 60s readiness and durable file work.
+TimeoutStopSec=360
+Restart=no
+User=root
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/opt/parins-managed /var/lib/parins-updater /var/lib/parins-managed /var/lib/private/parins-managed
+MemoryMax=256M
+TasksMax=32

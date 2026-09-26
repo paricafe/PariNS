@@ -2,10 +2,13 @@
 mod auth_budget;
 mod cache;
 mod certificates;
+pub mod check;
 mod runtime;
 mod settings;
 pub(crate) mod store;
 mod transport;
+mod update_checks;
+mod updates;
 
 use anyhow::Result;
 use axum::{
@@ -233,6 +236,32 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::result::Result<T,
 }
 
 impl Shared {
+    /// Keep the freeze check inside the same permit used for the mutation.
+    async fn mutation_permit(
+        &self,
+    ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+        let permit = self
+            .mutation
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| error(StatusCode::CONFLICT, "BUSY", "Another change is running"))?;
+        if self
+            .manager
+            .lock()
+            .await
+            .updates
+            .frozen
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "update_in_progress",
+                "Software update is in progress",
+            ));
+        }
+        Ok(permit)
+    }
+
     fn ensure_current(&self, transport: &Snapshot) -> std::result::Result<(), ApiError> {
         if self.active.lock().unwrap().snapshot.realm != transport.realm {
             return Err(error(
@@ -569,10 +598,7 @@ async fn api(
                 .and_then(|h| h.to_str().ok())
                 .unwrap_or("")
                 .to_owned();
-            let permit =
-                shared.mutation.clone().try_acquire_owned().map_err(|_| {
-                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
-                })?;
+            let permit = shared.mutation_permit().await?;
             let control = shared.clone();
             let host = host.to_owned();
             let result = tokio::spawn(async move {
@@ -650,6 +676,44 @@ async fn api(
     }
     shared.authorized(headers, &transport)?;
     match (method, path) {
+        ("GET", "/api/updates") => Ok(shared.manager.lock().await.updates.view()),
+        ("POST", "/api/updates/apply") => {
+            let input: updates::operation::Apply = decode(body)?;
+            // A repeated consumed plan must still return its existing operation,
+            // including while frozen; Coordinator rejects every different plan.
+            let permit =
+                shared.mutation.clone().try_acquire_owned().map_err(|_| {
+                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
+                })?;
+            tokio::spawn(async move {
+                let _permit = permit;
+                let operation_id = updates::operation::accept(&shared, input)
+                    .await
+                    .map_err(update_apply_error)?;
+                Ok(json!({"operation_id":operation_id,"status_url":"/api/updates"}))
+            })
+            .await
+            .map_err(|_| internal())?
+        }
+        ("POST", "/api/updates/check") => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Check {}
+            let _: Check = decode(body)?;
+            let updates = shared.manager.lock().await.updates.clone();
+            updates.request_check().await.map_err(|(code, retry)| {
+                error(
+                    if code == "rate_limited" {
+                        StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    },
+                    code,
+                    format!("{code}; retry_at_ms={retry}"),
+                )
+            })?;
+            Ok(json!({"accepted":true,"status_url":"/api/updates"}))
+        }
         ("GET", "/api/status") => {
             let manager = shared.manager.lock().await;
             let mut status = manager.status();
@@ -689,10 +753,7 @@ async fn api(
                     (v.revision, v.history_epoch, 2)
                 }
             };
-            let permit =
-                shared.mutation.clone().try_acquire_owned().map_err(|_| {
-                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
-                })?;
+            let permit = shared.mutation_permit().await?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let manager = shared.manager.lock().await;
@@ -723,10 +784,7 @@ async fn api(
                 revision: u64,
             }
             let input: Reload = decode(body)?;
-            let permit =
-                shared.mutation.clone().try_acquire_owned().map_err(|_| {
-                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
-                })?;
+            let permit = shared.mutation_permit().await?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let mut manager = shared.manager.lock().await;
@@ -744,10 +802,7 @@ async fn api(
         }
         ("POST", "/api/certificates/import") => {
             let input: CertificateImport = decode(body)?;
-            let permit =
-                shared.mutation.clone().try_acquire_owned().map_err(|_| {
-                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
-                })?;
+            let permit = shared.mutation_permit().await?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let manager = shared.manager.lock().await;
@@ -790,10 +845,7 @@ async fn api(
         ("POST", "/api/cache/invalidate") => {
             let input: cache::Invalidate = decode(body)?;
             let (name, kind, scope) = input.selection().map_err(invalid)?;
-            let _permit =
-                shared.mutation.clone().try_acquire_owned().map_err(|_| {
-                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
-                })?;
+            let _permit = shared.mutation_permit().await?;
             let manager = shared.manager.lock().await;
             if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
                 return Err(error(
@@ -881,10 +933,7 @@ async fn api(
                 let r: Change = decode(body)?;
                 (Some(r.toml), r.revision, r.allow_http_downgrade)
             };
-            let permit =
-                shared.mutation.clone().try_acquire_owned().map_err(|_| {
-                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
-                })?;
+            let permit = shared.mutation_permit().await?;
             let host = host.to_owned();
             tokio::spawn(async move {
                 let _permit = permit;
@@ -1061,6 +1110,11 @@ async fn handle_inner(
         .await?,
     )
     .into_response();
+    if parts.method == axum::http::Method::POST
+        && matches!(path, "/api/updates/check" | "/api/updates/apply")
+    {
+        *response.status_mut() = StatusCode::ACCEPTED;
+    }
     let cookie = match cookie {
         Some(token) => {
             let (name, attributes) = if transport.scheme == Scheme::Https {
@@ -1114,6 +1168,10 @@ pub async fn serve(
         address,
     });
     let router = Router::new().fallback(handle).with_state(shared.clone());
+    let (update_stop, update_stopping) = tokio::sync::watch::channel(false);
+    let update_task = tokio::spawn(update_checks::run(shared.clone(), update_stopping.clone()));
+    let update_operation_task =
+        tokio::spawn(updates::operation::run(shared.clone(), update_stopping));
     let initial = active.lock().unwrap().snapshot.clone();
     if let Some(origin) = &initial.origin {
         eprintln!("PariNS management: {origin}/");
@@ -1175,13 +1233,16 @@ pub async fn serve(
         }
     };
     drop(listener);
-    // A submitted mutation owns its transaction independently of its HTTP task.
-    tasks.shutdown().await;
+    let _ = update_stop.send(true);
     // Every accepted transaction owns this permit before detaching. Wait for it
     // before stopping DNS, including transactions not yet holding manager.lock.
     // A blocked filesystem must not keep the process alive indefinitely. On
     // timeout, leave no clean snapshot and let the process runtime terminate.
     let _transaction = timeout(Duration::from_secs(65), async {
+        // A submitted mutation owns its transaction independently of HTTP.
+        tasks.shutdown().await;
+        let _ = update_task.await;
+        let _ = update_operation_task.await;
         if let Some(task) = reload_task {
             let _ = task.await;
         }
@@ -1197,11 +1258,47 @@ pub async fn serve(
     result
 }
 
+fn update_apply_error(err: anyhow::Error) -> ApiError {
+    let code = match err.to_string().as_str() {
+        "plan_conflict" => "plan_conflict",
+        "plan_expired" => "plan_expired",
+        "config_changed" => "config_changed",
+        "update_in_progress" => "update_in_progress",
+        "readiness_failed" => "readiness_failed",
+        "unsupported_installation" => "unsupported_installation",
+        "helper_unavailable" => "helper_unavailable",
+        "manual_upgrade_required" => "manual_upgrade_required",
+        _ => "update_state_unavailable",
+    };
+    // A renamed acceptance followed by fsync failure has an unknown outcome.
+    // 5xx keeps the UI reconciling with GET instead of claiming rejection.
+    error(
+        if code == "update_state_unavailable" {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::CONFLICT
+        },
+        code,
+        code,
+    )
+}
+
 fn start_signal_reload(shared: Arc<Shared>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Ok(_permit) = shared.mutation.acquire().await else {
             return;
         };
+        if shared
+            .manager
+            .lock()
+            .await
+            .updates
+            .frozen
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            eprintln!("PariNS certificate reload skipped: software update is in progress");
+            return;
+        }
         match shared
             .manager
             .lock()
@@ -1219,6 +1316,77 @@ fn start_signal_reload(shared: Arc<Shared>) -> tokio::task::JoinHandle<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn update_freeze_uses_existing_permit_and_keeps_status_read_only() {
+        use super::*;
+        use std::sync::atomic::Ordering;
+        let temp = tempfile::tempdir().unwrap();
+        let address = "127.0.0.1:3000".parse().unwrap();
+        let active = Arc::new(Mutex::new(Active {
+            snapshot: Arc::new(Snapshot::initial()),
+            sessions: Vec::new(),
+        }));
+        let manager = Arc::new(tokio::sync::Mutex::new(
+            Manager::open(
+                Store::open(&temp.path().join("state")).unwrap(),
+                address,
+                active.clone(),
+            )
+            .await
+            .unwrap(),
+        ));
+        let shared = Arc::new(Shared {
+            manager: manager.clone(),
+            active: active.clone(),
+            auth: auth_budget::Budget::new(),
+            mutation: Arc::new(Semaphore::new(1)),
+            address,
+        });
+        let updates = manager.lock().await.updates.clone();
+        let permit = shared.mutation_permit().await.unwrap();
+        assert_eq!(shared.mutation_permit().await.unwrap_err().1, "BUSY");
+        updates.frozen.store(true, Ordering::Release);
+        drop(permit);
+        assert_eq!(
+            shared.mutation_permit().await.unwrap_err().1,
+            "update_in_progress"
+        );
+        let transport = active.lock().unwrap().snapshot.clone();
+        let session = shared.session(&transport).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3000"));
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("parins_session_http={}", session.token)).unwrap(),
+        );
+        headers.insert(
+            "x-parins-session",
+            HeaderValue::from_str(&session.binding).unwrap(),
+        );
+        let mut cookie = None;
+        let view = api(
+            shared.clone(),
+            transport,
+            ApiRequest {
+                peer: address,
+                method: "GET",
+                path: "/api/updates",
+                headers: &headers,
+                body: &[],
+            },
+            &mut cookie,
+        )
+        .await
+        .unwrap();
+        assert_eq!(view["frozen"], true);
+        assert_eq!(view["check"]["state"], "unchecked");
+        assert!(!temp.path().join("state/update-state.json").exists());
+        assert!(cookie.is_none());
+        // Shutdown's original permit is not prohibited by the update freeze.
+        let _shutdown = shared.mutation.acquire().await.unwrap();
+        manager.lock().await.terminal_shutdown().await;
+    }
+
     #[tokio::test]
     async fn session_capacity_and_late_logout_do_not_revoke_other_logins() {
         use axum::http::{HeaderMap, HeaderValue, header};

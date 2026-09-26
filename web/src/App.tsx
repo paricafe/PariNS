@@ -12,6 +12,8 @@ import { SessionProvider, useSession } from './session/context';
 import { Button, Drawer } from './components/beui';
 import { ConfirmProvider, useConfirm } from './components/ConfirmProvider';
 import { TransportHint, transportChangeText } from './components/TransportHint';
+import { UpdatesProvider } from './features/updates/context';
+import { UpdateHint } from './features/updates/UpdatePanel';
 
 type Theme = 'system' | 'light' | 'dark';
 const navigation = [
@@ -157,7 +159,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
       {logoutError && <p role="alert" className="notice error">{logoutError}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
       <motion.div animate={pageAnimation} className="route-content"><Routes>
-        <Route path="/overview" element={<OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} />} />
+        <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} /></>} />
         <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} />} />
         {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />
@@ -173,7 +175,7 @@ function RootView() {
   return <>
     <a href="#main-content" className="skip-link" onClick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>{t('ui.skip')}</a>
     {state.phase !== 'ready' && <header className="auth-topbar"><a href="/#/overview" className="brand-link">PariNS</a><Preferences {...appearance} /></header>}
-    <ConfigProvider api={api} active={state.phase === 'ready'} refreshSession={recheck}>{state.phase === 'ready' ? <ConfirmProvider language={appearance.language}><ReadyConsole appearance={appearance} /></ConfirmProvider>
+    <ConfigProvider api={api} active={state.phase === 'ready'} refreshSession={recheck}><UpdatesProvider active={state.phase === 'ready'}>{state.phase === 'ready' ? <ConfirmProvider language={appearance.language}><ReadyConsole appearance={appearance} /></ConfirmProvider>
       : state.phase === 'setup' ? <main id="main-content" tabIndex={-1}><SetupPage language={appearance.language} /></main>
         : state.phase === 'login' ? <main id="main-content" tabIndex={-1}><LoginPage language={appearance.language} /></main>
           : <main id="main-content" tabIndex={-1} className="state-page"><div className="state-card"><h1>{t('ui.title')}</h1>
@@ -183,7 +185,7 @@ function RootView() {
             {state.error && <p className="muted small">{state.error}</p>}
             {state.phase === 'logout-unknown' ? <button className="button primary" type="button" onClick={() => void retryLogout().catch(() => {})}>{t('app.logout')}</button>
               : state.phase !== 'checking' && state.phase !== 'transport-change' && <button className="button secondary" type="button" onClick={() => void recheck()}>{t('ui.reconnect')}</button>}
-          </div></main>}</ConfigProvider>
+          </div></main>}</UpdatesProvider></ConfigProvider>
   </>;
 }
 

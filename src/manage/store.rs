@@ -2,7 +2,7 @@
 //! one commit point so interrupted setup cannot create an unauthenticated server.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -85,12 +85,7 @@ impl Store {
     }
 
     pub fn read(&self) -> Result<Option<Stored>> {
-        let Some(bytes) = read_bounded(&self.dir.join(STATE), MAX_STATE)? else {
-            return Ok(None);
-        };
-        let stored: Stored = serde_json::from_slice(&bytes).context("invalid management state")?;
-        validate_stored(&stored)?;
-        Ok(Some(stored))
+        read_stored(&self.dir)
     }
 
     pub fn save(&self, stored: &Stored) -> Result<()> {
@@ -139,6 +134,17 @@ impl Store {
     }
 }
 
+/// Read the existing envelope without creating a Store, taking its writer lock,
+/// or touching runtime persistence. Shared by startup and candidate preflight.
+pub(super) fn read_stored(dir: &Path) -> Result<Option<Stored>> {
+    let Some(bytes) = read_bounded(&dir.join(STATE), MAX_STATE)? else {
+        return Ok(None);
+    };
+    let stored: Stored = serde_json::from_slice(&bytes).context("invalid management state")?;
+    validate_stored(&stored)?;
+    Ok(Some(stored))
+}
+
 fn validate_stored(stored: &Stored) -> Result<()> {
     ensure!(
         !stored.username.trim().is_empty() && stored.username.len() <= 64,
@@ -163,56 +169,7 @@ fn validate_stored(stored: &Stored) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn create_private(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-pub(crate) fn checked_open(path: &Path, writable: bool) -> Result<Option<File>> {
-    let before = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("inspect management file"),
-    };
-    ensure!(
-        before.is_file(),
-        "management files must be regular files, not symlinks"
-    );
-    private_permissions(&before, 0o600)?;
-    let file = OpenOptions::new().read(true).write(writable).open(path)?;
-    let after = file.metadata()?;
-    ensure!(after.is_file(), "management files must be regular files");
-    private_permissions(&after, 0o600)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        ensure!(
-            before.dev() == after.dev() && before.ino() == after.ino() && after.nlink() == 1,
-            "management file changed or has multiple links"
-        );
-    }
-    Ok(Some(file))
-}
-
-pub(crate) fn private_permissions(metadata: &fs::Metadata, mode: u32) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            metadata.permissions().mode() & 0o7777 == mode,
-            "management directory/files require private permissions (0700/0600)"
-        );
-    }
-    #[cfg(not(unix))]
-    let _ = (metadata, mode);
-    Ok(())
-}
+pub(crate) use crate::private_files::{checked_open, create_private, private_permissions};
 
 pub(super) fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     let Some(file) = checked_open(path, false)? else {

@@ -135,6 +135,7 @@ impl Running {
 }
 
 pub(super) struct Manager {
+    pub updates: Arc<super::updates::Coordinator>,
     pub services: Arc<RuntimeServices>,
     persistence: Arc<CachePersistence>,
     cache_report: SnapshotReport,
@@ -156,6 +157,11 @@ impl Manager {
         address: SocketAddr,
         active: Arc<Mutex<Active>>,
     ) -> Result<Self> {
+        let update_dir = store.dir.clone();
+        let updates = Arc::new(
+            tokio::task::spawn_blocking(move || super::updates::Coordinator::open(&update_dir))
+                .await?,
+        );
         let saved = store.read()?;
         let config = saved
             .as_ref()
@@ -187,13 +193,17 @@ impl Manager {
         .await??;
         let consumed = crate::runtime_lifecycle::consume(persistence.clone(), cache_settings).await;
         let cache_ready = consumed.is_ok();
-        let cache_report = match &consumed {
+        let mut cache_report = match &consumed {
             Ok(snapshot) => snapshot.report().clone(),
             Err(error) => SnapshotReport {
                 reason: Some(format!("clean snapshot consumption failed: {error:#}")),
                 ..Default::default()
             },
         };
+        let skip_restore = updates.skip_restore();
+        if skip_restore && cache_ready {
+            cache_report.reason = Some("software update recovery requires a cold cache".into());
+        }
         if let Some(config) = config {
             let snapshot = tokio::task::spawn_blocking(move || Snapshot::prepare(&config, address))
                 .await?
@@ -201,6 +211,7 @@ impl Manager {
             active.lock().unwrap().snapshot = Arc::new(snapshot);
         }
         let mut this = Self {
+            updates,
             services,
             persistence,
             cache_report,
@@ -216,7 +227,8 @@ impl Manager {
             reload_attempt: 0,
         };
         if let Some(saved) = this.saved.clone() {
-            this.restore(&saved.toml, consumed.ok()).await;
+            this.restore(&saved.toml, if skip_restore { None } else { consumed.ok() })
+                .await;
         }
         Ok(this)
     }
@@ -336,7 +348,7 @@ impl Manager {
         let split_cache = |text: &str| -> Option<(toml::Value, serde_json::Value, toml::Value)> {
             let mut value: toml::Value = toml::from_str(text).ok()?;
             let original = value.clone();
-            for field in ["storage", "query_log", "statistics"] {
+            for field in ["storage", "query_log", "statistics", "updates"] {
                 value.as_table_mut()?.remove(field);
             }
             value.as_table_mut()?.remove("cache");
@@ -420,6 +432,29 @@ impl Manager {
 
     /// Returns whether listener restart was necessary.
     pub async fn apply(&mut self, next: Stored) -> Result<bool> {
+        // Management-only settings do not inspect changed certificate files,
+        // restart a stopped DNS service, or publish new storage/cache settings.
+        if let Some(saved) = &self.saved {
+            let stripped = |text: &str| -> Result<toml::Value> {
+                let mut value: toml::Value = toml::from_str(text)?;
+                value
+                    .as_table_mut()
+                    .expect("configuration table")
+                    .remove("updates");
+                Ok(value)
+            };
+            if saved.toml != next.toml && stripped(&saved.toml)? == stripped(&next.toml)? {
+                let config = Config::parse_in(&next.toml, &self.store.dir)?;
+                let store = self.store.clone();
+                let copy = next.clone();
+                tokio::task::spawn_blocking(move || store.save(&copy)).await??;
+                if let Some(running) = &mut self.running {
+                    running.config.updates = config.updates;
+                }
+                self.saved = Some(next);
+                return Ok(false);
+            }
+        }
         ensure!(
             self.cache_ready,
             "cannot start DNS before clean snapshot is durably consumed; restart after resolving the storage error"

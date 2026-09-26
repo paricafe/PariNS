@@ -59,7 +59,7 @@ async fn run() -> Result<()> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: parins [--config PATH] [--data-dir DIR] [--check]\n       parins --manage [--state-dir DIR] [--web-listen IP:PORT]\nDefault config: parins.toml; file runtime data: parins-data; managed state: parins-state; web listen: 0.0.0.0:3000 (HTTP until inbound DoH with a matching certificate is enabled)\nIPv6: --web-listen [::]:3000; local-only: --web-listen 127.0.0.1:3000"
+                    "Usage: parins [--config PATH] [--data-dir DIR] [--check]\n       parins --manage [--state-dir DIR] [--web-listen IP:PORT] [--check]\n       parins --build-info=json\nDefault config: parins.toml; file runtime data: parins-data; managed state: parins-state; web listen: 0.0.0.0:3000 (HTTP until inbound DoH with a matching certificate is enabled)\nIPv6: --web-listen [::]:3000; local-only: --web-listen 127.0.0.1:3000\nManaged --check reads existing saved configuration without starting services or creating state."
                 );
                 return Ok(());
             }
@@ -67,14 +67,32 @@ async fn run() -> Result<()> {
                 println!("parins {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
+            "--build-info=json" => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&parins::update::build_info::BuildInfo::current())?
+                );
+                return Ok(());
+            }
             _ => bail!("unknown argument: {arg}"),
         }
     }
     if manage {
-        if config_given || check || data_given {
+        if config_given || data_given {
             bail!(
-                "--manage cannot be combined with --config, --check or --data-dir; import TOML in the console"
+                "--manage cannot be combined with --config or --data-dir; import TOML in the console"
             );
+        }
+        if check {
+            let report = parins::manage::check::managed(&state_dir, web_listen)?;
+            println!(
+                "{}",
+                serde_json::to_string(&parins::update::ipc::ManagedCheckOutput {
+                    check: report,
+                    build_info: parins::update::build_info::BuildInfo::current(),
+                })?
+            );
+            return Ok(());
         }
         #[cfg(unix)]
         let mut terminate =

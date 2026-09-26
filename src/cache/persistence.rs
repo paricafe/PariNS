@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
-const VERSION: u32 = 2;
-const CACHE_SEMANTICS: u32 = 2;
+pub(crate) const VERSION: u32 = 2;
+pub(crate) const CACHE_SEMANTICS: u32 = 2;
 const HEADER_BYTES: usize = 512;
 const MAX_RECORD_BYTES: usize = 96 * 1024;
 const MAX_RECORDS: usize = 1_000_000;

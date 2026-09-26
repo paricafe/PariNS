@@ -2,9 +2,11 @@ use super::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
 
+pub(crate) const DATABASE_FORMAT: u32 = 2;
+
 const SCHEMA: &str = "
 CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-INSERT INTO metadata VALUES('format',2),('log_epoch',0),('totals_epoch',0),('history_epoch',0),('clock_lower_ms',0),('log_count',0),('log_bytes',0),('point_count',0),('cleanup_age',0),('cleanup_entry_limit',0),('cleanup_byte_limit',0),('cleanup_database_limit',0),('cleanup_manual',0),('cleanup_last_reason',0),('cleanup_last_at_ms',0);
+INSERT INTO metadata VALUES('log_epoch',0),('totals_epoch',0),('history_epoch',0),('clock_lower_ms',0),('log_count',0),('log_bytes',0),('point_count',0),('cleanup_age',0),('cleanup_entry_limit',0),('cleanup_byte_limit',0),('cleanup_database_limit',0),('cleanup_manual',0),('cleanup_last_reason',0),('cleanup_last_at_ms',0);
 CREATE TABLE query_log(id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL, time_ms INTEGER NOT NULL, retention_ms INTEGER NOT NULL, name TEXT NOT NULL, client TEXT NOT NULL, qtype TEXT NOT NULL, upstream TEXT, status TEXT NOT NULL, cache TEXT NOT NULL, charge INTEGER NOT NULL, payload BLOB NOT NULL);
 CREATE INDEX query_log_time ON query_log(time_ms);
 CREATE INDEX query_log_retention ON query_log(retention_ms);
@@ -270,7 +272,7 @@ impl Database {
         if !fresh {
             let deadline = Instant::now() + Duration::from_secs(5);
             conn.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
-            if epoch(&conn, "format")? != 2 {
+            if epoch(&conn, "format")? != u64::from(DATABASE_FORMAT) {
                 return Err(Error::StorageUnavailable(
                     "unsupported runtime database format; file retained".into(),
                 ));
@@ -287,6 +289,10 @@ impl Database {
         if fresh {
             conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
             conn.execute_batch(SCHEMA)?;
+            conn.execute(
+                "INSERT INTO metadata VALUES('format',?1)",
+                [DATABASE_FORMAT],
+            )?;
         }
         let desired = shared.desired.lock().expect("storage settings");
         let mut database = Self {

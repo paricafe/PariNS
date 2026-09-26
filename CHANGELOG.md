@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add managed-mode official release checks and a restricted Linux updater with
+  read-only preflight, durable update intent and bounded recovery.
+- Add bilingual software-update controls and update-only hot settings without
+  restarting DNS or clearing caches.
+- Add official build manifests and explicit first-time updater enrollment.
+- Disposable Linux lifecycle and performance acceptance remain release gates.
+  These development changes are not included in v0.1.4.
+
 ## v0.1.4 — 2026-09-24
 
 ### Upgrade notice

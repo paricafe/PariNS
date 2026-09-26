@@ -1,0 +1,14 @@
+.update-panel { display: grid; gap: 16px; }
+.update-panel p, .update-panel dl { margin-bottom: 0; }
+.update-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.update-facts dt { color: var(--muted); font-size: 13px; }
+.update-facts dd { margin: 4px 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.update-notes { border-block: 1px solid var(--divider); padding-block: 12px; min-width: 0; }
+.update-notes summary { cursor: pointer; font-weight: 600; }
+.update-notes summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.update-notes pre { color: var(--text); background: var(--raised); border-radius: 6px; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto; font: inherit; }
+.update-operation { border-inline-start: 3px solid var(--divider); padding-inline-start: 12px; display: grid; gap: 8px; }
+.update-operation progress { width: 100%; height: 8px; accent-color: var(--primary); }
+.update-hint { background: var(--raised); border: 1px solid var(--divider); padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
+.update-actions { align-items: stretch; }
+@media (max-width: 767px) { .update-facts { grid-template-columns: minmax(0, 1fr); } .update-actions > * { flex: 1 1 auto; white-space: normal; } }

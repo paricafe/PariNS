@@ -46,6 +46,7 @@ Do not expand it into a full recursive resolver without an explicit design decis
 | `src/server.rs` and listener/transport modules | Listener lifecycle, transport framing, connection limits, and shutdown. |
 | `src/policy.rs`, `src/limits.rs` | Filtering decisions and source resource budgets, respectively. |
 | `src/manage/` | Authenticated management APIs, configuration transactions, persistence, and managed runtime ownership. |
+| `src/update/` | Official release/build contracts and bounded HTTPS reader; the fixed root executor owns its installation journal, never DNS or business data. |
 | `src/filter_subscriptions/` | Low-privilege subscription downloads and private source objects/catalog. Foundation preparation does not activate DNS policy or expose configuration/API controls. |
 | `src/https_reader.rs`, `src/private_files.rs` | Shared pinned HTTPS transport and private-file checks; callers retain source authorization, transactions, and lifecycle ownership. |
 | `web/` | Embedded UI, forms, drafts, and presentation. No independent DNS policy engine or authoritative configuration state. |
@@ -148,6 +149,17 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   and managed SIGHUP reload current certificates under the existing mutation
   permit; file-mode SIGHUP also reloads policy. Preparation cannot mutate active
   material. Reload does not alter config revision, DNS/cache ownership or sessions.
+- Software checks belong to one managed-process scheduler after setup, never a
+  DNS generation or API GET. Updates-only settings preserve listeners, caches,
+  RuntimeServices, certificates and sessions. File mode has no update scheduler.
+- Update commit intent is persisted before a freeze and fixed inbox request.
+  Check the freeze under the existing mutation permit; release that permit
+  before root waits for normal SIGTERM. Unknown helper outcomes never unlock by
+  timeout. Only a matching terminal fence and installed identity resolve intent.
+- Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
+  persistence or listeners. Candidate preflight runs as the existing app user;
+  root never executes the candidate. Root journal is the sole installed anchor,
+  with bounded derived status and pending-launch health, not a second database.
 - Subscription validators bind the final exact URL, request representation and
   accepted content. Source objects precede catalog selection; initialize a durable
   empty catalog before the first object. Never reconstruct missing/corrupt authority

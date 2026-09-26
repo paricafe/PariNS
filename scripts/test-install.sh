@@ -6,14 +6,18 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/parins-installer-test.XXXXXX")
 fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
 binary="$fixture/candidate"
+helper="$fixture/parins-updater"
+build_info="$fixture/install-build-info.json"
 printf '#!/bin/sh\nexit 99\n' > "$binary"
+cp "$binary" "$helper"
+printf '{"official_release":false}\n' > "$build_info"
 mkdir "$fixture/tools"
 printf '#!/bin/sh\nprintf called > "%s"\nexit 99\n' "$fixture/systemctl-called" > "$fixture/tools/systemctl"
 chmod 0755 "$fixture/tools/systemctl"
 PATH="$fixture/tools:$PATH"
 export PATH
 expect_failure() {
-    if sh "$repo/scripts/install.sh" "$@" > "$fixture/failure.log" 2>&1; then
+    if sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" "$@" > "$fixture/failure.log" 2>&1; then
         printf 'Expected refusal: %s\n' "$*" >&2
         exit 1
     fi
@@ -21,16 +25,24 @@ expect_failure() {
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 stage="$fixture/stage"
 mkdir -m 0700 "$stage"
-sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary" --dry-run
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" --dry-run
 [ ! -e "$stage/opt" ]
 mkdir -p "$stage/var/lib/parins/tls" "$stage/etc/systemd/system"
 printf 'external private HTTPS identity\n' > "$stage/var/lib/parins/tls/identity.pem"
 printf 'external public HTTPS certificate\n' > "$stage/var/lib/parins/tls/cert.pem"
 printf 'legacy service unchanged\n' > "$stage/etc/systemd/system/parins.service"
 chmod 0750 "$stage/etc"
-sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary"
 cmp "$binary" "$stage/opt/parins-managed/parins"
 cmp "$repo/deploy/parins-managed.service" "$stage/etc/systemd/system/parins-managed.service"
+cmp "$helper" "$stage/usr/libexec/parins-updater"
+cmp "$build_info" "$stage/var/lib/parins-updater/private/install-build-info.json"
+for unit in parins-updater.service parins-updater.path parins-update-recovery.service; do
+    cmp "$repo/deploy/$unit" "$stage/etc/systemd/system/$unit"
+done
+[ "$(mode "$stage/var/lib/parins-updater/private")" = 700 ]
+[ "$(mode "$stage/var/lib/parins-updater/private/install-build-info.json")" = 600 ]
+[ "$(mode "$stage/usr/libexec/parins-updater")" = 755 ]
 grep -Fq -- '--web-listen 0.0.0.0:3000' "$stage/etc/systemd/system/parins-managed.service"
 grep -Fqx 'ExecReload=/bin/kill -HUP $MAINPID' "$stage/etc/systemd/system/parins-managed.service"
 [ "$(mode "$stage/opt/parins-managed/parins")" = 755 ]
@@ -44,7 +56,7 @@ printf 'private running history\n' > "$stage/var/lib/parins-managed/runtime/obse
 mkdir "$stage/etc/systemd/system/parins-managed.service.d"
 printf '[Service]\nSupplementaryGroups=certificate-readers\n' > "$stage/etc/systemd/system/parins-managed.service.d/certificates.conf"
 printf 'second candidate, must never execute\n' > "$binary"
-sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary"
 cmp "$binary" "$stage/opt/parins-managed/parins"
 [ "$(sed -n 1p "$stage/var/lib/parins-managed/state.json")" = 'private existing state' ]
 [ "$(sed -n 1p "$stage/var/lib/parins-managed/certificates/import.pem")" = 'private imported certificate' ]
@@ -67,7 +79,7 @@ rm "$fixture/tools/mv"
 mkdir "$stage/var/lib/private"
 mv "$stage/var/lib/parins-managed" "$stage/var/lib/private/parins-managed"
 ln -s private/parins-managed "$stage/var/lib/parins-managed"
-sh "$repo/scripts/install.sh" --root "$stage" --binary "$binary"
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary"
 [ "$(sed -n 1p "$stage/var/lib/parins-managed/state.json")" = 'private existing state' ]
 # Every rejected preflight must precede replacement, backups and service calls.
 cp "$stage/opt/parins-managed/parins" "$fixture/preflight-binary"
@@ -147,9 +159,32 @@ for scenario in unknown-directory dangling-link orphaned-private legacy-state le
             printf '# PariNS managed installer unit v1\n[Service]\nStateDirectory=parins\n' > "$target/etc/systemd/system/parins-managed.service" ;;
     esac
     expect_failure --root "$target" --binary "$binary"
-    expect_failure --root "$target" --binary "$binary" --dry-run
+expect_failure --root "$target" --binary "$binary" --dry-run
     [ ! -e "$target/opt" ]
 done
+# First onboarding is an explicit, exact-layout operation, never a marker-only
+# legacy fallback. Staging proves no candidate/systemctl runs or business writes.
+enrollment="$fixture/enrollment"
+mkdir -p "$enrollment/etc/systemd/system/parins-managed.service.d" "$enrollment/opt/parins-managed" "$enrollment/var/lib/parins-managed/runtime"
+cp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$enrollment/etc/systemd/system/parins-managed.service"
+cp "$binary" "$enrollment/opt/parins-managed/parins"
+printf 'existing state stays byte-identical\n' > "$enrollment/var/lib/parins-managed/state.json"
+printf 'existing runtime stays byte-identical\n' > "$enrollment/var/lib/parins-managed/runtime/observability.sqlite3"
+printf '[Service]\nSupplementaryGroups=certificate-readers\n' > "$enrollment/etc/systemd/system/parins-managed.service.d/certificates.conf"
+expect_failure --root "$enrollment" --binary "$binary"
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$enrollment" --binary "$binary" --enable-updater --dry-run
+cmp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$enrollment/etc/systemd/system/parins-managed.service"
+printf '# marker retained but base unit changed\n' >> "$enrollment/etc/systemd/system/parins-managed.service"
+expect_failure --root "$enrollment" --binary "$binary" --enable-updater
+cp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$enrollment/etc/systemd/system/parins-managed.service"
+printf '[Service]\nExecStart=/bin/true\n' > "$enrollment/etc/systemd/system/parins-managed.service.d/evil.conf"
+expect_failure --root "$enrollment" --binary "$binary" --enable-updater
+rm "$enrollment/etc/systemd/system/parins-managed.service.d/evil.conf"
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$enrollment" --binary "$binary" --enable-updater
+cmp "$repo/deploy/parins-managed.service" "$enrollment/etc/systemd/system/parins-managed.service"
+grep -Fxq 'existing state stays byte-identical' "$enrollment/var/lib/parins-managed/state.json"
+grep -Fxq 'existing runtime stays byte-identical' "$enrollment/var/lib/parins-managed/runtime/observability.sqlite3"
+[ ! -f "$enrollment/var/lib/parins-updater/private/journal.json" ]
 # Even an owned unit cannot legitimize an unexpected logical or backing link.
 cp "$fixture/preflight-unit" "$stage/etc/systemd/system/parins-managed.service"
 rm "$stage/var/lib/parins-managed"

@@ -1,7 +1,8 @@
-# PariNS managed installer unit v2 (exclusive state directory)
+# PariNS managed installer unit v3 (restricted updater contract)
 [Unit]
 Description=PariNS DNS forwarder and management console
-After=network-online.target
+After=network-online.target parins-update-recovery.service
+Requires=parins-update-recovery.service
 Wants=network-online.target
 
 [Service]
@@ -9,6 +10,8 @@ Type=simple
 DynamicUser=yes
 StateDirectory=parins-managed
 StateDirectoryMode=0700
+RuntimeDirectory=parins-managed
+RuntimeDirectoryMode=0700
 WorkingDirectory=/var/lib/parins-managed
 ExecStart=/opt/parins-managed/parins --manage --state-dir /var/lib/parins-managed --web-listen 0.0.0.0:3000
 ExecReload=/bin/kill -HUP $MAINPID

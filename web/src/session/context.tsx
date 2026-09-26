@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiClient, ApiError, CookieUnavailable, StaleRequest, type SessionView, type TransportChange, type TransportView } from './client';
+import { reloadConsole } from '../features/updates/reload';
 
 export type SessionPhase = 'checking' | 'setup' | 'setup-unknown' | 'login' | 'ready' | 'connection-error' | 'cookie-unavailable' | 'logout-unknown' | 'transport-change';
 export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string; transport?: TransportView; nextOrigin?: string | null }
@@ -13,6 +14,7 @@ interface SessionContextValue {
   retryLogout(): Promise<void>;
   recheck(): Promise<void>;
   transportChanged(change: TransportChange): void;
+  expectUpdateRestart(expected: boolean): void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -27,11 +29,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const logoutBinding = useRef<string | null>(null);
   const logoutIntent = useRef(false);
   const authInFlight = useRef(false);
+  const updateRestart = useRef(false);
+  const expectUpdateRestart = useCallback((expected: boolean) => { updateRestart.current = expected; }, []);
   const phase = useRef<SessionPhase>(state.phase);
   phase.current = state.phase;
 
   const applySession = useCallback((view: SessionView) => {
     if (!mounted.current) return;
+    if (!view.authenticated && updateRestart.current && !logoutIntent.current) {
+      updateRestart.current = false;
+      api.replaceBinding(null);
+      setState({ phase: 'checking' });
+      reloadConsole();
+      return;
+    }
     const binding = view.authenticated ? view.session!.binding : null;
     if (binding !== api.currentBinding) api.replaceBinding(binding);
     setState(view.setup_required ? { phase: 'setup', transport: view.transport } : view.authenticated
@@ -64,6 +75,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     mounted.current = true;
     api.setAuthEventHandler((event) => {
+      if (event === 'unauthorized' && updateRestart.current && !logoutIntent.current) {
+        updateRestart.current = false;
+        api.replaceBinding(null);
+        setState({ phase: 'checking' });
+        reloadConsole();
+        return;
+      }
       if (event === 'transport-changed') {
         bootId.current += 1;
         api.replaceBinding(null);
@@ -184,6 +202,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [api, applySession, authAction]);
 
   const logout = useCallback(async () => {
+    updateRestart.current = false;
     logoutBinding.current = api.currentBinding;
     logoutIntent.current = true;
     bootId.current += 1;
@@ -197,7 +216,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     await performLogout(logoutBinding.current);
   }, [performLogout, state.phase]);
 
-  const value = useMemo<SessionContextValue>(() => ({ state, api, login, setup, logout, retryLogout, recheck, transportChanged }), [state, api, login, setup, logout, retryLogout, recheck, transportChanged]);
+  const value = useMemo<SessionContextValue>(() => ({ state, api, login, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart }), [state, api, login, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 

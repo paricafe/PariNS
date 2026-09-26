@@ -1,5 +1,6 @@
 //! Private runtime storage. One SQLite owner; DNS producers never wait for IO.
 mod database;
+pub(crate) use database::DATABASE_FORMAT;
 mod observation;
 mod statistics;
 #[cfg(test)]

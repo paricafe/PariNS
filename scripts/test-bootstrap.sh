@@ -43,13 +43,16 @@ asset="$archive.tar.gz"
 package="$fixture/build/$archive"
 mkdir "$package" "$package/deploy"
 printf '%s\n' '#!/bin/sh' 'printf called > "$BOOTSTRAP_FIXTURE/binary-called"' 'exit 99' > "$package/parins"
+cp "$package/parins" "$package/parins-updater"
+printf '{"official_release":false}\n' > "$package/install-build-info.json"
 cp "$repo/scripts/install.sh" "$package/install.sh"
 cp "$repo/deploy/parins-managed.service" "$repo/deploy/parins.service" "$package/deploy/"
+cp "$repo/deploy/parins-updater.service" "$repo/deploy/parins-updater.path" "$repo/deploy/parins-update-recovery.service" "$package/deploy/"
 cp "$repo/parins.example.toml" "$repo/LICENSE" "$repo/README.md" "$package/"
 cp "$repo/web/src/components/beui/LICENSE.beui" "$package/"
 printf 'fixture release notes\n' > "$package/CHANGELOG.md"
 manifest() {
-    for name in parins install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service; do
+    for name in parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service; do
         printf '%s  %s\n' "$(digest "$package/$name")" "$name"
     done > "$package/SHA256SUMS"
     if [ -f "$package/LICENSE.beui" ]; then
@@ -81,11 +84,21 @@ sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.4
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json"
 grep -Fxq 'keep certificate identity' "$fixture/stage/var/lib/parins-managed/certificates/identity.pem"
 grep -Fxq 'keep external certificate' "$fixture/stage/var/lib/parins/tls/external.pem"
-# Archives without a beUI notice remain installable; when present it is verified.
+# Bootstrap must forward explicit enrollment; it must not select this mode.
+cp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
+if sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" > "$fixture/enrollment-refused.log" 2>&1; then
+    printf '%s\n' 'Bootstrap silently adopted an old unit.' >&2; exit 1
+fi
+sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --enable-updater --dry-run
+cmp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
+sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --enable-updater
+cmp "$repo/deploy/parins-managed.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
+grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json"
+# Every install input is mandatory; no legacy package fallback.
 mv "$package/LICENSE.beui" "$fixture/notice-copy"
 manifest
 pack
-sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.4 --dry-run
+expect_failure --version v0.1.4
 printf '%064d  LICENSE.beui\n' 0 >> "$package/SHA256SUMS"
 pack
 expect_failure --version v0.1.4
@@ -101,6 +114,8 @@ BOOTSTRAP_ARCH=arm64 sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --d
 BOOTSTRAP_ARCH=riscv64 expect_failure
 BOOTSTRAP_OS=Darwin expect_failure
 expect_failure --version ../../escape
+expect_failure --version v0.01.4
+expect_failure --version v0.1.4-rc1
 expect_failure --version 'v0.1.4
 v0.1.4'
 expect_failure --version
@@ -130,6 +145,27 @@ pack
 expect_failure
 cp "$repo/README.md" "$package/README.md"
 manifest
+# Every privileged install input must be present and authenticated before install.
+for name in parins-updater install-build-info.json deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service; do
+    mv "$package/$name" "$fixture/missing-member"
+    pack
+    expect_failure
+    mv "$fixture/missing-member" "$package/$name"
+    cp "$package/$name" "$fixture/original-member"
+    printf '\ntampered\n' >> "$package/$name"
+    pack
+    expect_failure
+    mv "$fixture/original-member" "$package/$name"
+done
+printf 'unlisted\n' > "$package/deploy/unlisted.path"
+pack
+expect_failure
+rm "$package/deploy/unlisted.path"
+cp "$package/SHA256SUMS" "$fixture/original-manifest"
+printf '%s  parins-updater\n' "$(digest "$package/parins-updater")" >> "$package/SHA256SUMS"
+pack
+expect_failure
+mv "$fixture/original-manifest" "$package/SHA256SUMS"
 # Reject symlinks and hardlinks even when their names are allowlisted.
 mv "$package/parins" "$fixture/original-parins"
 ln -s "$fixture/original-parins" "$package/parins"

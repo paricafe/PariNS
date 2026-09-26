@@ -2,14 +2,38 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionProvider, useSession } from './context';
+const updateReload = vi.hoisted(() => vi.fn());
+vi.mock('../features/updates/reload', () => ({ reloadConsole: updateReload }));
 
 const session = { setup_required: false, authenticated: true, session: { binding: 'binding-1', expires_in_seconds: 28000 },
   transport: { scheme: 'http', origin: null, certificate_source: null } };
 const jsonResponse = (value: unknown) => ({ ok: true, status: 200, json: async () => value }) as Response;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); updateReload.mockClear(); });
 
 describe('session transition', () => {
+  it('reloads the embedded console only when an armed update reconnects to an expired session', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url === '/api/session' ? jsonResponse(session)
+      : ({ ok: false, status: 401, json: async () => ({ error: { code: 'UNAUTHORIZED', message: 'Sign in' } }) }) as Response));
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    act(() => hook.result.current.expectUpdateRestart(true));
+    await act(async () => { await hook.result.current.api.request('updates').catch(() => {}); });
+    expect(updateReload).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.api.currentBinding).toBeNull();
+    hook.unmount();
+  });
+
+  it('explicit logout clears update restart intent instead of reloading', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => jsonResponse(url === '/api/session' ? session : {})));
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    act(() => hook.result.current.expectUpdateRestart(true));
+    await act(async () => { await hook.result.current.logout(); });
+    expect(updateReload).not.toHaveBeenCalled();
+    expect(hook.result.current.state.phase).toBe('login');
+    hook.unmount();
+  });
   it('updates the security transport source on same-origin session refresh', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url !== '/api/session') throw new Error(`Unexpected request ${url}`);

@@ -28,10 +28,12 @@ jobs:
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CC_x86_64_unknown_linux_musl: musl-gcc
       CC_aarch64_unknown_linux_musl: musl-gcc
+      PARINS_OFFICIAL_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.16.0'
@@ -56,13 +58,17 @@ jobs:
             echo 'Tag does not match Cargo.toml' >&2
             exit 1
           fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "$(git rev-parse "$GITHUB_REF^{commit}")" = "$GITHUB_SHA"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           sudo apt-get update
           sudo apt-get install --yes musl-tools binutils
           rustup target add "$TARGET"
       - run: cargo fmt --check
       - name: Release notes regression
-        run: node --test scripts/test-release-notes.mjs
+        run: node --test scripts/test-release-notes.mjs scripts/test-update-manifest.mjs
       - name: Clippy and tests on the release target
         env:
           TARGET: ${{ matrix.target }}
@@ -100,9 +106,42 @@ jobs:
           path: |
             target/packages/parins-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
             target/packages/parins-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256
+            target/packages/parins-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.bin
+            target/packages/parins-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.build-info.json
+  verify-assets:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.16.0'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: target/release-assets
+      - name: Verify both native contracts and raw/package byte identity
+        run: |
+          set -euo pipefail
+          version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
+          mode=development
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then mode=official; fi
+          for arch in x86_64 aarch64; do
+            (cd target/release-assets && sha256sum --check "parins-$version-linux-$arch.tar.gz.sha256")
+          done
+          node scripts/update-manifest.mjs target/release-assets "$version" "$GITHUB_SHA" "$mode"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-manifest
+          if-no-files-found: error
+          path: target/release-assets/parins-update.json
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, verify-assets]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -118,6 +157,10 @@ jobs:
         with:
           pattern: release-*
           merge-multiple: true
+          path: target/release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: update-manifest
           path: target/release-assets
       - name: Publish only the fully verified tag
         env:
@@ -143,7 +186,8 @@ jobs:
           gh release create "$version" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "PariNS $version" --notes-file "$RUNNER_TEMP/parins-release-notes.md" \
             "parins-$version-linux-x86_64.tar.gz" "parins-$version-linux-x86_64.tar.gz.sha256" \
-            "parins-$version-linux-aarch64.tar.gz" "parins-$version-linux-aarch64.tar.gz.sha256" bootstrap.sh
+            "parins-$version-linux-aarch64.tar.gz" "parins-$version-linux-aarch64.tar.gz.sha256" \
+            "parins-$version-linux-x86_64.bin" "parins-$version-linux-aarch64.bin" parins-update.json bootstrap.sh
           gh release edit "$version" --repo "$GITHUB_REPOSITORY" --draft=false --latest
       - name: Verify the public quick-start download chain
         run: |

@@ -36,6 +36,12 @@ max_tcp_connections = 64
 # cert_file = "server.pem"
 # key_file = "server.key"
 
+# Managed mode only: check the official stable release, never install automatically.
+# File mode does not start the update checker. Interval range: 1..168 hours.
+[updates]
+auto_check = true
+check_interval_hours = 6
+
 # One or more equivalent upstreams; never point back to a PariNS listener.
 # Supports IP[:port], udp://, tcp://, tls://, https://host/dns-query, quic://.
 # Append weight=N to an endpoint for weighted balancing.

@@ -98,6 +98,7 @@ export const settingPages = {
     group("storageAdvanced", [number("storage.max_database_bytes", 16777216, 4294967296, true), number("storage.flush_interval_ms", 100, 5000), number("storage.cleanup_interval_secs", 10, 3600), number("storage.queue_max_entries", 128, 65536), number("storage.queue_max_bytes", 1048576, 67108864)]),
   ]),
   runtime: page("runtime", [
+    group("updates", [field("updates.auto_check", "checkbox", true), number("updates.check_interval_hours", 1, 168, true)]),
     group("concurrency", [number("max_inflight", 1, 65536), number("max_tcp_connections", 1, 65536), number("shutdown_grace_ms", 1, 60000)]),
     group("sourceLimits", [
       field("source_limits.enabled", "checkbox"), number("source_limits.rate_per_sec", 1, 1000000),

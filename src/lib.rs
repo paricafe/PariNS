@@ -28,5 +28,6 @@ pub mod server;
 pub mod storage;
 pub mod tls;
 mod transport;
+pub mod update;
 mod upstream;
 pub mod upstreams;

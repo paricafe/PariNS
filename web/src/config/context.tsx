@@ -54,6 +54,7 @@ interface ConfigContextValue {
   resolveUnknown(): Promise<'applied' | 'pending' | 'changed'>;
   exportDraft(): Promise<void>;
   discard(): void;
+  setUpdateLocked(locked: boolean): void;
 }
 
 const ConfigContext = createContext<ConfigContextValue | null>(null);
@@ -83,6 +84,9 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   const wasActive = useRef(false);
   const version = useRef(0);
   const writeLock = useRef(false);
+  const updateLock = useRef(false);
+  const [updateLocked, setUpdateLockedState] = useState(false);
+  const setUpdateLocked = useCallback((locked: boolean) => { updateLock.current = locked; setUpdateLockedState(locked); }, []);
   const assertVersion = (expected: number) => { if (expected !== version.current) throw new Error('Draft changed during this operation; preview again'); };
 
   const reload = useCallback(async () => {
@@ -115,29 +119,29 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
 
   const updateField = useCallback((path: string, value: RawFieldValue) => {
     if (!fieldByPath.has(path)) throw new Error(`Unknown field ${path}`);
-    if (writeLock.current) return;
+    if (writeLock.current || updateLock.current) return;
     version.current += 1;
     setDraft((current) => current && ({ ...current, previewTransportChange: null, fields: { ...current.fields, [path]: value } }));
   }, []);
   const setOptional = useCallback((protocol: string, enabled: boolean) => {
     if (!['dot', 'doh', 'doq'].includes(protocol)) throw new Error('Unknown listener');
-    if (writeLock.current) return;
+    if (writeLock.current || updateLock.current) return;
     version.current += 1;
     setDraft((current) => current && ({ ...current, previewTransportChange: null, optional: { ...current.optional, [protocol]: enabled } }));
   }, []);
   const setRules = useCallback((rules: CacheRuleDraft[]) => {
-    if (writeLock.current) return;
+    if (writeLock.current || updateLock.current) return;
     version.current += 1;
     setDraft((current) => current && ({ ...current, previewTransportChange: null, rules }));
   }, []);
   const setToml = useCallback((toml: string) => {
-    if (writeLock.current) return;
+    if (writeLock.current || updateLock.current) return;
     version.current += 1;
     setDraft((current) => current && ({ ...current, toml, stale: true, previewTransportChange: null }));
   }, []);
 
   const importCertificate = useCallback(async (target: 'dot' | 'doh' | 'doq', certificate: string, privateKey: string) => {
-    if (!draft || writeLock.current || busy) throw new Error('Configuration is busy');
+    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
     const enabled = draft.optional[target] ?? getPath(draft.settings, target) !== null;
     if (!enabled) throw new Error('app.enableListener');
     writeLock.current = true;
@@ -241,7 +245,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [api, draft]);
 
   const prepareSave = useCallback(async (): Promise<PreparedSave> => {
-    if (!draft || draft.unknownApply || writeLock.current) throw new Error('Resolve the previous operation before saving');
+    if (!draft || draft.unknownApply || writeLock.current || updateLock.current) throw new Error('Resolve the previous operation before saving');
     setBusy(true); setError(null);
     const before = version.current;
     try {
@@ -256,6 +260,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [api, draft, flush]);
 
   const commitPrepared = useCallback(async (prepared: PreparedSave) => {
+    if (updateLock.current) throw new Error('updates.locked');
     assertVersion(prepared.version);
     writeLock.current = true;
     setBusy(true); setError(null);
@@ -325,7 +330,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [api, draft, refreshSession]);
 
   const previewRollback = useCallback(async (): Promise<PreparedRollback> => {
-    if (!draft || writeLock.current || busy) throw new Error('Configuration is busy');
+    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
     const owner = version.current;
     const result = await api.request<{ transport_change: TransportChange | null }>('config/rollback/preview', 'POST', { revision: draft.revision });
     assertVersion(owner);
@@ -333,7 +338,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [api, busy, draft]);
 
   const rollback = useCallback(async (prepared: PreparedRollback): Promise<CommitResult> => {
-    if (!draft || writeLock.current || busy) throw new Error('Configuration is busy');
+    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
     assertVersion(prepared.version);
     writeLock.current = true;
     setBusy(true); setError(null);
@@ -378,9 +383,9 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, [flush]);
 
-  const value = useMemo<ConfigContextValue>(() => ({ draft, busy, locked: writeLock.current || Boolean(draft?.unknownApply), error, dirty: dirty(draft), setError, updateField,
-    setOptional, setRules, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard }),
-  [draft, busy, error, updateField, setOptional, setRules, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard]);
+  const value = useMemo<ConfigContextValue>(() => ({ draft, busy: busy || updateLocked, locked: writeLock.current || updateLocked || Boolean(draft?.unknownApply), error, dirty: dirty(draft), setError, updateField,
+    setOptional, setRules, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked }),
+  [draft, busy, updateLocked, error, updateField, setOptional, setRules, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked]);
   return <ConfigContext.Provider value={value}>{children}</ConfigContext.Provider>;
 }
 

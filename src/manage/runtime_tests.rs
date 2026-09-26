@@ -167,3 +167,68 @@ async fn aborted_dns_task_publishes_failed_sampler_state_and_never_clean_shutdow
     assert_sampler(&services, true, 2).await;
     services.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn update_settings_change_only_management_state_even_with_dns_stopped() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+            toml: config(),
+            previous: None,
+            revision: 1,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: Vec::new(),
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active.clone())
+        .await
+        .unwrap();
+    let resolver = manager.resolver().unwrap().clone();
+    let cache = resolver.cache();
+    let certificates = active
+        .lock()
+        .unwrap()
+        .snapshot
+        .certificates
+        .clone()
+        .unwrap();
+    let services = manager.services.clone();
+    let generation = manager.generation;
+    let storage_revision = manager.services.status().configured_revision;
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml
+        .push_str("\n[updates]\nauto_check=false\ncheck_interval_hours=168\n");
+    assert!(!manager.apply(next).await.unwrap());
+    assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
+    assert!(Arc::ptr_eq(&cache, &manager.resolver().unwrap().cache()));
+    assert!(Arc::ptr_eq(&services, &manager.services));
+    assert!(Arc::ptr_eq(
+        &certificates,
+        active
+            .lock()
+            .unwrap()
+            .snapshot
+            .certificates
+            .as_ref()
+            .unwrap()
+    ));
+    assert_eq!(manager.generation, generation);
+    assert_eq!(
+        manager.services.status().configured_revision,
+        storage_revision
+    );
+    manager.stop().await;
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml = next.toml.replace("auto_check=false", "auto_check=true");
+    assert!(!manager.apply(next).await.unwrap());
+    assert!(manager.resolver().is_none());
+    assert_eq!(manager.generation, generation);
+    manager.terminal_shutdown().await;
+}

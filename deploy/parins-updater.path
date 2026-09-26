@@ -1,0 +1,14 @@
+# PariNS updater contract v1
+[Unit]
+Description=PariNS update request inbox
+StartLimitIntervalSec=60
+StartLimitBurst=8
+
+[Path]
+PathExists=/var/lib/parins-managed/update-request.json
+Unit=parins-updater.service
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=8
+
+[Install]
+WantedBy=multi-user.target

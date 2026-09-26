@@ -1,4 +1,10 @@
 export const settingsMessages = {
+  'group.updates.title': ['自动检查更新', 'Automatic update checks'],
+  'group.updates.help': ['检查会联系 GitHub，仅查找新版本。保存此设置后生效。', 'Checks contact GitHub only to look for new versions. Save this setting to apply it.'],
+  'updates.auto_check.label': ['定期检查新版本', 'Check for new versions regularly'],
+  'updates.auto_check.help': ['关闭后仍可手动检查；安装始终需要管理员确认。', 'You can still check manually when this is off. Installation always needs administrator confirmation.'],
+  'updates.check_interval_hours.label': ['检查间隔（小时）', 'Check interval (hours)'],
+  'updates.check_interval_hours.help': ['可设置 1–168 小时；实际检查时间会有少量随机延迟。', 'Choose 1–168 hours. Actual checks include a small randomized delay.'],
   "page.dns.title": ["DNS 设置", "DNS settings"],
   "page.dns.intro": ["设置监听地址和上游 DNS，选择查询方式。IPv6 地址请加方括号。", "Set listening addresses, upstream DNS servers, and query mode. Enclose IPv6 addresses in brackets."],
   "page.cache.title": ["缓存与 ECS", "Cache & ECS"],

@@ -123,6 +123,10 @@ mod tests {
         assert_eq!(result["settings"]["source_limits"]["rate_per_sec"], 100);
         assert_eq!(result["settings"]["ecs"]["enabled"], false);
         assert_eq!(result["settings"]["coalescing"]["enabled"], true);
+        assert_eq!(
+            result["settings"]["updates"],
+            json!({"auto_check":true,"check_interval_hours":6})
+        );
         assert_eq!(result["settings"]["filter"]["block_exact"], json!([]));
         for key in ["dot", "doh", "doq"] {
             assert_eq!(result["settings"][key], Value::Null);
@@ -219,6 +223,10 @@ mod tests {
             json!({"cache":{"max_bytes":"large"}}),
             json!({"max_inflight":null}),
             json!({"ecs":{"ipv4_prefix":33}}),
+            json!({"updates":{"check_interval_hours":0}}),
+            json!({"updates":{"check_interval_hours":169}}),
+            json!({"updates":{"auto_check":"true"}}),
+            json!({"updates":{"unknown":true}}),
             json!({"filter":{"block_exact":[null]}}),
         ] {
             assert!(change(BASE, changes.clone()).is_err(), "{changes}");

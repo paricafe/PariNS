@@ -14,7 +14,7 @@ const [stage, fixture] = process.argv.slice(2);
 assert(process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true'
   && process.env.RUNNER_ENVIRONMENT === 'github-hosted' && process.env.RUNNER_OS === 'Linux',
   'requires a disposable GitHub Linux runner');
-assert(['activate', 'restart', 'offline', 'frozen', 'unfrozen'].includes(stage));
+assert(['activate', 'restart', 'offline', 'frozen', 'unfrozen', 'enospc', 'recovered'].includes(stage));
 assert(path.isAbsolute(fixture));
 const base = 'http://127.0.0.1:3000';
 const source = { id: 'fs-ci', format: 'domain_list',
@@ -104,6 +104,15 @@ function privilegedRead(file, maxBuffer = 256 * 1024) {
   return execFileSync('sudo', ['-n', 'cat', file], { maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+function stagingEnospcProof(trace) {
+  // -f prefixes TIDs, -yy resolves the FD, -s0 omits payload. Never emit raw
+  // trace lines; require the exact owned staging filename and Linux errno.
+  const pattern = /^(?:\d+\s+)?write\(\d+<\/var\/lib\/(?:private\/)?parins-managed\/filter-subscriptions\/staging\/download-[a-f0-9]{64}\.tmp(?: \(deleted\))?>, [^\r\n]*, ([1-9]\d*)\)\s+= -1 ENOSPC(?:\s|\()/gm;
+  const writes = [...trace.matchAll(pattern)];
+  assert(writes.length > 0, 'real download write must return ENOSPC');
+  return { syscall: 'write', errno: 'ENOSPC', failed_writes: writes.length,
+    attempted_bytes: writes.reduce((sum, match) => sum + Number(match[1]), 0) };
+}
 function selected(evidence, rootsSynchronized = true) {
   const catalog = JSON.parse(privilegedRead(`${directory}/catalog.json`));
   const record = catalog.records.find(item => item.fingerprint === evidence.fingerprint);
@@ -209,6 +218,54 @@ if (stage === 'activate') {
   assert.equal(before.unavailable_reason, null);
   selected(evidence);
   await blocked(evidence);
+  if (stage === 'enospc' || stage === 'recovered') {
+    assert.equal(before.operation, null, 'fault fixture requires an idle worker');
+    const catalog = selected(evidence);
+    assert.equal(catalog.records.length, 1, 'fault URL must have no previous selected content or validators');
+    const catalogHash = digest(privilegedRead(`${directory}/catalog.json`));
+    const objectHash = digest(privilegedRead(`${directory}/objects/${evidence.sha256}.txt`, 16 * 1024 * 1024));
+    assert.equal(objectHash, evidence.sha256, 'selected object bytes match their content address before the fault');
+    const draft = { ...source, id: 'fs-enospc', url: `${source.url}?parins-fs7=enospc` };
+    let previous;
+    if (stage === 'recovered') {
+      previous = JSON.parse(await readFile(path.join(artifacts, 'enospc.json'), 'utf8'));
+      assert.equal(previous.result, 'passed');
+      assert.equal(previous.operation_status, 'failed');
+      assert.equal(previous.write_proof.errno, 'ENOSPC');
+      assert.equal(before.generation, previous.generation);
+    }
+    // New URL identity has no validator, so the real reader must consume a 200
+    // body. A 304 or network failure cannot produce the required write trace.
+    const result = await operation('/api/filter/subscriptions/prepare',
+      { config_revision: evidence.config_revision, source: draft }, stage === 'enospc' ? 'failed' : 'succeeded');
+    assert.notEqual(result.fingerprint, evidence.fingerprint);
+    const after = await snapshot();
+    assert.equal(after.generation, before.generation);
+    assert.equal(after.config_revision, before.config_revision);
+    assert.equal(after.input_rules, before.input_rules);
+    selected(evidence);
+    assert.equal(digest(privilegedRead(`${directory}/objects/${evidence.sha256}.txt`, 16 * 1024 * 1024)), objectHash,
+      'active object bytes survive both the failure and recovery');
+    await blocked(evidence);
+    let write_proof;
+    if (stage === 'enospc') {
+      assert.equal(result.error?.code, 'subscription_download');
+      assert.equal(after.content_revision, before.content_revision);
+      assert.equal(selected(evidence).records.length, 1);
+      assert.equal(digest(privilegedRead(`${directory}/catalog.json`)), catalogHash,
+        'failed unconfigured preparation preserves catalog bytes');
+      write_proof = stagingEnospcProof(privilegedRead(path.join(fixture, 'enospc.trace'), 1024 * 1024).toString('utf8'));
+    } else {
+      assert.notEqual(result.id, previous.operation_id, 'recovery is a new operation after a known terminal failure');
+      assert.equal(result.fingerprint, previous.fingerprint);
+      assert.equal(result.sha256, evidence.sha256);
+      assert.equal(after.content_revision, before.content_revision + 1, 'only the newly prepared identity advances content revision');
+    }
+    return { stage, result: 'passed', sha256: evidence.sha256,
+      operation_id: result.id, operation_status: result.status, fingerprint: result.fingerprint,
+      generation: after.generation, content_revision: after.content_revision,
+      input_rules: after.input_rules, active_object_sha256: objectHash, write_proof };
+  }
   if (stage === 'frozen') {
     assert.equal(before.operation, null);
     const catalog = privilegedRead(`${directory}/catalog.json`);

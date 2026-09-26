@@ -58,6 +58,48 @@ opt_mode=$(sudo stat -c %a /opt)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/parins-systemd-test.XXXXXX")
 installed=false
 fs_uid= fs_chain=
+fs_trace_job= fs_tracer_pid= fs_fault_pid= fs_fault_ns= fs_staging=
+fs_tmpfs_active=false
+fs_trace_stop() {
+    [ -n "$fs_trace_job" ] || return 0
+    if [ -n "$fs_tracer_pid" ] && sudo test -e "/proc/$fs_tracer_pid/exe"; then
+        [ "$(sudo readlink "/proc/$fs_tracer_pid/exe")" = "$fs_strace" ] || {
+            printf '%s\n' 'FS7 trace cleanup refused: tracer executable identity changed.' >&2; return 1;
+        }
+        sudo kill -INT "$fs_tracer_pid" || return 1
+    elif [ -z "$fs_tracer_pid" ]; then
+        # sudo/timeout forwards termination to its child if attachment failed.
+        sudo kill -TERM "$fs_trace_job" 2>/dev/null || true
+    fi
+    fs_trace_status=0
+    wait "$fs_trace_job" || fs_trace_status=$?
+    fs_trace_job= fs_tracer_pid=
+    [ "$fs_trace_status" -eq 0 ] || {
+        printf 'FS7 tracer exited unexpectedly: status=%s\n' "$fs_trace_status" >&2; return 1;
+    }
+}
+fs_tmpfs_remove() {
+    "$fs_tmpfs_active" || return 0
+    if ! sudo test -e "/proc/$fs_fault_pid/ns/mnt"; then
+        # No other fixture process stays in this namespace. Its disappearance
+        # destroys the private mount; never unmount through a different PID.
+        printf '%s\n' 'FS7 tmpfs cleanup: original service namespace has exited.'
+        fs_tmpfs_active=false
+        return 0
+    fi
+    [ "$(sudo readlink "/proc/$fs_fault_pid/ns/mnt")" = "$fs_fault_ns" ] || {
+        printf '%s\n' 'FS7 tmpfs cleanup refused: mount namespace identity changed.' >&2; return 1;
+    }
+    fs_top=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -T "$fs_staging" -o TARGET,FSTYPE,SOURCE) || return 1
+    if [ "$fs_top" = "$fs_staging tmpfs parins-fs7-enospc" ]; then
+        sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_umount" "$fs_staging" || return 1
+    else
+        case "$fs_top" in "$fs_staging "*)
+            printf '%s\n' 'FS7 tmpfs cleanup refused: unexpected mount at fixture target.' >&2; return 1 ;;
+        esac
+    fi
+    fs_tmpfs_active=false
+}
 fs_offline_remove() {
     [ -n "$fs_chain" ] || return 0
     for table in iptables ip6tables; do
@@ -74,6 +116,8 @@ fs_offline_remove() {
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
+    fs_trace_stop || status=1
+    fs_tmpfs_remove || status=1
     fs_offline_remove || status=1
     if "$installed" && sudo test -f /etc/systemd/system/parins-managed.service && \
         ! sudo test -L /etc/systemd/system/parins-managed.service && \
@@ -85,7 +129,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json filter-evidence.json; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -323,7 +367,7 @@ cmp "$fixture/tls-before" "$fixture/tls-after"
 sudo grep -Fxq 'external certificate sentinel' /var/lib/parins/tls/external.pem
 
 if "$filter_subscriptions"; then
-    for command in node iptables ip6tables nsenter; do
+    for command in node iptables ip6tables nsenter mount umount findmnt strace timeout; do
         command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
     done
     fs_node=$(command -v node)
@@ -545,6 +589,131 @@ sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 check_dns
 if "$filter_subscriptions"; then
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" unfrozen "$fixture"
-    printf '%s\n' 'FS7 pinned HTTPS download, activation, DNS, DynamicUser, offline restart/LKG and UP freeze passed. ENOSPC and performance are separate gates.'
+    # Mount only an idle, empty staging child inside this running service's
+    # existing private/slave namespace. Catalog, objects and lock stay in place.
+    fs_fault_pid=$(systemctl show --property=MainPID --value parins-managed.service)
+    fs_fault_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
+    fs_fault_ns=$(sudo readlink "/proc/$fs_fault_pid/ns/mnt")
+    [ "$fs_fault_ns" != "$(readlink /proc/self/ns/mnt)" ] || {
+        printf '%s\n' 'FS7 ENOSPC refused: service shares the host mount namespace.' >&2; exit 1;
+    }
+    fs_uid=$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_fault_pid/status")
+    fs_gid=$(sudo awk '/^Gid:/ {print $2}' "/proc/$fs_fault_pid/status")
+    [ "$fs_uid" -gt 0 ] && [ "$(sudo readlink "/proc/$fs_fault_pid/exe")" = /opt/parins-managed/parins ] || {
+        printf '%s\n' 'FS7 ENOSPC refused: expected live non-root PariNS executable.' >&2; exit 1;
+    }
+    fs_mount=$(command -v mount)
+    fs_umount=$(command -v umount)
+    fs_findmnt=$(command -v findmnt)
+    fs_strace=$(readlink -f "$(command -v strace)")
+    fs_python=$(command -v python3)
+    fs_timeout=$(command -v timeout)
+    fs_staging=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- readlink -f /var/lib/parins-managed/filter-subscriptions/staging)
+    case "$fs_staging" in /var/lib/parins-managed/filter-subscriptions/staging|/var/lib/private/parins-managed/filter-subscriptions/staging) ;; *) printf '%s\n' 'FS7 ENOSPC refused: unexpected canonical staging path.' >&2; exit 1 ;; esac
+    fs_propagation=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -T "$fs_staging" -o PROPAGATION)
+    case "$fs_propagation" in private|slave) ;; *) printf 'FS7 ENOSPC refused: propagation=%s, expected private or slave.\n' "$fs_propagation" >&2; exit 1 ;; esac
+    if sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -M "$fs_staging" >/dev/null; then
+        printf '%s\n' 'FS7 ENOSPC refused: staging is already a mount point.' >&2; exit 1
+    fi
+    sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_python" - "$fs_staging" "$fs_uid" "$fs_gid" <<'PY'
+import os, stat, sys
+p, uid, gid = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+s = os.lstat(p)
+assert stat.S_ISDIR(s.st_mode) and not stat.S_ISLNK(s.st_mode)
+assert (s.st_uid, s.st_gid, stat.S_IMODE(s.st_mode)) == (uid, gid, 0o700)
+assert os.listdir(p) == [], 'staging must be empty before covering it'
+PY
+    fs_host_staging=$(sudo "$fs_stat" -c '%d:%i' "$fs_staging")
+    fs_tmpfs_active=true
+    sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_mount" -t tmpfs \
+        -o "size=4096,nr_inodes=64,mode=0700,uid=$fs_uid,gid=$fs_gid,nodev,nosuid,noexec" parins-fs7-enospc "$fs_staging"
+    [ "$(sudo "$fs_stat" -c '%d:%i' "$fs_staging")" = "$fs_host_staging" ] || {
+        printf '%s\n' 'FS7 ENOSPC failed isolation: host staging mount changed.' >&2; exit 1;
+    }
+    sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_python" - "$fs_staging" "$fs_uid" "$fs_gid" <<'PY'
+import errno, json, os, stat, sys
+p, uid, gid = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+s = os.lstat(p)
+assert (s.st_uid, s.st_gid, stat.S_IMODE(s.st_mode)) == (uid, gid, 0o700)
+os.setgroups([])
+os.setgid(gid)
+os.setuid(uid)
+with open(p + '/fs7-fill', 'xb') as fill:
+    os.chmod(fill.fileno(), 0o600)
+    fill.write(b'0' * 4096)
+    fill.flush()
+assert os.statvfs(p).f_bavail == 0
+# Plenty of inodes: file creation works; actual data allocation must fail.
+fd = os.open(p + '/fs7-probe', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    try:
+        os.write(fd, b'x')
+    except OSError as error:
+        assert error.errno == errno.ENOSPC
+    else:
+        raise AssertionError('expected real ENOSPC on data write')
+finally:
+    os.close(fd)
+    os.unlink(p + '/fs7-probe')
+print(json.dumps(dict(stage='enospc-mount', tmpfs_bytes=4096, free_blocks=0,
+                     uid=uid, gid=gid, empty_file_created=True, probe_errno='ENOSPC')))
+PY
+    [ "$(sudo awk '/^TracerPid:/ {print $2}' "/proc/$fs_fault_pid/status")" = 0 ] || {
+        printf '%s\n' 'FS7 ENOSPC refused: service already has a tracer.' >&2; exit 1;
+    }
+    # Failed write calls only; zero string bytes. Raw trace stays private and is
+    # removed by cleanup, never placed in the uploaded artifact directory.
+    sudo -n "$fs_timeout" -s INT -k 5 330 "$fs_strace" -f -yy -s 0 -e trace=write -e status=failed \
+        -o "$fixture/enospc.trace" -p "$fs_fault_pid" 2>"$fixture/enospc-tracer.log" &
+    fs_trace_job=$!
+    attempt=0
+    while :; do
+        # -f attaches existing Tokio threads as well as future children. Do not
+        # start the download while only the main thread is attached.
+        fs_tracer_pid=$(sudo "$fs_python" - "$fs_fault_pid" <<'PY'
+import pathlib, sys
+tracers = set()
+for task in pathlib.Path('/proc/' + sys.argv[1] + '/task').iterdir():
+    try:
+        lines = (task / 'status').read_text().splitlines()
+    except FileNotFoundError:
+        continue
+    tracers.add(int(next(line.split()[1] for line in lines if line.startswith('TracerPid:'))))
+print(next(iter(tracers)) if len(tracers) == 1 else 0)
+PY
+        )
+        [ "$fs_tracer_pid" = 0 ] || break
+        fs_tracer_pid=
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 10 ] || { printf '%s\n' 'FS7 ENOSPC tracer did not attach.' >&2; exit 1; }
+        sleep 1
+    done
+    [ "$(sudo readlink "/proc/$fs_tracer_pid/exe")" = "$fs_strace" ] || {
+        printf '%s\n' 'FS7 ENOSPC tracer identity mismatch.' >&2; exit 1;
+    }
+    "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" enospc "$fixture"
+    fs_trace_stop
+    # The operation is terminal and its writer drained. No lazy unmount; remove
+    # the cross-filesystem staging overlay before the single recovery prepare.
+    fs_tmpfs_remove
+    fs_fault_identity() {
+        [ "$(systemctl show --property=MainPID --value parins-managed.service)" = "$fs_fault_pid" ] && \
+            [ "$(systemctl show --property=InvocationID --value parins-managed.service)" = "$fs_fault_invocation" ] && \
+            [ "$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_fault_pid/status")" = "$fs_uid" ] && \
+            [ "$(sudo readlink "/proc/$fs_fault_pid/exe")" = /opt/parins-managed/parins ] || {
+            printf '%s\n' 'FS7 ENOSPC recovery refused: service identity changed.' >&2; return 1;
+        }
+    }
+    fs_fault_identity
+    sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_python" - "$fs_staging" "$fs_host_staging" <<'PY'
+import os, sys
+p = sys.argv[1]
+s = os.lstat(p)
+assert f'{s.st_dev}:{s.st_ino}' == sys.argv[2], 'original staging must be restored'
+assert os.listdir(p) == [], 'original staging remains empty'
+PY
+    "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" recovered "$fixture"
+    fs_fault_identity
+    printf '%s\n' 'FS7 download, activation, DNS, DynamicUser, offline LKG, UP freeze and actual staging-write ENOSPC/recovery passed. Performance remains a separate gate.'
 fi
 printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

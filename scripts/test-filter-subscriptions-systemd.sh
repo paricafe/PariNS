@@ -9,7 +9,7 @@ set -eu
     exit 1
 }
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-for command in node iptables ip6tables; do
+for command in node iptables ip6tables nsenter mount umount findmnt strace timeout; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
 done
 exec sh "$repo/scripts/test-systemd.sh" "$@" --filter-subscriptions

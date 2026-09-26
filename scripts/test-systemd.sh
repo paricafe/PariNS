@@ -196,10 +196,36 @@ printf '%s\n' 'listen = "127.0.0.1:0"' \
 openssl rand -hex 24 | jq -Rs '{username:"ci-admin",password:rtrimstr("\n")}' > "$fixture/credentials.json"
 jq --rawfile toml "$fixture/candidate.toml" '. + {toml:$toml}' "$fixture/credentials.json" > "$fixture/setup.json"
 sed 's/^/X-PariNS-Setup: /' "$fixture/token-copy" > "$fixture/setup-header"
-http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
-    -H 'Content-Type: application/json' \
-    -H "@$fixture/setup-header" --data-binary "@$fixture/setup.json" \
-    http://127.0.0.1:3000/api/setup > "$fixture/response.json"
+setup_service() {
+    # Root installation readiness precedes the managed process's next frozen
+    # state reconciliation. Only this explicit rejection proves no setup was
+    # accepted; unknown outcomes and every other failure must not be replayed.
+    setup_attempt=1
+    while :; do
+        if setup_status=$(curl --silent --show-error --noproxy '*' --max-time 15 \
+            --cookie "$fixture/cookies.txt" --cookie-jar "$fixture/cookies.txt" \
+            -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' \
+            -H "@$fixture/setup-header" --data-binary "@$fixture/setup.json" \
+            --output "$fixture/response.json" --write-out '%{http_code}' \
+            http://127.0.0.1:3000/api/setup); then
+            [ "$setup_status" != 200 ] || return 0
+        else
+            setup_curl_status=$?
+            printf 'Setup transport failed (curl %s); outcome unknown, not retried.\n' "$setup_curl_status" >&2
+            return "$setup_curl_status"
+        fi
+        # Never print response bodies: a successful body carries a session binding.
+        setup_code=$(jq -er '.error.code | select(type == "string" and test("^[A-Za-z0-9_]{1,64}$"))' "$fixture/response.json" 2>/dev/null) || setup_code=invalid_response
+        if [ "$setup_status" = 409 ] && [ "$setup_code" = update_in_progress ] && [ "$setup_attempt" -lt 3 ]; then
+            setup_attempt=$((setup_attempt + 1))
+            sleep 1
+        else
+            printf 'Setup rejected: HTTP %s, code %s (attempt %s).\n' "$setup_status" "$setup_code" "$setup_attempt" >&2
+            return 1
+        fi
+    done
+}
+setup_service
 binding=$(jq -er '.session.binding | select(type == "string" and length > 0)' "$fixture/response.json")
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 sudo test -s /var/lib/parins-managed/state.json

@@ -204,7 +204,8 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   transitions, keyboard use, and small screens.
 - Installer/bootstrap: `sh scripts/test-install.sh` and
   `sh scripts/test-bootstrap.sh`. Run `scripts/test-systemd.sh --ephemeral-ci`
-  only on a disposable Linux environment, not a developer's host.
+  only on a disposable Linux environment, not a developer's host, using native
+  musl binaries for the managed updater's installation contract.
 - Dependency/security changes: use the dependency audit configured in CI.
 - Documentation-only changes: check referenced paths/commands, review the diff, and
   run `git diff --check`; a full application build is not required.

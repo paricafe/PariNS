@@ -52,7 +52,16 @@ jobs:
           sh scripts/test-bootstrap.sh
       - name: Linux managed service acceptance
         if: runner.os == 'Linux'
-        run: sh scripts/test-systemd.sh --ephemeral-ci
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          # The managed updater accepts only the native static release contract.
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --release --bins --target x86_64-unknown-linux-musl
+          sh scripts/test-systemd.sh --ephemeral-ci --binary-path "$PWD/target/x86_64-unknown-linux-musl/release/parins"
       - name: Audit dependencies
         if: runner.os == 'Linux'
         run: |

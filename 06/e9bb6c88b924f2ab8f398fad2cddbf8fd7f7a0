@@ -1,0 +1,21 @@
+tests/runtime.rs
+  s_d595d238bbd4ee::t_8f95e3710202cc 337-341
+  s_d595d238bbd4ee::t_e7012da9657814 388
+  s_d595d238bbd4ee::t_177d5ec2a695c1 332-336,342-354,362-363,390-410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "06e9bb6c88b924f2ab8f398fad2cddbf8fd7f7a0",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

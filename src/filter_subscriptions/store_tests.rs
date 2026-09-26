@@ -162,6 +162,23 @@ fn current_previous_and_work_pins_survive_expiry_and_pressure() {
 }
 
 #[test]
+fn download_admission_stops_on_pressure_catalog_directory_sync_uncertainty() {
+    let (_dir, mut store) = store();
+    let hash = prepare(&mut store, "unused", b"unused.test\n", 100);
+    store.set_quota(MAX_OBJECT + MAX_CATALOG).unwrap();
+    store.fault = Some("directory_sync");
+    assert!(store.collect_for_download(101, true).is_err());
+    assert!(store.catalog.records.is_empty());
+    assert!(store.object_path(&hash).exists());
+    assert!(store.begin_staging(MAX_OBJECT, 101).is_err());
+    assert!(!*store.staging.lock().unwrap());
+    store.fault = None;
+    store.reconcile_sync().unwrap();
+    store.collect_for_download(101, true).unwrap();
+    assert!(!store.object_path(&hash).exists());
+}
+
+#[test]
 fn prepared_slots_bounded_and_unknown_files_never_deleted() {
     let (_dir, mut store) = store();
     let unknown = store.dir.join("objects/note.txt");

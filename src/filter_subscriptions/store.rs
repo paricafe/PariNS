@@ -270,6 +270,27 @@ impl Store {
         self.begin_reserved(reserve_bytes, MAX_OBJECT, "download", now)
     }
 
+    // Admission holds the publication/UP-freeze gate and has synchronized the
+    // Config roots. Only here may staging pressure evict selected preparations.
+    pub(crate) fn collect_for_download(&mut self, now: u64, needs_download: bool) -> Result<()> {
+        self.collect(now, false)?;
+        if needs_download && !self.has_staging_space(MAX_OBJECT)? {
+            self.collect(now, true)?;
+        }
+        ensure!(
+            !self.uncertain,
+            "catalog durability requires reconciliation"
+        );
+        Ok(())
+    }
+
+    fn has_staging_space(&self, reserve_bytes: u64) -> Result<bool> {
+        Ok(self
+            .disk_bytes()?
+            .checked_add(reserve_bytes + MAX_CATALOG)
+            .is_some_and(|sum| sum <= self.quota))
+    }
+
     fn begin_reserved(
         &mut self,
         reserve_bytes: u64,
@@ -296,21 +317,8 @@ impl Store {
             !self.uncertain,
             "catalog durability requires reconciliation"
         );
-        if self
-            .disk_bytes()?
-            .checked_add(reserve_bytes + MAX_CATALOG)
-            .is_none_or(|sum| sum > self.quota)
-        {
-            self.collect_orphans()?;
-        }
         ensure!(
-            !self.uncertain,
-            "catalog durability requires reconciliation"
-        );
-        ensure!(
-            self.disk_bytes()?
-                .checked_add(reserve_bytes + MAX_CATALOG)
-                .is_some_and(|sum| sum <= self.quota),
+            self.has_staging_space(reserve_bytes)?,
             "subscription disk budget exceeded"
         );
         let path = self

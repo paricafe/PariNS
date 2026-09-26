@@ -252,6 +252,8 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(conflict.1, "revision_conflict");
+        let catalog = temp.path().join("state/filter-subscriptions/catalog.json");
+        let before = std::fs::read(&catalog).unwrap();
         shared
             .manager
             .lock()
@@ -267,13 +269,24 @@ mod tests {
                 method: "POST",
                 path: "/api/filter/subscriptions/prepare",
                 headers: &headers,
-                body: input,
+                body: br#"{"config_revision":0,"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#,
             },
             &mut cookie,
         )
         .await
         .unwrap_err();
         assert_eq!(frozen.1, "update_in_progress");
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert!(
+            shared
+                .manager
+                .lock()
+                .await
+                .filters
+                .snapshot()
+                .operation
+                .is_none()
+        );
         assert!(shared.filter_tasks.lock().await.is_empty());
         assert!(cookie.is_none());
         shared

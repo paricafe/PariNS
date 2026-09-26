@@ -162,7 +162,31 @@ impl Service {
                 .as_mut()
                 .context(Failure::new("subscription_storage_unavailable"))?;
             self.sync_roots(store)?;
-            store.collect(now(), false)?;
+            let collected_at = now();
+            let needs_download = match &request {
+                WorkRequest::Prepare { source, .. } => store
+                    .read_prepared(
+                        &Source::new(&source.url, source.format)?.fingerprint,
+                        collected_at,
+                    )?
+                    .is_none(),
+                WorkRequest::Refresh {
+                    source_id,
+                    automatic,
+                    ..
+                } => {
+                    let state = self.state.lock().unwrap();
+                    state.settings.sources.iter().any(|source| {
+                        source_id
+                            .as_ref()
+                            .map_or(state.settings.enabled && source.enabled, |id| {
+                                id == &source.id
+                            })
+                            && (!*automatic || source.auto_update)
+                    })
+                }
+            };
+            store.collect_for_download(collected_at, needs_download)?;
             self.observe_store(store);
         }
         let mut state = self.state.lock().unwrap();

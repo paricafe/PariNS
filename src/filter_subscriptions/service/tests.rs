@@ -100,6 +100,169 @@ fn refresh(service: &Service) -> WorkRequest {
 }
 
 #[tokio::test]
+async fn refresh_reclaims_young_unreferenced_preparation_when_staging_needs_space() {
+    let mut active = source("one");
+    active.auto_update = false;
+    let current_fingerprint = active.identity().unwrap().fingerprint;
+    let previous = source("previous");
+    let previous_fingerprint = previous.identity().unwrap().fingerprint;
+    let (dir, service) = fixture(vec![active, previous]).await;
+    let pinned = source("pinned");
+    let pinned_fingerprint = pinned.identity().unwrap().fingerprint;
+    let small = source("small");
+    let small_fingerprint = small.identity().unwrap().fingerprint;
+    let _pin = {
+        let mut locked = service.store.lock().unwrap();
+        let store = locked.as_mut().unwrap();
+        install(store, &pinned, b"pinned.test\n");
+        install(store, &small, b"small.test\n");
+        store
+            .pin(&store.record(&pinned_fingerprint).unwrap().sha256)
+            .unwrap()
+    };
+    let mut settings = service.state.lock().unwrap().settings.clone();
+    settings.max_disk_bytes = 32 * 1024 * 1024;
+    settings.sources.pop(); // The removed source remains a previous-Config root.
+    let candidate = service
+        .prepare_config(settings, Policy::default(), 1)
+        .await
+        .unwrap();
+    service.publish_config(candidate, 2);
+
+    // Almost 16 MiB, but only one rule: the remaining 32 MiB quota cannot
+    // accommodate a full download reservation plus the catalog transaction.
+    let mut comment = vec![b'#'; 4095];
+    comment.push(b'\n');
+    let mut body = comment.repeat(4095);
+    body.extend_from_slice(b"unused.test\n");
+    let unused = source("unused");
+    let fingerprint = unused.identity().unwrap().fingerprint;
+    respond(&service, &[&body]);
+    let begin = service
+        .begin(WorkRequest::Prepare {
+            config_revision: 2,
+            source: DraftSource {
+                id: unused.id.clone(),
+                url: unused.url.clone(),
+                format: unused.format,
+            },
+        })
+        .await
+        .unwrap();
+    let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+    service.commit(candidate).await.unwrap();
+    assert_eq!(
+        service.snapshot().recent_operation.unwrap().status,
+        "succeeded"
+    );
+    assert!(
+        service
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .record(&fingerprint)
+            .is_some()
+    );
+    // Admission with enough space does not evict another young preparation.
+    assert!(
+        service
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .record(&small_fingerprint)
+            .is_some()
+    );
+
+    // Neither reuse nor an automatic refresh with no selected sources needs a
+    // download reservation. Both must keep the young preparation intact.
+    respond(&service, &[]);
+    for request in [
+        WorkRequest::Prepare {
+            config_revision: 2,
+            source: DraftSource {
+                id: unused.id,
+                url: unused.url,
+                format: unused.format,
+            },
+        },
+        refresh(&service),
+    ] {
+        let begin = service.begin(request).await.unwrap();
+        let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+        service.commit(candidate).await.unwrap();
+        assert_eq!(
+            service.snapshot().recent_operation.unwrap().status,
+            "succeeded"
+        );
+        assert!(
+            service
+                .store
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .record(&fingerprint)
+                .is_some()
+        );
+    }
+
+    respond(&service, &[b".new.test\n"]);
+    let begin = service
+        .begin(WorkRequest::Refresh {
+            config_revision: 2,
+            source_id: Some("one".into()),
+            automatic: false,
+        })
+        .await
+        .unwrap();
+    {
+        let locked = service.store.lock().unwrap();
+        let store = locked.as_ref().unwrap();
+        for fingerprint in [
+            &current_fingerprint,
+            &previous_fingerprint,
+            &pinned_fingerprint,
+        ] {
+            assert!(store.verified_content(fingerprint).is_ok());
+        }
+        assert!(store.record(&small_fingerprint).is_none());
+        assert!(store.record(&fingerprint).is_none());
+    }
+    let admitted_catalog = fs::read(dir.path().join("sources/catalog.json")).unwrap();
+    let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+    assert_eq!(
+        fs::read(dir.path().join("sources/catalog.json")).unwrap(),
+        admitted_catalog
+    );
+    service.commit(candidate).await.unwrap();
+    assert_eq!(
+        service.snapshot().recent_operation.unwrap().status,
+        "succeeded"
+    );
+    assert!(
+        service
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .record(&fingerprint)
+            .is_none()
+    );
+    assert_eq!(
+        service
+            .explain(&Name::from_ascii("new.test").unwrap())
+            .explanation
+            .decision,
+        crate::policy::Decision::Blocked
+    );
+}
+
+#[tokio::test]
 async fn local_configuration_and_read_only_do_not_require_subscription_material() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings::default();

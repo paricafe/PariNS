@@ -1,0 +1,28 @@
+scripts/test-filter-subscriptions-systemd.sh
+  s_d595d238bbd4ee::t_63bb15628ff37e 12
+.github/workflows/filter-acceptance.yml
+  s_d595d238bbd4ee::t_7f13c05d190abe 93
+scripts/test-filter-subscriptions-systemd.mjs
+  s_d595d238bbd4ee::t_7f13c05d190abe 225-227,247-248,255-256,267
+  s_d595d238bbd4ee::t_63bb15628ff37e 17,107-115,221-224,228-246,249-254,257-266,268
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_6edb228678ee5a 671-684
+  s_d595d238bbd4ee::t_c801ba4a9c373e 61-92,95,100-102,119-120,132,370,592-670,685-698,706,708-715,717
+  s_d595d238bbd4ee::t_fa13c1cdfec3e1 93-94,96-99,699-705,707,716
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2671fd1bc238ed51813098384c263ab1d5b4330e",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

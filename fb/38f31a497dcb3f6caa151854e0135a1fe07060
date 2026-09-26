@@ -1,0 +1,48 @@
+Cargo.toml
+  s_d595d238bbd4ee::t_f1716f6fdc8264 48-50
+README.md
+  s_d595d238bbd4ee::t_382126c22f6f47 379-381
+src/transport/mod.rs
+  s_d595d238bbd4ee::t_c704cb6c073a23 2
+scripts/test-udp.sh
+  s_d595d238bbd4ee::t_ddb50d91a5bd16 1-9,16-22,28-35,37-54
+  s_d595d238bbd4ee::t_60df6e91981091 23-27,36
+  s_d595d238bbd4ee::t_c489859c568212 10-15
+src/transport/udp.rs
+  s_d595d238bbd4ee::t_c704cb6c073a23 1-60,91-93
+  s_d595d238bbd4ee::t_3970c59992b715 61-90
+  s_d595d238bbd4ee::t_3c03ff9e3f6fc6 94-111
+.github/workflows/ci.yml
+  s_d595d238bbd4ee::t_c489859c568212 46-48,53
+src/server.rs
+  s_d595d238bbd4ee::t_c704cb6c073a23 13,24,29,189,386-387,389-392,412
+AGENTS.md
+  s_d595d238bbd4ee::t_382126c22f6f47 95-97,214-215
+src/transport/udp/packet_info.rs
+  s_d595d238bbd4ee::t_3970c59992b715 10-11,31-32,56-59,62-76,117-118
+  s_d595d238bbd4ee::t_c704cb6c073a23 1-9,12-30,33-55,60-61,77-116,119-121
+CHANGELOG.md
+  s_d595d238bbd4ee::t_382126c22f6f47 23-24
+tests/server.rs
+  s_d595d238bbd4ee::t_ddb50d91a5bd16 113,117-123,127,132-139,141
+  s_d595d238bbd4ee::t_22296e4a300600 140,142-143,148-154,162-171,181-190
+  s_d595d238bbd4ee::t_2688dc7d1a2201 111-112,114-116,124-126,128-131,144-147,155-161,172-180,191-192
+Cargo.lock
+  s_d595d238bbd4ee::t_cf8dd20d4724d0 923-931,955-967,1053
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "fb38f31a497dcb3f6caa151854e0135a1fe07060",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

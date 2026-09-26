@@ -14,9 +14,10 @@ shift
 binary="$repo/target/release/parins"
 installer="$repo/scripts/install.sh"
 build_info=
-package= binary_override=false
+package= binary_override=false filter_subscriptions=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --filter-subscriptions) filter_subscriptions=true; shift ;;
         --binary-path|--package)
             [ "$#" -ge 2 ] || { printf 'Missing value for %s\n' "$1" >&2; exit 1; }
             case "$1" in
@@ -56,9 +57,24 @@ sudo -n true
 opt_mode=$(sudo stat -c %a /opt)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/parins-systemd-test.XXXXXX")
 installed=false
+fs_uid= fs_chain=
+fs_offline_remove() {
+    [ -n "$fs_chain" ] || return 0
+    for table in iptables ip6tables; do
+        if sudo "$table" -w -C OUTPUT -m owner --uid-owner "$fs_uid" -j "$fs_chain" 2>/dev/null; then
+            sudo "$table" -w -D OUTPUT -m owner --uid-owner "$fs_uid" -j "$fs_chain"
+        fi
+        if sudo "$table" -w -S "$fs_chain" >/dev/null 2>&1; then
+            sudo "$table" -w -F "$fs_chain"
+            sudo "$table" -w -X "$fs_chain"
+        fi
+    done
+    fs_chain=
+}
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
+    fs_offline_remove || status=1
     if "$installed" && sudo test -f /etc/systemd/system/parins-managed.service && \
         ! sudo test -L /etc/systemd/system/parins-managed.service && \
         [ "$(sudo stat -c %u /etc/systemd/system/parins-managed.service)" = 0 ] && \
@@ -69,7 +85,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json filter-evidence.json; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -238,6 +254,7 @@ setup_service() {
     done
 }
 setup_service
+revision=1
 binding=$(jq -er '.session.binding | select(type == "string" and length > 0)' "$fixture/response.json")
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 sudo test -s /var/lib/parins-managed/state.json
@@ -247,7 +264,7 @@ sudo cat /var/lib/parins-managed/state.json > "$fixture/state-copy"
 check_dns() {
     http --max-time 5 -H "X-PariNS-Session: $binding" \
         http://127.0.0.1:3000/api/status > "$fixture/status.json"
-    jq -e '.running == true and .revision == 1 and .last_error == null' "$fixture/status.json" >/dev/null
+    jq -e --argjson revision "$revision" '.running == true and .revision == $revision and .last_error == null' "$fixture/status.json" >/dev/null
     address=$(jq -er '.listen' "$fixture/status.json")
     python3 - "$address" <<'PY'
 import socket
@@ -305,13 +322,63 @@ sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/pa
 cmp "$fixture/tls-before" "$fixture/tls-after"
 sudo grep -Fxq 'external certificate sentinel' /var/lib/parins/tls/external.pem
 
+if "$filter_subscriptions"; then
+    for command in node iptables ip6tables nsenter; do
+        command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
+    done
+    fs_node=$(command -v node)
+    fs_nsenter=$(command -v nsenter)
+    fs_stat=$(command -v stat)
+    "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" activate "$fixture"
+    revision=$(jq -er '.config_revision' "$fixture/filter-evidence.json")
+    sudo cat /var/lib/parins-managed/state.json > "$fixture/state-copy"
+    test "$(systemctl show --property=DynamicUser --value parins-managed.service)" = yes
+    fs_pid=$(systemctl show --property=MainPID --value parins-managed.service)
+    fs_uid=$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_pid/status")
+    test "$fs_uid" -gt 0
+    fs_hash=$(jq -er '.sha256' "$fixture/filter-evidence.json")
+    for relative in filter-subscriptions filter-subscriptions/objects filter-subscriptions/indexes; do
+        test "$(sudo "$fs_nsenter" --target "$fs_pid" --mount -- "$fs_stat" -c '%u:%a' "/var/lib/parins-managed/$relative")" = "$fs_uid:700"
+    done
+    for relative in filter-subscriptions/catalog.json "filter-subscriptions/objects/$fs_hash.txt"; do
+        test "$(sudo "$fs_nsenter" --target "$fs_pid" --mount -- "$fs_stat" -c '%u:%a' "/var/lib/parins-managed/$relative")" = "$fs_uid:600"
+    done
+    # Reject only this DynamicUser's external HTTPS. Both families are covered;
+    # the already-present rules precede restart. A changed UID fails this fixture
+    # instead of incorrectly claiming that the new process started offline.
+    fs_chain="PARINS_FS_$$"
+    for table in iptables ip6tables; do
+        sudo "$table" -w -N "$fs_chain"
+        case "$table" in iptables) loopback=127.0.0.0/8 ;; ip6tables) loopback=::1/128 ;; esac
+        sudo "$table" -w -A "$fs_chain" ! -d "$loopback" -p tcp --dport 443 -j REJECT
+        sudo "$table" -w -I OUTPUT 1 -m owner --uid-owner "$fs_uid" -j "$fs_chain"
+    done
+    fs_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
+    sudo systemctl restart parins-managed.service
+    test "$(systemctl show --property=InvocationID --value parins-managed.service)" != "$fs_invocation"
+    fs_pid=$(systemctl show --property=MainPID --value parins-managed.service)
+    test "$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_pid/status")" = "$fs_uid"
+    attempt=0
+    until session >/dev/null 2>&1; do
+        attempt=$((attempt + 1)); [ "$attempt" -lt 30 ] || exit 1
+        sleep 1
+    done
+    "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" restart "$fixture"
+    "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" offline "$fixture"
+    fs_packets4=$(sudo iptables -w -L "$fs_chain" -nvx | awk '$3 == "REJECT" {sum += $1} END {print sum + 0}')
+    fs_packets6=$(sudo ip6tables -w -L "$fs_chain" -nvx | awk '$3 == "REJECT" {sum += $1} END {print sum + 0}')
+    test "$((fs_packets4 + fs_packets6))" -gt 0
+    printf 'Subscription offline fault: rejected IPv4=%s IPv6=%s HTTPS packets.\n' "$fs_packets4" "$fs_packets6"
+    fs_offline_remove
+fi
+
 # Reproduce a crash after durable app intent, before Commit reaches the inbox.
 # Only this disposable fixture injects journal state; no candidate is executed
 # or downloaded, and the root installed identity remains the actual binary.
 old_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
 recovery_invocation=$(systemctl show --property=InvocationID --value parins-update-recovery.service)
 sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
-sudo python3 - "$old_invocation" <<'PY'
+sudo python3 - "$old_invocation" "$revision" <<'PY'
 import hashlib
 import json
 import os
@@ -351,7 +418,7 @@ status = dict(operation_id=operation_id, phase_nonce=nonce, phase='staged',
               version=build['version'], reason=None, updated_at_ms=stamp,
               downloaded_bytes=size, total_bytes=size)
 journal['operation'] = dict(status=status, old=installed, candidate=installed,
-                            invocation_id=sys.argv[1], config_revision=1,
+                            invocation_id=sys.argv[1], config_revision=int(sys.argv[2]),
                             started_at_ms=stamp, rollback_attempted=False,
                             rollback_started=False, pending_launch=None)
 state_path = app / 'update-state.json'
@@ -366,7 +433,7 @@ state['check']['next_check_at_ms'] = stamp + 3600000
 state['plan'] = None
 state['commit_intent'] = operation_id
 state['operation'] = dict(plan_id='a' * 32, expected_version=build['version'],
-                          config_revision=1, operation_id=operation_id, phase_nonce=nonce,
+                          config_revision=int(sys.argv[2]), operation_id=operation_id, phase_nonce=nonce,
                           invocation_id=sys.argv[1], download=download, manifest=manifest,
                           phase='committing', reason=None, finished=False)
 
@@ -409,10 +476,13 @@ binding=$(jq -er '.session.binding' "$fixture/response.json")
 reload_status=$(curl --silent --show-error --noproxy '*' --max-time 5 \
     --cookie "$fixture/cookies.txt" -H 'Origin: http://127.0.0.1:3000' \
     -H "X-PariNS-Session: $binding" -H 'Content-Type: application/json' \
-    --data '{"revision":1}' --output "$fixture/response.json" --write-out '%{http_code}' \
+    --data "{\"revision\":$revision}" --output "$fixture/response.json" --write-out '%{http_code}' \
     http://127.0.0.1:3000/api/certificates/reload)
 [ "$reload_status" = 409 ]
 jq -e '.error.code == "update_in_progress"' "$fixture/response.json" >/dev/null
+if "$filter_subscriptions"; then
+    "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" frozen "$fixture"
+fi
 sudo systemctl start parins-updater.path
 attempt=0
 until sudo jq -e '.commit_intent == null and .operation.finished == true and .operation.phase == "aborted"' /var/lib/parins-managed/update-state.json >/dev/null; do
@@ -423,9 +493,13 @@ done
 sudo jq -e '.operation.status.operation_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .operation.status.phase_nonce == "cccccccccccccccccccccccccccccccc" and .operation.status.phase == "aborted" and .last_operation == .operation.status and .installed == .operation.old' /var/lib/parins-updater/private/journal.json >/dev/null
 ! sudo test -e /var/lib/parins-managed/update-request.json
 http --max-time 5 -H 'Origin: http://127.0.0.1:3000' -H "X-PariNS-Session: $binding" \
-    -H 'Content-Type: application/json' --data '{"revision":1}' \
+    -H 'Content-Type: application/json' --data "{\"revision\":$revision}" \
     http://127.0.0.1:3000/api/certificates/reload | jq -e '.outcome == "unchanged"' >/dev/null
 sudo cmp "$binary" /opt/parins-managed/parins
 sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 check_dns
+if "$filter_subscriptions"; then
+    "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" unfrozen "$fixture"
+    printf '%s\n' 'FS7 pinned HTTPS download, activation, DNS, DynamicUser, offline restart/LKG and UP freeze passed. ENOSPC and performance are separate gates.'
+fi
 printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

@@ -321,6 +321,42 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
 }
 
 #[tokio::test]
+async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
+    let cert = Certificate::new();
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(upstream.local_addr().unwrap());
+    config.doq = Some(cert.listener());
+    config.shutdown_grace_ms = 1;
+    let server = Server::bind(config).await.unwrap();
+    let address = server.encrypted_addrs().unwrap()[0].1;
+    let metrics = server.metrics().clone();
+    let (stop, task) = run(server);
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der.clone()).unwrap();
+    let mut tls = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"doq".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+    let connection = client.connect(address, "localhost").unwrap().await.unwrap();
+    let (mut stream, _response) = connection.open_bi().await.unwrap();
+    stream.write_all(&[0]).await.unwrap();
+    timeout(WAIT, async {
+        while metrics.quic.snapshot()["doq"]["stream_started"] == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    finish(stop, task).await;
+    UdpSocket::bind(address).await.unwrap();
+    assert_eq!(metrics.quic.snapshot()["doq"]["stream_shutdown"], 1);
+    client.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
 async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext() {
     let cert = Certificate::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

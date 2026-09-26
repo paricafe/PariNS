@@ -88,6 +88,9 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   responses outside shard locks. Bound queues, cache state, and background work.
 - Give spawned tasks an owner and explicit shutdown/cancellation behavior. Refresh
   and foreground coalescing must share compatible work without crossing generations.
+- QUIC listener ownership includes Quinn drivers and final socket release. Server
+  retains cleanup across adapter cancellation; peer close notification stays within
+  the existing shutdown grace, and a completed shutdown permits immediate rebinding.
 - Keep cache byte accounting distinct from process RSS. Preserve separate positive
   and negative budgets; document capacity/utilization trade-offs when changing them.
 - Management mutations must retain authentication, Host/Origin checks, and relevant

@@ -4,11 +4,31 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use anyhow::{Result, ensure};
 use bytes::{Buf, Bytes};
 use quinn::{Connection, Endpoint, VarInt};
-use tokio::{task::JoinSet, time::timeout};
+use tokio::{
+    task::JoinSet,
+    time::{Instant, timeout, timeout_at},
+};
 
 use crate::ingress::Ingress;
 pub mod diagnostics;
+mod lifecycle;
 use diagnostics::{Event, Guard};
+pub(crate) use lifecycle::ListenerRuntime;
+
+pub struct Listener {
+    socket: std::net::UdpSocket,
+    config: quinn::ServerConfig,
+    owner: lifecycle::Owner,
+}
+
+impl Listener {
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+    pub(crate) fn runtime(&self) -> Arc<ListenerRuntime> {
+        self.owner.0.clone()
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Protocol {
@@ -21,7 +41,7 @@ pub fn bind(
     tls: Arc<rustls::ServerConfig>,
     max_streams: usize,
     protocol: Protocol,
-) -> Result<Endpoint> {
+) -> Result<Listener> {
     ensure!(
         (1..=1024).contains(&max_streams),
         "invalid QUIC stream limit"
@@ -48,10 +68,29 @@ pub fn bind(
     transport.send_window(1024 * 1024);
     transport.datagram_receive_buffer_size(None);
     transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
-    Ok(Endpoint::server(config, address)?)
+    // Defer background drivers until serve: failed or unused bind candidates
+    // then release their sockets synchronously on drop.
+    Ok(Listener {
+        socket: std::net::UdpSocket::bind(address)?,
+        config,
+        owner: lifecycle::Owner(ListenerRuntime::new()),
+    })
 }
 
-pub async fn serve(endpoint: Endpoint, protocol: Protocol, ingress: Ingress) -> Result<()> {
+pub async fn serve(listener: Listener, protocol: Protocol, ingress: Ingress) -> Result<()> {
+    let Listener {
+        socket,
+        config,
+        owner,
+    } = listener;
+    let endpoint = Endpoint::new(Default::default(), Some(config), socket, owner.0.clone())?;
+    let outcome = serve_endpoint(&endpoint, protocol, ingress).await;
+    drop(endpoint);
+    owner.0.shutdown().await;
+    outcome
+}
+
+async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingress) -> Result<()> {
     let local_port = endpoint.local_addr()?.port();
     let mut stop = ingress.stop.clone();
     let mut connections = JoinSet::new();
@@ -93,9 +132,11 @@ pub async fn serve(endpoint: Endpoint, protocol: Protocol, ingress: Ingress) -> 
             }
         }
     }
+    let deadline = Instant::now() + ingress.shutdown_grace;
     drain(&mut connections, ingress.shutdown_grace, &ingress.resolver).await;
     endpoint.close(VarInt::from_u32(0), b"shutdown");
-    // Do not await wait_idle: peer acknowledgements cannot extend shutdown.
+    // Notify peers only within the existing grace; owned drivers are then joined.
+    let _ = timeout_at(deadline, endpoint.wait_idle()).await;
     Ok(())
 }
 

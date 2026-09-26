@@ -41,6 +41,39 @@ struct Fixture {
     queries: Arc<Semaphore>,
 }
 
+#[tokio::test]
+async fn already_stopped_listener_releases_port_before_returning() {
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certified.cert.der().clone()], key.into())
+        .unwrap();
+    let endpoint = quic::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(tls),
+        2,
+        Protocol::Doq,
+    )
+    .unwrap();
+    let address = endpoint.local_addr().unwrap();
+    let config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+    let (_stop, receiver) = watch::channel(true);
+    let ingress = Ingress {
+        source_limits: Arc::new(parins::limits::Limiter::new(&config.source_limits).unwrap()),
+        resolver: Arc::new(Resolver::from_config(&config)),
+        queries: Arc::new(Semaphore::new(8)),
+        connections: Arc::new(Semaphore::new(1)),
+        stop: receiver,
+        io_timeout: Duration::from_millis(500),
+        shutdown_grace: Duration::from_millis(100),
+        max_streams: 2,
+    };
+    // The single-thread executor has not polled Quinn's detached driver yet.
+    quic::serve(endpoint, Protocol::Doq, ingress).await.unwrap();
+    UdpSocket::bind(address).await.unwrap();
+}
+
 impl Fixture {
     async fn new(protocol: Protocol) -> Self {
         Self::with_dropped_first_query(protocol, false).await
@@ -182,6 +215,7 @@ impl Fixture {
         );
         // Source admission is released as well as the global semaphore.
         assert!(self.source_limits.try_connection(self.address.ip()).is_ok());
+        UdpSocket::bind(self.address).await.unwrap();
         self.upstream.abort();
         let _ = self.upstream.await;
     }
@@ -363,11 +397,8 @@ async fn quic_connection_and_stream_caps_and_bounded_shutdown() {
             .is_err()
     );
     fixture.close().await;
-    assert!(
-        timeout(Duration::from_secs(1), connection.closed())
-            .await
-            .is_ok()
-    );
+    // Incomplete frames consume the grace. Forced socket release cannot promise
+    // that a peer receives a final packet; close() verifies local port/permit release.
     client.close(0u32.into(), b"done");
 }
 

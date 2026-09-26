@@ -77,7 +77,7 @@ impl ReloadHandle {
 enum Encrypted {
     Dot(TcpListener, Arc<rustls::ServerConfig>),
     Doh(TcpListener, Arc<rustls::ServerConfig>, Option<u16>),
-    Quic(quinn::Endpoint, crate::quic::Protocol),
+    Quic(crate::quic::Listener, crate::quic::Protocol),
 }
 
 impl Server {
@@ -230,6 +230,7 @@ impl Server {
         let (stopping, stop) = watch::channel(false);
         let mut tasks = JoinSet::new();
         let mut adapters = JoinSet::new();
+        let mut quic_runtimes = Vec::new();
         let ingress = crate::ingress::Ingress {
             resolver: resolver.clone(),
             queries: queries.clone(),
@@ -241,6 +242,9 @@ impl Server {
             max_streams: self.config.max_inflight.min(1024),
         };
         for listener in self.encrypted {
+            if let Encrypted::Quic(endpoint, _) = &listener {
+                quic_runtimes.push(endpoint.runtime());
+            }
             let ingress = ingress.clone();
             adapters.spawn(async move {
                 match listener {
@@ -342,6 +346,10 @@ impl Server {
         }
         tasks.shutdown().await;
         adapters.shutdown().await;
+        // The owner outlives adapter cancellation at the shutdown deadline.
+        for runtime in quic_runtimes {
+            runtime.shutdown().await;
+        }
         resolver.shutdown_refresh().await;
         resolver.finish_shutdown();
         if report {

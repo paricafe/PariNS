@@ -7,11 +7,16 @@ pub mod config;
 pub mod doh;
 pub mod ecs;
 mod flight;
+// Foundation only: no Config/Manager/Resolver entry point until index acceptance.
+#[allow(dead_code)]
+mod filter_subscriptions;
+mod https_reader;
 pub mod ingress;
 pub mod limits;
 pub mod manage;
 pub mod metrics;
 pub mod policy;
+mod private_files;
 pub mod protocol;
 pub mod query_log;
 pub mod quic;

@@ -10,9 +10,10 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 argon2 = { version = "0.5", features = ["std"] }
 axum = { version = "0.8", default-features = false, features = ["json", "http1", "tokio"] }
-hyper = { version = "1", features = ["server", "http1"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 base64 = "0.22"
 bytes = "1"
@@ -22,12 +23,13 @@ h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 http = "1"
+httpdate = "1"
 idna = "1"
 ipnet = "2"
 lru = "0.18.4"
 rand = "0.10"
 rusqlite = { version = "0.40.2", default-features = false, features = ["libsqlite3-sys", "bundled", "hooks", "fallible_uint", "limits"] }
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 sha2 = "0.10"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
@@ -38,6 +40,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 toml = "0.9"
+url = "2"
 webpki-roots = "1"
 x509-parser = "0.18"
 

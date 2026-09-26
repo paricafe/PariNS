@@ -18,6 +18,8 @@
   that cannot participate in the Linux updater installation protocol.
 - Fix successful managed reinstalls reporting a cleanup error after releasing
   their installation lock.
+- Keep the service mount namespace pinned during both low-privilege reinstall
+  preflights when the installer runs under dash.
 - Performance and disposable Linux lifecycle acceptance remain release gates.
   These development changes are not included in v0.1.4.
 

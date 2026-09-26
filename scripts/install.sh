@@ -378,7 +378,10 @@ if [ -z "$root" ]; then
         [ -n "$uid" ] && [ -n "$gid" ] || fail 'missing service identity'
         exec 8<"/proc/$original_pid/ns/mnt"
         mount_namespace="/proc/$$/fd/8"
-        low_preflight() {
+        low_preflight() (
+            # dash applies command redirections in its calling shell before
+            # forking. Keep FD 8 pinned in the installer while the child closes
+            # its copies and opens the parent's /proc/PID/fd/8 through nsenter.
             if [ -n "$groups" ]; then set -- --groups "$groups"; else set -- --clear-groups; fi
             # Two output files at 32 KiB each bound the combined output to
             # 64 KiB without losing the candidate's exit status in a pipeline.
@@ -387,7 +390,7 @@ if [ -z "$root" ]; then
                 setpriv --reuid "$uid" --regid "$gid" "$@" --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- \
                 "$preflight" --manage --check --state-dir /var/lib/parins-managed --web-listen 0.0.0.0:3000 \
                 </dev/null 8<&- 9<&- >"$updater_private/install-preflight.json" 2>"$updater_private/install-preflight-error.txt"
-        }
+        )
         low_preflight || fail 'read-only candidate preflight failed; no installation files were replaced'
         [ "$(systemctl show --property=MainPID --value parins-managed.service 8<&- 9>&-)" = "$original_pid" ] && \
             [ "$(systemctl show --property=InvocationID --value parins-managed.service 8<&- 9>&-)" = "$original_invocation" ] || fail 'running service changed during preflight'

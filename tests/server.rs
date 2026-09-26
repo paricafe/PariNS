@@ -206,14 +206,18 @@ async fn both_listeners_enforce_query_and_cached_cname_policy() {
     cfg.filter =
         toml::from_str("enabled = true\nblock_exact = ['example.test', 'ads.test']").unwrap();
     let (address, stop, task) = start(cfg).await;
-    let mut tcp = TcpStream::connect(address).await.unwrap();
     let direct = udp_query(address, &query()).await.0;
     assert_eq!(direct.response_code, ResponseCode::NoError);
     assert!(direct.answers.is_empty());
+    // This checks policy across transports, not TCP survival while UDP work
+    // runs. Connect at each TCP phase so unrelated work cannot exhaust its
+    // deliberately short idle timeout; connection reuse is covered separately.
+    let mut tcp = TcpStream::connect(address).await.unwrap();
     write(&mut tcp, &query()).await;
     let direct = read(&mut tcp).await;
     assert_eq!(direct.response_code, ResponseCode::NoError);
     assert!(direct.answers.is_empty());
+    drop(tcp);
     let mut buffer = [0; 4096];
     assert_eq!(
         upstream.try_recv(&mut buffer).unwrap_err().kind(),
@@ -245,6 +249,7 @@ async fn both_listeners_enforce_query_and_cached_cname_policy() {
     assert!(cold.answers.is_empty());
     mock.await.unwrap();
     alias.metadata.id += 1;
+    let mut tcp = TcpStream::connect(address).await.unwrap();
     write(&mut tcp, &alias).await;
     let hit = read(&mut tcp).await;
     assert_eq!(hit.id, alias.id);

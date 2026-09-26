@@ -35,6 +35,48 @@ sh -eu -c '
     exec 9>&-
     trap rollback EXIT
 ' sh "$fixture/rollback-function.sh"
+# The namespace is pinned in the installer across both preflight calls. Inspect
+# the actual parent's FD while the child runs, without nsenter or privilege.
+sed -n '/^        low_preflight() /,/^        [})]$/p' "$repo/scripts/install.sh" > "$fixture/preflight-function.sh"
+cat > "$fixture/tools/env" <<'MOCK_ENV'
+#!/bin/sh
+set -eu
+namespace=
+for argument do case "$argument" in --mount=*) namespace=${argument#--mount=} ;; esac; done
+[ -n "$namespace" ]
+if [ -d /proc/self/fd ]; then
+    [ -e "$namespace" ] || { printf 'parent namespace FD missing\n' >&2; exit 71; }
+else
+    parent=${namespace#/proc/}; parent=${parent%/fd/8}
+    lsof -a -p "$parent" -d 8 -Ff 2>/dev/null | grep -Fxq f8 || {
+        printf 'parent namespace FD missing\n' >&2; exit 71;
+    }
+fi
+for descriptor in 8 9; do
+    if (eval ": <&$descriptor") 2>/dev/null; then
+        printf 'preflight inherited private FD %s\n' "$descriptor" >&2
+        exit 72
+    fi
+done
+printf '{}\n'
+MOCK_ENV
+chmod 0755 "$fixture/tools/env"
+preflight_shell=sh
+if command -v dash >/dev/null 2>&1; then preflight_shell=dash; fi
+"$preflight_shell" -eu -c '
+    . "$1/preflight-function.sh"
+    updater_private=$1 groups= uid=1234 gid=1234 preflight=/unused-candidate
+    printf namespace > "$1/namespace-pin"
+    exec 8<"$1/namespace-pin" 9>"$1/installer-lock"
+    mount_namespace="/proc/$$/fd/8"
+    low_preflight || { cat "$1/install-preflight-error.txt" >&2; exit 1; }
+    rm "$1/namespace-pin"
+    low_preflight || { cat "$1/install-preflight-error.txt" >&2; exit 1; }
+    : <&8
+    : >&9
+    exec 8<&- 9>&-
+' sh "$fixture"
+rm "$fixture/tools/env"
 stage="$fixture/stage"
 mkdir -m 0700 "$stage"
 sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" --dry-run

@@ -81,6 +81,7 @@ export const settingPages = {
       field("filter.block_suffix", "lines", true), field("filter.allow_exact", "lines"),
       field("filter.allow_suffix", "lines"),
     ]),
+    group("subscriptionLimits", [field("filter_subscriptions.enabled", "checkbox", true), number("filter_subscriptions.max_rules", 1, 5000000), number("filter_subscriptions.max_memory_bytes", 1, 536870912), number("filter_subscriptions.max_disk_bytes", 1, 2147483648)]),
   ]),
   security: page("security", [
     group("web", [field("web.public_host", "text", true)]),

@@ -48,8 +48,6 @@ impl Validators {
 pub struct Downloaded {
     pub sha256: String,
     pub bytes: u64,
-    pub transferred_bytes: u64,
-    pub final_url: String,
     pub validators: Validators,
 }
 #[derive(Debug)]
@@ -280,7 +278,7 @@ where
         let etag = saved_header(&response.headers, header::ETAG).filter(|v| valid_etag(v));
         let last_modified =
             saved_header(&response.headers, header::LAST_MODIFIED).filter(|v| valid_modified(v));
-        let (sha256, bytes, transferred_bytes) = stream_text(response, output, limit).await?;
+        let (sha256, bytes, _transferred_bytes) = stream_text(response, output, limit).await?;
         let validators = Validators {
             final_url: current.clone(),
             representation: REPRESENTATION.into(),
@@ -291,8 +289,6 @@ where
         return Ok(DownloadOutcome::Downloaded(Downloaded {
             sha256,
             bytes,
-            transferred_bytes,
-            final_url: current,
             validators,
         }));
     }

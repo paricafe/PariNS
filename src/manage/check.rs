@@ -23,7 +23,11 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     let config = Config::parse_in(&saved.toml, &dir)?;
     let snapshot = Snapshot::prepare(&config, address)?;
     config.check_non_identity_files()?;
-    let policy = config.load_policy()?;
+    let material = crate::filter_subscriptions::service::read_only(
+        &dir.join("filter-subscriptions"),
+        &config.filter_subscriptions,
+        &config.load_policy()?,
+    )?;
     let mut digest = Sha256::new();
     let mut add = |bytes: &[u8]| {
         digest.update((bytes.len() as u64).to_be_bytes());
@@ -31,7 +35,9 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     };
     add(&saved.revision.to_be_bytes());
     add(saved.toml.as_bytes());
-    add(&policy.semantic_digest());
+    add(&material.material_digest);
+    add(&material.content_revision.to_be_bytes());
+    add(&material.policy.semantic_digest());
     if let Some(certificates) = snapshot.certificates {
         for role in [
             CertificateRole::Dot,

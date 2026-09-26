@@ -47,7 +47,7 @@ Do not expand it into a full recursive resolver without an explicit design decis
 | `src/policy.rs`, `src/limits.rs` | Filtering decisions and source resource budgets, respectively. |
 | `src/manage/` | Authenticated management APIs, configuration transactions, persistence, and managed runtime ownership. |
 | `src/update/` | Official release/build contracts and bounded HTTPS reader; the fixed root executor owns its installation journal, never DNS or business data. |
-| `src/filter_subscriptions/` | Low-privilege subscription downloads and private source objects/catalog. Foundation preparation does not activate DNS policy or expose configuration/API controls. |
+| `src/filter_subscriptions/` | Process-owned bounded subscription work, private source catalog/index, and immutable policy generations. Manager/file runtime own final configuration, freeze, reload and shutdown gates. |
 | `src/https_reader.rs`, `src/private_files.rs` | Shared pinned HTTPS transport and private-file checks; callers retain source authorization, transactions, and lifecycle ownership. |
 | `web/` | Embedded UI, forms, drafts, and presentation. No independent DNS policy engine or authoritative configuration state. |
 | `scripts/`, `deploy/` | Installation, packaging, and service lifecycle; not DNS business logic. |
@@ -166,6 +166,16 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   by scanning objects. Post-rename directory-sync uncertainty retains both versions
   and pauses GC until reconciliation. Preparation cannot refresh an active source
   or bypass future aggregate compilation, revision, local-basis and UP-freeze gates.
+- One aggregate radix policy serves local and subscription rules. Config retains
+  local source rules, not an index; each request holds its generation across cache/CNAME/stale
+  handling. One worker owns construction and at most one request-held retired
+  generation. Preserve raw cached answers and semantic cache restoration checks.
+- Subscription status GETs do no IO. Background download/compile stays outside Manager and mutation
+  locks, then recheck captured configuration/content/local basis and update freeze.
+  Config candidates use try-admission under Manager; never await the worker there.
+  Persist Config before its infallible policy swap; background content selects
+  catalog before policy publication. Synchronize current/previous GC roots before
+  new collection; do not invent a cross-file atomic transaction or legacy migration.
 - Publish DNS terminal health once per generation to both readiness and storage
   sampling. Attempt diagnostics use bounded endpoint slots and finite typed
   dimensions; cancellation/shutdown are not upstream faults. Management API 200

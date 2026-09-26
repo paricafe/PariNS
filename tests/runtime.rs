@@ -559,6 +559,138 @@ async fn reload_prepares_all_rule_and_certificate_candidates_before_publication(
 }
 
 #[tokio::test]
+async fn reload_busy_generation_keeps_candidate_certificates_unpublished() {
+    let cert = Certificate::new();
+    let replacement = Certificate::new();
+    let rules = cert.directory.path().join("rules.toml");
+    std::fs::write(&rules, "enabled = true\nblock_exact = ['runtime.test']").unwrap();
+    let mut config = config("127.0.0.1:9".parse().unwrap());
+    config.dot = Some(cert.listener());
+    config.filter_file = Some(rules.clone());
+    let policies =
+        parins::filter_subscriptions::handle::PolicyHandle::new(config.load_policy().unwrap());
+    let old_request = policies.snapshot();
+    let services = parins::runtime_services::RuntimeServices::ephemeral(
+        parins::storage::RuntimeSettings::from_config(&config),
+    );
+    let server = Server::bind_with_policy(config, None, services, policies)
+        .await
+        .unwrap();
+    server
+        .resolver()
+        .replace_policy(parins::policy::Policy::load(&rules).unwrap())
+        .unwrap();
+    let reload = server.reload_handle();
+    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let (stop, task) = run(server);
+    std::fs::copy(&replacement.files.cert_file, &cert.files.cert_file).unwrap();
+    std::fs::copy(&replacement.files.key_file, &cert.files.key_file).unwrap();
+    std::fs::write(&rules, "enabled = true\nblock_exact = ['changed.test']").unwrap();
+    assert!(reload.reload().is_err());
+    let client = cert.connect(dot).await;
+    assert_eq!(client.get_ref().1.peer_certificates().unwrap()[0], cert.der);
+    drop(client);
+    drop(old_request);
+    reload.reload().unwrap();
+    let client = replacement.connect(dot).await;
+    assert_eq!(
+        client.get_ref().1.peer_certificates().unwrap()[0],
+        replacement.der
+    );
+    drop(client);
+    finish(stop, task).await;
+}
+
+#[test]
+fn binary_subscription_check_is_offline_and_creates_no_runtime_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("parins.toml");
+    let data = directory.path().join("absent-runtime");
+    let text = "listen='127.0.0.1:0'\nquery_timeout_ms=1000\ntcp_io_timeout_ms=1000\nshutdown_grace_ms=1000\nmax_inflight=128\nmax_tcp_connections=32\n[upstreams]\nservers=['udp://127.0.0.1:9']\n[[filter_subscriptions.sources]]\nid='example'\nname='Example'\nurl='https://example.com/rules'\nformat='domain_list'\n";
+    std::fs::write(&path, text).unwrap();
+    let invoke = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_parins"))
+            .arg("--config")
+            .arg(&path)
+            .arg("--data-dir")
+            .arg(&data)
+            .arg("--check")
+            .output()
+            .unwrap()
+    };
+    let output = invoke();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("subscription_material_missing"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!data.exists());
+    std::fs::write(&path, format!("{text}enabled=false\n")).unwrap();
+    let output = invoke();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!data.exists());
+}
+
+#[tokio::test]
+async fn file_subscription_reload_prepares_all_material_and_closes_publication() {
+    let cert = Certificate::new();
+    let replacement = Certificate::new();
+    let rules = cert.directory.path().join("rules.toml");
+    std::fs::write(&rules, "enabled=true\nblock_exact=['runtime.test']").unwrap();
+    let mut config = config("127.0.0.1:9".parse().unwrap());
+    config.dot = Some(cert.listener());
+    config.filter_file = Some(rules.clone());
+    let filters = parins::filter_subscriptions::service::Service::open(
+        cert.directory.path().join("subscriptions"),
+        config.load_policy().unwrap(),
+        config.filter_subscriptions.clone(),
+        0,
+        vec![],
+    )
+    .await
+    .unwrap();
+    let services = parins::runtime_services::RuntimeServices::ephemeral(
+        parins::storage::RuntimeSettings::from_config(&config),
+    );
+    let server = Server::bind_with_filter_service(config, None, services, filters.clone())
+        .await
+        .unwrap();
+    let reload = server.reload_handle();
+    let (stop, task) = run(server);
+    let initial = filters.handle().snapshot().policy.semantic_digest();
+    std::fs::write(&rules, "enabled=true\nblock_exact=['changed.test']").unwrap();
+    std::fs::copy(&replacement.files.cert_file, &cert.files.cert_file).unwrap();
+    assert!(reload.reload_async().await.is_err());
+    assert_eq!(
+        filters.handle().snapshot().policy.semantic_digest(),
+        initial
+    );
+    std::fs::copy(&replacement.files.key_file, &cert.files.key_file).unwrap();
+    reload.reload_async().await.unwrap();
+    let changed = filters.handle().snapshot().policy.semantic_digest();
+    assert_ne!(changed, initial);
+    assert!(
+        filters
+            .handle()
+            .snapshot()
+            .policy
+            .blocks(&Name::from_ascii("changed.test").unwrap())
+    );
+    finish(stop, task).await;
+    std::fs::write(&rules, "enabled=false").unwrap();
+    assert!(reload.reload_async().await.is_err());
+    assert_eq!(
+        filters.handle().snapshot().policy.semantic_digest(),
+        changed
+    );
+}
+
+#[tokio::test]
 async fn resolver_profiles_keep_same_question_answers_and_warm_caches_isolated() {
     let mut resolvers = Vec::new();
     let mut mocks = Vec::new();

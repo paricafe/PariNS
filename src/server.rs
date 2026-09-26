@@ -40,6 +40,9 @@ pub struct ReloadHandle {
     resolver: Arc<Resolver>,
     certificates: Arc<crate::tls::CertificateSet>,
     filter_file: Option<PathBuf>,
+    local_policy: crate::policy::LocalRules,
+    filter_settings: crate::filter_subscriptions::settings::Settings,
+    filters: Option<Arc<crate::filter_subscriptions::service::Service>>,
     serial: Arc<Mutex<()>>,
     publication_closed: Arc<Mutex<bool>>,
 }
@@ -47,6 +50,10 @@ pub struct ReloadHandle {
 impl ReloadHandle {
     /// Call from a blocking worker: all candidates are validated before any publication.
     pub fn reload(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.filters.is_none(),
+            "subscription reload requires reload_async"
+        );
         let _serial = self.serial.lock().expect("reload lock poisoned");
         let policy = self
             .filter_file
@@ -59,10 +66,50 @@ impl ReloadHandle {
             .lock()
             .expect("reload publication lock");
         anyhow::ensure!(!*closed, "DNS generation stopped before reload publication");
-        self.certificates.publish(prepared)?;
-        if let Some(policy) = policy {
-            self.resolver.replace_policy(policy);
+        if let Some(policy) =
+            policy.filter(|policy| policy.semantic_digest() != self.resolver.policy_digest())
+        {
+            self.resolver.replace_policy_with(policy, || {
+                self.certificates.publish(prepared)?;
+                Ok(())
+            })?;
+        } else {
+            self.certificates.publish(prepared)?;
         }
+        Ok(())
+    }
+
+    /// File-mode subscription reload never downloads. IO and compilation happen
+    /// outside publication; shutdown, certificates and the aggregate share one cut.
+    pub async fn reload_async(&self) -> Result<()> {
+        let Some(filters) = &self.filters else {
+            let reload = self.clone();
+            return tokio::task::spawn_blocking(move || reload.reload()).await?;
+        };
+        let revision = filters.config_revision();
+        let next_revision = revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("filter revision exhausted"))?;
+        let reload = self.clone();
+        let certificates =
+            tokio::task::spawn_blocking(move || reload.certificates.prepare_reload()).await??;
+        let local = match &self.filter_file {
+            Some(path) => crate::policy::LocalPolicySource::File(path.clone()),
+            None => crate::policy::LocalPolicySource::Inline(self.local_policy.clone()),
+        };
+        let candidate = filters
+            .prepare_config_from_source(self.filter_settings.clone(), local, revision)
+            .await?;
+        // Lock order: file publication gate -> Service/PolicyHandle -> identities.
+        // The candidate holds the one worker lease, excluding refresh publication.
+        let closed = self
+            .publication_closed
+            .lock()
+            .expect("reload publication lock");
+        anyhow::ensure!(!*closed, "DNS generation stopped before reload publication");
+        filters.validate_candidate(&candidate)?;
+        self.certificates.publish(certificates)?;
+        filters.publish_config(candidate, next_revision);
         Ok(())
     }
 
@@ -71,6 +118,9 @@ impl ReloadHandle {
             .publication_closed
             .lock()
             .expect("reload publication lock") = true;
+        if let Some(filters) = &self.filters {
+            filters.request_close();
+        }
     }
 }
 
@@ -81,6 +131,23 @@ enum Encrypted {
 }
 
 impl Server {
+    /// File-mode service is closed with the DNS generation; managed mode keeps
+    /// its process-owned service outside individual listener generations.
+    pub async fn bind_with_filter_service(
+        config: Config,
+        certificates: Option<Arc<crate::tls::CertificateSet>>,
+        services: Arc<crate::runtime_services::RuntimeServices>,
+        filters: Arc<crate::filter_subscriptions::service::Service>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            filters.ready(),
+            "subscription_material_missing: complete policy required before binding"
+        );
+        let mut server =
+            Self::bind_with_policy(config, certificates, services, filters.handle()).await?;
+        server.reload.filters = Some(filters);
+        Ok(server)
+    }
     /// Bind both protocols before accepting traffic. Port zero selects one shared port.
     pub async fn bind(config: Config) -> Result<Self> {
         let services = crate::runtime_services::RuntimeServices::ephemeral(
@@ -90,9 +157,23 @@ impl Server {
     }
 
     pub async fn bind_with_services(
+        config: Config,
+        certificates: Option<Arc<crate::tls::CertificateSet>>,
+        services: Arc<crate::runtime_services::RuntimeServices>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            config.filter_subscriptions.effective().next().is_none(),
+            "subscription_material_missing: subscriptions require a prepared policy"
+        );
+        let policy = crate::filter_subscriptions::handle::PolicyHandle::new(config.load_policy()?);
+        Self::bind_with_policy(config, certificates, services, policy).await
+    }
+
+    pub async fn bind_with_policy(
         mut config: Config,
         certificates: Option<Arc<crate::tls::CertificateSet>>,
         services: Arc<crate::runtime_services::RuntimeServices>,
+        policy: Arc<crate::filter_subscriptions::handle::PolicyHandle>,
     ) -> Result<Self> {
         config.validate()?;
         let certificates = match certificates {
@@ -153,11 +234,16 @@ impl Server {
             settings.listen = endpoint.local_addr()?;
             encrypted.push(Encrypted::Quic(endpoint, crate::quic::Protocol::Doq));
         }
-        let resolver = Arc::new(Resolver::with_services(&config, services)?);
+        let resolver = Arc::new(Resolver::with_services_and_policy(
+            &config, services, policy,
+        )?);
         let reload = ReloadHandle {
             resolver: resolver.clone(),
             certificates,
             filter_file: config.filter_file.clone(),
+            local_policy: config.filter.clone(),
+            filter_settings: config.filter_subscriptions.clone(),
+            filters: None,
             serial: Arc::new(Mutex::new(())),
             publication_closed: Arc::new(Mutex::new(false)),
         };

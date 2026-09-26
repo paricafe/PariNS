@@ -32,9 +32,11 @@ pub struct Config {
     pub ecs: EcsConfig,
     #[serde(default)]
     pub cache: CacheConfig,
-    // Compiled policy is projected from source rules by management, not its trie.
+    // Local source syntax only. Runtime owners compile under their worker lease.
     #[serde(default, skip_serializing)]
-    pub filter: crate::policy::Policy,
+    pub filter: crate::policy::LocalRules,
+    #[serde(default)]
+    pub filter_subscriptions: crate::filter_subscriptions::settings::Settings,
     #[serde(default)]
     pub coalescing: CoalescingConfig,
     #[serde(default)]
@@ -324,15 +326,18 @@ impl Config {
     }
 
     pub fn check_non_identity_files(&self) -> Result<()> {
-        self.load_policy()?;
         crate::upstreams::Pool::new(&self.upstreams, self)?;
         Ok(())
     }
 
     pub fn load_policy(&self) -> Result<crate::policy::Policy> {
+        self.local_policy_source()
+            .compile(crate::policy::canonical::Limits::default(), || Ok(()))
+    }
+    pub fn local_policy_source(&self) -> crate::policy::LocalPolicySource {
         match &self.filter_file {
-            Some(path) => crate::policy::Policy::load(path),
-            None => Ok(self.filter.clone()),
+            Some(path) => crate::policy::LocalPolicySource::File(path.clone()),
+            None => crate::policy::LocalPolicySource::Inline(self.filter.clone()),
         }
     }
 
@@ -343,6 +348,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.filter_subscriptions.validate()?;
         ensure!(
             (1..=168).contains(&self.updates.check_interval_hours),
             "updates.check_interval_hours must be 1..=168"

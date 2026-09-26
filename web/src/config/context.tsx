@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError, StaleRequest, type ApiClient } from '../session/client';
 import type { TransportChange } from '../session/client';
+import { decodeSubscription, type SubscriptionDraft, type SubscriptionSource } from '../model/subscriptions';
 import { decodeCacheRule, diffSettings, fieldDisplayValue, getPath, setPath, settingPages, convertFieldValue, ModelError, type CacheRuleDraft, type RawFieldValue, type SettingsObject } from '../model';
 
 interface ConfigResponse { toml: string; revision: number; has_backup: boolean }
@@ -16,6 +17,8 @@ export interface ConfigDraft {
   fields: Record<string, RawFieldValue>;
   optional: Record<string, boolean>;
   rules: CacheRuleDraft[] | null;
+  sources: SubscriptionDraft[] | null;
+  savedSources: SubscriptionSource[];
   stale: boolean;
   unknownApply: boolean;
   pendingApply: { toml: string; revision: number } | null;
@@ -41,6 +44,7 @@ interface ConfigContextValue {
   updateField(path: string, value: RawFieldValue): void;
   setOptional(protocol: string, enabled: boolean): void;
   setRules(rules: CacheRuleDraft[]): void;
+  setSources(sources: SubscriptionDraft[]): void;
   setToml(toml: string): void;
   importCertificate(target: 'dot' | 'doh' | 'doq', certificate: string, privateKey: string): Promise<void>;
   preview(): Promise<string>;
@@ -63,7 +67,7 @@ const EMPTY_LISTENER = { listen: '', cert_file: '', key_file: '' };
 
 function dirty(draft: ConfigDraft | null): boolean {
   if (!draft) return false;
-  if (draft.toml !== draft.original || draft.rules !== null || Object.keys(draft.optional).length) return true;
+  if (draft.toml !== draft.original || draft.rules !== null || draft.sources !== null || Object.keys(draft.optional).length) return true;
   return Object.entries(draft.fields).some(([path, raw]) => {
     const field = fieldByPath.get(path);
     return field && JSON.stringify(raw) !== JSON.stringify(fieldDisplayValue(getPath(draft.settings, path), field));
@@ -73,7 +77,7 @@ function dirty(draft: ConfigDraft | null): boolean {
 function createDraft(config: ConfigResponse, parsed: ParsedResponse): ConfigDraft {
   return { original: config.toml, toml: config.toml, revision: config.revision,
     hasBackup: config.has_backup, settings: parsed.settings, fields: {}, optional: {},
-    rules: null, stale: false, unknownApply: false, pendingApply: null, pendingRollback: null,
+    rules: null, sources: null, savedSources: (getPath(parsed.settings, 'filter_subscriptions.sources') as SubscriptionSource[] | undefined) ?? [], stale: false, unknownApply: false, pendingApply: null, pendingRollback: null,
     previewTransportChange: null, pendingTransportChange: null };
 }
 
@@ -140,6 +144,12 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     setDraft((current) => current && ({ ...current, toml, stale: true, previewTransportChange: null }));
   }, []);
 
+  const setSources = useCallback((sources: SubscriptionDraft[]) => {
+    if (writeLock.current || updateLock.current) return;
+    version.current += 1;
+    setDraft((current) => current && ({ ...current, previewTransportChange: null, sources }));
+  }, []);
+
   const importCertificate = useCallback(async (target: 'dot' | 'doh' | 'doq', certificate: string, privateKey: string) => {
     if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
     const enabled = draft.optional[target] ?? getPath(draft.settings, target) !== null;
@@ -194,6 +204,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
         }
       }));
     }
+    if (draft.sources !== null) next = setPath(next, 'filter_subscriptions.sources', draft.sources.map(decodeSubscription));
     const changes = diffSettings(baseline, next);
     if (!Object.keys(changes).length) {
       const candidate = draft.toml !== draft.original
@@ -202,13 +213,13 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       assertVersion(owner);
       version.current += 1;
       setDraft((current) => current && ({ ...current, toml: candidate?.toml ?? draft.toml, settings: candidate?.settings ?? baseline,
-        stale: false, fields: {}, optional: {}, rules: null, previewTransportChange: candidate?.transport_change ?? null }));
+        stale: false, fields: {}, optional: {}, rules: null, sources: null, previewTransportChange: candidate?.transport_change ?? null }));
       return candidate?.toml ?? draft.toml;
     }
     const preview = await api.request<ParsedResponse>('config/preview', 'POST', { toml: draft.toml, changes });
     assertVersion(owner);
     version.current += 1;
-    setDraft((current) => current && ({ ...current, toml: preview.toml, settings: preview.settings, fields: {}, optional: {}, rules: null, stale: false,
+    setDraft((current) => current && ({ ...current, toml: preview.toml, settings: preview.settings, fields: {}, optional: {}, rules: null, sources: null, stale: false,
       previewTransportChange: preview.transport_change ?? null }));
     return preview.toml;
   }, [api, draft]);
@@ -276,7 +287,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       assertVersion(prepared.version);
       version.current += 1;
       setDraft((current) => current && ({ ...current, original: prepared.toml, toml: prepared.toml, revision: acknowledged.revision,
-        hasBackup: true, fields: {}, optional: {}, rules: null, stale: false, unknownApply: false, pendingApply: null, pendingRollback: null }));
+        hasBackup: true, fields: {}, optional: {}, rules: null, sources: null, savedSources: (getPath(current.settings, 'filter_subscriptions.sources') as SubscriptionSource[] | undefined) ?? [], stale: false, unknownApply: false, pendingApply: null, pendingRollback: null }));
       if (acknowledged.transport_change) return { refreshed: false, transportChange: acknowledged.transport_change };
       try { await reload(); return { refreshed: true, transportChange: null }; }
       catch { setError('app.savedRefreshFailed'); return { refreshed: false, transportChange: null }; }
@@ -384,8 +395,8 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [flush]);
 
   const value = useMemo<ConfigContextValue>(() => ({ draft, busy: busy || updateLocked, locked: writeLock.current || updateLocked || Boolean(draft?.unknownApply), error, dirty: dirty(draft), setError, updateField,
-    setOptional, setRules, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked }),
-  [draft, busy, updateLocked, error, updateField, setOptional, setRules, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked]);
+    setOptional, setRules, setSources, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked }),
+  [draft, busy, updateLocked, error, updateField, setOptional, setRules, setSources, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked]);
   return <ConfigContext.Provider value={value}>{children}</ConfigContext.Provider>;
 }
 

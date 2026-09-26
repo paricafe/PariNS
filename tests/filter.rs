@@ -288,7 +288,8 @@ async fn reload_changes_cached_cname_filter_but_inflight_keeps_starting_snapshot
         .unwrap();
     let outbound = protocol::decode(&buffer[..length]).unwrap();
     // The active request has snapshotted the blocking generation before upstream IO.
-    resolver.replace_policy(Policy::default());
+    resolver.replace_policy(Policy::default()).unwrap();
+    assert!(resolver.replace_policy(Policy::default()).is_err());
     let mut answer = protocol::error_response(&outbound, ResponseCode::NoError);
     answer.add_answer(Record::from_rdata(
         outbound.queries[0].name().clone(),
@@ -314,12 +315,15 @@ async fn reload_changes_cached_cname_filter_but_inflight_keeps_starting_snapshot
 
     // Cache contains the original response, not the old generation's synthesized block.
     assert_eq!(resolve(&resolver, &q).await.answers.len(), 2);
-    resolver.replace_policy(toml::from_str("enabled = true\nblock_exact = ['ads.test']").unwrap());
+    resolver
+        .replace_policy(toml::from_str("enabled = true\nblock_exact = ['ads.test']").unwrap())
+        .unwrap();
     assert_blocked(&q, &resolve(&resolver, &q).await);
     resolver
-        .replace_policy(toml::from_str("enabled = true\nblock_exact = ['alias.test']").unwrap());
+        .replace_policy(toml::from_str("enabled = true\nblock_exact = ['alias.test']").unwrap())
+        .unwrap();
     assert_blocked(&q, &resolve(&resolver, &q).await);
-    resolver.replace_policy(Policy::default());
+    resolver.replace_policy(Policy::default()).unwrap();
     assert_eq!(resolve(&resolver, &q).await.answers.len(), 2);
     assert_eq!(
         upstream.try_recv(&mut buffer).unwrap_err().kind(),

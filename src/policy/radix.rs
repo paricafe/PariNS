@@ -1,9 +1,13 @@
-//! One bounded compressed byte-radix experiment, not a production engine.
-use super::{Canonical, Error, Group, Key, grow, key};
+//! Immutable, bounded compressed byte-radix filtering index.
+//! Development integration does not imply performance release acceptance.
+use super::canonical::{Canonical, Error, Group, Key, grow, key};
 use hickory_proto::rr::Name;
 use std::mem::size_of;
 
 const NONE: u16 = u16::MAX;
+/// Exact ownership prefix: magic, big-endian index version, semantics version.
+/// The 32-byte input digest follows immediately, starting at byte 16.
+pub(crate) const DERIVED_PREFIX: &[u8; 16] = b"PRNSRDX\0\0\0\0\x01\0\0\0\x01";
 // Every non-root edge consumes at least one of at most 254 encoded bytes.
 // Explicit frames replace recursion so variable-depth build scratch is charged.
 const MAX_BUILD_DEPTH: usize = 255;
@@ -27,7 +31,7 @@ impl Frame {
     }
 }
 const BUILD_SCRATCH_BYTES: usize = MAX_BUILD_DEPTH * size_of::<Frame>();
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 struct Node {
     edge_offset: u32,
@@ -51,6 +55,7 @@ impl Node {
     }
 }
 
+#[derive(Debug)]
 pub struct Index {
     nodes: Vec<Node>,
     arena: Vec<u8>,
@@ -67,13 +72,21 @@ pub struct Match {
 }
 
 impl Index {
-    pub(super) fn build(mut input: Canonical) -> Result<Self, Error> {
+    pub(super) fn build(input: Canonical) -> Result<Self, Error> {
+        Self::build_with_check(input, || Ok(()))
+    }
+    pub(super) fn build_with_check(
+        mut input: Canonical,
+        mut check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<Self, Error> {
+        check()?;
         let index_rules = input.records.len();
         input.records.sort_unstable_by(|a, b| {
             key(&input.arena, a.entry)
                 .cmp(key(&input.arena, b.entry))
                 .then((a.group as u8).cmp(&(b.group as u8)))
         });
+        check()?;
         let mut result = Self {
             nodes: Vec::new(),
             arena: Vec::new(),
@@ -84,16 +97,25 @@ impl Index {
         };
         grow(&mut result.nodes, 1, &mut input.budget)?;
         result.nodes.push(Node::empty());
-        result.children(&mut input)?;
+        result.children(&mut input, &mut check)?;
         result.peak_bytes = input.budget.peak;
         Ok(result)
     }
-    fn children(&mut self, input: &mut Canonical) -> Result<(), Error> {
+    fn children(
+        &mut self,
+        input: &mut Canonical,
+        check: &mut impl FnMut() -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let mut frames = Vec::new();
         grow(&mut frames, MAX_BUILD_DEPTH, &mut input.budget)?;
         debug_assert!(frames.capacity() * size_of::<Frame>() >= BUILD_SCRATCH_BYTES);
         frames.push(Frame::new(0, 0, input.records.len(), 0));
+        let mut processed = 0usize;
         while let Some(frame) = frames.last_mut() {
+            processed += 1;
+            if processed.is_multiple_of(4096) {
+                check()?;
+            }
             if frame.next_child == usize::MAX {
                 while frame.start < frame.end
                     && usize::from(input.records[frame.start].entry.len) == frame.depth
@@ -113,6 +135,9 @@ impl Index {
                         && key(&input.arena, input.records[position].entry)[frame.depth] == byte
                     {
                         position += 1;
+                        if position.is_multiple_of(4096) {
+                            check()?;
+                        }
                     }
                 }
                 let first_child = self.nodes.len();
@@ -138,6 +163,9 @@ impl Index {
             let mut stop = start + 1;
             while stop < end && key(&input.arena, input.records[stop].entry)[depth] == byte {
                 stop += 1;
+                if stop.is_multiple_of(4096) {
+                    check()?;
+                }
             }
             let last = key(&input.arena, input.records[stop - 1].entry);
             let mut common = depth + 1;
@@ -164,6 +192,7 @@ impl Index {
             frames.push(Frame::new(child, start, stop, common));
         }
         input.budget.release(frames.capacity() * size_of::<Frame>());
+        check()?;
         Ok(())
     }
     pub fn lookup(&self, name: &Name) -> Option<Match> {
@@ -212,11 +241,35 @@ impl Index {
     pub fn index_bytes(&self) -> usize {
         self.arena.capacity() + self.nodes.capacity() * size_of::<Node>()
     }
+    #[allow(dead_code)] // Standalone benchmark also compiles this source without cfg(test).
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+    /// Only copies the bounded matched rule, never the whole source.
+    pub fn rule(&self, name: &Name, matched: Match) -> String {
+        let key = Key::query(name);
+        let mut bytes = &key.as_slice()[..usize::from(matched.matched_key_len)];
+        let mut labels = [&[][..]; 127];
+        let mut count = 0;
+        while let Some((&len, rest)) = bytes.split_first() {
+            labels[count] = &rest[..usize::from(len)];
+            count += 1;
+            bytes = &rest[usize::from(len)..];
+        }
+        let mut result = String::with_capacity(253);
+        for label in labels[..count].iter().rev() {
+            if !result.is_empty() {
+                result.push('.');
+            }
+            result.push_str(std::str::from_utf8(label).expect("matched rules are ASCII"));
+        }
+        result
     }
 }
 
 #[cfg(test)]
 #[path = "radix_tests.rs"]
 mod tests;
+
+#[path = "radix_disk.rs"]
+mod disk;

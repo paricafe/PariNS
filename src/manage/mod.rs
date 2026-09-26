@@ -3,6 +3,7 @@ mod auth_budget;
 mod cache;
 mod certificates;
 pub mod check;
+mod filters;
 mod runtime;
 mod settings;
 pub(crate) mod store;
@@ -51,6 +52,7 @@ struct Active {
     sessions: Vec<Session>,
 }
 struct Shared {
+    filter_tasks: tokio::sync::Mutex<JoinSet<()>>,
     manager: Arc<tokio::sync::Mutex<Manager>>,
     active: Arc<Mutex<Active>>,
     auth: auth_budget::Budget,
@@ -152,6 +154,9 @@ fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> 
     ApiError(status, code, message.into())
 }
 fn invalid(err: anyhow::Error) -> ApiError {
+    if err.is::<crate::filter_subscriptions::service::Failure>() {
+        return filters::api_error(err);
+    }
     let code = if err.is::<crate::tls::ManagementNameMismatch>() {
         "CERTIFICATE_NAME_MISMATCH"
     } else if err.is::<transport::CertificateInvalid>() {
@@ -676,6 +681,15 @@ async fn api(
     }
     shared.authorized(headers, &transport)?;
     match (method, path) {
+        ("GET", "/api/filter/subscriptions") => {
+            Ok(json!(shared.manager.lock().await.filters.snapshot()))
+        }
+        (
+            "POST",
+            "/api/filter/subscriptions/prepare"
+            | "/api/filter/subscriptions/refresh"
+            | "/api/filter/check",
+        ) => filters::api(shared, path, body).await,
         ("GET", "/api/updates") => Ok(shared.manager.lock().await.updates.view()),
         ("POST", "/api/updates/apply") => {
             let input: updates::operation::Apply = decode(body)?;
@@ -1111,7 +1125,13 @@ async fn handle_inner(
     )
     .into_response();
     if parts.method == axum::http::Method::POST
-        && matches!(path, "/api/updates/check" | "/api/updates/apply")
+        && matches!(
+            path,
+            "/api/updates/check"
+                | "/api/updates/apply"
+                | "/api/filter/subscriptions/prepare"
+                | "/api/filter/subscriptions/refresh"
+        )
     {
         *response.status_mut() = StatusCode::ACCEPTED;
     }
@@ -1160,7 +1180,9 @@ pub async fn serve(
     let manager = Arc::new(tokio::sync::Mutex::new(
         Manager::open(store, address, active.clone()).await?,
     ));
+    let filter_service = manager.lock().await.filters.clone();
     let shared = Arc::new(Shared {
+        filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
         manager: manager.clone(),
         active: active.clone(),
         auth: auth_budget::Budget::new(),
@@ -1170,6 +1192,7 @@ pub async fn serve(
     let router = Router::new().fallback(handle).with_state(shared.clone());
     let (update_stop, update_stopping) = tokio::sync::watch::channel(false);
     let update_task = tokio::spawn(update_checks::run(shared.clone(), update_stopping.clone()));
+    let filter_task = tokio::spawn(filters::run(shared.clone(), update_stopping.clone()));
     let update_operation_task =
         tokio::spawn(updates::operation::run(shared.clone(), update_stopping));
     let initial = active.lock().unwrap().snapshot.clone();
@@ -1234,14 +1257,25 @@ pub async fn serve(
     };
     drop(listener);
     let _ = update_stop.send(true);
+    filter_service.request_close();
     // Every accepted transaction owns this permit before detaching. Wait for it
     // before stopping DNS, including transactions not yet holding manager.lock.
     // A blocked filesystem must not keep the process alive indefinitely. On
     // timeout, leave no clean snapshot and let the process runtime terminate.
     let _transaction = timeout(Duration::from_secs(65), async {
+        // Closing serializes with catalog publication, which may be in fsync.
+        // Keep both waits inside the shutdown budget and off the executor.
+        let _ = tokio::task::spawn_blocking(move || filter_service.close()).await;
         // A submitted mutation owns its transaction independently of HTTP.
         tasks.shutdown().await;
         let _ = update_task.await;
+        let _ = filter_task.await;
+        // A disconnected HTTP admission may still own the mutation permit and
+        // register its rule task. Cross that barrier before draining the owner.
+        {
+            let _admission = shared.mutation.acquire().await?;
+        }
+        while shared.filter_tasks.lock().await.join_next().await.is_some() {}
         let _ = update_operation_task.await;
         if let Some(task) = reload_task {
             let _ = task.await;
@@ -1336,6 +1370,7 @@ mod tests {
             .unwrap(),
         ));
         let shared = Arc::new(Shared {
+            filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
             manager: manager.clone(),
             active: active.clone(),
             auth: auth_budget::Budget::new(),
@@ -1407,6 +1442,7 @@ mod tests {
             .unwrap(),
         ));
         let shared = super::Shared {
+            filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             manager,
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
@@ -1503,6 +1539,7 @@ mod tests {
             .unwrap(),
         ));
         let shared = super::Shared {
+            filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             manager,
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
@@ -1542,6 +1579,7 @@ mod tests {
             .unwrap(),
         ));
         let shared = Arc::new(super::Shared {
+            filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             manager: manager.clone(),
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),

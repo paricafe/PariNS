@@ -3,21 +3,6 @@ pub use super::canonical::*;
 use super::canonical::{Key, error, grow, key};
 use hickory_proto::rr::Name;
 use std::mem::size_of;
-#[path = "radix.rs"]
-pub mod radix;
-
-impl Key {
-    fn query(name: &Name) -> Self {
-        let mut key = Self {
-            bytes: [0; 255],
-            len: 0,
-        };
-        for label in name.iter().rev() {
-            key.push(label);
-        }
-        key
-    }
-}
 fn suffix_match(arena: &[u8], table: &[Entry], query: &[u8]) -> Option<Entry> {
     let index = table.partition_point(|entry| key(arena, *entry) <= query);
     index
@@ -65,9 +50,6 @@ impl Canonical {
             input_rules: self.input_rules,
             peak_bytes: self.budget.peak,
         })
-    }
-    pub fn finish_radix(self) -> Result<radix::Index, Error> {
-        radix::Index::build(self)
     }
 }
 

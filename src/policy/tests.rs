@@ -167,3 +167,151 @@ fn unrelated_names_wrong_class_and_cycles_do_not_cause_false_blocks() {
     p.apply_response(&q, &mut reply);
     assert!(reply.answers.is_empty());
 }
+
+#[test]
+fn local_inputs_are_retained_and_charged_without_changing_effective_digest() {
+    let local = policy(
+        "block_suffix=['test','TEST.']\nblock_exact=['ads.test']\nallow_exact=['safe.test']",
+    );
+    let effective = policy("block_suffix=['test']\nallow_exact=['safe.test']");
+    assert_eq!(local.semantic_digest(), effective.semantic_digest());
+    assert_eq!(local.publication_digest(), effective.publication_digest());
+    assert_eq!(local.input_rules(), 4);
+    assert_eq!(local.index_rules(), 2);
+    assert_eq!(local.input_bytes(), 26);
+    assert!(local.local_bytes() >= 26 + 4 * std::mem::size_of::<String>());
+    assert!(local.owned_bytes() > local.local_bytes() + local.index_bytes());
+    assert!(Arc::ptr_eq(&local.data, &local.clone().data));
+    let mut builder = Builder::new(Limits::default()).unwrap();
+    local.append_to(&mut builder).unwrap();
+    assert_eq!(builder.prepare().unwrap().input_rules, 4);
+    let disabled: Policy = toml::from_str("block_suffix=['test']").unwrap();
+    assert_eq!(disabled.input_rules(), 0);
+    assert_eq!(disabled.input_bytes(), 0);
+    assert!(disabled.local_bytes() > 0);
+    assert_eq!(
+        disabled.semantic_digest(),
+        Policy::default().semantic_digest()
+    );
+}
+
+#[test]
+fn aggregate_witnesses_are_bounded_and_local_allow_wins() {
+    let local = policy("allow_exact=['safe.test']");
+    let mut builder = Builder::new(Limits::default()).unwrap();
+    local.append_to(&mut builder).unwrap();
+    builder.add("test", Group::BlockSuffix, 2).unwrap();
+    builder.add("test", Group::BlockSuffix, 1).unwrap();
+    let aggregate = Policy::from_index(
+        builder.prepare().unwrap().finish_radix().unwrap(),
+        vec![String::new(), "local".into(), "z-list".into()],
+    );
+    let check = |name| aggregate.explain(&Name::from_ascii(name).unwrap());
+    assert_eq!(
+        check("safe.test"),
+        Explanation {
+            decision: Decision::Allowed,
+            witness: Some(Witness {
+                source_id: None,
+                rule: "safe.test".into(),
+                scope: Scope::Exact,
+            })
+        }
+    );
+    assert_eq!(
+        check("a.test"),
+        Explanation {
+            decision: Decision::Blocked,
+            witness: Some(Witness {
+                source_id: Some("local".into()),
+                rule: "test".into(),
+                scope: Scope::Suffix,
+            })
+        }
+    );
+    assert_eq!(check("other.example").decision, Decision::Unmatched);
+    assert_eq!(aggregate.local_bytes(), 0);
+    assert!(
+        aggregate
+            .append_to(&mut Builder::new(Limits::default()).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+fn publication_digest_ignores_unused_slots_but_tracks_actual_witness_identity() {
+    let make = |slot, ids: &[&str]| {
+        let mut builder = Builder::new(Limits::default()).unwrap();
+        builder.add("test", Group::BlockSuffix, slot).unwrap();
+        Policy::from_index(
+            builder.prepare().unwrap().finish_radix().unwrap(),
+            ids.iter().map(|s| s.to_string()).collect(),
+        )
+    };
+    let original = make(1, &["", "b-list"]);
+    let unused = make(2, &["", "a-list", "b-list"]);
+    let renamed = make(1, &["", "c-list"]);
+    assert_eq!(original.publication_digest(), unused.publication_digest());
+    assert_eq!(original.semantic_digest(), renamed.semantic_digest());
+    assert_ne!(original.publication_digest(), renamed.publication_digest());
+}
+
+#[test]
+fn local_source_is_raw_until_budgeted_compilation_and_can_reuse_owned_policy() {
+    let raw: LocalRules = toml::from_str("enabled=true\nblock_suffix=['test']").unwrap();
+    let source = LocalPolicySource::Inline(raw.clone());
+    let rejected = source
+        .compile(
+            Limits {
+                max_memory_bytes: raw.owned_bytes(),
+                ..Limits::default()
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+    assert_eq!(
+        rejected.downcast_ref::<canonical::Error>().unwrap().kind,
+        canonical::ErrorKind::MemoryLimit
+    );
+    let compiled = source.compile(Limits::default(), || Ok(())).unwrap();
+    assert!(
+        source
+            .reuse_policy(&compiled)
+            .unwrap()
+            .same_allocation(&compiled)
+    );
+    let changed =
+        LocalPolicySource::Inline(toml::from_str("enabled=false\nblock_suffix=['test']").unwrap());
+    assert!(changed.reuse_policy(&compiled).is_none());
+}
+
+#[test]
+fn local_file_buffer_is_charged_before_reading_or_compiling_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rules.toml");
+    std::fs::write(
+        &path,
+        format!("#{}\nenabled=true\nblock_exact=['test']", "x".repeat(8192)),
+    )
+    .unwrap();
+    let source = LocalPolicySource::File(path);
+    let error = source
+        .compile(
+            Limits {
+                max_memory_bytes: 4096,
+                ..Limits::default()
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<canonical::Error>().unwrap().kind,
+        canonical::ErrorKind::MemoryLimit
+    );
+    assert!(
+        source
+            .compile(Limits::default(), || Ok(()))
+            .unwrap()
+            .blocks(&Name::from_ascii("test").unwrap())
+    );
+}

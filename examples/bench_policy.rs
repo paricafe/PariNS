@@ -5,7 +5,10 @@
 mod canonical;
 #[path = "../src/policy/compact.rs"]
 mod compact;
-use compact::{Builder, Format, Group, Index, Limits, radix};
+#[path = "../src/policy/radix.rs"]
+#[allow(dead_code)]
+mod radix;
+use compact::{Builder, Format, Group, Index, Limits};
 use hickory_proto::rr::Name;
 use sha2::{Digest, Sha256};
 use std::{

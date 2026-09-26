@@ -1,0 +1,7 @@
+.subscription-card { min-width: 0; border: 1px solid var(--divider); border-radius: 6px; padding: 1rem; }
+.subscription-card legend { max-width: 100%; padding-inline: .5rem; font-weight: 600; overflow-wrap: anywhere; }
+.subscription-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); gap: .75rem; margin-block: 1rem; }
+.subscription-stats dt { font-size: .8rem; color: var(--muted); }
+.subscription-stats dd { margin: .25rem 0 0; overflow-wrap: anywhere; }
+.subscription-panel .notice, .subscription-card .notice, .inspection-result p { overflow-wrap: anywhere; }
+.subscription-panel > .button-group { margin-top: 1rem; }

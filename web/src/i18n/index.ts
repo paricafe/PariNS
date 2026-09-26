@@ -4,6 +4,7 @@ import { viewsMessages } from "./views";
 import { storageMessages } from "./storage";
 import { reliabilityMessages } from './reliability';
 import { updatesMessages } from './updates';
+import { subscriptionMessages } from './subscriptions';
 import { ModelError } from "../model/errors";
 import { ApiError } from "../session/client";
 
@@ -12,6 +13,7 @@ export type TranslationParams = Readonly<Record<string, string | number | boolea
 type MessagePair = readonly [string, string];
 
 const catalog: Record<string, MessagePair> = {
+  ...Object.fromEntries(Object.entries(subscriptionMessages).map(([key, value]) => [`subscriptions.${key}`, value])),
   ...Object.fromEntries(Object.entries(apiMessages).map(([key, value]) => [`api.${key}`, value])),
   ...Object.fromEntries(Object.entries(appMessages).map(([key, value]) => [`app.${key}`, value])),
   ...Object.fromEntries(Object.entries(uiMessages).map(([key, value]) => [`ui.${key}`, value])),
@@ -36,6 +38,7 @@ export function hasTranslation(key: string): boolean {
 export function presentIssue(issue: string | ModelError | ApiError, language: Language): string {
   if (issue instanceof ApiError) {
     const key = `api.${issue.code}`;
+    if (hasTranslation(`subscriptions.${issue.code}`)) return translate(`subscriptions.${issue.code}`, language);
     return hasTranslation(key) ? translate(key, language, { detail: issue.message, status: issue.status }) : issue.message;
   }
   const key = issue instanceof ModelError ? issue.key : issue;

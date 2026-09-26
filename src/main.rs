@@ -111,6 +111,11 @@ async fn run() -> Result<()> {
     let config = Config::load(&path)?;
     if check {
         config.check_files()?;
+        parins::filter_subscriptions::service::read_only(
+            &data_dir.join("filter-subscriptions"),
+            &config.filter_subscriptions,
+            &config.load_policy()?,
+        )?;
         println!("configuration valid");
         return Ok(());
     }
@@ -122,13 +127,33 @@ async fn run() -> Result<()> {
     .await??;
     let data_dir = data_dir.canonicalize()?;
     eprintln!("PariNS runtime data: {}", data_dir.display());
+    let filters = parins::filter_subscriptions::service::Service::open(
+        data_dir.join("filter-subscriptions"),
+        config.load_policy()?,
+        config.filter_subscriptions.clone(),
+        0,
+        vec![],
+    )
+    .await?;
+    // Only a never-selected fingerprint may perform first preparation. Existing
+    // selected corruption is an explicit failure, never an implicit repair.
+    filters.bootstrap_new().await?;
+    anyhow::ensure!(
+        filters.ready(),
+        "subscription_material_missing: complete policy required before binding"
+    );
     let persistence =
         std::sync::Arc::new(parins::cache_persistence::CachePersistence::new(&data_dir));
     let snapshot =
         parins::runtime_lifecycle::consume(persistence.clone(), config.cache.persistence.clone())
             .await?;
-    let server =
-        parins::server::Server::bind_with_services(config.clone(), None, services.clone()).await?;
+    let server = parins::server::Server::bind_with_filter_service(
+        config.clone(),
+        None,
+        services.clone(),
+        filters.clone(),
+    )
+    .await?;
     let resolver = server.resolver().clone();
     let fingerprint =
         parins::cache::persistence::semantic_fingerprint(&config, &resolver.policy_digest())?;
@@ -153,6 +178,7 @@ async fn run() -> Result<()> {
     let mut reload_task: Option<tokio::task::JoinHandle<Result<()>>> = None;
     #[cfg(unix)]
     let mut reload_pending = false;
+    let scheduler = tokio::spawn(filters.clone().run_file_scheduler());
     let outcome = server
         .run(async {
             #[cfg(unix)]
@@ -167,7 +193,7 @@ async fn run() -> Result<()> {
                     if reload_task.is_some() { reload_pending = true; }
                     else {
                         let reload = reload.clone();
-                        reload_task = Some(tokio::task::spawn_blocking(move || reload.reload()));
+                        reload_task = Some(tokio::spawn(async move { reload.reload_async().await }));
                     }
                 }
                 result = async { if let Some(task) = &mut reload_task { task.await } else { std::future::pending().await } }, if reload_task.is_some() => {
@@ -180,7 +206,7 @@ async fn run() -> Result<()> {
                     if reload_pending {
                         reload_pending = false;
                         let reload = reload.clone();
-                        reload_task = Some(tokio::task::spawn_blocking(move || reload.reload()));
+                        reload_task = Some(tokio::spawn(async move { reload.reload_async().await }));
                     }
                 }
             }}
@@ -191,6 +217,20 @@ async fn run() -> Result<()> {
         })
         .await;
     services.set_dns_state(false, 1);
+    filters.request_close();
+    // A commit already past rename may finish, but slow filesystem IO must not
+    // block the runtime before its bounded shutdown timer is even installed.
+    let close_filters = filters.clone();
+    let barrier = tokio::task::spawn_blocking(move || close_filters.close());
+    let filters_drained = matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            barrier.await?;
+            scheduler.await?;
+            Ok::<_, tokio::task::JoinError>(())
+        })
+        .await,
+        Ok(Ok(()))
+    );
     // Server has closed publication before returning: a late blocking read can
     // never change the policy fingerprint or active identities after this cut.
     #[cfg(unix)]
@@ -203,7 +243,7 @@ async fn run() -> Result<()> {
     };
     #[cfg(not(unix))]
     let reload_drained = true;
-    let quiescent = reload_drained && outcome.is_ok() && resolver.is_quiescent();
+    let quiescent = filters_drained && reload_drained && outcome.is_ok() && resolver.is_quiescent();
     let report = parins::runtime_lifecycle::terminal(
         services,
         persistence,

@@ -1,4 +1,5 @@
 //! Bounded streaming subscription parser and canonical logical rules; no physical index.
+use hickory_proto::rr::Name;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{io::BufRead, mem::size_of, net::IpAddr};
@@ -21,6 +22,7 @@ pub enum ErrorKind {
     HostsRewrite,
     EmptySource,
     Io,
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,7 +173,17 @@ pub(super) struct Key {
     pub(super) len: usize,
 }
 impl Key {
-    fn rule(text: &str) -> Result<Self, Error> {
+    pub(super) fn query(name: &Name) -> Self {
+        let mut key = Self {
+            bytes: [0; 255],
+            len: 0,
+        };
+        for label in name.iter().rev() {
+            key.push(label);
+        }
+        key
+    }
+    pub(super) fn rule(text: &str) -> Result<Self, Error> {
         let text = text.strip_suffix('.').unwrap_or(text);
         if text.is_empty() || text.len() > 253 {
             return Err(error(ErrorKind::InvalidDomain));
@@ -232,6 +244,27 @@ pub struct SourceStats {
     pub duplicates: usize,
 }
 impl Builder {
+    /// Local text participates in the aggregate decoded-input budget too.
+    pub(crate) fn account_local_text(&mut self, bytes: usize) -> Result<(), Error> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        match self
+            .decoded_bytes
+            .checked_add(bytes)
+            .filter(|n| *n <= 32 * 1024 * 1024)
+        {
+            Some(total) => {
+                self.decoded_bytes = total;
+                Ok(())
+            }
+            None => {
+                let error = error(ErrorKind::InputLimit);
+                self.failed = Some(error);
+                Err(error)
+            }
+        }
+    }
     pub fn new(limits: Limits) -> Result<Self, Error> {
         if limits.max_rules == 0
             || limits.max_rules > 5_000_000
@@ -300,7 +333,14 @@ impl Builder {
         });
         Ok(())
     }
-    pub fn prepare(mut self) -> Result<Canonical, Error> {
+    pub fn prepare(self) -> Result<Canonical, Error> {
+        self.prepare_with_check(|| Ok(()))
+    }
+    pub fn prepare_with_check(
+        mut self,
+        mut check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<Canonical, Error> {
+        check()?;
         if let Some(error) = self.failed {
             return Err(error);
         }
@@ -312,6 +352,9 @@ impl Builder {
                 .then_with(|| key(arena, a.entry).cmp(key(arena, b.entry)))
                 .then(a.entry.source_slot.cmp(&b.entry.source_slot))
         });
+        // Sorting is non-preemptible; its owner retains the memory lease until
+        // this worker really exits, including when its caller is cancelled.
+        check()?;
         let duplicates = duplicate_count(&self.records, arena);
         let mut ranges = [0..0, 0..0, 0..0, 0..0];
         let mut read = 0;
@@ -320,6 +363,9 @@ impl Builder {
             let mut previous: Option<Entry> = None;
             let start = write;
             while read < self.records.len() && self.records[read].group as usize == group {
+                if read.is_multiple_of(4096) {
+                    check()?;
+                }
                 let record = self.records[read];
                 read += 1;
                 let entry = record.entry;
@@ -357,6 +403,7 @@ impl Builder {
                 hash.update(key(&self.arena, record.entry));
             }
         }
+        check()?;
         Ok(Canonical {
             arena: self.arena,
             records: self.records,
@@ -561,6 +608,15 @@ pub struct Canonical {
     pub decoded_bytes: usize,
 }
 impl Canonical {
+    pub fn finish_radix(self) -> Result<super::radix::Index, Error> {
+        super::radix::Index::build(self)
+    }
+    pub fn finish_radix_with_check(
+        self,
+        check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<super::radix::Index, Error> {
+        super::radix::Index::build_with_check(self, check)
+    }
     pub fn memory(&self) -> MemoryStats {
         self.budget.stats(&self.arena, &self.records)
     }

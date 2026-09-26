@@ -5,6 +5,145 @@ fn config() -> String {
     "listen='127.0.0.1:0'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=200\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n".into()
 }
 
+fn subscription_config(enabled: bool) -> String {
+    format!(
+        "{}\n[filter_subscriptions]\nenabled={enabled}\n[[filter_subscriptions.sources]]\nid='online'\nname='Online'\nurl='https://example.org/fixture.list'\nformat='domain_list'\nenabled=true\nauto_update=false\n",
+        config()
+    )
+}
+
+fn seed_subscription(path: &std::path::Path) {
+    use crate::filter_subscriptions::{
+        download::{REPRESENTATION, Validators},
+        store::{PreparedMetadata, Store as Sources},
+    };
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let config = Config::parse(&subscription_config(true)).unwrap();
+    let mut sources = Sources::open(path, config.filter_subscriptions.max_disk_bytes, 1).unwrap();
+    let bytes = b".blocked.test\n";
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    let mut stage = sources.begin_staging(bytes.len() as u64, 1).unwrap();
+    stage.file.write_all(bytes).unwrap();
+    sources
+        .prepare(
+            stage,
+            PreparedMetadata {
+                fingerprint: config
+                    .filter_subscriptions
+                    .fingerprints()
+                    .unwrap()
+                    .remove(0),
+                sha256: hash.clone(),
+                bytes: bytes.len() as u64,
+                rules: 1,
+                validators: Validators {
+                    final_url: "https://example.org/fixture.list".into(),
+                    representation: REPRESENTATION.into(),
+                    content_sha256: hash,
+                    etag: None,
+                    last_modified: None,
+                },
+            },
+            1,
+        )
+        .unwrap();
+    sources
+        .set_references(
+            config.filter_subscriptions.fingerprints().unwrap(),
+            vec![],
+            1,
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn subscription_hot_apply_retains_runtime_and_offline_rules_allow_exceptions() {
+    use hickory_proto::rr::Name;
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    seed_subscription(&store.dir.join("filter-subscriptions"));
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+            toml: subscription_config(true),
+            previous: None,
+            revision: 1,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: vec![],
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active.clone())
+        .await
+        .unwrap();
+    let resolver = manager
+        .resolver()
+        .expect("verified offline startup")
+        .clone();
+    let cache = resolver.cache();
+    let name = Name::from_ascii("child.blocked.test").unwrap();
+    assert_eq!(
+        serde_json::to_value(manager.filters.explain(&name)).unwrap()["decision"],
+        "blocked"
+    );
+    let generation = manager.filters.snapshot().generation;
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml = next.toml.replace("name='Online'", "name='Renamed'");
+    assert!(!manager.apply(next).await.unwrap());
+    assert_eq!(manager.filters.snapshot().generation, generation);
+    assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
+    assert!(Arc::ptr_eq(&cache, &resolver.cache()));
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml
+        .push_str("\n[filter]\nenabled=true\nallow_suffix=['blocked.test']\n");
+    assert!(!manager.apply(next).await.unwrap());
+    assert_eq!(
+        serde_json::to_value(manager.filters.explain(&name)).unwrap()["decision"],
+        "allowed"
+    );
+    assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
+    assert!(Arc::ptr_eq(&cache, &resolver.cache()));
+    assert_eq!(manager.filters.snapshot().config_revision, 3);
+    manager.terminal_shutdown().await;
+}
+
+#[tokio::test]
+async fn subscriptions_missing_material_keep_console_and_disable_recovers_local_dns() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+            toml: subscription_config(true),
+            previous: None,
+            revision: 1,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: vec![],
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active)
+        .await
+        .unwrap();
+    assert!(manager.resolver().is_none());
+    assert!(manager.last_error.is_some());
+    assert!(manager.validate(subscription_config(true)).await.is_err());
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml = subscription_config(false);
+    manager.apply(next).await.unwrap();
+    assert!(manager.resolver().is_some());
+    assert_eq!(manager.saved.as_ref().unwrap().revision, 2);
+    manager.terminal_shutdown().await;
+}
+
 async fn assert_sampler(services: &RuntimeServices, running: bool, generation: u64) {
     // Isolate the current-state tail from intentional aggregate transition gaps.
     services

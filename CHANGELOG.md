@@ -7,7 +7,14 @@
 - Add bilingual software-update controls and update-only hot settings without
   restarting DNS or clearing caches.
 - Add official build manifests and explicit first-time updater enrollment.
-- Disposable Linux lifecycle and performance acceptance remain release gates.
+- Add optional HTTPS filtering subscriptions with explicit domain-list and
+  sinkhole-hosts formats, verified last-known-good content, bounded updates,
+  and per-source status in the bilingual console.
+- Use one compact radix policy for local and online rules. Keep local allow
+  priority, request-consistent generations and unfiltered upstream cache data.
+- Apply filtering settings without restarting managed DNS listeners; verify
+  effective source material before saving and include it in read-only preflight.
+- Performance and disposable Linux lifecycle acceptance remain release gates.
   These development changes are not included in v0.1.4.
 
 ## v0.1.4 — 2026-09-24

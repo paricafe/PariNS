@@ -1,24 +1,37 @@
-//! Subscription preparation foundations. This module never activates DNS rules.
+//! Subscription identities, managed source storage, and process-owned policy work.
 pub(crate) mod download;
+pub mod handle;
+pub mod service;
+pub mod settings;
 pub(crate) mod store;
 mod writer;
 
-use crate::policy::canonical::{Builder, Format, Limits, MemoryStats, PARSER_VERSION, SourceStats};
-use anyhow::{Context, Result, ensure};
-use download::{DownloadError, DownloadOutcome, SubscriptionReader};
+#[cfg(test)]
+use crate::policy::canonical::{Builder, Limits, MemoryStats, SourceStats};
+use crate::policy::canonical::{Format, PARSER_VERSION};
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::{Context, ensure};
+#[cfg(test)]
+use download::{DownloadError, DownloadOutcome};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::{
     fs::File,
     io::{BufReader, Seek, SeekFrom},
     path::Path,
 };
+#[cfg(test)]
 use store::{CommitOutcome, PreparedMetadata, Store};
+#[cfg(test)]
 use writer::StagingWriter;
 
+#[cfg(test)]
 const PARSE_BUFFER: usize = 16 * 1024;
 
 /// Identity excludes names, schedules and enablement. There is no public Config
 /// field yet: this is input to the isolated preparation foundation only.
+#[derive(Clone)]
 pub(crate) struct Source {
     url: String,
     format: Format,
@@ -44,6 +57,7 @@ impl Source {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 pub(crate) struct Prepared {
     pub fingerprint: String,
     pub sha256: String,
@@ -57,37 +71,24 @@ pub(crate) struct Prepared {
 /// One private-directory owner serializes complete preparations. No scheduler,
 /// active refresh, aggregate index, PolicyHandle or runtime publication exists
 /// here. Future runtime integration must own blocking parsing/store operations.
+#[cfg(test)]
 pub(crate) struct Foundation {
     store: Store,
-    reader: SubscriptionReader,
     limits: Limits,
 }
+#[cfg(test)]
 impl Foundation {
     pub(crate) fn open(path: &Path, max_disk_bytes: u64, limits: Limits, now: u64) -> Result<Self> {
         Builder::new(parse_limits(limits)?)
             .map_err(|error| anyhow::anyhow!("subscription parser: {error:?}"))?;
         Ok(Self {
             store: Store::open(path, max_disk_bytes, now)?,
-            reader: SubscriptionReader::new(),
             limits,
         })
     }
-    pub(crate) async fn prepare(&mut self, source: &Source, now: u64) -> Result<Prepared> {
-        let reader = &self.reader;
-        prepare_with(
-            &mut self.store,
-            source,
-            self.limits,
-            now,
-            |mut file| async move {
-                let outcome = reader.download(&source.url, None, None, &mut file).await;
-                (file, outcome)
-            },
-        )
-        .await
-    }
 }
 
+#[cfg(test)]
 fn parse_limits(mut limits: Limits) -> Result<Limits> {
     limits.retained_bytes = limits
         .retained_bytes
@@ -100,6 +101,7 @@ fn parse_limits(mut limits: Limits) -> Result<Limits> {
     Ok(limits)
 }
 
+#[cfg(test)]
 fn inspect(
     mut file: File,
     source: &Source,
@@ -123,6 +125,7 @@ fn inspect(
 
 // The generic seam is private and shares all persistence/parser code. Production
 // calls only SubscriptionReader; tests supply its test-only wire fixture.
+#[cfg(test)]
 async fn prepare_with<F, Fut>(
     store: &mut Store,
     source: &Source,

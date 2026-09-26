@@ -16,6 +16,7 @@ use crate::{
     cache::Cache,
     config::{CacheConfig, CoalescingConfig, Config, EcsConfig},
     ecs::{self, Context},
+    filter_subscriptions::handle::PolicyHandle,
     flight::{Answer, Flights, Role},
     metrics::{Counter, Metrics, Timer},
     policy::Policy,
@@ -68,7 +69,7 @@ pub struct Resolver {
     generation: RwLock<Arc<Generation>>,
     coalescing: CoalescingConfig,
     metrics: Arc<Metrics>,
-    policy: RwLock<Policy>,
+    policy: Arc<PolicyHandle>,
     query_log: Arc<QueryLog>,
     services: Arc<crate::runtime_services::RuntimeServices>,
     retired_refresh: Mutex<Vec<Arc<refresh::Refresh>>>,
@@ -92,6 +93,18 @@ impl Resolver {
         config: &Config,
         services: Arc<crate::runtime_services::RuntimeServices>,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.filter_subscriptions.effective().next().is_none(),
+            "subscription_material_missing: subscriptions require a prepared policy"
+        );
+        Self::with_services_and_policy(config, services, PolicyHandle::new(config.load_policy()?))
+    }
+
+    pub fn with_services_and_policy(
+        config: &Config,
+        services: Arc<crate::runtime_services::RuntimeServices>,
+        policy: Arc<PolicyHandle>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             upstream: Arc::new(crate::upstreams::Pool::new(&config.upstreams, config)?),
             timeout: Duration::from_millis(config.query_timeout_ms),
@@ -102,7 +115,7 @@ impl Resolver {
             ))),
             coalescing: config.coalescing.clone(),
             metrics: services.metrics.clone(),
-            policy: RwLock::new(config.load_policy()?),
+            policy,
             query_log: services.query_log.clone(),
             services,
             retired_refresh: Mutex::new(Vec::new()),
@@ -169,10 +182,7 @@ impl Resolver {
         &self.services
     }
     pub fn policy_digest(&self) -> [u8; 32] {
-        self.policy
-            .read()
-            .expect("policy lock poisoned")
-            .semantic_digest()
+        self.policy.snapshot().policy.semantic_digest()
     }
     pub(crate) fn force_shutdown(&self) {
         self.shutdown_forced.store(true, Ordering::Release);
@@ -191,8 +201,15 @@ impl Resolver {
         self.shutdown_clean.load(Ordering::Acquire)
     }
 
-    pub fn replace_policy(&self, policy: Policy) {
-        *self.policy.write().expect("policy lock poisoned") = policy;
+    pub fn replace_policy(&self, policy: Policy) -> anyhow::Result<()> {
+        self.policy.try_publish(policy)
+    }
+    pub(crate) fn replace_policy_with(
+        &self,
+        policy: Policy,
+        before_publish: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.policy.try_publish_with(policy, before_publish)
     }
 
     pub fn cache(&self) -> Arc<Cache> {
@@ -239,8 +256,9 @@ impl Resolver {
 
     async fn resolve_inner(&self, bytes: &[u8], peer: IpAddr, trace: &mut Trace) -> Option<Reply> {
         // One immutable generation governs this request, including across awaits.
-        // The Arc-backed trie clone releases the lock before parsing or network IO.
-        let policy = self.policy.read().expect("policy lock poisoned").clone();
+        // Keep the generation owner, not just its index, across every await.
+        let policy_generation = self.policy.snapshot();
+        let policy = &policy_generation.policy;
         let generation = self
             .generation
             .read()

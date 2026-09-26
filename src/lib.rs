@@ -6,10 +6,8 @@ pub mod cache_persistence;
 pub mod config;
 pub mod doh;
 pub mod ecs;
+pub mod filter_subscriptions;
 mod flight;
-// Foundation only: no Config/Manager/Resolver entry point until index acceptance.
-#[allow(dead_code)]
-mod filter_subscriptions;
 mod https_reader;
 pub mod ingress;
 pub mod limits;

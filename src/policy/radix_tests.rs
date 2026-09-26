@@ -1,5 +1,6 @@
-use super::super::{Builder, Limits};
+use super::super::canonical::{Builder, Limits};
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn compare(rules: &[(String, Group, u16)], queries: &[Name]) {
     let mut a = Builder::new(Limits::default()).unwrap();
@@ -13,6 +14,16 @@ fn compare(rules: &[(String, Group, u16)], queries: &[Name]) {
     let mut count = 0;
     input.visit_rules(|_, _, _| count += 1);
     let b = input.finish_radix().unwrap();
+    let slots = rules
+        .iter()
+        .map(|(_, _, slot)| usize::from(*slot))
+        .max()
+        .unwrap_or(0);
+    let mut ids = vec![String::new()];
+    ids.extend((1..=slots).map(|slot| format!("source-{slot:02}")));
+    let mut encoded = Vec::new();
+    b.write_to(&mut encoded, [9; 32], &ids).unwrap();
+    let restored = Index::read_from(encoded.as_slice(), [9; 32], &ids, Limits::default()).unwrap();
     assert_eq!(a.semantic_digest, b.semantic_digest);
     assert_eq!(a.input_rules, b.input_rules);
     assert_eq!(count, b.index_rules);
@@ -25,6 +36,7 @@ fn compare(rules: &[(String, Group, u16)], queries: &[Name]) {
         let actual = b
             .lookup(name)
             .map(|m| (m.group, m.source_slot, m.matched_key_len));
+        assert_eq!(restored.lookup(name), b.lookup(name), "disk {name}");
         assert_eq!(expected, actual, "{name}");
         let query: Vec<_> = name
             .iter()
@@ -63,6 +75,137 @@ fn compare(rules: &[(String, Group, u16)], queries: &[Name]) {
             "oracle {name}"
         );
     }
+}
+
+fn disk_fixture() -> (Index, Vec<String>, Vec<u8>) {
+    let mut builder = Builder::new(Limits::default()).unwrap();
+    for (name, group, slot) in [
+        ("test", Group::BlockSuffix, 1),
+        ("safe.test", Group::AllowExact, 0),
+        ("exact.example", Group::BlockExact, 2),
+        ("another.example", Group::BlockExact, 2),
+    ] {
+        builder.add(name, group, slot).unwrap();
+    }
+    let index = builder.prepare().unwrap().finish_radix().unwrap();
+    let ids = vec![String::new(), "a-list".into(), "z-list".into()];
+    let mut bytes = Vec::new();
+    index.write_to(&mut bytes, [42; 32], &ids).unwrap();
+    (index, ids, bytes)
+}
+fn checksum(bytes: &mut [u8]) {
+    let split = bytes.len() - 32;
+    let digest = Sha256::digest(&bytes[..split]);
+    bytes[split..].copy_from_slice(&digest);
+}
+#[test]
+fn derived_roundtrip_binds_sources_input_and_effective_semantics() {
+    let (original, ids, bytes) = disk_fixture();
+    assert_eq!(&bytes[..16], DERIVED_PREFIX);
+    assert_eq!(&bytes[16..48], &[42; 32]);
+    let restored = Index::read_from(bytes.as_slice(), [42; 32], &ids, Limits::default()).unwrap();
+    assert_eq!(restored.semantic_digest, original.semantic_digest);
+    assert_eq!(restored.input_rules, original.input_rules);
+    for name in [
+        "test",
+        "a.test",
+        "safe.test",
+        "x.safe.test",
+        "exact.example",
+        "miss.example",
+    ] {
+        let name = Name::from_ascii(name).unwrap();
+        assert_eq!(restored.lookup(&name), original.lookup(&name));
+    }
+    assert!(Index::read_from(bytes.as_slice(), [0; 32], &ids, Limits::default()).is_err());
+    let wrong_ids = vec![String::new(), "b-list".into(), "z-list".into()];
+    assert!(Index::read_from(bytes.as_slice(), [42; 32], &wrong_ids, Limits::default()).is_err());
+    assert!(
+        Index::read_from(
+            bytes.as_slice(),
+            [42; 32],
+            &ids,
+            Limits {
+                max_memory_bytes: 100,
+                ..Limits::default()
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        Index::read_from_with_check(
+            bytes.as_slice(),
+            [42; 32],
+            &ids,
+            Limits::default(),
+            || anyhow::bail!("cancelled")
+        )
+        .is_err()
+    );
+}
+#[test]
+fn derived_rejects_corruption_even_with_recomputed_checksum() {
+    let (_, ids, bytes) = disk_fixture();
+    let nodes = 98 + ids.iter().map(|id| 1 + id.len()).sum::<usize>();
+    let node_count = u32::from_be_bytes(bytes[80..84].try_into().unwrap()) as usize;
+    let arena = nodes + node_count * 20;
+    // Bad version, semantic digest, count, graph cycle/alias, root terminal,
+    // impossible source reference, edge bounds and terminal label encoding.
+    for (offset, value) in [
+        (15, 2),
+        (48, 99),
+        (95, 99),
+        (nodes + 7, 0),
+        (nodes + 12, 0),
+        (nodes + 20 + 12, 0),
+        (nodes + 20 + 3, 255),
+        (arena, 0),
+    ] {
+        let mut damaged = bytes.clone();
+        damaged[offset] = value;
+        checksum(&mut damaged);
+        assert!(
+            Index::read_from(damaged.as_slice(), [42; 32], &ids, Limits::default()).is_err(),
+            "offset={offset}"
+        );
+    }
+    let mut extra = bytes.clone();
+    extra.push(0);
+    assert!(Index::read_from(extra.as_slice(), [42; 32], &ids, Limits::default()).is_err());
+    for end in [0, 16, 97, nodes, bytes.len() - 1] {
+        assert!(Index::read_from(&bytes[..end], [42; 32], &ids, Limits::default()).is_err());
+    }
+    let mut bad_checksum = bytes;
+    bad_checksum[arena] ^= 1;
+    assert!(Index::read_from(bad_checksum.as_slice(), [42; 32], &ids, Limits::default()).is_err());
+}
+
+#[test]
+fn compiler_cancellation_returns_without_a_publishable_index() {
+    let cancelled = || {
+        Err(super::super::canonical::Error {
+            line: 0,
+            kind: super::super::canonical::ErrorKind::Cancelled,
+        })
+    };
+    let mut builder = Builder::new(Limits::default()).unwrap();
+    builder.add("test", Group::BlockSuffix, 0).unwrap();
+    assert_eq!(
+        builder.prepare_with_check(cancelled).err().unwrap().kind,
+        super::super::canonical::ErrorKind::Cancelled
+    );
+    let mut builder = Builder::new(Limits::default()).unwrap();
+    builder.add("test", Group::BlockSuffix, 0).unwrap();
+    assert_eq!(
+        builder
+            .prepare()
+            .unwrap()
+            .finish_radix_with_check(cancelled)
+            .err()
+            .unwrap()
+            .kind,
+        super::super::canonical::ErrorKind::Cancelled
+    );
 }
 
 #[test]
@@ -167,7 +310,7 @@ fn node_growth_accounts_for_both_old_and_new_buffers() {
             .err()
             .unwrap()
             .kind,
-        super::super::ErrorKind::MemoryLimit
+        super::super::canonical::ErrorKind::MemoryLimit
     );
     let mut invalid = Builder::new(Limits::default()).unwrap();
     assert_eq!(
@@ -175,7 +318,7 @@ fn node_growth_accounts_for_both_old_and_new_buffers() {
             .add("a", Group::BlockExact, u16::MAX)
             .unwrap_err()
             .kind,
-        super::super::ErrorKind::InvalidSource
+        super::super::canonical::ErrorKind::InvalidSource
     );
     let mut builder = Builder::new(Limits {
         max_memory_bytes: 60 + BUILD_SCRATCH_BYTES,
@@ -191,7 +334,7 @@ fn node_growth_accounts_for_both_old_and_new_buffers() {
             .err()
             .unwrap()
             .kind,
-        super::super::ErrorKind::MemoryLimit
+        super::super::canonical::ErrorKind::MemoryLimit
     );
     let index = Builder::new(Limits::default())
         .unwrap()

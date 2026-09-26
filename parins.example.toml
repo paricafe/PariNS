@@ -113,6 +113,15 @@ block_suffix = []
 allow_exact = []
 allow_suffix = []
 
+# Empty by default: no subscription downloads. Add sources in the console or
+# explicitly configure [[filter_subscriptions.sources]] after reviewing its list.
+[filter_subscriptions]
+enabled = true
+max_rules = 1000000
+max_memory_bytes = 134217728
+max_disk_bytes = 268435456
+sources = []
+
 [coalescing]
 enabled = true
 max_groups = 128

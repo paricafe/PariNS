@@ -14,6 +14,7 @@ import { DohRuntime } from './DohRuntime';
 import { CertificateTools } from './CertificateTools';
 import type { SnapshotReport } from '../observability/storage';
 import { UpdatePanel } from '../../features/updates/UpdatePanel';
+import { SubscriptionsPanel } from '../../features/subscriptions/SubscriptionsPanel';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
 type CacheTab = typeof cacheTabs[number];
@@ -243,7 +244,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   const [notice, setNotice] = useState<string | null>(null);
   const [previewed, setPreviewed] = useState<{ source: string; result: string } | null>(null);
   const diff = useMemo(() => previewed ? lineDiff(previewed.source, previewed.result) : [], [previewed]);
-  const needsFormFlush = Boolean(draft && (Object.keys(draft.fields).length || Object.keys(draft.optional).length || draft.rules !== null));
+  const needsFormFlush = Boolean(draft && (Object.keys(draft.fields).length || Object.keys(draft.optional).length || draft.rules !== null || draft.sources !== null));
   const needsParse = Boolean(draft?.stale);
   useEffect(() => {
     if (pageId === 'advanced' && needsFormFlush) void preview().catch(() => {});
@@ -259,7 +260,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   const t = (key: string) => translate(key, language);
   const errorPage = error instanceof ModelError && error.path
     ? (Object.entries(settingPages).find(([, page]) => page.groups.some((group) => group.fields.some((field) => error.path === field.path || error.path?.startsWith(`${field.path}.`))))?.[0] as SettingPageId | undefined)
-      ?? (error.path.startsWith('cache.rules.') ? 'cache' : 'dns')
+      ?? (error.path.startsWith('cache.rules.') ? 'cache' : error.path.startsWith('filter_subscriptions.') ? 'filters' : 'dns')
     : 'dns';
   const intro = pageId === 'advanced' ? t('app.advancedIntro') : t(settingPages[pageId].introKey);
   const title = pageId === 'advanced' ? t('app.advanced') : t(settingPages[pageId].titleKey);
@@ -304,6 +305,6 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
         <p className="muted small">{t(state.transport?.scheme === 'https' ? 'app.transportHttpsHelp' : 'app.transportHttpHelp')}</p>
         <p className="muted small">{t('app.transportCertificateSource')}: {state.transport?.certificate_source?.toUpperCase() ?? t('app.transportNoCertificate')}</p>
       </section>}
-      {pageId === 'security' && <><DohRuntime api={api} language={language} /><CertificateTools language={language} /></>}{pageId === 'storage' && <StorageTools language={language} />}{pageId === 'runtime' && <UpdatePanel language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'security' && <CertificateImport language={language} />}</>}
+      {pageId === 'security' && <><DohRuntime api={api} language={language} /><CertificateTools language={language} /></>}{pageId === 'storage' && <StorageTools language={language} />}{pageId === 'runtime' && <UpdatePanel language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'filters' && <SubscriptionsPanel language={language} />}{pageId === 'security' && <CertificateImport language={language} />}</>}
   </div>;
 }

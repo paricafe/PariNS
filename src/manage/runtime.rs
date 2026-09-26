@@ -135,6 +135,7 @@ impl Running {
 }
 
 pub(super) struct Manager {
+    pub filters: Arc<crate::filter_subscriptions::service::Service>,
     pub updates: Arc<super::updates::Coordinator>,
     pub services: Arc<RuntimeServices>,
     persistence: Arc<CachePersistence>,
@@ -176,6 +177,44 @@ impl Manager {
             .map(|c| c.cache.persistence.clone())
             .unwrap_or_default();
         let revision = saved.as_ref().map_or(0, |s| s.revision);
+        let filter_settings = config
+            .as_ref()
+            .map(|c| c.filter_subscriptions.clone())
+            .unwrap_or_default();
+        let local = config.as_ref().map(Config::load_policy).transpose();
+        let local_error = local.as_ref().err().map(ToString::to_string);
+        let previous = saved
+            .as_ref()
+            .and_then(|s| s.previous.as_ref())
+            .map(|text| {
+                Config::parse_in(text, &store.dir)
+                    .and_then(|c| c.filter_subscriptions.fingerprints())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        // A broken local file must keep management available; local_error below
+        // prevents a listener from ever serving this placeholder policy.
+        let local = local.ok().flatten().unwrap_or_default();
+        use crate::filter_subscriptions::service::Service as Filters;
+        let filters = if updates.frozen.load(std::sync::atomic::Ordering::Acquire) {
+            Filters::open_frozen(
+                store.dir.join("filter-subscriptions"),
+                local,
+                filter_settings,
+                revision,
+                previous,
+            )
+            .await?
+        } else {
+            Filters::open(
+                store.dir.join("filter-subscriptions"),
+                local,
+                filter_settings,
+                revision,
+                previous,
+            )
+            .await?
+        };
         let directory = store.dir.join("runtime");
         let (services, persistence) = tokio::task::spawn_blocking(move || {
             match std::fs::symlink_metadata(&directory) {
@@ -211,6 +250,7 @@ impl Manager {
             active.lock().unwrap().snapshot = Arc::new(snapshot);
         }
         let mut this = Self {
+            filters,
             updates,
             services,
             persistence,
@@ -227,8 +267,12 @@ impl Manager {
             reload_attempt: 0,
         };
         if let Some(saved) = this.saved.clone() {
-            this.restore(&saved.toml, if skip_restore { None } else { consumed.ok() })
-                .await;
+            if let Some(error) = local_error {
+                this.last_error = Some(format!("DNS unavailable: {error}"));
+            } else {
+                this.restore(&saved.toml, if skip_restore { None } else { consumed.ok() })
+                    .await;
+            }
         }
         Ok(this)
     }
@@ -341,14 +385,22 @@ impl Manager {
             .map(|r| &r.resolver)
     }
 
-    /// Compare source documents, not the serialized compiled filter (which is
-    /// deliberately omitted by Config). Any non-cache change needs a restart.
+    /// Compare source documents, not compiled rules. Cache/storage/filter changes
+    /// can retain the current listener and certificate ownership.
     pub fn hot_update(&self, next: &str) -> Option<bool> {
         let previous = self.saved.as_ref().filter(|_| self.resolver().is_some())?;
         let split_cache = |text: &str| -> Option<(toml::Value, serde_json::Value, toml::Value)> {
             let mut value: toml::Value = toml::from_str(text).ok()?;
             let original = value.clone();
-            for field in ["storage", "query_log", "statistics", "updates"] {
+            for field in [
+                "storage",
+                "query_log",
+                "statistics",
+                "updates",
+                "filter",
+                "filter_file",
+                "filter_subscriptions",
+            ] {
                 value.as_table_mut()?.remove(field);
             }
             value.as_table_mut()?.remove("cache");
@@ -367,7 +419,17 @@ impl Manager {
     }
 
     pub async fn validate(&self, toml: String) -> Result<Config> {
-        Ok(self.prepare(toml).await?.0)
+        let config = self.prepare(toml).await?.0;
+        let local = config.local_policy_source();
+        let _candidate = self
+            .filters
+            .prepare_config_from_source(
+                config.filter_subscriptions.clone(),
+                local,
+                self.saved.as_ref().map_or(0, |s| s.revision),
+            )
+            .await?;
+        Ok(config)
     }
 
     pub async fn prepare(&self, toml: String) -> Result<(Config, Snapshot)> {
@@ -390,10 +452,18 @@ impl Manager {
                 "cannot start DNS before clean snapshot is durably consumed"
             );
             let config = Config::parse_in(toml, &self.store.dir)?;
+            ensure!(
+                self.filters.ready(),
+                "subscription_material_missing: DNS policy unavailable"
+            );
             let certificates = self.active.lock().unwrap().snapshot.certificates.clone();
-            let server =
-                Server::bind_with_services(config.clone(), certificates, self.services.clone())
-                    .await?;
+            let server = Server::bind_with_policy(
+                config.clone(),
+                certificates,
+                self.services.clone(),
+                self.filters.handle(),
+            )
+            .await?;
             if let Some(snapshot) = snapshot {
                 let cache = server.resolver().cache();
                 let fingerprint = crate::cache::persistence::semantic_fingerprint(
@@ -451,6 +521,7 @@ impl Manager {
                 if let Some(running) = &mut self.running {
                     running.config.updates = config.updates;
                 }
+                self.filters.set_revision(next.revision);
                 self.saved = Some(next);
                 return Ok(false);
             }
@@ -460,6 +531,15 @@ impl Manager {
             "cannot start DNS before clean snapshot is durably consumed; restart after resolving the storage error"
         );
         let (config, candidate) = self.prepare(next.toml.clone()).await?;
+        let local = config.local_policy_source();
+        let filter_candidate = self
+            .filters
+            .prepare_config_from_source(
+                config.filter_subscriptions.clone(),
+                local,
+                self.saved.as_ref().map_or(0, |s| s.revision),
+            )
+            .await?;
         if let Some(replace_cache) = self.hot_update(&next.toml) {
             // Manager's mutex serializes this transaction. There is no fallible
             // IO after persist and no await between live swap and revision update.
@@ -467,6 +547,7 @@ impl Manager {
             let saved = next.clone();
             let resolver = self.resolver().expect("running cache-only target").clone();
             tokio::task::spawn_blocking(move || store.save(&saved)).await??;
+            self.filters.publish_config(filter_candidate, next.revision);
             if replace_cache {
                 resolver.replace_cache(config.cache.clone());
             }
@@ -483,10 +564,11 @@ impl Manager {
         let previous = self.saved.clone();
         self.stop().await;
         let result = async {
-            let server = Server::bind_with_services(
+            let server = Server::bind_with_policy(
                 config.clone(),
                 candidate.certificates.clone(),
                 self.services.clone(),
+                self.filters.handle(),
             )
             .await?;
             let listen = server.local_addr()?;
@@ -494,6 +576,7 @@ impl Manager {
             let saved = next.clone();
             // Persist only after all candidate sockets and material are prepared.
             tokio::task::spawn_blocking(move || store.save(&saved)).await??;
+            self.filters.publish_config(filter_candidate, next.revision);
             self.services
                 .publish_settings(RuntimeSettings::from_config(&config), next.revision);
             self.generation = self.generation.saturating_add(1);
@@ -546,6 +629,7 @@ impl Manager {
 
     /// Called once after management mutations are closed and drained.
     pub async fn terminal_shutdown(&mut self) {
+        self.filters.close();
         let stopped = match self.running.take() {
             Some(running) => Some(running.stop().await),
             None => None,

@@ -3,8 +3,9 @@
 mod diagnose;
 
 use super::{
-    Node, Policy,
-    compact::{self, Builder, Canonical, Format, Group, Limits},
+    Policy,
+    canonical::{Builder, Canonical, Format, Group, Limits},
+    radix,
 };
 use anyhow::{Result, ensure};
 use sha2::{Digest, Sha256};
@@ -27,8 +28,43 @@ const FIXTURES: [(&str, Group); 6] = [
 ];
 
 pub(super) struct Injection {
-    pub(super) radix: Option<compact::radix::Index>,
+    pub(super) radix: Option<radix::Index>,
+    trie: Node,
     pub(super) digest: [u8; 32],
+}
+#[derive(Default)]
+struct Node {
+    children: std::collections::HashMap<Vec<u8>, Node>,
+    block_exact: bool,
+    block_suffix: bool,
+    allow_exact: bool,
+    allow_suffix: bool,
+}
+impl Injection {
+    pub(super) fn blocks(&self, name: &hickory_proto::rr::Name) -> bool {
+        if let Some(index) = &self.radix {
+            return index
+                .lookup(name)
+                .is_some_and(|matched| (matched.group as u8) >= 2);
+        }
+        // Exact former production trie walk: retain a genuine wire baseline.
+        let normalized = name.to_lowercase();
+        let mut labels = normalized.iter().rev().peekable();
+        let mut node = &self.trie;
+        let mut blocked = false;
+        while let Some(label) = labels.next() {
+            let Some(child) = node.children.get(label) else {
+                break;
+            };
+            node = child;
+            let exact = labels.peek().is_none();
+            if node.allow_suffix || (exact && node.allow_exact) {
+                return false;
+            }
+            blocked |= node.block_suffix || (exact && node.block_exact);
+        }
+        blocked
+    }
 }
 impl fmt::Debug for Injection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -87,9 +123,12 @@ fn canonical_policy(input: Canonical, engine: Engine) -> Result<Policy> {
         }
     };
     Ok(Policy {
-        enabled: true,
-        root: Arc::new(root),
-        wire: Some(Arc::new(Injection { radix, digest })),
+        wire: Some(Arc::new(Injection {
+            radix,
+            trie: root,
+            digest,
+        })),
+        ..Policy::default()
     })
 }
 fn add_fixtures(builder: &mut Builder) -> Result<()> {
@@ -191,7 +230,7 @@ fn serve() -> Result<()> {
     }
     let (policy, input_rules) = full_policy(std::path::Path::new(&rules_path), engine)?;
     let digest = hex(&policy.semantic_digest());
-    config.filter = policy;
+    config.filter = policy.into();
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?.block_on(async move {
         #[cfg(unix)]
         let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -281,11 +320,12 @@ mod tests {
         for engine in [Engine::Trie, Engine::Radix] {
             let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let mut config=Config::parse(&format!("listen='127.0.0.1:0'\nquery_timeout_ms=50\ntcp_io_timeout_ms=1000\nshutdown_grace_ms=1000\nmax_inflight=128\nmax_tcp_connections=32\n[upstreams]\nservers=['udp://{}']\n[cache.stale]\nenabled=true\n",upstream.local_addr().unwrap())).unwrap();
-            config.filter = fixture(engine);
-            let digest = config.filter.semantic_digest();
+            let fixture = fixture(engine);
+            let digest = fixture.semantic_digest();
+            config.filter = fixture.clone().into();
             let cloned = config.load_policy().unwrap();
             assert!(Arc::ptr_eq(
-                config.filter.wire.as_ref().unwrap(),
+                fixture.wire.as_ref().unwrap(),
                 cloned.wire.as_ref().unwrap()
             ));
             let resolver = Resolver::from_config(&config);

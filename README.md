@@ -562,7 +562,8 @@ becomes authoritative instead of inline rules and is limited to 8 MiB total.
 In file-configured mode on Unix, SIGHUP reloads this file and configured listener certificates. Every
 candidate is checked before publication; errors retain the previous generation.
 Each DNS request keeps its starting policy snapshot. Inline configuration changes
-require restart. There is no rule download or third-party list import.
+require restart in file mode. Managed rule-only changes retain listeners and the
+raw-answer cache.
 
 Query-name filtering runs after protocol/ECS validation and before cache lookup
 for every supported query type (including AAAA, HTTPS and SVCB). Blocking returns
@@ -577,6 +578,65 @@ trigger a block. This check runs on both upstream responses and cache hits;
 the cache retains the original upstream answer, never a filtered replacement.
 DNAME and HTTPS/SVCB TargetName traversal are not implemented; query-name and
 CNAME checks alone are not a complete DNS/application firewall.
+
+### Unreleased development: online subscriptions
+
+The development console supports HTTPS rule subscriptions alongside local rules.
+This is **not included in v0.1.4**. Performance and isolated Linux acceptance remain
+release gates; do not interpret the compact index as a target-machine capacity claim.
+No lists are bundled, and the default empty source list makes no network requests.
+The local filter switch controls only local rules; enabled local allow rules also
+take precedence over subscription blocks.
+
+Add a source in Filtering, choose its explicit format, verify the download, then
+enable it and save the configuration. Verification alone does not activate rules.
+Disabled sources can be saved before downloading. Update now uses the saved source;
+editing a URL or format requires verification of the new identity. An unknown
+operation result is reconciled through status, never silently retried.
+
+```toml
+[filter_subscriptions]
+enabled = true
+max_rules = 1000000
+max_memory_bytes = 134217728
+max_disk_bytes = 268435456
+
+[[filter_subscriptions.sources]]
+id = "example"
+name = "My domain list"
+url = "https://example.org/block.list"
+format = "domain_list"
+enabled = false
+auto_update = true
+update_interval_hours = 24
+```
+
+`domain_list` accepts one ASCII domain per line: `example.org` matches exactly,
+while `.example.org` includes its root and subdomains. `hosts_blocklist` accepts
+standard sinkhole hosts entries with `0.0.0.0` or `127.0.0.1` addresses (and their
+supported IPv6 sinkholes). These are not ABP, wildcard or regex formats. For
+Natsuki List use its `.list` domain-list source, not the unsupported Legacy file.
+Third-party list licensing and content remain the administrator's responsibility.
+
+At most 16 sources are configured. Rule counts are charged before deduplication;
+the memory budget includes construction and retained generations, not process RSS.
+Each source is bounded to 16 MiB, all source input to 32 MiB, and each line to
+4096 bytes. Automatic intervals are 1–168 hours with bounded jitter and failure
+backoff. Downloads use verified HTTPS and public pinned addresses; proxy environment
+variables and private/synthetic DNS results cannot bypass these restrictions.
+
+Private content and the authoritative catalog live under `filter-subscriptions/`
+in the managed state directory or file-mode data directory. A failed update keeps
+the accepted rules. An invalid derived index can be rebuilt from verified content;
+missing or corrupt selected content does not silently remove protection. Existing
+sources start offline from verified content. `--check` only reads material and
+fails when effective sources are unavailable; it never downloads or writes an index.
+
+If the catalog is corrupt or missing from an existing store, preserve the directory
+for diagnosis. Restore a verified backup of the catalog and its selected objects,
+or explicitly disable subscriptions before arranging a fresh store. Do not select
+objects by filename, edit the catalog to guess a version, or copy state into an
+older binary. The management console remains available to diagnose rule failures.
 
 ## Request coalescing
 

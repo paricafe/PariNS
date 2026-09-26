@@ -95,7 +95,7 @@ async fn validators_bind_exact_final_path_representation_and_verified_content() 
     let DownloadOutcome::Downloaded(result) = result else {
         panic!("not a new object")
     };
-    assert_eq!(result.final_url, "https://example.com/b");
+    assert_eq!(result.validators.final_url, "https://example.com/b");
     assert_eq!(
         result.validators.content_sha256,
         format!("{:x}", Sha256::digest(&output))

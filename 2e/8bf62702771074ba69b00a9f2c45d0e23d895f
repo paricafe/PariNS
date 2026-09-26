@@ -1,0 +1,28 @@
+scripts/bench-filter-wire.mjs
+  s_d595d238bbd4ee::t_031438b41f93da 143-146,310
+  s_d595d238bbd4ee::t_e6ba7f87fbdd94 2,14,16,21-29,64,70-72
+  s_d595d238bbd4ee::t_ab118ed1c89300 12,243,260,277,285
+  s_d595d238bbd4ee::t_1c42f9e029843a 4,135-138,140,160,162-163,302-303,305,307,312-320
+scripts/lib/wire-bench.mjs
+  s_d595d238bbd4ee::t_76d93e01b3b5b8 68-72
+  s_d595d238bbd4ee::t_06629c90644ab7 5-66
+  s_d595d238bbd4ee::t_ef9cd51fed0b11 67
+scripts/test-filter-performance.sh
+  s_d595d238bbd4ee::t_080244e61af6e2 1-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2e8bf62702771074ba69b00a9f2c45d0e23d895f",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

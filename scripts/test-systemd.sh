@@ -85,7 +85,19 @@ if [ -z "$build_info" ]; then
 fi
 sudo chmod go-w /opt
 install_service() {
-    sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info"
+    if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info"; then
+        :
+    else
+        install_status=$?
+        # This disposable fixture contains only generated test configuration.
+        # Preserve the bounded preflight error before runner cleanup; do not
+        # print state.json, credentials, setup responses or session cookies.
+        if sudo test -f /var/lib/parins-updater/private/install-preflight-error.txt; then
+            printf '%s\n' 'Candidate preflight stderr:' >&2
+            sudo head -c 32768 /var/lib/parins-updater/private/install-preflight-error.txt >&2 || true
+        fi
+        return "$install_status"
+    fi
     sudo systemctl is-active --quiet parins-managed.service
     sudo cmp "$binary" /opt/parins-managed/parins
 }

@@ -1,0 +1,21 @@
+.github/workflows/filter-acceptance.yml
+  s_d595d238bbd4ee::t_9c88c690d03693 21-49,51,55
+scripts/test-filter-subscriptions-systemd.mjs
+  s_d595d238bbd4ee::t_5a370845951b1a 61,64-65,133-135,137,145-148
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0c30547d7f85750e11c2d3535df4228e7270280d",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

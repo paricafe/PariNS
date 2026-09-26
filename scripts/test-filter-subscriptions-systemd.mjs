@@ -26,7 +26,7 @@ function safeCode(value, fallback = 'unknown') {
   return typeof value === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(value) ? value : fallback;
 }
 function httpDiagnostic(method, apiPath, actualStatus, expectedStatus, errorCode) {
-  const paths = ['/api/login', '/api/config', '/api/config/validate', '/api/status',
+  const paths = ['/api/login', '/api/config', '/api/config/validate', '/api/status', '/api/updates',
     '/api/filter/check', '/api/filter/subscriptions',
     '/api/filter/subscriptions/prepare', '/api/filter/subscriptions/refresh'];
   if (!['GET', 'POST', 'PUT'].includes(method) || !paths.includes(apiPath)
@@ -35,11 +35,11 @@ function httpDiagnostic(method, apiPath, actualStatus, expectedStatus, errorCode
   return { method, api_path: apiPath, actual_status: actualStatus,
     expected_status: expectedStatus, api_error_code: safeCode(errorCode) };
 }
-function request(method, endpoint, body, expected = 200) {
+function request(method, endpoint, body, expected = 200, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const headers = { Origin: base, 'Content-Type': 'application/json' };
     if (auth) Object.assign(headers, { Cookie: auth.cookie, 'X-PariNS-Session': auth.binding });
-    const req = http.request(base + endpoint, { method, headers, timeout: 30000 }, res => {
+    const req = http.request(base + endpoint, { method, headers, timeout: timeoutMs }, res => {
       let bytes = '';
       res.on('data', chunk => {
         bytes += chunk;
@@ -67,6 +67,37 @@ function request(method, endpoint, body, expected = 200) {
     req.on('error', reject);
     req.end(body === undefined ? undefined : JSON.stringify(body));
   });
+}
+function installationReconciled(value) {
+  assert.equal(typeof value.frozen, 'boolean', 'updates.frozen must be a boolean');
+  assert(value.active_operation === null || (typeof value.active_operation === 'object'
+    && !Array.isArray(value.active_operation)), 'updates.active_operation must be present');
+  return value.frozen === false && value.active_operation === null;
+}
+async function waitForInstallationReconciliation() {
+  const started = Date.now();
+  const deadline = started + 30000;
+  let reads = 0;
+  const expired = () => Object.assign(new Error('installer reconciliation deadline exceeded'),
+    { code: 'installer_reconcile_timeout' });
+  while (Date.now() < deadline) {
+    let value;
+    try {
+      value = await request('GET', '/api/updates', undefined, 200, Math.max(1, deadline - Date.now()));
+    } catch (error) {
+      if (Date.now() >= deadline) throw expired();
+      throw error;
+    }
+    reads++;
+    if (Date.now() >= deadline) break;
+    if (installationReconciled(value)) {
+      const result = { reads, elapsed_ms: Date.now() - started };
+      console.log(JSON.stringify({ stage: 'activate', installation_reconciled: true, ...result }));
+      return result;
+    }
+    await delay(Math.min(1000, Math.max(0, deadline - Date.now())));
+  }
+  throw expired();
 }
 const snapshot = () => request('GET', '/api/filter/subscriptions');
 function privilegedRead(file, maxBuffer = 256 * 1024) {
@@ -132,6 +163,9 @@ async function blocked(evidence) {
 async function run() {
 await request('POST', '/api/login', JSON.parse(await readFile(path.join(fixture, 'credentials.json'), 'utf8')));
 if (stage === 'activate') {
+  // Installer readiness and app/root reconciliation are distinct. Wait only via
+  // reads before the first mutation; never replay prepare or wait in frozen tests.
+  const installation_reconciliation = await waitForInstallationReconciliation();
   const config = await request('GET', '/api/config');
   assert(!config.toml.includes('[filter_subscriptions]') && !config.toml.includes('[updates]'), 'fresh fixture configuration');
   const prepared = await operation('/api/filter/subscriptions/prepare', { config_revision: config.revision, source }, 'succeeded');
@@ -163,7 +197,7 @@ if (stage === 'activate') {
   selected(evidence, false);
   await blocked(evidence);
   await writeFile(evidencePath, JSON.stringify(evidence) + '\n', { mode: 0o600, flag: 'wx' });
-  return { stage, result: 'passed', ...evidence };
+  return { stage, result: 'passed', installation_reconciliation, ...evidence };
 } else {
   const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
   const before = await snapshot();

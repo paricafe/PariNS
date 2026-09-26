@@ -713,6 +713,102 @@ async fn file_subscription_reload_prepares_all_material_and_closes_publication()
 }
 
 #[tokio::test]
+async fn corrupt_subscription_catalog_keeps_busy_file_reload_policy_and_certificate_unpublished() {
+    use parins::filter_subscriptions::service::Service;
+    let cert = Certificate::new();
+    let replacement = Certificate::new();
+    let rules = cert.directory.path().join("rules.toml");
+    std::fs::write(&rules, "enabled=true\nblock_exact=['one.test']").unwrap();
+    let mut config = config("127.0.0.1:9".parse().unwrap());
+    config.dot = Some(cert.listener());
+    config.filter_file = Some(rules.clone());
+    let sources = cert.directory.path().join("subscriptions");
+    let initial = Service::open(
+        sources.clone(),
+        config.load_policy().unwrap(),
+        config.filter_subscriptions.clone(),
+        0,
+        vec![],
+    )
+    .await
+    .unwrap();
+    initial.close();
+    drop(initial);
+    std::fs::write(sources.join("catalog.json"), b"invalid catalog").unwrap();
+    let filters = Service::open(
+        sources,
+        config.load_policy().unwrap(),
+        config.filter_subscriptions.clone(),
+        0,
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert!(filters.ready());
+    assert!(filters.snapshot().sources.is_empty());
+    let services = parins::runtime_services::RuntimeServices::ephemeral(
+        parins::storage::RuntimeSettings::from_config(&config),
+    );
+    let server = Server::bind_with_filter_service(config, None, services, filters.clone())
+        .await
+        .unwrap();
+    let reload = server.reload_handle();
+    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let (stop, task) = run(server);
+    let old_request = filters.handle().snapshot();
+    std::fs::write(&rules, "enabled=true\nblock_exact=['two.test']").unwrap();
+    reload.reload_async().await.unwrap();
+    let generation = filters.snapshot().generation;
+    assert_eq!(generation, old_request.number + 1);
+    let revision = filters.config_revision();
+    std::fs::write(&rules, "enabled=true\nblock_exact=['three.test']").unwrap();
+    std::fs::copy(&replacement.files.cert_file, &cert.files.cert_file).unwrap();
+    std::fs::copy(&replacement.files.key_file, &cert.files.key_file).unwrap();
+    let error = reload.reload_async().await.unwrap_err();
+    assert_eq!(
+        parins::filter_subscriptions::service::Failure::from_error(&error).code,
+        "busy"
+    );
+    assert_eq!(filters.config_revision(), revision);
+    assert_eq!(filters.snapshot().generation, generation);
+    assert!(
+        filters
+            .handle()
+            .snapshot()
+            .policy
+            .blocks(&Name::from_ascii("two.test").unwrap())
+    );
+    assert!(
+        !filters
+            .handle()
+            .snapshot()
+            .policy
+            .blocks(&Name::from_ascii("three.test").unwrap())
+    );
+    let client = cert.connect(dot).await;
+    assert_eq!(client.get_ref().1.peer_certificates().unwrap()[0], cert.der);
+    drop(client);
+    drop(old_request);
+    reload.reload_async().await.unwrap();
+    assert_eq!(filters.config_revision(), revision + 1);
+    assert_eq!(filters.snapshot().generation, generation + 1);
+    assert!(
+        filters
+            .handle()
+            .snapshot()
+            .policy
+            .blocks(&Name::from_ascii("three.test").unwrap())
+    );
+    let client = replacement.connect(dot).await;
+    assert_eq!(
+        client.get_ref().1.peer_certificates().unwrap()[0],
+        replacement.der
+    );
+    drop(client);
+    finish(stop, task).await;
+}
+
+#[tokio::test]
 async fn resolver_profiles_keep_same_question_answers_and_warm_caches_isolated() {
     let mut resolvers = Vec::new();
     let mut mocks = Vec::new();

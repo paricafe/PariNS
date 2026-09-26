@@ -497,10 +497,6 @@ impl Service {
                         content_revision: store.revision(),
                     }
                 } else {
-                    owner
-                        .handle
-                        .ensure_available()
-                        .map_err(|_| Failure::new("busy"))?;
                     material::compile(
                         store,
                         &settings,
@@ -523,6 +519,17 @@ impl Service {
                 material::local_material(&local, &settings)?
             };
             drop(locked);
+            // All storage paths share the publication gate while the candidate
+            // owns the single worker. Reject before callers commit Config or
+            // certificates, but allow metadata-only changes with retired readers.
+            if owner.handle.snapshot().policy.publication_digest()
+                != material.policy.publication_digest()
+            {
+                owner
+                    .handle
+                    .ensure_available()
+                    .map_err(|_| Failure::new("busy"))?;
+            }
             let input_rules =
                 preserved_input_rules.unwrap_or_else(|| material.policy.input_rules());
             Ok(ConfigCandidate {

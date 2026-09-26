@@ -144,6 +144,138 @@ async fn subscriptions_missing_material_keep_console_and_disable_recovers_local_
     manager.terminal_shutdown().await;
 }
 
+#[tokio::test]
+async fn local_policy_retirement_is_checked_before_managed_config_and_certificate_commit() {
+    use crate::filter_subscriptions::store::Store as Sources;
+    use hickory_proto::rr::Name;
+
+    for corrupt_catalog in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let first = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+        let replacement = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+        let cert = temp.path().join("cert.pem");
+        let key = temp.path().join("key.pem");
+        std::fs::write(&cert, first.cert.pem()).unwrap();
+        std::fs::write(&key, first.signing_key.serialize_pem()).unwrap();
+        let store = Store::open(&temp.path().join("state")).unwrap();
+        let sources = store.dir.join("filter-subscriptions");
+        drop(Sources::open(&sources, 32 * 1024 * 1024, 1).unwrap());
+        if corrupt_catalog {
+            std::fs::write(sources.join("catalog.json"), b"invalid catalog").unwrap();
+            assert!(Sources::read_only(&sources).is_err());
+        }
+        let toml = format!(
+            "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n[filter]\nenabled=true\nblock_exact=['one.test']\n",
+            config(),
+            serde_json::json!(cert),
+            serde_json::json!(key),
+        );
+        store
+            .save(&Stored {
+                username: "admin".into(),
+                password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+                toml,
+                previous: None,
+                revision: 1,
+            })
+            .unwrap();
+        let active = Arc::new(Mutex::new(Active {
+            snapshot: Arc::new(Snapshot::initial()),
+            sessions: vec![],
+        }));
+        let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active.clone())
+            .await
+            .unwrap();
+        assert!(manager.filters.ready());
+        assert!(manager.filters.snapshot().sources.is_empty());
+        let resolver = manager.resolver().unwrap().clone();
+        // Keep the same generation Arc that an in-flight DNS request owns.
+        let old_request = manager.filters.handle().snapshot();
+        let mut second = manager.saved.clone().unwrap();
+        second.revision += 1;
+        second.toml = second.toml.replace("'one.test'", "'two.test'");
+        assert!(!manager.apply(second).await.unwrap());
+        let generation = manager.filters.snapshot().generation;
+        assert_eq!(generation, old_request.number + 1);
+
+        // Changed raw input/counts with identical publication content remain
+        // saveable while a retired request is held, with or without a Store.
+        let mut metadata = manager.saved.clone().unwrap();
+        metadata.revision += 1;
+        metadata.toml = metadata
+            .toml
+            .replace("'two.test'", "'two.test', 'two.test'");
+        assert!(!manager.apply(metadata).await.unwrap());
+        assert_eq!(manager.filters.snapshot().generation, generation);
+        assert_eq!(manager.filters.snapshot().input_rules, 2);
+
+        let saved = manager.saved.clone().unwrap();
+        let persisted = std::fs::read(manager.store.dir.join("state.json")).unwrap();
+        std::fs::write(&cert, replacement.cert.pem()).unwrap();
+        std::fs::write(&key, replacement.signing_key.serialize_pem()).unwrap();
+        let mut third = saved.clone();
+        third.revision += 1;
+        third.toml = third.toml.replace("'two.test', 'two.test'", "'three.test'");
+        // Exercise both hot persistence and the listener/certificate commit
+        // path. Busy must reject before either saves Config or stops live DNS.
+        for restart in [false, true] {
+            if restart {
+                third.toml = third.toml.replace("max_inflight=16", "max_inflight=17");
+            }
+            let error = manager.apply(third.clone()).await.unwrap_err();
+            assert_eq!(
+                crate::filter_subscriptions::service::Failure::from_error(&error).code,
+                "busy"
+            );
+            assert_eq!(
+                std::fs::read(manager.store.dir.join("state.json")).unwrap(),
+                persisted
+            );
+            assert_eq!(manager.saved.as_ref().unwrap().revision, saved.revision);
+            assert_eq!(manager.saved.as_ref().unwrap().toml, saved.toml);
+            assert_eq!(manager.filters.snapshot().generation, generation);
+            assert!(
+                manager
+                    .filters
+                    .handle()
+                    .snapshot()
+                    .policy
+                    .blocks(&Name::from_ascii("two.test").unwrap())
+            );
+            assert!(
+                !manager
+                    .filters
+                    .handle()
+                    .snapshot()
+                    .policy
+                    .blocks(&Name::from_ascii("three.test").unwrap())
+            );
+            assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
+            let web = active.lock().unwrap().snapshot.tls.clone().unwrap();
+            assert_web_identity(web, &first).await;
+        }
+
+        drop(old_request);
+        assert!(manager.apply(third).await.unwrap());
+        assert_eq!(manager.filters.snapshot().generation, generation + 1);
+        assert_eq!(
+            manager.store.read().unwrap().unwrap().revision,
+            saved.revision + 1
+        );
+        assert!(
+            manager
+                .filters
+                .handle()
+                .snapshot()
+                .policy
+                .blocks(&Name::from_ascii("three.test").unwrap())
+        );
+        let web = active.lock().unwrap().snapshot.tls.clone().unwrap();
+        assert_web_identity(web, &replacement).await;
+        manager.terminal_shutdown().await;
+    }
+}
+
 async fn assert_sampler(services: &RuntimeServices, running: bool, generation: u64) {
     // Isolate the current-state tail from intentional aggregate transition gaps.
     services

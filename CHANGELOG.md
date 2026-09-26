@@ -14,6 +14,8 @@
   priority, request-consistent generations and unfiltered upstream cache data.
 - Apply filtering settings without restarting managed DNS listeners; verify
   effective source material before saving and include it in read-only preflight.
+- Reject local rule changes before configuration or certificate publication when
+  old requests still hold a retired policy, including with unavailable source storage.
 - Avoid hashing the executable at startup for independent management instances
   that cannot participate in the Linux updater installation protocol.
 - Fix successful managed reinstalls reporting a cleanup error after releasing

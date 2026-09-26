@@ -1,0 +1,40 @@
+CHANGELOG.md
+  s_d595d238bbd4ee::t_70310aadf0e84a 25-26
+src/tls.rs
+  s_d595d238bbd4ee::t_19fcedb90220c5 203,211-221
+src/manage/runtime_tests.rs
+  s_d595d238bbd4ee::t_10bc7c5f8032a5 8-20,356-357,402-409,411-412,419,424,426-427,471-478,483-486,492,494
+  s_d595d238bbd4ee::t_b025886695ee31 416,421,448-470,479-482,489,501-502
+  s_d595d238bbd4ee::t_4c0bdc45ddae3a 410,413-415,417-418,420,422-423,425,428,487-488,490-491,493,495-500,503-508
+src/manage/certificates.rs
+  s_d595d238bbd4ee::t_650356361b3508 250-257
+  s_d595d238bbd4ee::t_1e1457f17c618f 171-178,245-249
+  s_d595d238bbd4ee::t_e0be1ca130809c 258-260
+tests/runtime.rs
+  s_d595d238bbd4ee::t_b86640d1d75e43 605-607,613-619,625-628
+  s_d595d238bbd4ee::t_82224a9bb6f878 34-41,47-48,52,590-604,608-612,620-624,629-630
+  s_d595d238bbd4ee::t_973a6395e73758 631-632
+src/tls/certificates.rs
+  s_d595d238bbd4ee::t_110bba7c4b387c 505-508,513-515,519,524-525,533-537,545-546
+  s_d595d238bbd4ee::t_f08f7e1d41bfbf 293-304,309-311,501-504,509-512,517,520-523,547
+  s_d595d238bbd4ee::t_e084d980499e5b 526-532,538-544
+  s_d595d238bbd4ee::t_14f7d612a37417 516,518,548
+AGENTS.md
+  s_d595d238bbd4ee::t_70310aadf0e84a 128-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9a417fba9c9aab9af99f04365567cd9063bd5dd1",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

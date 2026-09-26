@@ -30,6 +30,8 @@
   their installation lock.
 - Keep the service mount namespace pinned during both low-privilege reinstall
   preflights when the installer runs under dash.
+- Duplicate the updater's inherited installation lock with close-on-exec set
+  atomically, preventing concurrent child execution from retaining the lock.
 - Performance and disposable Linux lifecycle acceptance remain release gates.
   These development changes are not included in v0.1.4.
 

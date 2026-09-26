@@ -5,12 +5,25 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Read, Write},
-    os::fd::OwnedFd,
+    os::fd::{AsFd, OwnedFd},
     path::Path,
 };
 
 pub struct Dir {
     pub fd: OwnedFd,
+}
+
+/// Adopt the trusted installer's held lock without creating an inheritable
+/// duplicate. The caller has already validated the expected lock file.
+pub(super) fn adopt_installer_lock(handoff: impl AsFd, expected: &fs::Stat) -> Result<OwnedFd> {
+    rustix::io::fcntl_setfd(handoff.as_fd(), rustix::io::FdFlags::CLOEXEC)?;
+    let inherited = rustix::io::fcntl_dupfd_cloexec(handoff.as_fd(), 0)?;
+    let actual = fs::fstat(&inherited)?;
+    ensure!(
+        actual.st_ino == expected.st_ino && actual.st_dev == expected.st_dev,
+        "installer lock was not handed off"
+    );
+    Ok(inherited)
 }
 impl Dir {
     pub fn exists(&self, name: &str) -> Result<bool> {

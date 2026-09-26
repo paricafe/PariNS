@@ -141,18 +141,9 @@ impl Executor {
             "invalid installer lock"
         );
         let lock = if register {
-            // Trusted installer passes its held lock on stdin. dup shares the
-            // open-file-description, avoiding a second competing flock while
-            // retaining CLOEXEC before any systemctl child.
-            let inherited = rustix::io::dup(std::io::stdin())?;
-            rustix::io::fcntl_setfd(std::io::stdin(), rustix::io::FdFlags::CLOEXEC)?;
-            let actual = rustix::fs::fstat(&inherited)?;
-            ensure!(
-                actual.st_ino == stat.st_ino && actual.st_dev == stat.st_dev,
-                "installer lock was not handed off"
-            );
-            rustix::io::fcntl_setfd(&inherited, rustix::io::FdFlags::CLOEXEC)?;
-            inherited
+            // Trusted installer passes its held lock on stdin. Adopt that
+            // open-file-description rather than taking a competing flock.
+            fs::adopt_installer_lock(std::io::stdin(), &stat)?
         } else {
             lock
         };

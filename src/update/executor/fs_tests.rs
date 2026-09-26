@@ -3,18 +3,74 @@ use std::os::unix::fs::symlink;
 
 #[test]
 fn lock_duplicate_is_not_inherited_by_spawned_child() {
+    const ISOLATED: &str = "PARINS_LOCK_HANDOFF_ISOLATED_TEST";
+    if std::env::var_os(ISOLATED).is_none() {
+        // This process runs other tests concurrently. Their forks can briefly
+        // retain even CLOEXEC descriptors until exec, so own the lock only in
+        // a child test runner with this one selected test.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::executor::fs::tests::lock_duplicate_is_not_inherited_by_spawned_child",
+                "--test-threads=1",
+            ])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "isolated lock test failed:\n{}\n{}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let fixture = tempfile::tempdir().unwrap();
-    let file = std::fs::File::create(fixture.path().join("lock")).unwrap();
+    let file = rustix::fs::open(
+        fixture.path().join("lock"),
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .unwrap();
     rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let expected = rustix::fs::fstat(&file).unwrap();
     let handoff = rustix::io::dup(&file).unwrap();
-    rustix::io::fcntl_setfd(&handoff, rustix::io::FdFlags::CLOEXEC).unwrap();
+    let wrong = rustix::fs::open(
+        fixture.path().join("wrong"),
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        adopt_installer_lock(&wrong, &expected)
+            .unwrap_err()
+            .to_string(),
+        "installer lock was not handed off"
+    );
+    let adopted = adopt_installer_lock(&handoff, &expected).unwrap();
+    assert!(
+        rustix::io::fcntl_getfd(&handoff)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC)
+    );
+    assert!(
+        rustix::io::fcntl_getfd(&adopted)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC)
+    );
+    drop(file);
+    drop(handoff);
+    let next = std::fs::File::open(fixture.path().join("lock")).unwrap();
+    assert_eq!(
+        rustix::fs::flock(&next, rustix::fs::FlockOperation::NonBlockingLockExclusive),
+        Err(rustix::io::Errno::WOULDBLOCK)
+    );
     let mut child = std::process::Command::new("/bin/sleep")
         .arg("10")
         .spawn()
         .unwrap();
-    drop(file);
-    drop(handoff);
-    let next = std::fs::File::open(fixture.path().join("lock")).unwrap();
+    drop(adopted);
     let result = rustix::fs::flock(&next, rustix::fs::FlockOperation::NonBlockingLockExclusive);
     child.kill().unwrap();
     child.wait().unwrap();

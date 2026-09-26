@@ -351,7 +351,29 @@ async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
     .await
     .unwrap();
     finish(stop, task).await;
-    UdpSocket::bind(address).await.unwrap();
+    if let Err(error) = UdpSocket::bind(address).await {
+        // Keep the immediate rebind assertion: a later successful bind would
+        // hide incomplete cleanup. Capture ownership only after it has failed
+        // so CI can distinguish a retained listener from ephemeral-port reuse.
+        #[cfg(target_os = "macos")]
+        {
+            let owners = std::process::Command::new("lsof")
+                .args(["-nP", &format!("-iUDP:{}", address.port())])
+                .output();
+            match owners {
+                Ok(output) => eprintln!(
+                    "UDP owners for {address} (lsof status {}):\n{}{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ),
+                Err(diagnostic_error) => {
+                    eprintln!("UDP owner diagnostic unavailable for {address}: {diagnostic_error}");
+                }
+            }
+        }
+        panic!("immediate UDP rebind failed for {address}: {error:?}");
+    }
     assert_eq!(metrics.quic.snapshot()["doq"]["stream_shutdown"], 1);
     client.close(0u32.into(), b"done");
 }

@@ -13,6 +13,7 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 shift
 binary="$repo/target/release/parins"
 installer="$repo/scripts/install.sh"
+build_info=
 package= binary_override=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -31,9 +32,11 @@ if [ -n "$package" ]; then
     package=$(CDPATH= cd -- "$package" && pwd -P)
     binary="$package/parins"
     installer="$package/install.sh"
+    build_info="$package/install-build-info.json"
     (cd "$package" && sha256sum --check SHA256SUMS)
 fi
-[ -f "$binary" ] && [ -f "$installer" ]
+helper="$(dirname "$binary")/parins-updater"
+[ -f "$binary" ] && [ -f "$helper" ] && [ -f "$installer" ]
 for command in sudo systemctl systemd-analyze curl jq openssl python3 ip ss sha256sum; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
 done
@@ -66,7 +69,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -74,9 +77,15 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+if [ -z "$build_info" ]; then
+    # Source CI has no package manifest. Query the selected build as the runner,
+    # before sudo; the root installer must never execute a candidate for metadata.
+    build_info="$fixture/install-build-info.json"
+    "$binary" --build-info=json > "$build_info"
+fi
 sudo chmod go-w /opt
 install_service() {
-    sudo sh "$installer" --binary "$binary"
+    sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info"
     sudo systemctl is-active --quiet parins-managed.service
     sudo cmp "$binary" /opt/parins-managed/parins
 }
@@ -86,7 +95,7 @@ http() {
 }
 session() { http --max-time 5 http://127.0.0.1:3000/api/session; }
 refuse_install() {
-    if sudo sh "$installer" --binary "$binary" > "$fixture/refusal.log" 2>&1; then
+    if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info" > "$fixture/refusal.log" 2>&1; then
         printf '%s\n' 'Expected installation refusal before changing files or service.' >&2
         exit 1
     fi
@@ -244,16 +253,17 @@ http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
 binding=$(jq -er '.session.binding' "$fixture/response.json")
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 check_dns
-# A valid native executable that exits immediately exercises real restart
-# failure and rollback, including restoring the previously active service.
-if sudo sh "$installer" --binary /bin/false > "$fixture/refusal.log" 2>&1; then
-    printf '%s\n' 'Expected failed service startup and binary/unit rollback.' >&2
+# A valid native executable that exits immediately fails read-only preflight
+# before replacement or stopping the previously active service.
+if sudo sh "$installer" --binary /bin/false --helper "$helper" --build-info "$build_info" > "$fixture/refusal.log" 2>&1; then
+    printf '%s\n' 'Expected read-only preflight failure without replacing the running service.' >&2
     exit 1
 fi
+grep -Fq 'read-only candidate preflight failed' "$fixture/refusal.log"
 sudo systemctl is-active --quiet parins-managed.service
 sudo cmp "$binary" /opt/parins-managed/parins
 sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/parins/tls/external.pem > "$fixture/tls-after"
 cmp "$fixture/tls-before" "$fixture/tls-after"
 sudo grep -Fxq 'external certificate sentinel' /var/lib/parins/tls/external.pem
-printf '%s\n' 'Linux systemd directory ownership, external TLS, HOME errors, setup, UDP/TCP DNS, state-preserving upgrade and failed-start rollback passed.'
+printf '%s\n' 'Linux systemd directory ownership, external TLS, HOME errors, setup, UDP/TCP DNS, state-preserving upgrade and read-only preflight rejection passed.'

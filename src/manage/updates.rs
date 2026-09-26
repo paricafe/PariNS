@@ -160,7 +160,10 @@ impl Coordinator {
             .and_then(Result::ok);
         let frozen = state.commit_intent.is_some()
             || root.as_ref().is_some_and(|s| s.pending_launch.is_some());
-        let identity = state::own_identity().ok();
+        // Only the fixed managed installation participates in root identity
+        // reconciliation. Independent consoles cannot use the helper and must
+        // not delay startup by hashing their entire executable.
+        let identity = helper_scoped.then(state::own_identity).and_then(Result::ok);
         Self {
             dir: dir.into(),
             state: Mutex::new(state),
@@ -512,6 +515,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let coordinator = Coordinator::open(dir.path());
         assert!(!coordinator.helper_scoped);
+        assert!(coordinator.identity.is_none());
         assert!(coordinator.root.lock().unwrap().is_none());
         assert!(!coordinator.frozen.load(Ordering::Acquire));
         assert!(!coordinator.skip_restore());

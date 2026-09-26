@@ -23,6 +23,18 @@ expect_failure() {
     fi
 }
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+# Exercise the installer's real EXIT handler without invoking the live install
+# path. A successful reinstallation has stopped the old service and already
+# closed its lock descriptor; cleanup must not unlock or restart it again.
+sed -n '/^rollback() {/,/^}$/p' "$repo/scripts/install.sh" > "$fixture/rollback-function.sh"
+sh -eu -c '
+    . "$1"
+    root= changed=true committed=true stopped=true was_active=true
+    flock() { printf "unexpected lock cleanup\n" >&2; return 65; }
+    systemctl() { printf "unexpected service cleanup\n" >&2; return 99; }
+    exec 9>&-
+    trap rollback EXIT
+' sh "$fixture/rollback-function.sh"
 stage="$fixture/stage"
 mkdir -m 0700 "$stage"
 sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" --dry-run

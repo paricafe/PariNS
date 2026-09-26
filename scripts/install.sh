@@ -348,7 +348,7 @@ rollback() {
                 if "$adopting_v2" && "$new_started"; then printf '%s\n' 'Installation files restored; service remains stopped. v0.1.4 has no verified rollback epoch; inspect retained business data before manually starting it.' >&2; fi
             fi
         fi
-    elif [ -z "$root" ] && "$stopped" && "$was_active"; then
+    elif ! "$committed" && [ -z "$root" ] && "$stopped" && "$was_active"; then
         # A read-only preflight failure before replacement has never run the
         # candidate and cannot have introduced candidate business writes.
         flock -u 9; exec 9>&-; lock_held=false

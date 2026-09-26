@@ -14,6 +14,10 @@
   priority, request-consistent generations and unfiltered upstream cache data.
 - Apply filtering settings without restarting managed DNS listeners; verify
   effective source material before saving and include it in read-only preflight.
+- Avoid hashing the executable at startup for independent management instances
+  that cannot participate in the Linux updater installation protocol.
+- Fix successful managed reinstalls reporting a cleanup error after releasing
+  their installation lock.
 - Performance and disposable Linux lifecycle acceptance remain release gates.
   These development changes are not included in v0.1.4.
 

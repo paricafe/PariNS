@@ -375,23 +375,45 @@ if "$filter_subscriptions"; then
         case "$table" in iptables) loopback=127.0.0.0/8 ;; ip6tables) loopback=::1/128 ;; esac
         sudo "$table" -w -A "$fs_chain" ! -d "$loopback" -p tcp --dport 443 -j REJECT
         sudo "$table" -w -I OUTPUT 1 -m owner --uid-owner "$fs_uid" -j "$fs_chain"
+        printf 'FS7 offline rule installed: table=%s uid=%s chain=%s external_tcp_port=443\n' "$table" "$fs_uid" "$fs_chain"
     done
     fs_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
     sudo systemctl restart parins-managed.service
-    test "$(systemctl show --property=InvocationID --value parins-managed.service)" != "$fs_invocation"
     fs_pid=$(systemctl show --property=MainPID --value parins-managed.service)
-    test "$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_pid/status")" = "$fs_uid"
+    fs_early_uid=$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_pid/status" 2>/dev/null) || fs_early_uid=unavailable
+    printf 'FS7 restart returned: early MainPID=%s UID=%s (diagnostic only; waiting for API readiness)\n' "$fs_pid" "$fs_early_uid"
+    # Type=simple reports start before child credentials/exec are complete.
+    # Only the actual application's read-only response establishes readiness
+    # for the strict identity checks below; the firewall is already in place.
     attempt=0
     until session >/dev/null 2>&1; do
-        attempt=$((attempt + 1)); [ "$attempt" -lt 30 ] || exit 1
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 30 ] || { printf '%s\n' 'FS7 restart FAILED: expected ready session API, actual=timeout.' >&2; exit 1; }
         sleep 1
     done
+    fs_new_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
+    fs_pid=$(systemctl show --property=MainPID --value parins-managed.service)
+    fs_new_uid=$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_pid/status") || fs_new_uid=unavailable
+    fs_exe=$(sudo readlink "/proc/$fs_pid/exe") || fs_exe=unavailable
+    printf 'FS7 ready identity: MainPID=%s old_invocation=%s new_invocation=%s expected_uid=%s actual_uid=%s expected_exe=/opt/parins-managed/parins actual_exe=%s\n' \
+        "$fs_pid" "$fs_invocation" "$fs_new_invocation" "$fs_uid" "$fs_new_uid" "$fs_exe"
+    [ -n "$fs_new_invocation" ] && [ "$fs_new_invocation" != "$fs_invocation" ] || {
+        printf '%s\n' 'FS7 restart FAILED: expected a new nonempty InvocationID.' >&2; exit 1;
+    }
+    [ "$fs_new_uid" = "$fs_uid" ] || {
+        printf 'FS7 offline identity FAILED: expected UID=%s actual=%s; cannot claim offline restart.\n' "$fs_uid" "$fs_new_uid" >&2; exit 1;
+    }
+    [ "$fs_exe" = /opt/parins-managed/parins ] || {
+        printf 'FS7 restart FAILED: expected exe=/opt/parins-managed/parins actual=%s\n' "$fs_exe" >&2; exit 1;
+    }
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" restart "$fixture"
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" offline "$fixture"
     fs_packets4=$(sudo iptables -w -L "$fs_chain" -nvx | awk '$3 == "REJECT" {sum += $1} END {print sum + 0}')
     fs_packets6=$(sudo ip6tables -w -L "$fs_chain" -nvx | awk '$3 == "REJECT" {sum += $1} END {print sum + 0}')
-    test "$((fs_packets4 + fs_packets6))" -gt 0
     printf 'Subscription offline fault: rejected IPv4=%s IPv6=%s HTTPS packets.\n' "$fs_packets4" "$fs_packets6"
+    [ "$((fs_packets4 + fs_packets6))" -gt 0 ] || {
+        printf '%s\n' 'FS7 offline fault FAILED: expected rejected HTTPS packets >0, actual=0.' >&2; exit 1;
+    }
     fs_offline_remove
 fi
 

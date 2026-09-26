@@ -66,15 +66,35 @@ fn lock_duplicate_is_not_inherited_by_spawned_child() {
         rustix::fs::flock(&next, rustix::fs::FlockOperation::NonBlockingLockExclusive),
         Err(rustix::io::Errno::WOULDBLOCK)
     );
-    let mut child = std::process::Command::new("/bin/sleep")
-        .arg("10")
+    let (mut ready, child_ready) = std::os::unix::net::UnixStream::pair().unwrap();
+    ready
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf R; exec /bin/sleep 10"])
+        .stdout(std::process::Stdio::from(OwnedFd::from(child_ready)))
         .spawn()
         .unwrap();
-    drop(adopted);
-    let result = rustix::fs::flock(&next, rustix::fs::FlockOperation::NonBlockingLockExclusive);
-    child.kill().unwrap();
-    child.wait().unwrap();
+    let result = (|| -> anyhow::Result<()> {
+        // posix_spawn can return before the child's exec closes CLOEXEC FDs.
+        // A byte from the new program is the required post-exec barrier.
+        let mut byte = [0];
+        ready.read_exact(&mut byte)?;
+        ensure!(byte == *b"R", "child did not report post-exec readiness");
+        ensure!(
+            child.try_wait()?.is_none(),
+            "child exited before lock check"
+        );
+        drop(adopted);
+        rustix::fs::flock(&next, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        Ok(())
+    })();
+    // Reap the child even when readiness or the nonblocking lock assertion fails.
+    let killed = child.kill();
+    let waited = child.wait();
     result.unwrap();
+    killed.unwrap();
+    waited.unwrap();
 }
 #[test]
 fn nofollow_single_link_and_bounded_files() {

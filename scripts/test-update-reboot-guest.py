@@ -17,6 +17,36 @@ JOURNAL = Path('/var/lib/parins-updater/private/journal.json')
 EVIDENCE = Path('/root/up6-evidence.json')
 CREDS = Path('/root/up6-credentials.json')
 UNIT = 'parins-managed.service'
+SETUP_CONFIG = ('listen = "127.0.0.1:15353"\nquery_timeout_ms = 100\n'
+                'tcp_io_timeout_ms = 1000\nshutdown_grace_ms = 1000\n'
+                'max_inflight = 16\nmax_tcp_connections = 8\n'
+                '[upstreams]\nservers = ["udp://127.0.0.1:9"]\n[filter]\nenabled = true\n'
+                'block_exact = ["ci.invalid"]\n[updates]\nauto_check = false\n')
+
+
+class SetupRejected(Exception):
+    def __init__(self, status, value, attempt):
+        error = value.get('error') if isinstance(value, dict) else None
+        code = error.get('code') if isinstance(error, dict) else None
+        allowed = ('update_in_progress', 'INVALID_CONFIG', 'BUSY', 'ALREADY_SETUP',
+                   'SETUP_TOKEN', 'BAD_JSON', 'ORIGIN', 'BODY_LIMIT', 'JSON_REQUIRED',
+                   'INTERNAL', 'RATE_LIMIT', 'AUTH_BUSY')
+        self.diagnostic = {'method': 'POST', 'path': '/api/setup', 'status': status,
+                           'expected': 200, 'code': code if code in allowed else 'unknown',
+                           'attempt': attempt}
+        super().__init__('setup rejected')
+
+
+def setup(api, credentials, token):
+    for attempt in range(1, 4):
+        status, value = api.request('POST', '/api/setup', {**credentials, 'toml': SETUP_CONFIG},
+                                    {'X-PariNS-Setup': token})
+        if status == 200:
+            return
+        rejected = SetupRejected(status, value, attempt)
+        if status != 409 or rejected.diagnostic['code'] != 'update_in_progress' or attempt == 3:
+            raise rejected
+        time.sleep(1)  # Only an explicit non-accepted rejection may be retried.
 
 
 def run(*args):
@@ -142,18 +172,14 @@ def main():
         subprocess.run(['sha256sum', '--check', 'SHA256SUMS'], cwd='/home/up6/package',
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         run('sh', '/home/up6/package/install.sh')
+        # Exercise the actual Config parser before sending a setup mutation.
+        subprocess.run(['sudo', '-n', '-u', 'up6', '/opt/parins-managed/parins',
+                        '--config', '/dev/stdin', '--check'],
+                       input=SETUP_CONFIG.encode(), check=True, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=60)
         atomic(CREDS, dict(username='up6-admin', password=secrets.token_hex(24)))
         api = API()
-        config = ('listen = "127.0.0.1:15353"\nquery_timeout_ms = 100\nshutdown_grace_ms = 1000\n'
-                  '[upstreams]\nservers = ["udp://127.0.0.1:9"]\n[filter]\nenabled = true\n'
-                  'block_exact = ["ci.invalid"]\n[updates]\nauto_check = false\n')
-        for attempt in range(3):
-            status, value = api.request('POST', '/api/setup', {**json.loads(CREDS.read_text()), 'toml': config},
-                                        {'X-PariNS-Setup': (APP / 'setup-token').read_text().strip()})
-            if status == 200:
-                break
-            assert status == 409 and value.get('error', {}).get('code') == 'update_in_progress' and attempt < 2
-            time.sleep(1)  # Only an explicit non-accepted rejection may be retried.
+        setup(api, json.loads(CREDS.read_text()), (APP / 'setup-token').read_text().strip())
         _, evidence = ready()
         evidence['installed'] = json.loads(JOURNAL.read_text())['installed']
         assert evidence['installed']['build']['official_release'] is False
@@ -218,5 +244,8 @@ if __name__ == '__main__':
         # API bodies/keys/passwords/installer output never leave the guest.
         frames = traceback.extract_tb(error.__traceback__)
         line = next(frame.lineno for frame in reversed(frames) if frame.filename == __file__)
-        print(json.dumps({'error': type(error).__name__, 'stage': sys.argv[1], 'line': line}))
+        detail = {'error': type(error).__name__, 'stage': sys.argv[1], 'line': line}
+        if isinstance(error, SetupRejected):
+            detail['setup_http'] = error.diagnostic
+        print(json.dumps(detail))
         sys.exit(1)

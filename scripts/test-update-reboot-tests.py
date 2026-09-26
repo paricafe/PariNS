@@ -7,6 +7,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -19,6 +20,35 @@ def load(name):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_setup_config_and_rejection_preserve_bounded_mutation_contract(self):
+        guest = load('test-update-reboot-guest')
+        config = tomllib.loads(guest.SETUP_CONFIG)
+        self.assertEqual(config['tcp_io_timeout_ms'], 1000)
+        self.assertEqual(config['max_inflight'], 16)
+        self.assertEqual(config['max_tcp_connections'], 8)
+        private = 'PRIVATE_TOKEN_PASSWORD_RESPONSE'
+        api = Mock()
+        api.request.return_value = (400, {'error': {'code': 'INVALID_CONFIG', 'message': private}})
+        with self.assertRaises(guest.SetupRejected) as caught:
+            guest.setup(api, {'password': private}, private)
+        api.request.assert_called_once()
+        self.assertEqual(caught.exception.diagnostic, {'method': 'POST', 'path': '/api/setup',
+                         'status': 400, 'expected': 200, 'code': 'INVALID_CONFIG', 'attempt': 1})
+        self.assertNotIn(private, json.dumps(caught.exception.diagnostic))
+        self.assertEqual(guest.SetupRejected(400, {'error': {'code': private}}, 1).diagnostic['code'], 'unknown')
+        api.reset_mock()
+        api.request.return_value = (409, {'error': {'code': 'update_in_progress'}})
+        with patch.object(guest.time, 'sleep') as sleep, self.assertRaises(guest.SetupRejected) as caught:
+            guest.setup(api, {}, private)
+        self.assertEqual(api.request.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(caught.exception.diagnostic['attempt'], 3)
+        api.reset_mock()
+        api.request.side_effect = TimeoutError()
+        with self.assertRaises(TimeoutError):
+            guest.setup(api, {}, private)
+        api.request.assert_called_once()
+
     def test_cloud_init_terminal_error_is_not_retried_or_accepted(self):
         host = load('test-update-reboot')
         private = 'PRIVATE_KEY_SEED_CREDENTIAL'

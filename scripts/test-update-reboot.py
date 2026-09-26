@@ -247,6 +247,13 @@ def main():
                         detail = json.loads(error.output)
                         if detail.get('stage') == action and isinstance(detail.get('line'), int):
                             result['guest_error'] = {'stage': action, 'line': detail['line']}
+                            diagnostic = detail.get('setup_http')
+                            if (action == 'install' and isinstance(diagnostic, dict)
+                                    and diagnostic.get('method') == 'POST'
+                                    and diagnostic.get('path') == '/api/setup'):
+                                result['guest_error']['setup_http'] = {
+                                    key: diagnostic.get(key) for key in
+                                    ('method', 'path', 'status', 'expected', 'code', 'attempt')}
                     except (ValueError, AttributeError):
                         pass
                     raise
@@ -254,6 +261,7 @@ def main():
                 assert observation.get('stage') == action
                 result['stages'].append(observation)
                 save()
+                print(json.dumps({'progress': observation}), flush=True)
                 return observation
 
             def reboot(previous):

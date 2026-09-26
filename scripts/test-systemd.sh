@@ -62,11 +62,13 @@ fs_trace_job= fs_tracer_pid= fs_fault_pid= fs_fault_ns= fs_staging=
 fs_tmpfs_active=false
 fs_trace_stop() {
     [ -n "$fs_trace_job" ] || return 0
+    fs_trace_interrupted=false
     if [ -n "$fs_tracer_pid" ] && sudo test -e "/proc/$fs_tracer_pid/exe"; then
         [ "$(sudo readlink "/proc/$fs_tracer_pid/exe")" = "$fs_strace" ] || {
             printf '%s\n' 'FS7 trace cleanup refused: tracer executable identity changed.' >&2; return 1;
         }
         sudo kill -INT "$fs_tracer_pid" || return 1
+        fs_trace_interrupted=true
     elif [ -z "$fs_tracer_pid" ]; then
         # sudo/timeout forwards termination to its child if attachment failed.
         sudo kill -TERM "$fs_trace_job" 2>/dev/null || true
@@ -74,9 +76,24 @@ fs_trace_stop() {
     fs_trace_status=0
     wait "$fs_trace_job" || fs_trace_status=$?
     fs_trace_job= fs_tracer_pid=
-    [ "$fs_trace_status" -eq 0 ] || {
+    # timeout preserves the child's SIGINT exit status for our explicit stop.
+    # Its own deadline returns 124 and must still fail acceptance.
+    [ "$fs_trace_status" -eq 0 ] || { "$fs_trace_interrupted" && [ "$fs_trace_status" -eq 130 ]; } || {
         printf 'FS7 tracer exited unexpectedly: status=%s\n' "$fs_trace_status" >&2; return 1;
     }
+    if "$fs_trace_interrupted"; then
+        sudo "$fs_python" - "$fs_fault_pid" <<'PY'
+import pathlib, sys
+tasks = list(pathlib.Path('/proc/' + sys.argv[1] + '/task').iterdir())
+assert tasks, 'service must remain alive after tracer detach'
+for task in tasks:
+    try:
+        lines = (task / 'status').read_text().splitlines()
+    except FileNotFoundError:
+        continue
+    assert int(next(line.split()[1] for line in lines if line.startswith('TracerPid:'))) == 0, 'tracer must detach from every service thread'
+PY
+    fi
 }
 fs_tmpfs_remove() {
     "$fs_tmpfs_active" || return 0

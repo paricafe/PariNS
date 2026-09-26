@@ -1,0 +1,77 @@
+name: Filter acceptance
+# Expensive acceptance is rerun manually for the exact release candidate SHA.
+# Path-triggered runs validate harness changes; they do not replace normal CI.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/filter-acceptance.yml'
+      - 'scripts/bench-filter-wire.mjs'
+      - 'scripts/lib/wire-bench.mjs'
+      - 'scripts/test-filter-performance.sh'
+      - 'scripts/test-filter-subscriptions-systemd*'
+      - 'scripts/test-systemd.sh'
+permissions:
+  contents: read
+concurrency:
+  group: filter-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  acceptance:
+    name: ${{ matrix.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [performance, subscriptions]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.16.0'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build checked console
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm test
+          npm run build
+      - name: Pinned toolchain and script syntax
+        run: |
+          rustup show active-toolchain
+          for script in scripts/test-filter-performance.sh scripts/test-filter-subscriptions-systemd.sh scripts/test-systemd.sh; do
+            sh -n "$script"
+          done
+          node --check scripts/bench-filter-wire.mjs
+          node --check scripts/lib/wire-bench.mjs
+          node --check scripts/test-filter-subscriptions-systemd.mjs
+      - name: Fixed-resource wire matrix
+        if: matrix.suite == 'performance'
+        run: sh scripts/test-filter-performance.sh --ephemeral-ci
+      - name: Build native static service
+        if: matrix.suite == 'subscriptions'
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
+          sh scripts/package.sh --version "$version" --target x86_64-unknown-linux-musl
+          mkdir -p target/filter-acceptance-package
+          tar -xzf "target/packages/parins-$version-linux-x86_64.tar.gz" -C target/filter-acceptance-package
+          sh scripts/test-filter-subscriptions-systemd.sh --ephemeral-ci --package "$PWD/target/filter-acceptance-package/parins-$version-linux-x86_64"
+      - name: Preserve acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: filter-${{ matrix.suite }}-${{ github.sha }}
+          if-no-files-found: warn
+          path: artifacts/filter-${{ matrix.suite }}/

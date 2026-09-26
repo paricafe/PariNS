@@ -215,6 +215,9 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   musl binaries for the managed updater's installation contract.
   Run `sh scripts/test-udp.sh --ephemeral-ci` on a disposable GitHub Linux runner
   for isolated network-namespace IPv4/IPv6 source-address acceptance.
+  `.github/workflows/filter-acceptance.yml` runs the isolated subscription service
+  and fixed-resource wire fixtures; their `--ephemeral-ci` guards must remain intact.
+  Static trie/radix comparisons do not establish subscription lifecycle or VPS capacity.
 - Dependency/security changes: use the dependency audit configured in CI.
 - Documentation-only changes: check referenced paths/commands, review the diff, and
   run `git diff --check`; a full application build is not required.

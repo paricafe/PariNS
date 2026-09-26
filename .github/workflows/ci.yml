@@ -50,7 +50,9 @@ jobs:
       - run: ./target/release/parins --config parins.example.toml --check
       - name: Installer fixture tests
         run: |
-          sh -n scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/test-udp.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh
+          for script in scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/test-udp.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh; do
+            sh -n "$script"
+          done
           sh scripts/test-install.sh
           sh scripts/test-bootstrap.sh
       - name: Linux managed service acceptance

@@ -200,7 +200,7 @@ fn checked_identity(
     certificates: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<Arc<CertifiedKey>> {
-    for certificate in &certificates {
+    for (index, certificate) in certificates.iter().enumerate() {
         let (remaining, parsed) = X509Certificate::from_der(certificate.as_ref())
             .map_err(|_| anyhow::anyhow!("invalid TLS certificate chain"))?;
         ensure!(remaining.is_empty(), "trailing data in TLS certificate");
@@ -208,6 +208,17 @@ fn checked_identity(
             parsed.validity().is_valid(),
             "TLS certificate is not currently valid"
         );
+        if index == 0 {
+            let usage = parsed
+                .extended_key_usage()
+                .context("invalid TLS certificate extended key usage")?;
+            // rustls-webpki's server_auth usage accepts an absent EKU, but an
+            // explicit EKU must contain serverAuth (anyEKU alone is not enough).
+            ensure!(
+                usage.is_none_or(|usage| usage.value.server_auth),
+                "TLS certificate leaf does not allow server authentication"
+            );
+        }
     }
     let key = CertifiedKey::from_der(certificates, key, &rustls::crypto::ring::default_provider())?;
     // from_der permits providers that cannot determine key consistency; ours must prove it.

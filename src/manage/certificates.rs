@@ -168,8 +168,14 @@ mod tests {
     };
 
     fn pair() -> (String, String) {
-        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        (generated.cert.pem(), generated.signing_key.serialize_pem())
+        pair_with_eku(vec![])
+    }
+
+    fn pair_with_eku(usages: Vec<rcgen::ExtendedKeyUsagePurpose>) -> (String, String) {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params.extended_key_usages = usages;
+        let key = rcgen::KeyPair::generate().unwrap();
+        (params.self_signed(&key).unwrap().pem(), key.serialize_pem())
     }
 
     #[test]
@@ -233,6 +239,22 @@ mod tests {
         ] {
             assert!(import(&store.dir, &cert, &key).is_err());
         }
+        assert!(!store.dir.join("certificates").exists());
+    }
+
+    #[test]
+    fn client_auth_only_leaf_is_rejected_before_private_import_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state")).unwrap();
+        let (cert, key) = pair_with_eku(vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth]);
+        let error = match import(&store.dir, &cert, &key) {
+            Ok(_) => panic!("client-auth-only import was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("server authentication"),
+            "{error:#}"
+        );
         assert!(!store.dir.join("certificates").exists());
     }
 

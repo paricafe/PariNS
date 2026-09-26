@@ -31,18 +31,25 @@ struct Certificate {
 
 impl Certificate {
     fn new() -> Self {
-        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        Self::with_eku(vec![])
+    }
+
+    fn with_eku(usages: Vec<rcgen::ExtendedKeyUsagePurpose>) -> Self {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params.extended_key_usages = usages;
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let files = TlsFiles {
             cert_file: directory.path().join("cert.pem"),
             key_file: directory.path().join("key.pem"),
         };
-        std::fs::write(&files.cert_file, certificate.cert.pem()).unwrap();
-        std::fs::write(&files.key_file, certificate.signing_key.serialize_pem()).unwrap();
+        std::fs::write(&files.cert_file, certificate.pem()).unwrap();
+        std::fs::write(&files.key_file, key.serialize_pem()).unwrap();
         Self {
             directory,
             files,
-            der: certificate.cert.der().clone(),
+            der: certificate.der().clone(),
         }
     }
     fn listener(&self) -> ListenerConfig {
@@ -578,6 +585,49 @@ async fn reload_prepares_all_rule_and_certificate_candidates_before_publication(
     assert_eq!(udp(address, 4).await.answers.len(), 1);
     finish(stop, task).await;
     timeout(WAIT, mock).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn client_auth_only_reload_keeps_old_tls_fingerprint_and_dns_policy() {
+    use sha2::{Digest, Sha256};
+    let cert = Certificate::new();
+    let restricted = Certificate::with_eku(vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth]);
+    let rules = cert.directory.path().join("rules.toml");
+    std::fs::write(&rules, "enabled = true\nblock_exact = ['runtime.test']").unwrap();
+    let mut config = config("127.0.0.1:9".parse().unwrap());
+    config.dot = Some(cert.listener());
+    config.filter_file = Some(rules.clone());
+    let server = Server::bind(config).await.unwrap();
+    let dns = server.local_addr().unwrap();
+    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let reload = server.reload_handle();
+    let (stop, task) = run(server);
+    let blocked = udp(dns, 100).await;
+    assert_eq!(blocked.response_code, ResponseCode::NoError);
+    assert!(blocked.answers.is_empty());
+
+    std::fs::write(&rules, "enabled = false").unwrap();
+    std::fs::copy(&restricted.files.cert_file, &cert.files.cert_file).unwrap();
+    std::fs::copy(&restricted.files.key_file, &cert.files.key_file).unwrap();
+    let error = reload.reload().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("server authentication"),
+        "{error:#}"
+    );
+    let blocked = udp(dns, 101).await;
+    assert_eq!(blocked.response_code, ResponseCode::NoError);
+    assert!(blocked.answers.is_empty());
+    // This is a new connection through the live DoT listener using the normal
+    // rustls server-auth verifier, not a prepared-key or mock handshake.
+    let client = cert.connect(dot).await;
+    let presented = &client.get_ref().1.peer_certificates().unwrap()[0];
+    assert_eq!(presented, &cert.der);
+    assert_eq!(
+        Sha256::digest(presented.as_ref()),
+        Sha256::digest(cert.der.as_ref())
+    );
+    drop(client);
+    finish(stop, task).await;
 }
 
 #[tokio::test]

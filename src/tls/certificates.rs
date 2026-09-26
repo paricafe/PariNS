@@ -290,14 +290,25 @@ mod tests {
     };
 
     fn identity(directory: &Path, name: &str) -> (TlsFiles, CertificateDer<'static>) {
-        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        identity_with_eku(directory, name, vec![])
+    }
+
+    fn identity_with_eku(
+        directory: &Path,
+        name: &str,
+        usages: Vec<rcgen::ExtendedKeyUsagePurpose>,
+    ) -> (TlsFiles, CertificateDer<'static>) {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params.extended_key_usages = usages;
+        let signing_key = rcgen::KeyPair::generate().unwrap();
+        let generated = params.self_signed(&signing_key).unwrap();
         let files = TlsFiles {
             cert_file: directory.join(format!("{name}.pem")),
             key_file: directory.join(format!("{name}.key")),
         };
-        std::fs::write(&files.cert_file, generated.cert.pem()).unwrap();
-        std::fs::write(&files.key_file, generated.signing_key.serialize_pem()).unwrap();
-        (files, generated.cert.der().clone())
+        std::fs::write(&files.cert_file, generated.pem()).unwrap();
+        std::fs::write(&files.key_file, signing_key.serialize_pem()).unwrap();
+        (files, generated.der().clone())
     }
 
     fn replace(source: &TlsFiles, destination: &TlsFiles) {
@@ -485,6 +496,54 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn inbound_identity_requires_server_auth_when_leaf_has_eku() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, usages) in [
+            (
+                "client-only",
+                vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth],
+            ),
+            ("any-only", vec![rcgen::ExtendedKeyUsagePurpose::Any]),
+        ] {
+            let (files, _) = identity_with_eku(directory.path(), name, usages);
+            let error = CertificateSet::prepare(sources(&files)).unwrap_err();
+            assert!(
+                error.to_string().contains("server authentication"),
+                "{error:#}"
+            );
+            assert!(super::super::load_identity(&files).is_err());
+        }
+        let (server_auth, server_der) = identity_with_eku(
+            directory.path(),
+            "server-auth",
+            vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth],
+        );
+        let server_set = CertificateSet::prepare(sources(&server_auth)).unwrap();
+        assert_eq!(
+            handshake(
+                server_set
+                    .server_config(CertificateRole::Dot, &[b"dot"])
+                    .unwrap(),
+                std::slice::from_ref(&server_der),
+                b"dot"
+            ),
+            server_der
+        );
+        let (without_eku, no_eku_der) = identity(directory.path(), "without-eku");
+        let no_eku_set = CertificateSet::prepare(sources(&without_eku)).unwrap();
+        assert_eq!(
+            handshake(
+                no_eku_set
+                    .server_config(CertificateRole::Doh, &[b"h2"])
+                    .unwrap(),
+                std::slice::from_ref(&no_eku_der),
+                b"h2"
+            ),
+            no_eku_der
+        );
     }
 
     #[test]

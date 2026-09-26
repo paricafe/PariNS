@@ -125,6 +125,8 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
 - Pasted DNS identities must be validated before private persistence; return only
   file references, never private keys. Management and DNS listeners have separate
   ports, ALPN and routes even when they reuse one validated inbound DoH identity.
+  Shared inbound identity preparation accepts absent leaf EKU, but an explicit
+  EKU must permit serverAuth before persistence or certificate publication.
 - Pool endpoints share cache semantics: require equivalent policies, explicit
   hostname bootstrap and authenticated encrypted transports. Parallel losers must
   cancel with the caller; failed DNS responses must not preempt usable answers.

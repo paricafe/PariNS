@@ -22,6 +22,8 @@
   management restart; retain the freeze until the matching durable outcome is known.
 - Reply to UDP queries from their original local destination address on Linux and
   macOS, including wildcard dual-stack listeners and IPv6 interface scopes.
+- Reject inbound certificates whose leaf EKU does not permit server authentication
+  before import, configuration save or reload, keeping the active identity unchanged.
 - Avoid hashing the executable at startup for independent management instances
   that cannot participate in the Linux updater installation protocol.
 - Fix successful managed reinstalls reporting a cleanup error after releasing

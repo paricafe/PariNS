@@ -5,6 +5,19 @@ fn config() -> String {
     "listen='127.0.0.1:0'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=200\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n".into()
 }
 
+fn identity_with_eku(
+    name: &str,
+    usages: Vec<rcgen::ExtendedKeyUsagePurpose>,
+) -> rcgen::CertifiedKey<rcgen::KeyPair> {
+    let mut params = rcgen::CertificateParams::new(vec![name.into()]).unwrap();
+    params.extended_key_usages = usages;
+    let signing_key = rcgen::KeyPair::generate().unwrap();
+    rcgen::CertifiedKey {
+        cert: params.self_signed(&signing_key).unwrap(),
+        signing_key,
+    }
+}
+
 fn subscription_config(enabled: bool) -> String {
     format!(
         "{}\n[filter_subscriptions]\nenabled={enabled}\n[[filter_subscriptions.sources]]\nid='online'\nname='Online'\nurl='https://example.org/fixture.list'\nformat='domain_list'\nenabled=true\nauto_update=false\n",
@@ -340,6 +353,8 @@ async fn certificate_reload_retains_cache_owner_and_updates_web_identity_while_d
     let first = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
     let second = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
     let third = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let client_only =
+        identity_with_eku("dns.test", vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth]);
     let cert = temp.path().join("cert.pem");
     let key = temp.path().join("key.pem");
     let write = |identity: &rcgen::CertifiedKey<rcgen::KeyPair>| {
@@ -384,6 +399,33 @@ async fn certificate_reload_retains_cache_owner_and_updates_web_identity_while_d
     assert_eq!(manager.generation, generation);
     assert_web_identity(web.clone(), &second).await;
 
+    let before_rejected = active
+        .lock()
+        .unwrap()
+        .snapshot
+        .certificates
+        .as_ref()
+        .unwrap()
+        .summary();
+    write(&client_only);
+    let error = manager.reload_certificates("api").await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("server authentication"),
+        "{error:#}"
+    );
+    assert_eq!(
+        active
+            .lock()
+            .unwrap()
+            .snapshot
+            .certificates
+            .as_ref()
+            .unwrap()
+            .summary(),
+        before_rejected
+    );
+    assert_web_identity(web.clone(), &second).await;
+
     manager.stop().await;
     assert!(manager.resolver().is_none());
     assert_eq!(
@@ -400,6 +442,67 @@ async fn certificate_reload_retains_cache_owner_and_updates_web_identity_while_d
     assert_eq!(manager.saved.as_ref().unwrap().revision, 1);
     assert_web_identity(web, &third).await;
     assert_sampler(&manager.services, false, generation).await;
+    manager.terminal_shutdown().await;
+}
+
+#[tokio::test]
+async fn client_auth_only_candidate_keeps_http_config_and_dns_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let client_only =
+        identity_with_eku("dns.test", vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth]);
+    let cert_file = temp.path().join("candidate-cert.pem");
+    let key_file = temp.path().join("candidate-key.pem");
+    std::fs::write(&cert_file, client_only.cert.pem()).unwrap();
+    std::fs::write(&key_file, client_only.signing_key.serialize_pem()).unwrap();
+
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    let original = Stored {
+        username: "admin".into(),
+        password_hash: super::super::store::hash_password("local-unit-test-password").unwrap(),
+        toml: config(),
+        previous: None,
+        revision: 1,
+    };
+    store.save(&original).unwrap();
+    let state_before = std::fs::read(store.dir.join("state.json")).unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: Vec::new(),
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active.clone())
+        .await
+        .unwrap();
+    let resolver = manager.resolver().unwrap().clone();
+    let generation = manager.generation;
+    let snapshot = active.lock().unwrap().snapshot.clone();
+    assert_eq!(snapshot.scheme, super::super::transport::Scheme::Http);
+    let next = Stored {
+        toml: format!(
+            "{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+            original.toml,
+            serde_json::json!(cert_file),
+            serde_json::json!(key_file)
+        ),
+        revision: 2,
+        ..original
+    };
+    let error = manager.apply(next).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("server authentication"),
+        "{error:#}"
+    );
+    assert_eq!(
+        std::fs::read(manager.store.dir.join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(manager.saved.as_ref().unwrap().revision, 1);
+    assert_eq!(manager.generation, generation);
+    assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
+    assert!(Arc::ptr_eq(&snapshot, &active.lock().unwrap().snapshot));
+    assert_eq!(
+        active.lock().unwrap().snapshot.scheme,
+        super::super::transport::Scheme::Http
+    );
     manager.terminal_shutdown().await;
 }
 

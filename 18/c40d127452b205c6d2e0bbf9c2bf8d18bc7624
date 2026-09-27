@@ -1,0 +1,30 @@
+scripts/test-update-reboot.py
+  s_d595d238bbd4ee::t_d088c3bef1005e 18-27,151,160,162,198-199,297-308
+scripts/test-update-reboot-guest.py
+  s_d595d238bbd4ee::t_385adda7c43e97 3,10,189-242,246-276,279-280,282-314,352,354-355
+  s_d595d238bbd4ee::t_5e3a401742d2a5 243-245
+  s_d595d238bbd4ee::t_d6ec45a3d60e6b 277-278,281
+scripts/test-update-reboot-tests.py
+  s_d595d238bbd4ee::t_a6d0996b7861ff 25-85
+AGENTS.md
+  s_d595d238bbd4ee::t_130f4d8539dca8 231
+  s_d595d238bbd4ee::t_a70009b1520f8d 228-230,232-233
+.github/workflows/update-recovery.yml
+  s_d595d238bbd4ee::t_99fa39c0f650ee 16-19,47,52,54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "18c40d127452b205c6d2e0bbf9c2bf8d18bc7624",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

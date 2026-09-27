@@ -15,6 +15,16 @@ import time
 
 IMAGE = 'https://cloud-images.ubuntu.com/releases/noble/release-20260911/ubuntu-24.04-server-cloudimg-amd64.img'
 IMAGE_SHA = '612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354'
+SCENARIOS = ('normal', 'hard-reset', 'journal-enospc')
+
+
+def arguments(args):
+    assert len(args) in (3, 5) and args[:2] == ['--ephemeral-ci', '--package']
+    scenario = 'normal'
+    if len(args) == 5:
+        assert args[3] == '--scenario' and args[4] in SCENARIOS
+        scenario = args[4]
+    return Path(args[2]).resolve(strict=True), scenario
 
 
 def guard(env, system, args):
@@ -138,8 +148,7 @@ def main():
         raise InterruptedError('fixture cancelled')
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
-    assert len(sys.argv) == 4 and sys.argv[2] == '--package'
-    package = Path(sys.argv[3]).resolve(strict=True)
+    package, scenario = arguments(sys.argv[1:])
     assert package.is_dir() and (package / 'install-build-info.json').is_file()
     build = json.loads((package / 'install-build-info.json').read_text())
     assert build['official_release'] is False and build['source_commit'] == os.environ['GITHUB_SHA']
@@ -148,9 +157,9 @@ def main():
         assert shutil.which(tool), 'missing prerequisite: ' + tool
     repo = Path(__file__).resolve().parent.parent
     guest_script = (repo / 'scripts/test-update-reboot-guest.py').read_bytes()
-    result_dir = Path(os.environ['RUNNER_TEMP']) / 'parins-up6-results'
+    result_dir = Path(os.environ['RUNNER_TEMP']) / ('parins-up6-results-' + scenario)
     result_dir.mkdir(mode=0o700)
-    result = dict(result='running', scope='development-build boot/precommit recovery only',
+    result = dict(result='running', scope='development-build boot/precommit recovery only', scenario=scenario,
                   source_commit=os.environ['GITHUB_SHA'], image_url=IMAGE, image_sha256=IMAGE_SHA,
                   accelerator='tcg', vcpus=2, memory_mib=2048, stages=[])
 
@@ -186,6 +195,8 @@ def main():
                      'ssh_deletekeys': False,
                      'write_files': [{'path': '/etc/parins-up6-fixture', 'owner': 'root:root',
                                       'permissions': '0600', 'content': marker + '\n'}]}
+            if scenario == 'journal-enospc':
+                cloud['packages'] = ['strace']
             (root / 'user-data').write_text('#cloud-config\n' + json.dumps(cloud))
             (root / 'meta-data').write_text(json.dumps({'instance-id': 'parins-up6-' + secrets.token_hex(8),
                                                        'local-hostname': 'parins-up6'}))
@@ -283,9 +294,18 @@ def main():
             normal = guest('normal')
             stage = 'stage'
             guest('stage')
-            stage = 'precommit-reboot'
-            reboot(normal['boot_id'])
-            guest('recovered')
+            if scenario == 'journal-enospc':
+                stage = 'journal-enospc'
+                guest('journal-enospc')
+            else:
+                stage = 'precommit-' + ('hard-reset' if scenario == 'hard-reset' else 'reboot')
+                if scenario == 'hard-reset':
+                    # A virtual hardware reset, not a claim of physical power loss.
+                    qmp(root / 'qmp.sock', 'system_reset')
+                    wait_boot(normal['boot_id'])
+                else:
+                    reboot(normal['boot_id'])
+                guest('recovered')
             result['result'] = 'passed'
         except Exception as error:
             result.update(result='failed', failed_stage=stage, error_type=type(error).__name__)

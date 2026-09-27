@@ -1,11 +1,13 @@
 """Guest-only UP6 fixture. No official download/update is simulated."""
 import copy
+import errno
 import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
 import pwd
+import re
 import secrets
 import socket
 import stat
@@ -184,6 +186,132 @@ def ready():
                      state_sha256=hashlib.sha256((APP / 'state.json').read_bytes()).hexdigest())
 
 
+def recovered_fence(old, current):
+    journal = json.loads(JOURNAL.read_text())
+    assert journal['installed'] == old['installed']
+    op = journal['operation']
+    assert op['status']['operation_id'] == old['operation_id']
+    assert op['status']['phase_nonce'] == old['phase_nonce']
+    assert op['status']['phase'] == 'failed' and op['status']['reason'] == 'interrupted'
+    assert not op['rollback_attempted'] and not op['rollback_started']
+    assert op['pending_launch'] is None
+    # A real late Commit is consumed by the unchanged root protocol.
+    run('systemctl', 'stop', 'parins-updater.path')
+    request = dict(schema=1, operation_id=old['operation_id'], phase_nonce=old['phase_nonce'],
+                   request=dict(kind='commit', invocation_id=old['invocation'], config_revision=1))
+    atomic(APP / 'update-request.json', request, (APP / 'state.json').stat())
+    run('systemctl', 'start', 'parins-updater.service')
+    assert not (APP / 'update-request.json').exists()
+    assert json.loads(JOURNAL.read_text()) == journal
+    assert property('InvocationID') == current['invocation']
+    run('systemctl', 'start', 'parins-updater.path')
+    ready()
+
+
+def journal_write_enospc(trace):
+    # strace records failed writes only, with zero string bytes. Never return
+    # raw trace text: only this exact root-journal destination and errno count.
+    return bool(re.search(r'\bwrite\(\d+</var/lib/parins-updater/private/\.journal\.json\.tmp>, '
+                          r'[^\n]*\)\s+= -1 ENOSPC\b', trace))
+
+
+def journal_enospc():
+    old = json.loads(EVIDENCE.read_text())
+    original = JOURNAL.read_bytes()
+    assert len(original) <= 32768
+    journal = json.loads(original)
+    assert journal['installed'] == old['installed']
+    assert journal['operation']['status']['phase'] == 'staged'
+    assert property('MainPID') == '0'
+    private = JOURNAL.parent
+    image = Path('/root/up6-journal-volume.img')
+    trace = Path('/root/up6-journal-enospc.trace')
+    filler = private / 'up6-filler'
+    assert not image.exists() and not trace.exists()
+    assert private.resolve(strict=True) == private
+    assert private.stat().st_uid == 0 and stat.S_IMODE(private.stat().st_mode) == 0o700
+    check = subprocess.run(['findmnt', '-rn', '-M', str(private)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    assert check.returncode == 1, 'private directory already mounted'
+    size = 16 * 1024 * 1024
+    mounted = False
+    source = None
+    with image.open('xb') as disk:
+        disk.truncate(size)
+    try:
+        run('mkfs.ext4', '-q', '-F', '-m', '0', str(image))
+        # Allocate blocks at write time so the evidence targets write ENOSPC,
+        # not a later delayed-allocation/fsync boundary.
+        run('mount', '-o', 'loop,nodelalloc', str(image), str(private))
+        mounted = True
+        private.chmod(0o700)
+        mount = json.loads(run('findmnt', '-J', '-M', str(private), '-o', 'TARGET,FSTYPE,SOURCE'))['filesystems']
+        assert len(mount) == 1 and mount[0]['target'] == str(private) and mount[0]['fstype'] == 'ext4'
+        source = mount[0]['source']
+        assert source.startswith('/dev/loop')
+        assert run('losetup', '--noheadings', '--output', 'BACK-FILE', source) == str(image)
+        # Copy the exact durable input, never manufacture an official identity
+        # or write a terminal result on behalf of the real helper.
+        with JOURNAL.open('xb') as output:
+            output.write(original)
+            output.flush()
+            os.fsync(output.fileno())
+        JOURNAL.chmod(0o600)
+        (private / 'lock').touch(mode=0o600, exist_ok=False)
+        fd = os.open(filler, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_SYNC, 0o600)
+        try:
+            written = 0
+            while written <= size:
+                try:
+                    count = os.write(fd, b'x' * 65536)
+                except OSError as error:
+                    assert error.errno == errno.ENOSPC
+                    break
+                assert count > 0
+                written += count
+            else:
+                raise AssertionError('bounded volume did not fill')
+        finally:
+            os.close(fd)
+        assert os.statvfs(private).f_bavail == 0
+        failed = subprocess.run(['timeout', '--signal=TERM', '--kill-after=5', '60',
+                                 'strace', '-f', '-qq', '-yy', '-s', '0', '-e', 'trace=write',
+                                 '-e', 'status=failed', '-o', str(trace),
+                                 '/usr/libexec/parins-updater', 'boot-recover'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=70)
+        assert failed.returncode == 1
+        with trace.open() as stream:
+            evidence = stream.read(65537)
+        assert len(evidence) <= 65536 and journal_write_enospc(evidence), 'helper journal write did not fail ENOSPC'
+        assert JOURNAL.read_bytes() == original
+        assert hashlib.sha256(Path('/opt/parins-managed/parins').read_bytes()).hexdigest() == old['elf_sha256']
+        assert hashlib.sha256((APP / 'state.json').read_bytes()).hexdigest() == old['state_sha256']
+        # Recover on the SAME volume and journal, including the failed helper's
+        # temporary file. Only this fixture's filler is removed.
+        filler.unlink()
+        run('systemctl', 'restart', 'parins-update-recovery.service')
+        run('systemctl', 'start', UNIT)
+        _, current = ready()
+        assert current['boot_id'] == old['boot_id']
+        assert current['invocation'] != old['invocation']
+        assert current['recovery_invocation'] != old['recovery_invocation']
+        for field in ('elf_sha256', 'state_sha256'):
+            assert current[field] == old[field]
+        recovered_fence(old, current)
+        return dict(stage='journal-enospc', **current, precommit_fence=True,
+                    filesystem='ext4', volume_bytes=size, helper_write_errno='ENOSPC',
+                    recovered_on_same_volume=True)
+    finally:
+        if mounted:
+            run('systemctl', 'stop', 'parins-updater.path', UNIT, 'parins-updater.service')
+            assert run('findmnt', '-rn', '-M', str(private), '-o', 'SOURCE') == source
+            run('umount', str(private))
+        assert not run('losetup', '-j', str(image))
+        image.unlink()
+        if trace.exists():
+            trace.unlink()
+
+
 def main():
     action, marker = sys.argv[1:]
     assert sys.platform == 'linux' and os.geteuid() == 0
@@ -221,25 +349,10 @@ def main():
             assert journal['operation'] is None
             atomic(EVIDENCE, {**old, **current})
         else:
-            op = journal['operation']
-            assert op['status']['operation_id'] == old['operation_id']
-            assert op['status']['phase_nonce'] == old['phase_nonce']
-            assert op['status']['phase'] == 'failed' and op['status']['reason'] == 'interrupted'
-            assert not op['rollback_attempted'] and not op['rollback_started']
-            assert op['pending_launch'] is None
-            # A real late Commit is consumed by the unchanged root protocol.
-            # Stop only the path watcher so completion has a synchronous owner.
-            run('systemctl', 'stop', 'parins-updater.path')
-            request = dict(schema=1, operation_id=old['operation_id'], phase_nonce=old['phase_nonce'],
-                           request=dict(kind='commit', invocation_id=old['invocation'], config_revision=1))
-            atomic(APP / 'update-request.json', request, (APP / 'state.json').stat())
-            run('systemctl', 'start', 'parins-updater.service')
-            assert not (APP / 'update-request.json').exists()
-            assert json.loads(JOURNAL.read_text()) == journal
-            assert property('InvocationID') == current['invocation']
-            run('systemctl', 'start', 'parins-updater.path')
-            ready()
+            recovered_fence(old, current)
         print(json.dumps(dict(stage=action, **current, precommit_fence=action == 'recovered')))
+    elif action == 'journal-enospc':
+        print(json.dumps(journal_enospc()))
     elif action == 'stage':
         api, before = ready()
         old = json.loads(EVIDENCE.read_text())

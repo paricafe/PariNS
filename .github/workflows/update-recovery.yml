@@ -13,6 +13,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   guest:
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [normal, hard-reset, journal-enospc]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -40,11 +44,11 @@ jobs:
           sh scripts/package.sh --version "$version" --target x86_64-unknown-linux-musl
           mkdir -p target/update-recovery-package
           tar -xzf "target/packages/parins-$version-linux-x86_64.tar.gz" -C target/update-recovery-package
-          python3 -B scripts/test-update-reboot.py --ephemeral-ci --package "$PWD/target/update-recovery-package/parins-$version-linux-x86_64"
+          python3 -B scripts/test-update-reboot.py --ephemeral-ci --package "$PWD/target/update-recovery-package/parins-$version-linux-x86_64" --scenario '${{ matrix.scenario }}'
       - name: Preserve only sanitized evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: update-boot-recovery-${{ github.sha }}
+          name: update-boot-recovery-${{ matrix.scenario }}-${{ github.sha }}
           if-no-files-found: warn
-          path: ${{ runner.temp }}/parins-up6-results/result.json
+          path: ${{ runner.temp }}/parins-up6-results-${{ matrix.scenario }}/result.json

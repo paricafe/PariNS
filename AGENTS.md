@@ -225,8 +225,12 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   `update-recovery.yml` controls a disposable QEMU guest from a hosted runner.
   Keep the host guard, pinned image digest, pinned guest SSH identity and private
   cleanup. Never reboot the runner or fake hosted-runner flags inside a guest.
-  Development-build boot/precommit recovery is not official upgrade/rollback,
-  hard-power-loss recovery or a capacity measurement.
+  Keep normal reboot, virtual hard reset and bounded journal-volume ENOSPC as
+  separate fresh-guest scenarios. Disk-fault acceptance must observe the real
+  helper's failed journal write and recovery on that same volume after space is
+  freed, preserving the installed binary and managed configuration. Development-build
+  precommit recovery is not official upgrade/rollback, physical power-loss
+  recovery, full update-disk fault coverage or a capacity measurement.
 - Dependency/security changes: use the dependency audit configured in CI.
 - Documentation-only changes: check referenced paths/commands, review the diff, and
   run `git diff --check`; a full application build is not required.

@@ -22,6 +22,67 @@ def load(name):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_scenario_selection_preserves_default_and_rejects_unknown_modes(self):
+        host = load('test-update-reboot')
+        with tempfile.TemporaryDirectory() as directory:
+            args = ['--ephemeral-ci', '--package', directory]
+            self.assertEqual(host.arguments(args), (Path(directory).resolve(), 'normal'))
+            for scenario in ('normal', 'hard-reset', 'journal-enospc'):
+                self.assertEqual(host.arguments(args + ['--scenario', scenario])[1], scenario)
+            for tail in (['--scenario', 'power-loss'], ['--scenario'], ['--unsafe', 'normal']):
+                with self.assertRaises(AssertionError):
+                    host.arguments(args + tail)
+
+    def test_enospc_requires_real_helper_journal_write_not_filler_or_other_error(self):
+        guest = load('test-update-reboot-guest')
+        target = '/var/lib/parins-updater/private/.journal.json.tmp'
+        line = f'123 write(9<{target}>, ""..., 1234) = -1 ENOSPC (No space left on device)\n'
+        self.assertTrue(guest.journal_write_enospc(line))
+        for wrong in (line.replace('.journal.json.tmp', 'up6-filler'),
+                      line.replace('ENOSPC', 'EACCES'), line.replace('write(', 'openat('),
+                      line.replace(target, '/tmp/.journal.json.tmp'),
+                      line.replace('= -1 ENOSPC', '= 1234')):
+            self.assertFalse(guest.journal_write_enospc(wrong))
+
+    def test_recovered_fence_preserves_terminal_and_rejects_late_commit_changes(self):
+        guest = load('test-update-reboot-guest')
+        old = dict(installed={'sha256': 'a' * 64}, operation_id='b' * 32,
+                   phase_nonce='c' * 32, invocation='d' * 32)
+        journal = dict(installed=old['installed'], operation=dict(
+            status=dict(operation_id=old['operation_id'], phase_nonce=old['phase_nonce'],
+                        phase='failed', reason='interrupted'),
+            rollback_attempted=False, rollback_started=False, pending_launch=None))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'journal.json'
+            (root / 'state.json').write_text('{}')
+            calls = []
+
+            def run(*args):
+                calls.append(args)
+                if args == ('systemctl', 'start', 'parins-updater.service'):
+                    request = json.loads((root / 'update-request.json').read_text())
+                    self.assertEqual(request['request']['kind'], 'commit')
+                    self.assertEqual(request['phase_nonce'], old['phase_nonce'])
+                    (root / 'update-request.json').unlink()
+                    if mutate:
+                        path.write_text('{}')
+
+            for mutate in (False, True):
+                path.write_text(json.dumps(journal))
+                with patch.object(guest, 'APP', root), patch.object(guest, 'JOURNAL', path), \
+                        patch.object(guest, 'run', side_effect=run), \
+                        patch.object(guest, 'property', return_value='new-invocation'), \
+                        patch.object(guest, 'ready') as ready:
+                    if mutate:
+                        with self.assertRaises(AssertionError):
+                            guest.recovered_fence(old, {'invocation': 'new-invocation'})
+                        ready.assert_not_called()
+                    else:
+                        guest.recovered_fence(old, {'invocation': 'new-invocation'})
+                        ready.assert_called_once()
+            self.assertIn(('systemctl', 'start', 'parins-updater.path'), calls)
+
     def test_config_precheck_uses_private_owned_file_and_cleans_after_failure(self):
         guest = load('test-update-reboot-guest')
         user = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())

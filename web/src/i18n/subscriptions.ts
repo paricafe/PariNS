@@ -12,6 +12,7 @@ export const subscriptionMessages = {
   savedOnly: ['立即更新使用已保存的来源；地址或格式草稿请先验证。', 'Update now uses saved sources. Verify address or format changes first.'],
   input: ['有效输入条目', 'Valid input rules'], indexed: ['压缩后索引条目', 'Compacted index rules'], memory: ['索引 / 保留内存', 'Index / retained memory'], disk: ['磁盘占用', 'Disk usage'],
   lastSuccess: ['最后成功', 'Last success'], lastAttempt: ['最后尝试', 'Last attempt'], next: ['下次更新', 'Next update'], failures: ['连续失败', 'Consecutive failures'], never: ['暂无', 'Not yet'],
+  manualOnly: ['仅手动更新', 'Manual updates only'],
   old: ['更新失败，继续使用上次成功的规则。', 'Update failed; the last successful rules remain in use.'],
   countsHelp: ['输入条目包含重复项；索引会合并重复与覆盖规则。更新时间不等于规则内容改变时间。', 'Input counts include duplicates. The index merges duplicates and covered rules. An update time does not imply changed rule content.'],
   running: ['处理中…', 'Working…'], succeeded: ['操作完成', 'Operation completed'], failed: ['操作失败', 'Operation failed'], cancelled: ['操作已取消', 'Operation cancelled'],

@@ -68,9 +68,13 @@ pub struct WorkCandidate {
 impl Service {
     pub async fn begin(self: &Arc<Self>, request: WorkRequest) -> Result<Begin> {
         let owner = self.clone();
-        tokio::task::spawn_blocking(move || owner.begin_sync(request)).await?
+        tokio::task::spawn_blocking(move || owner.begin_sync(request, false)).await?
     }
-    fn begin_sync(self: &Arc<Self>, mut request: WorkRequest) -> Result<Begin> {
+    fn begin_sync(
+        self: &Arc<Self>,
+        mut request: WorkRequest,
+        bootstrap_download: bool,
+    ) -> Result<Begin> {
         self.check_revision(request.revision())?;
         if let WorkRequest::Prepare { source, .. } = &mut request {
             super::super::settings::validate_id(&source.id)?;
@@ -186,7 +190,7 @@ impl Service {
                     })
                 }
             };
-            store.collect_for_download(collected_at, needs_download)?;
+            store.collect_for_download(collected_at, bootstrap_download || needs_download)?;
             self.observe_store(store);
         }
         let mut state = self.state.lock().unwrap();
@@ -775,13 +779,16 @@ impl Service {
         })
         .await??;
         if !missing.is_empty() {
-            let begin = self
-                .begin(WorkRequest::Refresh {
-                    config_revision: self.config_revision(),
-                    source_id: None,
-                    automatic: true,
-                })
-                .await?;
+            let request = WorkRequest::Refresh {
+                config_revision: self.config_revision(),
+                source_id: None,
+                automatic: true,
+            };
+            let owner = self.clone();
+            // Missing startup sources are downloaded even with auto_update off.
+            // Admit that real download through the same worker and GC-root gate.
+            let begin =
+                tokio::task::spawn_blocking(move || owner.begin_sync(request, true)).await??;
             let Some(mut work) = begin.work else {
                 anyhow::bail!(Failure::new("busy"));
             };

@@ -18,6 +18,10 @@
   old requests still hold a retired policy, including with unavailable source storage.
 - Reclaim unreferenced prepared subscriptions under disk pressure before admitting
   downloads, while preserving configured sources and work-pinned material.
+- Apply the same disk-pressure admission to first-time subscription downloads
+  in file mode, including sources with automatic updates disabled.
+- Show subscription update schedules from saved settings, with explicit manual-only
+  and inactive states that remain unchanged while editing drafts.
 - Recover interrupted update intents through root Abort arbitration after a
   management restart; retain the freeze until the matching durable outcome is known.
 - Reply to UDP queries from their original local destination address on Linux and

@@ -53,7 +53,8 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
     <div className="settings-stack">{sources.map((source, index) => {
       const baseline = saved?.find((item) => item.id === source.id && item.url === source.url && item.format === source.format);
       const status = baseline && revisionMatches ? view.state?.sources.find((item) => item.id === source.id) : undefined;
-      return <SourceCard key={source.key} source={source} index={index} status={status} language={language} locked={locked || busy} working={working} saved={Boolean(baseline)}
+      return <SourceCard key={source.key} source={source} index={index} status={status} language={language} locked={locked || busy} working={working}
+        savedSource={baseline} subscriptionsEnabled={view.state?.enabled === true}
         change={(next) => setSources(sources.map((item, at) => at === index ? next : item))} remove={() => setSources(sources.filter((_, at) => at !== index))}
         prepare={() => void view.start('prepare', source)} refresh={() => void view.start('refresh', source.id)} />;
     })}</div>

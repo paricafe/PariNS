@@ -503,6 +503,78 @@ async fn close_before_scheduler_first_poll_and_during_download_is_prompt() {
 }
 
 #[tokio::test]
+async fn bootstrap_reclaims_young_removed_source_for_manual_only_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bootstrap");
+    let old = source("old");
+    let old_fingerprint = old.identity().unwrap().fingerprint;
+    let mut settings = Settings {
+        max_disk_bytes: 32 * 1024 * 1024,
+        sources: vec![old],
+        ..Default::default()
+    };
+    let service = Service::open(path.clone(), Policy::default(), settings.clone(), 1, vec![])
+        .await
+        .unwrap();
+    // A recent, almost 16 MiB download leaves insufficient room for another
+    // full download reservation plus the catalog transaction under 32 MiB.
+    let mut comment = vec![b'#'; 4095];
+    comment.push(b'\n');
+    let mut body = comment.repeat(4095);
+    body.extend_from_slice(b".old.test\n");
+    let old_object = path
+        .join("objects")
+        .join(format!("{:x}.txt", Sha256::digest(&body)));
+    respond(&service, &[&body]);
+    service.bootstrap_new().await.unwrap();
+    assert!(service.ready());
+    service.close();
+    drop(service);
+
+    let mut new = source("new");
+    new.auto_update = false;
+    settings.sources = vec![new];
+    // File startup has only the new Config roots, not the removed source's
+    // previous-Config root. Normal GC still retains its recent preparation.
+    let service = Service::open(path, Policy::default(), settings, 1, vec![])
+        .await
+        .unwrap();
+    assert!(!service.ready());
+    assert!(old_object.exists());
+    assert!(
+        service
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .record(&old_fingerprint)
+            .is_some()
+    );
+    respond(&service, &[b".new.test\n"]);
+    service.bootstrap_new().await.unwrap();
+    assert!(service.ready());
+    assert!(!old_object.exists());
+    assert!(
+        service
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .record(&old_fingerprint)
+            .is_none()
+    );
+    assert_eq!(
+        service
+            .explain(&Name::from_ascii("new.test").unwrap())
+            .explanation
+            .decision,
+        crate::policy::Decision::Blocked
+    );
+}
+
+#[tokio::test]
 async fn frozen_start_is_read_only_and_bootstrap_downloads_all_new_sources_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("frozen");

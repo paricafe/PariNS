@@ -1,15 +1,15 @@
 import { Switch } from '../../components/beui';
 import { translate, formatDate, formatNumber, hasTranslation, type Language } from '../../i18n';
-import type { SubscriptionDraft } from '../../model/subscriptions';
+import type { SubscriptionDraft, SubscriptionSource } from '../../model/subscriptions';
 import type { Failure, SourceStatus } from './types';
 
 export function failureText(failure: Failure, language: Language) {
   const key = `subscriptions.${failure.code}`;
   return `${translate(hasTranslation(key) ? key : 'subscriptions.error', language)}${failure.line === null ? '' : ` (${translate('subscriptions.line', language, { line: failure.line })})`}`;
 }
-export function SourceCard({ source, index, status, language, locked, working, saved, change, remove, prepare, refresh }: {
+export function SourceCard({ source, index, status, language, locked, working, savedSource, subscriptionsEnabled, change, remove, prepare, refresh }: {
   source: SubscriptionDraft; index: number; status?: SourceStatus; language: Language;
-  locked: boolean; working: boolean; saved: boolean;
+  locked: boolean; working: boolean; savedSource?: SubscriptionSource; subscriptionsEnabled: boolean;
   change(source: SubscriptionDraft): void; remove(): void; prepare(): void; refresh(): void;
 }) {
   const t = (key: string) => translate(`subscriptions.${key}`, language);
@@ -32,12 +32,13 @@ export function SourceCard({ source, index, status, language, locked, working, s
       <div><dt>{t('input')}</dt><dd>{formatNumber(status.input_rules, language)}</dd></div>
       <div><dt>{t('lastSuccess')}</dt><dd>{date(status.last_success)}</dd></div>
       <div><dt>{t('lastAttempt')}</dt><dd>{date(status.last_attempt)}</dd></div>
-      <div><dt>{t('next')}</dt><dd>{date(status.next_update)}</dd></div>
+      <div><dt>{t('next')}</dt><dd>{!subscriptionsEnabled || !savedSource?.enabled ? t('inactive')
+        : !savedSource.auto_update ? t('manualOnly') : date(status.next_update)}</dd></div>
       <div><dt>{t('failures')}</dt><dd>{formatNumber(status.failures, language)}</dd></div>
     </dl>}
     {status?.error && <p className="notice error">{failureText(status.error, language)} {status.ready && t('old')}</p>}
     <div className="button-group"><button type="button" className="button secondary" disabled={working || !source.id || !source.url || status?.active} onClick={prepare}>{t('prepare')}</button>
-      <button type="button" className="button secondary" disabled={working || !saved} onClick={refresh}>{t('refresh')}</button>
+      <button type="button" className="button secondary" disabled={working || !savedSource} onClick={refresh}>{t('refresh')}</button>
       <button type="button" className="button quiet" onClick={remove}>{t('remove')}</button></div>
   </fieldset>;
 }

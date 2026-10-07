@@ -1,0 +1,21 @@
+tests/quic_shutdown.rs
+  s_d595d238bbd4ee::t_f4853b0226ac88 1-3,5-11,13-18,20-138
+  s_d595d238bbd4ee::t_c7989fb478c517 4,19
+  s_d595d238bbd4ee::t_6900bfbe9e2dc6 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7c96a570f2612aa1e9fb0eec978038313ead6958",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

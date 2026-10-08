@@ -9,6 +9,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cpuList, linuxUsage, nameLabels, parse, query, verifyLinuxServer } from './lib/wire-bench.mjs';
+import { aResponse, distribution, dueCount, ioStat, oracle, plannedCount, probe, runWirePhase } from './lib/managed-wire.mjs';
 
 const MiB = 1024 * 1024;
 const SLO = Object.freeze({ rate: 1000, steady_ms: 60000, update_ms: 120000,
@@ -23,21 +24,11 @@ const SOURCES = [
 const CORPUS_SHA = 'd68e37b2a861e6e8ef85568db4237bb3e18d1a9f2476323b3dba977fe850af09';
 const CONTENT = { A: 'lifecycle-a.test\ncommon.lifecycle.test\n', B: 'lifecycle-b.test\ncommon.lifecycle.test\n' };
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-const IP = Buffer.from([192, 0, 2, 42]);
 const base = 'http://127.0.0.1:3000';
 const UNIT = 'parins-managed.service';
 const FILTER_DIR = '/var/lib/parins-managed/filter-subscriptions';
 const safeCode = value => typeof value === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(value) ? value : 'fixture_failed';
 const fail = code => Object.assign(new Error(code), { code });
-function distribution(values) {
-  const sorted = [...values].sort((a, b) => a - b);
-  const percentile = p => sorted.length ? sorted[Math.max(0, Math.ceil(sorted.length * p) - 1)] : null;
-  return { count: sorted.length, p50: percentile(.5), p95: percentile(.95), p99: percentile(.99), max: sorted.at(-1) ?? null };
-}
-function plannedCount(duration, rate) { return Math.round(duration * rate / 1000); }
-function dueCount(elapsed, duration, rate) {
-  return Math.min(plannedCount(duration, rate), Math.max(0, Math.floor(elapsed * rate / 1000) + 1));
-}
 function itemFor(sequence, phase, active) {
   switch (sequence % 4) {
     case 0: return { group: 'fresh_cache', name: 'fresh.lifecycle.test', blocked: false };
@@ -45,31 +36,6 @@ function itemFor(sequence, phase, active) {
     case 2: return { group: 'subscription_common', name: 'common.lifecycle.test', blocked: active };
     default: return { group: 'allow_local', name: 'allow.local.lifecycle.test', blocked: false };
   }
-}
-function oracle(wire, packet, blocked) {
-  const parsed = parse(wire);
-  assert.equal(wire.readUInt16BE(0), packet.readUInt16BE(0), 'DNS ID');
-  assert.equal(wire.readUInt16BE(2), 0x8180, 'DNS flags');
-  assert(wire.subarray(12, parsed.questionEnd).equals(packet.subarray(12)), 'DNS question');
-  assert.equal(wire.readUInt16BE(8), 0, 'DNS authority');
-  assert.equal(wire.readUInt16BE(10), 0, 'DNS additional');
-  assert.equal(parsed.options.length, 0, 'EDNS leak');
-  assert.equal(parsed.answers.length, blocked ? 0 : 1, 'DNS answer count');
-  if (!blocked) {
-    const answer = parsed.answers[0];
-    assert.equal(answer.type, 1); assert.equal(answer.klass, 1);
-    assert(answer.data.equals(IP), 'DNS address');
-    assert.deepEqual(answer.owner, nameLabels(packet, 12), 'DNS answer owner');
-    assert(answer.ttl > 0 && answer.ttl <= 3600, 'DNS TTL');
-  }
-}
-function aResponse(packet) {
-  const end = parse(packet).questionEnd;
-  const response = Buffer.from(packet.subarray(0, end));
-  response.writeUInt16BE(0x8180, 2); response.writeUInt16BE(1, 6);
-  response.writeUInt16BE(0, 8); response.writeUInt16BE(0, 10);
-  const rr = Buffer.from('c00c0001000100000e100004c000022a', 'hex');
-  return Buffer.concat([response, rr]);
 }
 function cnameResponse(packet, target) {
   const end = parse(packet).questionEnd;
@@ -84,6 +50,14 @@ function cnameResponse(packet, target) {
 }
 
 let auth;
+function httpDiagnostic(method, apiPath, status, expected, code) {
+  if (!['GET', 'POST', 'PUT'].includes(method)
+    || !['/api/session', '/api/login', '/api/updates', '/api/config', '/api/config/validate', '/api/status',
+      '/api/filter/check', '/api/filter/subscriptions', '/api/filter/subscriptions/prepare', '/api/filter/subscriptions/refresh'].includes(apiPath)
+    || !Number.isInteger(status) || status < 100 || status > 599
+    || !Number.isInteger(expected) || expected < 100 || expected > 599) return undefined;
+  return { method, api_path: apiPath, actual_status: status, expected_status: expected, api_error_code: safeCode(code) };
+}
 function request(method, endpoint, body, expected = 200, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const headers = { Origin: base, 'Content-Type': 'application/json' };
@@ -95,7 +69,11 @@ function request(method, endpoint, body, expected = 200, timeout = 30000) {
       res.on('end', () => {
         try {
           const value = JSON.parse(bytes);
-          if (res.statusCode !== expected) throw fail(`http_${res.statusCode}_${safeCode(value.error?.code)}`);
+          if (res.statusCode !== expected) {
+            const error = fail(`http_${res.statusCode}_${safeCode(value.error?.code)}`);
+            error.http = httpDiagnostic(method, endpoint, res.statusCode, expected, value.error?.code);
+            throw error;
+          }
           if (value.session?.binding) {
             assert.equal(res.headers['set-cookie']?.length, 1);
             auth = { cookie: res.headers['set-cookie'][0].split(';')[0], binding: value.session.binding };
@@ -207,21 +185,6 @@ async function startUpstream() {
       return { arrived, release() { assert(entry.release, 'held query reached upstream'); entry.release(); held.delete(name); } };
     } };
 }
-async function probe(port, name, blocked, deadline = 2000) {
-  const socket = dgram.createSocket('udp4'); const packet = query(12345, name);
-  try {
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(fail('probe_timeout')), deadline);
-      socket.on('error', error => { clearTimeout(timer); reject(error); });
-      socket.on('message', (wire, peer) => {
-        clearTimeout(timer);
-        try { assert.equal(peer.address, '127.0.0.1'); assert.equal(peer.port, port); oracle(wire, packet, blocked); resolve(); }
-        catch (error) { reject(error); }
-      });
-      socket.send(packet, port, '127.0.0.1');
-    });
-  } finally { socket.close(); }
-}
 async function sentinel(port, label) {
   const blockedName = `lifecycle-${label.toLowerCase()}.test`;
   const otherName = `lifecycle-${label === 'A' ? 'b' : 'a'}.test`;
@@ -273,6 +236,7 @@ max_memory_bytes=268435456
 max_disk_bytes=268435456
 ${withSources ? SOURCES.map(source => `[[filter_subscriptions.sources]]
 id='${source.id}'
+name='${source.id}'
 url='${source.url}'
 format='domain_list'
 enabled=true
@@ -302,14 +266,6 @@ async function resources(pid, cgroup) {
   return { at_ms: performance.now(), ...usage, rss_bytes: number('VmRSS'),
     process_lifetime_rss_peak_bytes: number('VmHWM'), cgroup_lifetime_peak_bytes: Number(peak),
     block_io_by_device: ioStat(io), ...selected(state) };
-}
-function ioStat(text) {
-  return Object.fromEntries(text.trim().split('\n').filter(Boolean).map(line => {
-    const [device, ...fields] = line.split(/\s+/); assert.match(device, /^\d+:\d+$/);
-    return [device, Object.fromEntries(fields.filter(field => /^(rbytes|wbytes|rios|wios)=/.test(field)).map(field => {
-      const [key, value] = field.split('='); assert.match(value, /^\d+$/); return [key, Number(value)];
-    }))];
-  }));
 }
 function mainPid() {
   return Number(execFileSync('systemctl', ['show', '--property=MainPID', '--value', UNIT], { encoding: 'utf8' }).trim());
@@ -390,7 +346,7 @@ async function startupSample({ round, mode, pid, indexName, current, fixture, ou
     if (result.startup_observed_ms > SLO.startup_ms) result.failures.push('startup_deadline');
     if (result.resources.process_lifetime_rss_peak_bytes > SLO.startup_rss_bytes) result.failures.push('startup_rss');
     if (['oom', 'oom_kill', 'oom_group_kill'].some(key => (result.resources.memory_events[key] ?? 0) !== 0)) result.failures.push('startup_oom');
-  } catch (error) { failure = error; result.error = safeCode(error.code); }
+  } catch (error) { failure = error; result.error = safeCode(error.code); result.http = error.http; }
   finally {
     if (moved) {
       try {
@@ -411,121 +367,13 @@ async function startupSample({ round, mode, pid, indexName, current, fixture, ou
   if (failure) { failure.startup_sample = result; throw failure; }
   return { result, pid, cgroup };
 }
-async function phase({ name, port, active, duration, pid, cgroup, output, onUpdate }) {
-  await probe(port, 'fresh.lifecycle.test', false);
-  const warmBefore = (await request('GET', '/api/status')).metrics.counters;
-  await probe(port, 'fresh.lifecycle.test', false);
-  const warmAfter = (await request('GET', '/api/status')).metrics.counters;
-  assert.equal(warmAfter.cache_hits, warmBefore.cache_hits + 1, 'fresh-cache group must really hit cache');
-  const socket = dgram.createSocket('udp4');
-  await new Promise(resolve => socket.bind(0, '127.0.0.1', resolve));
-  const pending = new Map(); const expired = new Set(); let nextId = 0;
-  const result = { name, duration_ms: duration, configured_qps: SLO.rate,
-    planned: plannedCount(duration, SLO.rate), sent: 0, correct: 0, timeouts: 0,
-    invalid: 0, late: 0, unexpected: 0, send_errors: 0, never_sent: 0,
-    groups: {}, resource_samples: [], fresh_cache_probe_verified: true };
-  const latencies = [], wireLatencies = [], lags = []; let sentCount = 0;
-  let action, actionError, samplingError, samplingDone = false;
-  let started;
-  const expire = (id, entry) => {
-    pending.delete(id); expired.add(id); result.timeouts++; entry.group.timeouts++;
-    latencies.push(Math.max(SLO.client_deadline_ms, performance.now() - entry.due));
-  };
-  socket.on('message', (wire, peer) => {
-    const id = wire.length >= 2 ? wire.readUInt16BE(0) : -1;
-    const entry = pending.get(id);
-    if (!entry) { if (expired.has(id)) result.late++; else result.unexpected++; return; }
-    pending.delete(id); clearTimeout(entry.timer);
-    try {
-      assert.equal(peer.address, '127.0.0.1'); assert.equal(peer.port, port);
-      oracle(wire, entry.packet, entry.blocked);
-      const end = performance.now();
-      if (end - entry.due > SLO.client_deadline_ms) {
-        expired.add(id); result.timeouts++; entry.group.timeouts++;
-      } else { result.correct++; entry.group.correct++; }
-      latencies.push(end - entry.due); wireLatencies.push(end - entry.sent);
-    } catch { result.invalid++; entry.group.invalid++; }
-  });
-  socket.on('error', () => { result.send_errors++; });
-  try {
-    const before = await resources(pid, cgroup); result.resource_samples.push(before);
-    started = performance.now();
-    const sampler = (async () => {
-      while (!samplingDone) {
-        await delay(100);
-        if (!samplingDone) result.resource_samples.push(await resources(pid, cgroup));
-      }
-    })().catch(error => { samplingError = error; });
-    while (sentCount < result.planned) {
-      const now = performance.now(); const elapsed = now - started;
-      if (onUpdate && elapsed >= SLO.refresh_at_ms && !action) {
-        action = onUpdate().then(value => { result.update = value; }).catch(error => { actionError = error; });
-      }
-      const due = dueCount(elapsed, duration, SLO.rate);
-      while (sentCount < due) {
-        const sequence = sentCount++; const item = itemFor(sequence, name, active);
-        const plannedAt = started + sequence * 1000 / SLO.rate;
-        const sent = performance.now(); lags.push(sent - plannedAt);
-        const group = result.groups[item.group] ??= { planned: 0, correct: 0, timeouts: 0, invalid: 0 };
-        group.planned++;
-        if (sent - plannedAt >= SLO.client_deadline_ms) {
-          result.never_sent++; result.timeouts++; group.timeouts++; latencies.push(sent - plannedAt); continue;
-        }
-        // No live ID is reused; the name/question additionally binds reused IDs.
-        while (pending.has(nextId)) nextId = (nextId + 1) & 65535;
-        const id = nextId; nextId = (nextId + 1) & 65535; expired.delete(id);
-        const packet = query(id, item.name); const entry = { packet, blocked: item.blocked, group, due: plannedAt, sent };
-        pending.set(id, entry); result.sent++;
-        entry.timer = setTimeout(() => expire(id, entry), Math.max(1, plannedAt + SLO.client_deadline_ms - performance.now()));
-        socket.send(packet, port, '127.0.0.1', error => { if (error) result.send_errors++; });
-      }
-      if (sentCount < result.planned) await delay(1);
-    }
-    // Fixed duration, not last-response time, is the QPS denominator.
-    await delay(Math.max(0, started + duration - performance.now()));
-    while (pending.size) await delay(5);
-    if (action) await action;
-    samplingDone = true; await sampler;
-    result.resource_samples.push(await resources(pid, cgroup));
-    const after = result.resource_samples.at(-1);
-    const finalMetrics = (await request('GET', '/api/status')).metrics.counters;
-    result.metric_deltas = Object.fromEntries(['query_received', 'query_blocked', 'cache_hits', 'cache_misses', 'upstream_success', 'upstream_failure']
-      .filter(key => Object.hasOwn(warmAfter, key)).map(key => [key, finalMetrics[key] - warmAfter[key]]));
-    result.actual_elapsed_ms = performance.now() - started;
-    result.correct_qps = result.correct / (duration / 1000);
-    result.timeout_fraction = result.timeouts / result.planned;
-    result.scheduled_latency_ms = distribution(latencies);
-    result.wire_latency_ms = distribution(wireLatencies);
-    result.driver_lag_ms = distribution(lags);
-    result.cpu_seconds = (after.cpu.usage_usec - before.cpu.usage_usec) / 1e6;
-    result.cpu_average_cores = result.cpu_seconds / (result.actual_elapsed_ms / 1000);
-    result.rss_sample_peak_bytes = Math.max(...result.resource_samples.map(s => s.rss_bytes));
-    result.process_lifetime_rss_peak_bytes = after.process_lifetime_rss_peak_bytes;
-    result.cgroup_lifetime_peak_bytes = after.cgroup_lifetime_peak_bytes;
-    result.oom_events = Object.fromEntries(['oom', 'oom_kill', 'oom_group_kill'].map(key => [key, after.memory_events[key] ?? 0]));
-    const update = Boolean(onUpdate);
-    result.failures = [];
-    const check = (condition, code) => { if (!condition) result.failures.push(code); };
-    check(result.invalid === 0 && result.unexpected === 0 && result.send_errors === 0, 'correctness');
-    check(result.correct + result.timeouts + result.invalid === result.planned, 'sample_accounting');
-    check(result.timeout_fraction <= SLO.timeout_fraction, 'timeout_fraction');
-    check(result.correct_qps >= SLO.correct_qps, 'offered_load_correct_qps');
-    check(result.scheduled_latency_ms.p99 !== null && result.scheduled_latency_ms.p99 <= (update ? SLO.update_p99_ms : SLO.steady_p99_ms), 'scheduled_p99');
-    check(update ? result.process_lifetime_rss_peak_bytes <= SLO.update_rss_bytes : result.rss_sample_peak_bytes <= SLO.steady_rss_bytes, 'rss');
-    check(Object.values(result.oom_events).every(value => value === 0), 'oom');
-    check(!samplingError, 'resource_sampling'); check(!actionError, 'update_evidence');
-    check(!onUpdate || Boolean(result.update), 'update_completed');
-    if (actionError) result.update_error = safeCode(actionError.code);
-    result.result = result.failures.length ? 'failed' : 'passed';
-    await writeFile(path.join(output, `${name}.json`), JSON.stringify(result, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-    console.log(JSON.stringify({ event: 'phase_complete', name, result: result.result,
-      correct_qps: result.correct_qps, scheduled_p99_ms: result.scheduled_latency_ms.p99, failures: result.failures }));
-    return result;
-  } finally {
-    samplingDone = true;
-    for (const entry of pending.values()) clearTimeout(entry.timer);
-    socket.close();
-  }
+async function phase({ active, pid, cgroup, port, onUpdate, ...args }) {
+  return runWirePhase({ ...args, port, slo: SLO, actionKey: 'update', safeCode,
+    errorDiagnostic: error => error.http,
+    warmup: () => probe(port, 'fresh.lifecycle.test', false),
+    readMetrics: async () => (await request('GET', '/api/status')).metrics.counters,
+    observeResources: () => resources(pid, cgroup),
+    itemFor: (sequence, name) => itemFor(sequence, name, active), onAction: onUpdate });
 }
 
 async function updateEvidence({ round, current, next, runtime, upstream }) {
@@ -651,14 +499,14 @@ async function run(fixture, output) {
     if (summary.result !== 'passed') process.exitCode = 1;
   } catch (error) {
     if (error.startup_sample) summary.startups.push(error.startup_sample);
-    summary.result = 'failed'; summary.error = safeCode(error.code);
+    summary.result = 'failed'; summary.error = safeCode(error.code); summary.http = error.http;
     summary.location = String(error.stack).match(/test-filter-lifecycle\.mjs:\d+:\d+/)?.[0] ?? 'unknown';
     process.exitCode = 1;
   } finally {
     upstream?.close(); summary.finished_at = new Date().toISOString();
     await writeFile(artifact, JSON.stringify(summary, null, 2) + '\n', { mode: 0o600 });
     console.log(JSON.stringify({ event: 'lifecycle_complete', result: summary.result,
-      error: summary.error, location: summary.location, phases: summary.phases.length }));
+      error: summary.error, location: summary.location, http: summary.http, phases: summary.phases.length }));
   }
 }
 
@@ -683,6 +531,13 @@ function selfTest() {
   assert.equal(cname.answers[0].type, 5); assert.equal(cname.answers[1].type, 1);
   assert.notEqual(digest(CONTENT.A), digest(CONTENT.B));
   assert.match(configText(1234, true, true, 1), /query_timeout_ms=20000/);
+  for (const source of SOURCES) {
+    assert(configText(1234, true, true, 1).includes(`id='${source.id}'\nname='${source.id}'`));
+    assert.deepEqual(Object.keys(source).sort(), ['format', 'id', 'url'], 'prepare uses only DraftSource fields');
+  }
+  assert.deepEqual(httpDiagnostic('POST', '/api/config/validate', 422, 200, 'INVALID_CONFIG'),
+    { method: 'POST', api_path: '/api/config/validate', actual_status: 422, expected_status: 200, api_error_code: 'INVALID_CONFIG' });
+  assert.equal(httpDiagnostic('POST', '/untrusted', 422, 200, 'secret'), undefined);
   assert.notEqual(configText(1234, true, true, 1), configText(1234, true, true, 2));
   assert.deepEqual(ioStat('8:0 rbytes=12 wbytes=34 rios=1 wios=2 dbytes=99\n'), { '8:0': { rbytes: 12, wbytes: 34, rios: 1, wios: 2 } });
   assert.deepEqual(ioStat(''), {}); assert.throws(() => ioStat('bad rbytes=1'));

@@ -1,0 +1,35 @@
+scripts/test-install.sh
+  s_d595d238bbd4ee::t_09e36a15c43233 82-84,91-93
+CHANGELOG.md
+  s_d595d238bbd4ee::t_ac5575e83d9ff0 17-20
+AGENTS.md
+  s_d595d238bbd4ee::t_ac5575e83d9ff0 227-229
+README.md
+  s_d595d238bbd4ee::t_ac5575e83d9ff0 143-148
+  s_d595d238bbd4ee::t_7d36381cb633c2 33-34,149
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_0293f95f8cb438 838
+  s_d595d238bbd4ee::t_5b5a8108f6deca 204-206
+  s_d595d238bbd4ee::t_09e36a15c43233 166,182-183,198-203,207-211,260,306,395
+scripts/install.sh
+  s_d595d238bbd4ee::t_09e36a15c43233 21,403,446-458
+scripts/test-certificate-renewal-systemd.py
+  s_d595d238bbd4ee::t_0293f95f8cb438 30,39,41,172,305-341,345-353,356-392,431-434,442
+  s_d595d238bbd4ee::t_6aa39ccfbc7fc4 342-344,354-355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a88e74e8d3b787ec19ffbef6f03261e18243a570",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

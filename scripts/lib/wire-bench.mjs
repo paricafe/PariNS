@@ -38,19 +38,25 @@ export async function linuxConstraints(pid) {
   return { pid, allowed_cpus: status.match(/^Cpus_allowed_list:\s*(.+)$/m)?.[1], cgroup: relative, hierarchy };
 }
 
-export async function verifyLinuxServer(pid, unit, serviceCpus, driverCpus) {
+export async function verifyLinuxServer(pid, unit, serviceCpus, driverCpus, memoryBytes = 4294967296) {
+  assert([2147483648, 4294967296].includes(memoryBytes), 'expected a declared 2 or 4 GiB fixture');
   const snapshot = await linuxConstraints(pid);
   assert(snapshot.cgroup.endsWith(`/${unit}`), 'fixture is outside its owned transient unit');
   assert.deepEqual(cpuList(snapshot.allowed_cpus), serviceCpus, 'server affinity differs from the fixed two CPUs');
   const own = snapshot.hierarchy[0];
   assert(own, 'missing fixture cgroup');
+  if (memoryBytes === 2147483648) {
+    const [quota, period] = own['cpu.max'].split(/\s+/);
+    assert(quota !== 'max' && Number(period) > 0 && Number(quota) / Number(period) === 2,
+      'lifecycle service must have exactly a 200% CPU quota');
+  }
   assert.deepEqual(cpuList(own['cpuset.cpus.effective']), serviceCpus, 'effective service cpuset differs');
-  assert.equal(own['memory.max'], '4294967296', 'service must have a 4 GiB memory limit');
+  assert.equal(own['memory.max'], String(memoryBytes), 'service memory limit differs from the declared fixture');
   assert.equal(own['memory.swap.max'], '0', 'service swap must be disabled');
   for (const level of snapshot.hierarchy) {
     const [quota, period] = level['cpu.max'].split(/\s+/);
     assert(quota === 'max' || Number(quota) / Number(period) >= 2, 'ancestor CPU quota is below two CPUs');
-    assert(level['memory.max'] === 'max' || BigInt(level['memory.max']) >= 4294967296n, 'ancestor memory limit is below 4 GiB');
+    assert(level['memory.max'] === 'max' || BigInt(level['memory.max']) >= BigInt(memoryBytes), 'ancestor memory limit is below the declared fixture');
   }
   const tasks = await readdir(`/proc/${pid}/task`);
   for (const tid of tasks) {

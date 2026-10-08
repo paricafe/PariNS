@@ -218,6 +218,13 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   `.github/workflows/filter-acceptance.yml` runs the isolated subscription service
   and fixed-resource wire fixtures; their `--ephemeral-ci` guards must remain intact.
   Static trie/radix comparisons do not establish subscription lifecycle or VPS capacity.
+  Manual `filter-lifecycle.yml` uses the real managed service with a verified
+  2 CPU/2 GiB, no-swap cgroup and a separately pinned load generator. Its synthetic
+  HTTPS source branch changes only fixture domains; keep CI read-only and normal
+  public certificate validation. Fix the workload and SLO before running, retain
+  all three rounds, distinguish CDN propagation from the measured refresh window,
+  and prove request-held old-generation release separately from latency samples.
+  A workflow success proves only the declared fixture, not public-network capacity.
   `public-dns-acceptance.yml` is manual-only and takes an explicitly selected public
   endpoint. Keep its one-query deadline and normal certificate verification; never
   hardcode deployment targets or add production credentials to CI. A successful

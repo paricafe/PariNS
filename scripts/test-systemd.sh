@@ -14,10 +14,11 @@ shift
 binary="$repo/target/release/parins"
 installer="$repo/scripts/install.sh"
 build_info=
-package= binary_override=false filter_subscriptions=false
+package= binary_override=false filter_subscriptions=false filter_lifecycle=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --filter-subscriptions) filter_subscriptions=true; shift ;;
+        --filter-lifecycle) filter_lifecycle=true; shift ;;
         --binary-path|--package)
             [ "$#" -ge 2 ] || { printf 'Missing value for %s\n' "$1" >&2; exit 1; }
             case "$1" in
@@ -28,6 +29,10 @@ while [ "$#" -gt 0 ]; do
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
+if "$filter_subscriptions" && "$filter_lifecycle"; then
+    printf '%s\n' 'Subscription fault and lifecycle measurement suites require separate fresh runners.' >&2
+    exit 1
+fi
 if [ -n "$package" ]; then
     ! "$binary_override" || { printf '%s\n' '--package and --binary-path are mutually exclusive' >&2; exit 1; }
     package=$(CDPATH= cd -- "$package" && pwd -P)
@@ -146,7 +151,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -382,6 +387,45 @@ sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/parins/tls/external.pem > "$fixture/tls-after"
 cmp "$fixture/tls-before" "$fixture/tls-after"
 sudo grep -Fxq 'external certificate sentinel' /var/lib/parins/tls/external.pem
+
+if "$filter_lifecycle"; then
+    for command in node taskset lscpu; do
+        command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
+    done
+    fs_output="$repo/artifacts/filter-lifecycle"
+    [ ! -e "$fs_output" ] || { printf 'Refusing existing result directory: %s\n' "$fs_output" >&2; exit 1; }
+    mkdir -p "$fs_output"
+    node --input-type=module - "$fixture" "$fs_output" "$repo" <<'JS'
+import assert from 'node:assert/strict';
+import { readFile, writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+const [fixture, output, repo] = process.argv.slice(2);
+const { cpuList } = await import(pathToFileURL(`${repo}/scripts/lib/wire-bench.mjs`));
+const status = await readFile('/proc/self/status', 'utf8');
+const cpus = cpuList(status.match(/^Cpus_allowed_list:\s*(.+)$/m)?.[1]);
+assert(cpus.length >= 4, 'need two service CPUs and at least two independent driver CPUs');
+const memory = await readFile('/proc/meminfo', 'utf8');
+assert(BigInt(memory.match(/^MemTotal:\s*(\d+) kB$/m)[1]) * 1024n >= 4n * 1024n ** 3n,
+  'need host memory for the 2 GiB service plus driver/build');
+await writeFile(`${fixture}/server-cpus`, cpus.slice(0, 2).join(','));
+await writeFile(`${fixture}/driver-cpus`, cpus.slice(2).join(','));
+await writeFile(`${output}/host-proc-status`, status);
+await writeFile(`${output}/host-meminfo`, memory);
+JS
+    PARINS_FS_SERVER_CPUS=$(cat "$fixture/server-cpus")
+    PARINS_FS_DRIVER_CPUS=$(cat "$fixture/driver-cpus")
+    export PARINS_FS_SERVER_CPUS PARINS_FS_DRIVER_CPUS
+    lscpu > "$fs_output/lscpu.txt"
+    git -C "$repo" rev-parse HEAD > "$fs_output/commit.txt"
+    sha256sum "$binary" > "$fs_output/binary-sha256.txt"
+    sudo systemctl set-property --runtime parins-managed.service \
+        "AllowedCPUs=$PARINS_FS_SERVER_CPUS" CPUQuota=200% MemoryMax=2147483648 MemorySwapMax=0
+    # Restart inside the declared CPU set before measuring; no production host.
+    sudo systemctl restart parins-managed.service
+    taskset --cpu-list "$PARINS_FS_DRIVER_CPUS" node "$repo/scripts/test-filter-lifecycle.mjs" "$fixture" "$fs_output"
+    # The common trap disables the owned service and removes private credentials.
+    exit 0
+fi
 
 if "$filter_subscriptions"; then
     for command in node iptables ip6tables nsenter mount umount findmnt strace timeout; do

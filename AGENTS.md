@@ -224,6 +224,9 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   version and exercise the default, unpinned entry point. Stage each actual
   native release package through that entry point before publication; the public
   quick-start check must then assert the exact published version.
+  Live success guidance distinguishes setup from initialized state only after the
+  existing identity-preserving preflight succeeds. Never parse private state or
+  infer initialization from a token file, and keep staging/dry-run service-free.
   Run `scripts/test-systemd.sh --ephemeral-ci`
   only on a disposable Linux environment, not a developer's host, using native
   musl binaries for the managed updater's installation contract.

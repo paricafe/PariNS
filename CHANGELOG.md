@@ -14,6 +14,10 @@
 - Recheck credential snapshots before issuing login sessions and recheck old
   sessions at protected mutation admission. Preserve already accepted background
   work and the updater's consumed-plan/freeze semantics.
+- Distinguish uninitialized setup from an initialized managed reinstall in success
+  guidance, using the existing verified preflight state. Initialized installations
+  keep their original address/account and no longer receive first-setup token or
+  guessed HTTP address instructions.
 
 ### Operational notes
 

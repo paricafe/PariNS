@@ -30,7 +30,8 @@ provider or hosted service.
 
 ## Status
 
-Unreleased development changes add online administrator credential rotation.
+Unreleased development changes add online administrator credential rotation and distinguish
+first-time setup from an initialized reinstall in the installer's success message.
 These changes are not part of the published v0.1.6 packages.
 
 Version 0.1.6 fixes the Linux bootstrap's default release selection and checks
@@ -138,6 +139,13 @@ before running it. SHA256 detects corruption; it is not an independent signature
 or a substitute for trusting the release publisher.
 
 ### 2. Open the setup wizard
+
+This step is for an uninitialized installation, including a reinstall that only
+has a setup token. An initialized reinstall keeps its existing management address
+and administrator account; do not run setup again or infer a new HTTP/HTTPS URL
+from the server IP. The unreleased installer prints this distinction only after
+the saved configuration passes its existing preflight and installation readiness
+checks. It does not inspect the setup token to decide whether setup is complete.
 
 Open `http://SERVER_IP:3000` (or <http://127.0.0.1:3000> on the server itself).
 The console switches to HTTPS after inbound DoH (with optional HTTP/3) is configured with a

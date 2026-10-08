@@ -163,7 +163,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log install.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -179,8 +179,8 @@ if [ -z "$build_info" ]; then
 fi
 sudo chmod go-w /opt
 install_service() {
-    if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info"; then
-        :
+    if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info" > "$fixture/install.log" 2>&1; then
+        cat "$fixture/install.log"
     else
         install_status=$?
         # This disposable fixture contains only generated test configuration.
@@ -194,6 +194,20 @@ install_service() {
     fi
     sudo systemctl is-active --quiet parins-managed.service
     sudo cmp "$binary" /opt/parins-managed/parins
+}
+expect_fresh_install_message() {
+    grep -Fq 'Fresh setup console: http://' "$fixture/install.log"
+    grep -Fq '/var/lib/parins-managed/setup-token' "$fixture/install.log"
+    ! grep -Fq 'Existing configuration preserved.' "$fixture/install.log"
+}
+expect_initialized_install_message() {
+    # The official-A updater suite intentionally runs the immutable v0.1.5
+    # installer, which predates this messaging fix; it is not this regression gate.
+    "$official_updater_check" && return 0
+    grep -Fq 'Existing configuration preserved. Continue using your existing management address and administrator account.' "$fixture/install.log"
+    grep -Fq 'Check service: sudo systemctl status' "$fixture/install.log"
+    grep -Fq 'View logs: sudo journalctl' "$fixture/install.log"
+    ! grep -Eq 'Fresh setup|setup-token|http://|https://' "$fixture/install.log"
 }
 http() {
     curl --fail --silent --show-error --noproxy '*' \
@@ -243,6 +257,7 @@ grep -Fq "$fixture/account-home" "$fixture/home-error.log"
 rmdir "$fixture/account-home"
 installed=true
 install_service
+expect_fresh_install_message
 sudo systemd-analyze verify /etc/systemd/system/parins-managed.service
 sudo systemd-analyze verify /etc/systemd/system/parins-updater.service /etc/systemd/system/parins-updater.path /etc/systemd/system/parins-update-recovery.service
 systemctl is-active --quiet parins-updater.path
@@ -288,6 +303,7 @@ sudo test -s /var/lib/parins-managed/setup-token
 [ "$(sudo stat -Lc %a /var/lib/parins-managed)" = 700 ]
 sudo cat /var/lib/parins-managed/setup-token > "$fixture/token-copy"
 install_service
+expect_fresh_install_message
 sudo cmp "$fixture/token-copy" /var/lib/parins-managed/setup-token
 session | jq -e '.setup_required == true and .transport.scheme == "http"' >/dev/null
 ! sudo test -e /var/lib/parins-managed/state.json
@@ -376,6 +392,7 @@ PY
 }
 check_dns
 install_service
+expect_initialized_install_message
 ! sudo test -e /var/lib/parins-managed/https-identity.pem
 ! sudo test -e /var/lib/parins-managed/https-cert.pem
 sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
@@ -818,5 +835,5 @@ PY
     fs_fault_identity
     printf '%s\n' 'FS7 download, activation, DNS, DynamicUser, offline LKG, UP freeze and actual staging-write ENOSPC/recovery passed. Performance remains a separate gate.'
 fi
-python3 "$repo/scripts/test-certificate-renewal-systemd.py" --ephemeral-ci "$fixture"
+python3 "$repo/scripts/test-certificate-renewal-systemd.py" --ephemeral-ci "$fixture" "$installer" "$binary" "$helper" "$build_info"
 printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

@@ -27,7 +27,7 @@ DROP_IN = DROP_DIR / "91-ci-certificate-renewal.conf"
 UNIT_MARKER = "# PariNS managed installer unit v3 (restricted updater contract)"
 LOCAL_FILES = (
     "ca.pem", "ca-key.pem", "leaf.ext", "a.pem", "a-key.pem", "a.csr",
-    "b.pem", "b-key.pem", "b.csr", "drop-in.conf",
+    "b.pem", "b-key.pem", "b.csr", "drop-in.conf", "https-cookies.txt", "https-headers.txt",
 )
 
 
@@ -36,9 +36,9 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def command(*args, root=False, timeout=15):
+def command(*args, root=False, timeout=15, input=None):
     argv = (["sudo", "-n"] if root else []) + [str(arg) for arg in args]
-    result = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    result = subprocess.run(argv, input=input, capture_output=True, timeout=timeout, check=False)
     # Never expose command output: credentials and generated key material stay private.
     require(result.returncode == 0, f"{Path(str(args[0])).name} failed ({result.returncode})")
     return result.stdout
@@ -169,7 +169,7 @@ def stable(before, after):
     require(after["running"] is True and after["last_error"] is None, "DNS not healthy after reload")
 
 
-def exercise(fixture):
+def exercise(fixture, installer, binary, helper, build_info):
     guarded_fixture(fixture)
     # Each mutation has one owner; no repeated API apply or reload on unknown outcomes.
     require(not EXTERNAL.exists() and not EXTERNAL.is_symlink(), "external fixture path exists")
@@ -302,6 +302,94 @@ def exercise(fixture):
         reload_expect("failed", second, generation + 1)
         replace("b", key_only=True)
         reload_expect("unchanged", second, generation + 1)
+
+        # Reuse this verified private CA and external identity for an initialized
+        # HTTPS reinstall. No host trust or DNS changes, and no TLS bypass.
+        require("[web]" not in saved["toml"], "expected no existing web section")
+        https_candidate = saved["toml"] + (
+            '\n[doh]\nlisten = "127.0.0.1:0"\n'
+            f'cert_file = "{EXTERNAL}/cert.pem"\nkey_file = "{EXTERNAL}/key.pem"\n'
+            '\n[web]\npublic_host = "dns.test"\n'
+        )
+        api.request("PUT", "/api/config", {"revision": saved["revision"], "toml": https_candidate})
+        https_binding = None
+
+        def https_request(method, path, body=None):
+            headers = "Origin: https://dns.test:3000\nContent-Type: application/json\n"
+            if https_binding is not None:
+                headers += f"X-PariNS-Session: {https_binding}\n"
+            (local / "https-headers.txt").write_text(headers)
+            return json.loads(command(
+                "curl", "--fail", "--silent", "--show-error", "--noproxy", "*", "--max-time", "10",
+                "--cacert", local / "ca.pem", "--resolve", "dns.test:3000:127.0.0.1",
+                "--cookie", local / "https-cookies.txt", "--cookie-jar", local / "https-cookies.txt",
+                "--header", "@" + str(local / "https-headers.txt"), "--request", method,
+                *([] if body is None else ["--data-binary", "@-"]),
+                "https://dns.test:3000" + path,
+                input=None if body is None else json.dumps(body).encode(),
+            ))
+
+        session = https_request("GET", "/api/session")
+        require(session["transport"]["scheme"] == "https" and not session["authenticated"],
+                "HTTPS transition must require login")
+        https_binding = https_request("POST", "/api/login", credentials)["session"]["binding"]
+        saved_https = https_request("GET", "/api/config")
+        before_https = poll(lambda: https_request("GET", "/api/status"),
+                            lambda value: value["storage"]["health"] == "healthy", "HTTPS storage")
+        state_path = "/var/lib/parins-managed/state.json"
+        database_path = "/var/lib/parins-managed/runtime/observability.sqlite3"
+        state_hash = command("sha256sum", state_path, root=True)
+        # DynamicUser may legitimately receive a different numeric UID/GID on
+        # restart. Preserve the database identity/mode and verify runtime access.
+        database_identity = command("stat", "-c", "%d:%i:%a", database_path, root=True)
+        install_arguments = ["sh", installer, "--binary", binary, "--helper", helper, "--build-info", build_info]
+        output = command(*install_arguments, root=True, timeout=240).decode()
+        require("Existing configuration preserved. Continue using your existing management address and administrator account." in output,
+                "HTTPS reinstall missing existing-account guidance")
+        require("Check service: sudo systemctl status" in output and "View logs: sudo journalctl" in output,
+                "HTTPS reinstall missing service guidance")
+        require(not any(value in output for value in ("Fresh setup", "setup-token", "http://", "https://")),
+                "HTTPS reinstall printed first-setup or guessed-address guidance")
+        require(command("sha256sum", state_path, root=True) == state_hash, "HTTPS reinstall changed saved state")
+        require(command("stat", "-c", "%d:%i:%a", database_path, root=True) == database_identity,
+                "HTTPS reinstall replaced SQLite or changed its mode")
+        https_binding = None
+        require(not https_request("GET", "/api/session")["authenticated"], "reinstall retained an old session")
+        https_binding = https_request("POST", "/api/login", credentials)["session"]["binding"]
+        require(https_request("GET", "/api/config") == saved_https, "HTTPS reinstall changed configuration")
+        after_https = poll(lambda: https_request("GET", "/api/status"),
+                           lambda value: value["storage"]["health"] == "healthy", "reinstalled HTTPS storage")
+        require(after_https["revision"] == before_https["revision"] and after_https["running"],
+                "HTTPS reinstall lost DNS configuration")
+        for epoch in ("log_epoch", "totals_epoch", "history_epoch"):
+            require(after_https["storage"][epoch] == before_https["storage"][epoch],
+                    f"HTTPS reinstall changed {epoch}")
+        fresh_tls(port, local / "ca.pem", second)
+
+        # Corrupt only this generated fixture state, then restore its exact bytes
+        # in finally. Rejection must precede service stop or executable replacement.
+        identity_after_install = service_identity()
+        state_bytes = command("cat", state_path, root=True)
+        try:
+            command("tee", state_path, root=True, input=b"invalid fixture state\n")
+            refused = subprocess.run(["sudo", "-n", *map(str, install_arguments)],
+                                     capture_output=True, timeout=60, check=False)
+            require(refused.returncode != 0 and b"read-only candidate preflight failed" in refused.stderr,
+                    "corrupt initialized state did not fail preflight")
+            require(b"Fresh setup" not in refused.stdout and b"Existing configuration preserved" not in refused.stdout,
+                    "failed preflight printed success guidance")
+            require(service_identity() == identity_after_install, "corrupt-state refusal changed service")
+        finally:
+            command("tee", state_path, root=True, input=state_bytes)
+        require(command("sha256sum", state_path, root=True) == state_hash, "fixture state was not restored")
+        command("systemctl", "stop", UNIT, root=True, timeout=160)
+        refused = subprocess.run(["sudo", "-n", *map(str, install_arguments)],
+                                 capture_output=True, timeout=60, check=False)
+        require(refused.returncode != 0 and b"existing initialized service must be running" in refused.stderr,
+                "stopped initialized service bypassed identity preflight")
+        require(property_value("MainPID") == "0", "refused reinstall started stopped service")
+        require(command("sha256sum", state_path, root=True) == state_hash, "refused reinstall changed state")
+        print("Initialized HTTPS reinstall guidance, verified TLS, state/SQLite preservation and preflight refusal passed.")
         directory_mode = command("stat", "-c", "%u:%g:%a", EXTERNAL, root=True).decode().strip()
         require(directory_mode == f"0:{group_gid}:750", "external certificate directory ownership changed")
         for name in ("cert.pem", "key.pem"):
@@ -340,6 +428,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ephemeral-ci", required=True, action="store_true")
     parser.add_argument("fixture", type=Path)
+    parser.add_argument("installer", type=Path)
+    parser.add_argument("binary", type=Path)
+    parser.add_argument("helper", type=Path)
+    parser.add_argument("build_info", type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     def interrupted(number, frame):
@@ -347,7 +439,7 @@ def main():
 
     for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, interrupted)
-    exercise(args.fixture)
+    exercise(args.fixture, args.installer, args.binary, args.helper, args.build_info)
 
 
 if __name__ == "__main__":

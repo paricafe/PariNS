@@ -30,12 +30,14 @@ provider or hosted service.
 
 ## Status
 
-Version 0.1.4 adds persistent history and statistics, clean cache snapshots,
+Version 0.1.5 adds managed Linux software-update checks and first-time updater
+enrollment, HTTPS filtering subscriptions, and the related console controls.
+Version 0.1.4 added persistent history and statistics, clean cache snapshots,
 certificate reload, exact-subnet caching for missing ECS, and unified DoH HTTP/3.
 The installer uses the exclusive `/var/lib/parins-managed` state directory and
 rejects old managed layouts and unknown directories before making changes.
 There is no automatic migration. Read the
-[upgrade notice](CHANGELOG.md#v014--2026-09-24) before installing over an older version.
+[upgrade notices](CHANGELOG.md#v015--2026-10-08) before installing over an older version.
 
 Management uses HTTP unless inbound DoH has a valid certificate and a matching
 `[web].public_host`. Restrict access to administrators and use local access or an
@@ -43,8 +45,9 @@ SSH tunnel for credentials and private-key entry until HTTPS is configured.
 The former standalone `[doh3]` setting is replaced by `[doh].http3 = true`.
 
 PariNS remains in active initial development. Automated Linux and macOS checks
-and isolated Linux systemd installation checks cover releases; production
-deployment and target-machine capacity acceptance have not been performed.
+and isolated Linux systemd installation checks cover releases; they do not
+establish capacity on a target machine or complete the official two-version
+updater acceptance.
 `[upstreams]` is required, and old single-upstream settings are not accepted.
 Start with the bundled example or the setup wizard.
 
@@ -56,11 +59,14 @@ deploying.
 
 ## Quick start
 
-### Unreleased development: software updates
+### Software updates (v0.1.5)
 
-The working development version adds managed-mode release checks and a restricted
-Linux updater. These changes are **not included in v0.1.4**. Real Linux update,
-recovery and resource acceptance must pass before this feature is released.
+Starting with v0.1.5, managed Linux installations can check for software
+updates and use a restricted updater. This is the first updater-capable official
+version. A complete official
+same-epoch update, rollback, and two-version data round trip still require a
+later, independently changed compatible release. Isolated development-build
+recovery checks do not prove that official path.
 
 `[updates]` defaults to `auto_check = true` and `check_interval_hours = 6`
 (1–168 hours). Checks begin only after managed setup, contact the official GitHub
@@ -79,7 +85,7 @@ use automatic binary rollback; it does not restore an old database or discard
 new query history. HTTPS and SHA256 establish transport and content integrity,
 not an independent publisher signature.
 
-The development installer accepts `--enable-updater` only for the exact official
+The v0.1.5 installer accepts `--enable-updater` only for the exact official
 v0.1.4 managed unit and fixed installation paths. Run it from a verified **newer**
 package; the v0.1.4 download does not implement this option. The installer keeps
 the same state directory and certificate access, performs read-only preflight as
@@ -164,7 +170,7 @@ to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
 needed. Reinstalling the current managed layout preserves the account and
 configuration. Upgrading an older layout requires explicit preparation as
 described in the upgrade notice; the installer will reject it without migration.
-Pin a version with `sudo sh parins-install.sh --version v0.1.4`.
+Pin a version with `sudo sh parins-install.sh --version v0.1.5`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`
@@ -582,11 +588,11 @@ the cache retains the original upstream answer, never a filtered replacement.
 DNAME and HTTPS/SVCB TargetName traversal are not implemented; query-name and
 CNAME checks alone are not a complete DNS/application firewall.
 
-### Unreleased development: online subscriptions
+### Online subscriptions (v0.1.5)
 
-The development console supports HTTPS rule subscriptions alongside local rules.
-This is **not included in v0.1.4**. Performance and isolated Linux acceptance remain
-release gates; do not interpret the compact index as a target-machine capacity claim.
+The console supports HTTPS rule subscriptions alongside local rules. Automated
+fixed-resource performance and isolated Linux checks do not establish capacity
+on a target machine; do not interpret the compact index as a capacity claim.
 No lists are bundled, and the default empty source list makes no network requests.
 The local filter switch controls only local rules; enabled local allow rules also
 take precedence over subscription blocks.

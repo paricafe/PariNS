@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## v0.1.5 — 2026-10-08
+
+### Upgrade notice
+
+- This is the first release with the managed Linux updater. The official v0.1.4
+  release has no updater; enroll an existing exact v0.1.4 managed installation
+  manually from a verified v0.1.5 package with `install.sh --enable-updater`.
+  Custom layouts are not adopted, and no data or configuration migration is
+  performed. Keep a separate backup before enrollment. If enrollment fails after
+  the new binary has run, v0.1.4 is not restarted automatically against data it
+  may no longer understand.
+- The first updater-capable release cannot itself prove an official same-epoch
+  two-version update or rollback. End-to-end A-to-B update, reverse data access,
+  and rollback acceptance require a later independently changed official release
+  with a compatible durable contract. Isolated development-build recovery checks
+  do not substitute for that official version pair.
+
+### Added and changed
+
 - Add managed-mode official release checks and a restricted Linux updater with
   read-only preflight, durable update intent and bounded recovery.
 - Add bilingual software-update controls and update-only hot settings without
@@ -36,8 +55,9 @@
   preflights when the installer runs under dash.
 - Duplicate the updater's inherited installation lock with close-on-exec set
   atomically, preventing concurrent child execution from retaining the lock.
-- Performance and disposable Linux lifecycle acceptance remain release gates.
-  These development changes are not included in v0.1.4.
+- Automated checks and isolated Linux fixtures do not establish capacity on a
+  deployment host. Validate performance against the intended workload and
+  resources before relying on this release for that host.
 
 ## v0.1.4 — 2026-09-24
 

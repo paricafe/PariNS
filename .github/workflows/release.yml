@@ -98,6 +98,7 @@ jobs:
           sh scripts/package.sh --version "$VERSION" --target "$TARGET"
           archive="parins-$VERSION-linux-$ARCH"
           (cd target/packages && sha256sum --check "$archive.tar.gz.sha256")
+          sh scripts/test-bootstrap.sh --package "$PWD/target/packages/$archive.tar.gz"
           mkdir -p target/release-acceptance
           tar -xzf "target/packages/$archive.tar.gz" -C target/release-acceptance
           sh scripts/test-systemd.sh --ephemeral-ci --package "$PWD/target/release-acceptance/$archive"
@@ -201,4 +202,4 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/bootstrap.sh" -o "$script"
           sh "$script" --root "$stage"
           test -x "$stage/opt/parins-managed/parins"
-          "$stage/opt/parins-managed/parins" --version
+          test "$("$stage/opt/parins-managed/parins" --version)" = "parins ${GITHUB_REF_NAME#v}"

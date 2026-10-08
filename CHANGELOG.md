@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## v0.1.6 — 2026-10-08
+
+### Fixed
+
+- Select the current release by default in the Linux bootstrap. The v0.1.5
+  bootstrap incorrectly selected v0.1.4 and then rejected that older package
+  because it does not contain the updater components.
+- Bind bootstrap regression fixtures to the Cargo version and stage each actual
+  native release package through the default bootstrap before publication.
+- Require the public quick-start check to install the exact published version.
+
+### Operational notes
+
+- DNS, filtering, updater protocols and durable-data formats are unchanged from
+  v0.1.5. Official two-version update, rollback and data round-trip acceptance
+  still require their own completed checks; publishing this patch is not proof.
+- Existing v0.1.4 installations still require explicit updater enrollment from
+  a verified newer package. Follow the
+  [v0.1.5 enrollment guidance](https://github.com/paricafe/PariNS/blob/v0.1.5/CHANGELOG.md#v015--2026-10-08)
+  and keep a separate backup; there is no automatic migration.
+
 ## v0.1.5 — 2026-10-08
 
 ### Upgrade notice

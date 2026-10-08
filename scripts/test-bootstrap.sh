@@ -1,18 +1,44 @@
 #!/bin/sh
-# Offline fixtures: mock only the network/platform; use real archives/install.sh.
+# Offline fixtures, or native package staging with only the download mocked.
 set -eu
 umask 077
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+version="v$(awk '$0 == "[package]" { package_section=1; next } /^\[/ { package_section=0 } package_section && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' "$repo/Cargo.toml")"
+package_input=
+case "$#" in
+    0) BOOTSTRAP_ARCH=x86_64 ;;
+    2)
+        [ "$1" = --package ] || { printf 'Usage: sh scripts/test-bootstrap.sh [--package ARCHIVE.tar.gz]\n' >&2; exit 1; }
+        [ "$(uname -s)" = Linux ] || { printf 'Package bootstrap acceptance requires native Linux.\n' >&2; exit 1; }
+        case "$(uname -m)" in
+            x86_64) BOOTSTRAP_ARCH=x86_64 ;;
+            aarch64|arm64) BOOTSTRAP_ARCH=aarch64 ;;
+            *) printf 'Unsupported native package architecture.\n' >&2; exit 1 ;;
+        esac
+        package_input=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd -P)/$(basename -- "$2")
+        [ -f "$package_input" ] && [ -f "$package_input.sha256" ] ;;
+    *) printf 'Usage: sh scripts/test-bootstrap.sh [--package ARCHIVE.tar.gz]\n' >&2; exit 1 ;;
+esac
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/parins-bootstrap-test.XXXXXX")
 fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
 mkdir "$fixture/tools" "$fixture/downloads" "$fixture/build" "$fixture/stage" "$fixture/refused"
 export BOOTSTRAP_FIXTURE="$fixture"
-export BOOTSTRAP_ARCH=x86_64 BOOTSTRAP_OS=Linux
+export BOOTSTRAP_ARCH BOOTSTRAP_OS=Linux BOOTSTRAP_VERSION="$version"
+if [ -z "$package_input" ]; then
 printf '%s\n' '#!/bin/sh
 case "$1" in -s) printf "%s\n" "$BOOTSTRAP_OS" ;; -m) printf "%s\n" "$BOOTSTRAP_ARCH" ;; *) exit 95 ;; esac' > "$fixture/tools/uname"
+chmod 0755 "$fixture/tools/uname"
+fi
 printf '%s\n' '#!/bin/sh
 set -eu
 [ ! -f "$BOOTSTRAP_FIXTURE/download-fails" ] || exit 22
+case "$BOOTSTRAP_ARCH" in
+    x86_64) architecture=x86_64 ;;
+    aarch64|arm64) architecture=aarch64 ;;
+    *) exit 95 ;;
+esac
+asset="parins-$BOOTSTRAP_VERSION-linux-$architecture.tar.gz"
+base_url="https://github.com/paricafe/PariNS/releases/download/$BOOTSTRAP_VERSION"
 output= url= protocol= redirect=
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -21,7 +47,7 @@ while [ "$#" -gt 0 ]; do
         --proto-redir) redirect=$2; shift 2 ;;
         --connect-timeout|--max-time) shift 2 ;;
         --fail|--silent|--show-error|--location) shift ;;
-        https://github.com/paricafe/PariNS/releases/download/v0.1.4/*) url=$1; shift ;;
+        "$base_url/$asset"|"$base_url/$asset.sha256") url=$1; shift ;;
         *) exit 94 ;;
     esac
 done
@@ -31,15 +57,31 @@ cp "$BOOTSTRAP_FIXTURE/downloads/${url##*/}" "$output"' > "$fixture/tools/curl"
 printf '%s\n' '#!/bin/sh
 printf called > "$BOOTSTRAP_FIXTURE/systemctl-called"
 exit 99' > "$fixture/tools/systemctl"
-chmod 0755 "$fixture/tools/uname" "$fixture/tools/curl" "$fixture/tools/systemctl"
+chmod 0755 "$fixture/tools/curl" "$fixture/tools/systemctl"
 PATH="$fixture/tools:$PATH"
 export PATH
 digest() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
     else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
-archive=parins-v0.1.4-linux-x86_64
+archive="parins-$version-linux-$BOOTSTRAP_ARCH"
 asset="$archive.tar.gz"
+if [ -n "$package_input" ]; then
+    [ "$(basename -- "$package_input")" = "$asset" ]
+    cp "$package_input" "$package_input.sha256" "$fixture/downloads/"
+    # No --version: the default entry point must select this actual release package.
+    (cd / && sh -s -- --root "$fixture/stage" < "$repo/scripts/bootstrap.sh")
+    for name in parins parins-updater install-build-info.json; do
+        tar -xOzf "$package_input" "$archive/$name" > "$fixture/build/$name"
+    done
+    cmp "$fixture/build/parins" "$fixture/stage/opt/parins-managed/parins"
+    cmp "$fixture/build/parins-updater" "$fixture/stage/usr/libexec/parins-updater"
+    cmp "$fixture/build/install-build-info.json" "$fixture/stage/var/lib/parins-updater/private/install-build-info.json"
+    [ "$("$fixture/stage/opt/parins-managed/parins" --version)" = "parins ${version#v}" ]
+    [ ! -e "$fixture/systemctl-called" ]
+    printf 'Native package default-bootstrap checks passed for %s. Retained fixtures: %s\n' "$version" "$fixture"
+    exit 0
+fi
 package="$fixture/build/$archive"
 mkdir "$package" "$package/deploy"
 printf '%s\n' '#!/bin/sh' 'printf called > "$BOOTSTRAP_FIXTURE/binary-called"' 'exit 99' > "$package/parins"
@@ -70,6 +112,7 @@ expect_failure() {
 }
 manifest
 pack
+sh "$repo/scripts/bootstrap.sh" --help | grep -Fq -- "[--version $version]"
 # A caller can start from any directory; dry-run stages nothing.
 (cd / && sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --dry-run)
 [ ! -e "$fixture/stage/opt" ]
@@ -80,7 +123,7 @@ mkdir -p "$fixture/stage/var/lib/parins-managed/certificates" "$fixture/stage/va
 printf 'keep private state\n' > "$fixture/stage/var/lib/parins-managed/state.json"
 printf 'keep certificate identity\n' > "$fixture/stage/var/lib/parins-managed/certificates/identity.pem"
 printf 'keep external certificate\n' > "$fixture/stage/var/lib/parins/tls/external.pem"
-sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version v0.1.4
+sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version "$version"
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json"
 grep -Fxq 'keep certificate identity' "$fixture/stage/var/lib/parins-managed/certificates/identity.pem"
 grep -Fxq 'keep external certificate' "$fixture/stage/var/lib/parins/tls/external.pem"
@@ -98,17 +141,18 @@ grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json
 mv "$package/LICENSE.beui" "$fixture/notice-copy"
 manifest
 pack
-expect_failure --version v0.1.4
+expect_failure --version "$version"
 printf '%064d  LICENSE.beui\n' 0 >> "$package/SHA256SUMS"
 pack
-expect_failure --version v0.1.4
+expect_failure --version "$version"
 mv "$fixture/notice-copy" "$package/LICENSE.beui"
 manifest
 pack
 # Both architecture mappings select their exact release asset.
-cp -R "$package" "$fixture/build/parins-v0.1.4-linux-aarch64"
-tar -czf "$fixture/downloads/parins-v0.1.4-linux-aarch64.tar.gz" -C "$fixture/build" parins-v0.1.4-linux-aarch64
-printf '%s  parins-v0.1.4-linux-aarch64.tar.gz\n' "$(digest "$fixture/downloads/parins-v0.1.4-linux-aarch64.tar.gz")" > "$fixture/downloads/parins-v0.1.4-linux-aarch64.tar.gz.sha256"
+arm_archive="parins-$version-linux-aarch64"
+cp -R "$package" "$fixture/build/$arm_archive"
+tar -czf "$fixture/downloads/$arm_archive.tar.gz" -C "$fixture/build" "$arm_archive"
+printf '%s  %s.tar.gz\n' "$(digest "$fixture/downloads/$arm_archive.tar.gz")" "$arm_archive" > "$fixture/downloads/$arm_archive.tar.gz.sha256"
 BOOTSTRAP_ARCH=aarch64 sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --dry-run
 BOOTSTRAP_ARCH=arm64 sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --dry-run
 BOOTSTRAP_ARCH=riscv64 expect_failure

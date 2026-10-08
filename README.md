@@ -30,7 +30,9 @@ provider or hosted service.
 
 ## Status
 
-Version 0.1.5 adds managed Linux software-update checks and first-time updater
+Version 0.1.6 fixes the Linux bootstrap's default release selection and checks
+the actual release package through that entry point before publication.
+Version 0.1.5 added managed Linux software-update checks and first-time updater
 enrollment, HTTPS filtering subscriptions, and the related console controls.
 Version 0.1.4 added persistent history and statistics, clean cache snapshots,
 certificate reload, exact-subnet caching for missing ECS, and unified DoH HTTP/3.
@@ -85,7 +87,7 @@ use automatic binary rollback; it does not restore an old database or discard
 new query history. HTTPS and SHA256 establish transport and content integrity,
 not an independent publisher signature.
 
-The v0.1.5 installer accepts `--enable-updater` only for the exact official
+The current installer accepts `--enable-updater` only for the exact official
 v0.1.4 managed unit and fixed installation paths. Run it from a verified **newer**
 package; the v0.1.4 download does not implement this option. The installer keeps
 the same state directory and certificate access, performs read-only preflight as
@@ -170,7 +172,7 @@ to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
 needed. Reinstalling the current managed layout preserves the account and
 configuration. Upgrading an older layout requires explicit preparation as
 described in the upgrade notice; the installer will reject it without migration.
-Pin a version with `sudo sh parins-install.sh --version v0.1.5`.
+Pin a version with `sudo sh parins-install.sh --version v0.1.6`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`

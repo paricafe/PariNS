@@ -210,7 +210,11 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   verify the affected flow in a real browser, including errors, session
   transitions, keyboard use, and small screens.
 - Installer/bootstrap: `sh scripts/test-install.sh` and
-  `sh scripts/test-bootstrap.sh`. Run `scripts/test-systemd.sh --ephemeral-ci`
+  `sh scripts/test-bootstrap.sh`. Bootstrap fixtures must use the Cargo release
+  version and exercise the default, unpinned entry point. Stage each actual
+  native release package through that entry point before publication; the public
+  quick-start check must then assert the exact published version.
+  Run `scripts/test-systemd.sh --ephemeral-ci`
   only on a disposable Linux environment, not a developer's host, using native
   musl binaries for the managed updater's installation contract.
   Run `sh scripts/test-udp.sh --ephemeral-ci` on a disposable GitHub Linux runner

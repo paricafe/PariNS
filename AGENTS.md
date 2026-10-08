@@ -278,8 +278,9 @@ checks or add complex optimizations solely for a microbenchmark score.
 
 - Write focused English commit messages, such as `docs: clarify cache ownership`.
   Report what changed, what was verified, and remaining limitations.
-- Keep user-facing behavior and compatibility notes in `README.md` and
-  `CHANGELOG.md` as appropriate. Distinguish unreleased main changes from releases.
+- Keep `README.md` focused on the overview, features, quick start and license.
+  Detailed public guides live in `guide/`; keep release and compatibility notes
+  in `CHANGELOG.md`. Distinguish unreleased main changes from releases.
 - `docs/` contains intentionally ignored local plans and progress. Do not force-add
   it; essential contributor rules must remain available in tracked files.
 - Maintain this file in the same change that alters an ownership boundary, durable

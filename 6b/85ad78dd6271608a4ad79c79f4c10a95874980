@@ -1,0 +1,43 @@
+README.md
+  s_d595d238bbd4ee::t_c1af6fe39a58ad 33-35,90,175
+scripts/bootstrap.sh
+  s_d595d238bbd4ee::t_9c4e40700bc0ff 9-10,38
+scripts/test-bootstrap.sh
+  s_d595d238bbd4ee::t_b57121fc99ea40 35-41,50,115
+  s_d595d238bbd4ee::t_fcfa02b8390fb6 2,6-21,26-27,30-31,60,67,69-84,126,144,147,152-155
+CHANGELOG.md
+  s_d595d238bbd4ee::t_c1af6fe39a58ad 5-21,25
+  s_d595d238bbd4ee::t_aa5e8253e9e60b 22-24
+Cargo.toml
+  s_d595d238bbd4ee::t_c1af6fe39a58ad 3
+AGENTS.md
+  s_d595d238bbd4ee::t_c1af6fe39a58ad 213-217
+.github/workflows/release.yml
+  s_d595d238bbd4ee::t_141c84739459c1 101,205
+Cargo.lock
+  s_903d654e7dbfb8::t_6f44ed631983d7 1033
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6b85ad78dd6271608a4ad79c79f4c10a95874980",
+  "prompts": {},
+  "sessions": {
+    "s_903d654e7dbfb8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d233-02be-7323-85be-4e768e69908b",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+scripts/test-filter-lifecycle.mjs
+  s_d595d238bbd4ee::t_ac43397eda6110 372,509
+  s_d595d238bbd4ee::t_a86aeca20649a7 12,370-371,373-376
+  s_d595d238bbd4ee::t_ccae10221a88a8 53-60,72-76,239,349,502,534-540
+scripts/lib/managed-wire.mjs
+  s_d595d238bbd4ee::t_ac43397eda6110 70,174-177
+  s_d595d238bbd4ee::t_a86aeca20649a7 1-69,71-173,178-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a8a85ef965b659ecf5b29cf4f19b67364250aaf3",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

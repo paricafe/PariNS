@@ -184,50 +184,66 @@ function sourceBinding(pid, state, current) {
   }
   return binding;
 }
-async function sourceProbe(binding, evidence) {
+async function sourcePeer(binding, address, evidence, timeoutMs) {
+  if (timeoutMs <= 0) throw fail('source_fixture_readiness_timeout');
   const url = new URL(SOURCES[1].url), controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const timeout = setTimeout(() => controller.abort(), Math.min(10000, timeoutMs));
   const signal = controller.signal;
   try {
-    // OS getaddrinfo order, as used by the Rust reader; do not race address families.
-    const addresses = await Promise.race([lookup(url.hostname, { all: true, verbatim: true }),
-      new Promise((_, reject) => signal.addEventListener('abort', () => reject(fail('source_probe_timeout')), { once: true }))]);
-    assert(addresses.length > 0 && addresses.length <= 16);
-    for (const address of addresses) {
-      let connected = false;
-      const peer = { address: address.address, family: address.family }; evidence.connection_attempts.push(peer);
-      try {
-        return await new Promise((resolve, reject) => {
-          const req = https.request(url, { method: 'GET', agent: false, signal,
-            servername: url.hostname, ALPNProtocols: ['http/1.1'], autoSelectFamily: false,
-            lookup: (_host, _options, callback) => callback(null, address.address, address.family),
-            headers: sourceHeaders(binding) }, res => {
-            evidence.probe_http_status = res.statusCode;
-            evidence.peer = { address: res.socket.remoteAddress, family: res.socket.remoteFamily };
-            const encoding = (res.headers['content-encoding'] ?? 'identity').toLowerCase();
-            evidence.probe_content_encoding = ['gzip', 'identity'].includes(encoding) ? encoding : 'unsupported';
-            let bytes = Buffer.alloc(0);
-            res.on('data', chunk => {
-              bytes = Buffer.concat([bytes, chunk]);
-              if (bytes.length > 4096) res.destroy(fail('source_fixture_body_limit'));
-            });
-            res.on('error', reject);
-            res.on('end', () => {
-              try { resolve(sourceBodySha(res.statusCode, res.headers['content-encoding'], bytes)); }
-              catch (error) { reject(error); }
-            });
-          });
-          req.on('socket', socket => socket.once('connect', () => { connected = true; peer.tcp_connected = true; }));
-          req.on('error', reject); req.end();
+    return await new Promise((resolve, reject) => {
+      const req = https.request(url, { method: 'GET', agent: false, signal,
+        servername: url.hostname, ALPNProtocols: ['http/1.1'], autoSelectFamily: false,
+        lookup: (_host, _options, callback) => callback(null, address.address, address.family),
+        headers: sourceHeaders(binding) }, res => {
+        evidence.probe_http_status = res.statusCode;
+        evidence.peer = { address: res.socket.remoteAddress, family: res.socket.remoteFamily };
+        const encoding = (res.headers['content-encoding'] ?? 'identity').toLowerCase();
+        evidence.probe_content_encoding = ['gzip', 'identity'].includes(encoding) ? encoding : 'unsupported';
+        let bytes = Buffer.alloc(0);
+        res.on('data', chunk => {
+          bytes = Buffer.concat([bytes, chunk]);
+          if (bytes.length > 4096) res.destroy(fail('source_fixture_body_limit'));
         });
-      } catch (error) {
-        peer.error = safeCode(error.code);
-        // Rust selects the first TCP-reachable address; TLS/HTTP failure does not select another peer.
-        if (connected || signal.aborted) throw error;
-      }
-    }
-    throw fail('source_probe_connect_failed');
+        res.on('error', reject);
+        res.on('end', () => {
+          try { resolve(sourceBodySha(res.statusCode, res.headers['content-encoding'], bytes)); }
+          catch (error) { reject(error); }
+        });
+      });
+      req.on('socket', socket => socket.once('connect', () => { evidence.tcp_connected = true; }));
+      req.on('error', reject); req.end();
+    });
   } finally { clearTimeout(timeout); }
+}
+function sourceScanReady(peers, expectedSha) {
+  const reachable = peers.filter(peer => peer.tcp_connected);
+  return reachable.length > 0 && reachable.every(peer => !peer.error
+    && peer.probe_http_status === 200 && peer.decoded_sha256 === expectedSha);
+}
+async function sourceProbe(binding, evidence, deadline) {
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) throw fail('source_fixture_readiness_timeout');
+  let timeout, addresses;
+  try {
+    addresses = await Promise.race([lookup(new URL(SOURCES[1].url).hostname, { all: true, verbatim: true }),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(fail('source_probe_dns_timeout')), Math.min(10000, remaining)); })]);
+  } finally { clearTimeout(timeout); }
+  assert(addresses.length > 0 && addresses.length <= 16);
+  // One OS DNS snapshot per scan; never combine successes from different scans.
+  const unique = [...new Map(addresses.map(address => [`${address.family}:${address.address}`, address])).values()];
+  evidence.resolved_addresses = unique; evidence.peers = [];
+  for (const address of unique) {
+    if (performance.now() >= deadline) throw fail('source_fixture_readiness_timeout');
+    const peer = { ...address, tcp_connected: false }; evidence.peers.push(peer);
+    try { peer.decoded_sha256 = await sourcePeer(binding, address, peer, deadline - performance.now()); }
+    catch (error) {
+      peer.error = safeCode(error.code);
+      // Only a failed TCP connection is unreachable. TLS/HTTP/decode failure cannot be excluded.
+      if (peer.tcp_connected) throw error;
+      if (performance.now() >= deadline) throw fail('source_fixture_readiness_timeout');
+    }
+  }
+  if (performance.now() >= deadline) throw fail('source_fixture_readiness_timeout');
 }
 async function sourceReady(round, expected, binding, evidence) {
   console.log(`LIFECYCLE_SOURCE_WAIT round=${round} expected=${expected}`);
@@ -236,17 +252,17 @@ async function sourceReady(round, expected, binding, evidence) {
     conditional: sourceConditional(binding), probes: [] };
   evidence.push(result);
   while (performance.now() - started < 600000) {
-    const attempt = { read: ++reads, connection_attempts: [] }; result.probes.push(attempt);
-    try { attempt.decoded_sha256 = await sourceProbe(binding, attempt); }
+    const attempt = { read: ++reads }; result.probes.push(attempt);
+    try { await sourceProbe(binding, attempt, started + 600000); }
     catch (error) { attempt.error = safeCode(error.code); throw error; }
     result.reads = reads; result.readiness_wait_ms = performance.now() - started;
-    if (attempt.probe_http_status === 200 && attempt.decoded_sha256 === result.expected_sha256) {
-      result.sha256 = attempt.decoded_sha256;
+    if (sourceScanReady(attempt.peers, result.expected_sha256)) {
+      result.sha256 = result.expected_sha256;
       console.log(JSON.stringify({ event: 'source_ready', round, expected, reads,
         sha256: result.sha256, readiness_wait_ms: result.readiness_wait_ms }));
       return result;
     }
-    await delay(5000);
+    await delay(Math.min(5000, Math.max(0, started + 600000 - performance.now())));
   }
   throw fail('source_fixture_readiness_timeout');
 }
@@ -643,6 +659,17 @@ function selfTest() {
   assert.throws(() => sourceBodySha(200, 'br', Buffer.from(CONTENT.A)));
   assert.throws(() => sourceBodySha(200, 'gzip', gzipSync(Buffer.alloc(4097))));
   assert.throws(() => sourceBodySha(200, 'identity', Buffer.alloc(4097)));
+  const fresh = { tcp_connected: true, probe_http_status: 200, decoded_sha256: digest(CONTENT.B) };
+  const stale = { ...fresh, decoded_sha256: digest(CONTENT.A) };
+  const unchanged = { ...fresh, probe_http_status: 304, decoded_sha256: null };
+  const unreachable = { tcp_connected: false, error: 'ECONNREFUSED' };
+  assert.equal(sourceScanReady([fresh, fresh], digest(CONTENT.B)), true);
+  assert.equal(sourceScanReady([unreachable, fresh], digest(CONTENT.B)), true);
+  assert.equal(sourceScanReady([fresh, unchanged], digest(CONTENT.B)), false);
+  assert.equal(sourceScanReady([fresh, stale], digest(CONTENT.B)), false);
+  assert.equal(sourceScanReady([unreachable], digest(CONTENT.B)), false);
+  assert.equal(sourceScanReady([], digest(CONTENT.B)), false);
+  assert.equal(sourceScanReady([fresh, { tcp_connected: true, error: 'CERT_HAS_EXPIRED' }], digest(CONTENT.B)), false);
   assert.match(configText(1234, true, true, 1), /query_timeout_ms=20000/);
   for (const source of SOURCES) {
     assert(configText(1234, true, true, 1).includes(`id='${source.id}'\nname='${source.id}'`));

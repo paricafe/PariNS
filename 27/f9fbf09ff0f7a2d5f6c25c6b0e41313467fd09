@@ -1,0 +1,27 @@
+scripts/test-filter-lifecycle.mjs
+  s_d595d238bbd4ee::t_3171e01e3bb715 579,582,591-593,632,638-645,650,653,687-688
+  s_d595d238bbd4ee::t_640be4dfb4e28e 329,332-333,385-388,398-402
+  s_d595d238bbd4ee::t_fdf70406b2ca2f 17-18,29,144-145,297,299,303-328,330-331,334-384,389-397,403-412
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_b7ac4f980b0ccb 422
+AGENTS.md
+  s_d595d238bbd4ee::t_6e39cf8131b17e 227-229
+.github/workflows/filter-lifecycle.yml
+  s_d595d238bbd4ee::t_6e39cf8131b17e 41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "27f9fbf09ff0f7a2d5f6c25c6b0e41313467fd09",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

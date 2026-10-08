@@ -12,6 +12,127 @@ const jsonResponse = (value: unknown) => ({ ok: true, status: 200, json: async (
 afterEach(() => { vi.unstubAllGlobals(); updateReload.mockClear(); });
 
 describe('session transition', () => {
+  it('rotates with the exact payload, clears only the local binding and requires an explicit new login', async () => {
+    const messages: unknown[] = [];
+    vi.stubGlobal('BroadcastChannel', class {
+      onmessage = null;
+      postMessage(value: unknown) { messages.push(value); }
+      close() {}
+    });
+    let loggedIn = false;
+    const fetcher = vi.fn(async (url: string) => {
+      if (url === '/api/session') return jsonResponse(loggedIn ? { ...session, session: { ...session.session, binding: 'new-binding' } } : session);
+      if (url === '/api/account/credentials') return jsonResponse({ reauthentication_required: true });
+      if (url === '/api/login') { loggedIn = true; return jsonResponse({}); }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    await act(async () => { await hook.result.current.rotateCredentials('current-password', 'new_admin', 'new-password-long'); });
+    expect(hook.result.current.state).toMatchObject({ phase: 'login', credentials: 'changed' });
+    expect(hook.result.current.api.currentBinding).toBeNull();
+    const sent = (fetcher.mock.calls as unknown as [string, RequestInit][]).find(([url]) => url === '/api/account/credentials')![1];
+    expect(JSON.parse(sent.body as string)).toEqual({ current_password: 'current-password', username: 'new_admin', new_password: 'new-password-long' });
+    expect(sent.headers).toMatchObject({ 'X-PariNS-Session': 'binding-1' });
+    expect(messages).toEqual(['changed']);
+    const calls = fetcher.mock.calls.length;
+    await act(async () => { await hook.result.current.recheck(); });
+    expect(fetcher.mock.calls).toHaveLength(calls);
+    await act(async () => { await hook.result.current.login('new_admin', 'new-password-long'); });
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/login')).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/logout')).toHaveLength(0);
+    expect(hook.result.current.api.currentBinding).toBe('new-binding');
+    expect(hook.result.current.state.phase).toBe('ready');
+    hook.unmount();
+  });
+
+  it.each(['NETWORK', 'BAD_RESPONSE'])('does not replay a credential mutation with %s and checks entered credentials despite an old Cookie', async (code) => {
+    const fetcher = vi.fn(async (url: string) => {
+      if (url === '/api/session') return jsonResponse(session);
+      if (url === '/api/account/credentials') {
+        if (code === 'NETWORK') throw new TypeError('response lost');
+        return jsonResponse({});
+      }
+      if (url === '/api/login') return ({ ok: false, status: 401, json: async () => ({ error: { code: 'LOGIN_FAILED', message: 'Not changed yet' } }) }) as Response;
+      throw new Error(`Unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    await act(async () => { await expect(hook.result.current.rotateCredentials('current-password', 'new_admin', 'new-password-long')).rejects.toMatchObject({ code }); });
+    expect(hook.result.current.state).toMatchObject({ phase: 'login', credentials: 'unknown' });
+    expect(hook.result.current.api.currentBinding).toBeNull();
+    await act(async () => { await hook.result.current.recheck(); });
+    await act(async () => { await expect(hook.result.current.login('new_admin', 'new-password-long')).rejects.toMatchObject({ code: 'LOGIN_FAILED' }); });
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/account/credentials')).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/login')).toHaveLength(1);
+    expect(hook.result.current.state).toMatchObject({ phase: 'login', credentials: 'unknown' });
+    hook.unmount();
+  });
+
+  it('keeps a wrong-current-password 403 signed in while a revoked-session 401 follows normal session recovery', async () => {
+    let revoked = false;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/session') return jsonResponse(revoked ? { ...session, authenticated: false, session: null } : session);
+      return ({ ok: false, status: revoked ? 401 : 403, json: async () => ({ error: { code: revoked ? 'UNAUTHORIZED' : 'CURRENT_PASSWORD_INCORRECT', message: 'Rejected' } }) }) as Response;
+    }));
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    await act(async () => { await expect(hook.result.current.rotateCredentials('incorrect', 'admin', 'new-password-long')).rejects.toMatchObject({ status: 403, code: 'CURRENT_PASSWORD_INCORRECT' }); });
+    expect(hook.result.current.state.phase).toBe('ready');
+    expect(hook.result.current.api.currentBinding).toBe('binding-1');
+    revoked = true;
+    await act(async () => { await hook.result.current.rotateCredentials('current-password', 'admin', 'new-password-long').catch(() => {}); });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('login'));
+    expect(hook.result.current.state.credentials).toBeUndefined();
+    hook.unmount();
+  });
+
+  it('never lets a delayed old rotation response replace the newer session announced by another tab', async () => {
+    let broadcast!: { onmessage: ((event: { data: string }) => void) | null };
+    vi.stubGlobal('BroadcastChannel', class {
+      onmessage = null;
+      constructor() { broadcast = this; }
+      postMessage() {}
+      close() {}
+    });
+    let finish!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => { finish = resolve; });
+    let active = session;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url === '/api/session' ? jsonResponse(active) : response));
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    let rotation!: Promise<unknown>;
+    act(() => { rotation = hook.result.current.rotateCredentials('current-password', 'admin', 'new-password-long').catch((error: unknown) => error); });
+    active = { ...session, session: { ...session.session, binding: 'later-login' } };
+    act(() => { broadcast.onmessage?.({ data: 'changed' }); });
+    await waitFor(() => expect(hook.result.current.api.currentBinding).toBe('later-login'));
+    await act(async () => { finish(jsonResponse({ reauthentication_required: true })); expect(await rotation).toMatchObject({ name: 'StaleRequest' }); });
+    expect(hook.result.current.api.currentBinding).toBe('later-login');
+    expect(hook.result.current.state.phase).toBe('ready');
+    expect(hook.result.current.state.credentials).toBeUndefined();
+    hook.unmount();
+  });
+
+  it('does not mask or interrupt a pending credential mutation when logout is clicked after closing its form', async () => {
+    let finish!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => { finish = resolve; });
+    const fetcher = vi.fn(async (url: string) => url === '/api/session' ? jsonResponse(session) : response);
+    vi.stubGlobal('fetch', fetcher);
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    let rotation!: Promise<void>;
+    act(() => { rotation = hook.result.current.rotateCredentials('current-password', 'admin', 'new-password-long'); });
+    await act(async () => { await expect(hook.result.current.logout()).rejects.toMatchObject({ code: 'BUSY' }); });
+    expect(hook.result.current.api.currentBinding).toBe('binding-1');
+    expect(hook.result.current.state.phase).toBe('ready');
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/logout')).toHaveLength(0);
+    await act(async () => { finish(jsonResponse({ reauthentication_required: true })); await rotation; });
+    expect(hook.result.current.state).toMatchObject({ phase: 'login', credentials: 'changed' });
+    hook.unmount();
+  });
+
   it('reloads the embedded console only when an armed update reconnects to an expired session', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => url === '/api/session' ? jsonResponse(session)
       : ({ ok: false, status: 401, json: async () => ({ error: { code: 'UNAUTHORIZED', message: 'Sign in' } }) }) as Response));

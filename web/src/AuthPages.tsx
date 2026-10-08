@@ -11,7 +11,7 @@ function present(error: unknown, language: Language): string {
 }
 
 export function LoginPage({ language }: { language: Language }) {
-  const { login } = useSession();
+  const { login, state } = useSession();
   const [username, setUsername] = useState(''); const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const t = (key: string) => translate(`ui.${key}`, language);
@@ -23,6 +23,7 @@ export function LoginPage({ language }: { language: Language }) {
   };
   return <section className="auth-wrap"><div className="auth-card">
     <p className="eyebrow">{t('welcome')}</p><h1>{t('loginTitle')}</h1><p className="muted">{t('loginIntro')}</p>
+    {state.credentials && <p className="notice" role="status">{translate(`account.${state.credentials}`, language)}</p>}
     <form onSubmit={(event) => void submit(event)} className="auth-form">
       <label htmlFor="login-username">{t('username')}</label><input id="login-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required maxLength={64} />
       <label htmlFor="login-password">{t('password')}</label><input id="login-password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required />

@@ -201,16 +201,33 @@ pub(super) fn secret() -> String {
 }
 
 pub(super) fn hash_password(password: &str) -> Result<String> {
-    ensure!(
-        (12..=256).contains(&password.len()),
-        "password must contain 12 to 256 bytes"
-    );
+    validate_password(password)?;
     let salt = SaltString::encode_b64(&rand::random::<[u8; 16]>())
         .map_err(|_| anyhow::anyhow!("generate password salt"))?;
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
         .map_err(|_| anyhow::anyhow!("hash management password"))
+}
+
+pub(super) fn validate_username(username: &str) -> Result<()> {
+    ensure!(
+        !username.is_empty()
+            && username.len() <= 64
+            && username
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "Username must be 1..64 ASCII letters, digits, hyphen or underscore"
+    );
+    Ok(())
+}
+
+pub(super) fn validate_password(password: &str) -> Result<()> {
+    ensure!(
+        (12..=256).contains(&password.len()),
+        "password must contain 12 to 256 bytes"
+    );
+    Ok(())
 }
 
 fn valid_hash(hash: &str) -> Option<PasswordHash<'_>> {

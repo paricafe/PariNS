@@ -1,8 +1,8 @@
 //! Management owns admission, mutation ordering and the lifetime of rule work.
 //! Downloads and compilation never hold the Manager or mutation lock.
-use super::{ApiError, Shared, decode, error};
+use super::{ApiError, Shared, Snapshot, decode, error};
 use crate::filter_subscriptions::service::{DraftSource, WorkRequest};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -28,7 +28,13 @@ struct Check {
     name: String,
 }
 
-pub(super) async fn api(shared: Arc<Shared>, path: &str, body: &[u8]) -> Result<Value, ApiError> {
+pub(super) async fn api(
+    shared: Arc<Shared>,
+    transport: Arc<Snapshot>,
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+) -> Result<Value, ApiError> {
     match path {
         "/api/filter/check" => {
             let input: Check = decode(body)?;
@@ -49,6 +55,7 @@ pub(super) async fn api(shared: Arc<Shared>, path: &str, body: &[u8]) -> Result<
                     config_revision: input.config_revision,
                     source: input.source,
                 },
+                Some((headers, &transport)),
             )
             .await
         }
@@ -61,6 +68,7 @@ pub(super) async fn api(shared: Arc<Shared>, path: &str, body: &[u8]) -> Result<
                     source_id: input.source_id,
                     automatic: false,
                 },
+                Some((headers, &transport)),
             )
             .await
         }
@@ -68,8 +76,15 @@ pub(super) async fn api(shared: Arc<Shared>, path: &str, body: &[u8]) -> Result<
     }
 }
 
-async fn start(shared: Arc<Shared>, request: WorkRequest) -> Result<Value, ApiError> {
-    let permit = shared.mutation_permit().await?;
+async fn start(
+    shared: Arc<Shared>,
+    request: WorkRequest,
+    authorization: Option<(&HeaderMap, &Snapshot)>,
+) -> Result<Value, ApiError> {
+    let permit = match authorization {
+        Some((headers, transport)) => shared.protected_mutation_permit(headers, transport).await?,
+        None => shared.mutation_permit().await?,
+    };
     // Admission may fsync catalog maintenance. Its permit and registration must
     // survive the initiating HTTP connection, just like configuration apply.
     tokio::spawn(async move {
@@ -136,7 +151,7 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
             }
         };
         if let Some(request) = request {
-            let _ = start(shared.clone(), request).await;
+            let _ = start(shared.clone(), request, None).await;
         }
         tokio::select! {
             _ = stop.changed() => {},
@@ -308,6 +323,7 @@ mod tests {
                     source_id: None,
                     automatic: false,
                 },
+                None,
             )
             .await
         });
@@ -330,6 +346,45 @@ mod tests {
         .await
         .unwrap();
         assert!(shared.filter_tasks.lock().await.is_empty());
+        // Revocation blocks manual admission but leaves the process scheduler
+        // able to own and finish work without any administrator session.
+        active.lock().unwrap().sessions.clear();
+        let manual = start(
+            shared.clone(),
+            WorkRequest::Refresh {
+                config_revision: 0,
+                source_id: None,
+                automatic: false,
+            },
+            Some((&headers, &transport)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(manual.1, "UNAUTHORIZED");
+        start(
+            shared.clone(),
+            WorkRequest::Refresh {
+                config_revision: 0,
+                source_id: None,
+                automatic: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        while shared.filter_tasks.lock().await.join_next().await.is_some() {}
+        assert_eq!(
+            shared
+                .manager
+                .lock()
+                .await
+                .filters
+                .snapshot()
+                .recent_operation
+                .unwrap()
+                .status,
+            "succeeded"
+        );
         shared.manager.lock().await.terminal_shutdown().await;
     }
 }

@@ -1,4 +1,5 @@
 export const apiMessages = {
+  CURRENT_PASSWORD_INCORRECT: ['当前密码不正确，请重新输入。', 'The current password is incorrect. Please try again.'],
   CERTIFICATE_INVALID: ['证书材料验证失败，请检查证书、公私钥和有效期。{detail}', 'Certificate validation failed. Check the certificate, key pair and validity dates. {detail}'],
   CERTIFICATE_NAME_MISMATCH: ['证书 SAN 与当前管理台域名不匹配。', 'The certificate SAN does not match the current console hostname.'],
   STORAGE_UNAVAILABLE: ["历史存储暂不可用：{detail}", "History storage is unavailable: {detail}"],

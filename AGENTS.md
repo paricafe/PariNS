@@ -106,6 +106,16 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   Web Locks for cross-tab ordering. Never persist or broadcast the binding.
   An unknown configuration result is not proof of failure and must not be
   silently replayed.
+- Account credential changes are separate Store transactions, never DNS configuration
+  apply. Reuse the hash/attempt budget outside Manager locks; recheck the verified
+  username/hash and session at serialized admission. After Store's rename commit,
+  publish saved credentials and revoke all sessions without awaiting, in Manager
+  then Active lock order. Preserve TOML, previous and configuration revision.
+  Session issuance must recheck its credential snapshot; protected manual mutations
+  must recheck session/realm at admission, including special updater paths, without
+  imposing sessions on schedulers or revoking already accepted background work.
+  Success or unknown credential outcomes require explicit login, never replay,
+  Cookie clearing, replacement sessions or broadcasting sensitive inputs.
 - Authentication attempt budgets use the socket peer, never forwarding headers.
   Bound and reclaim source state separately from global password-hash concurrency;
   blocking hash work owns its permit until it finishes, even after caller cancellation.

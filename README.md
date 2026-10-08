@@ -30,6 +30,9 @@ provider or hosted service.
 
 ## Status
 
+Unreleased development changes add online administrator credential rotation.
+These changes are not part of the published v0.1.6 packages.
+
 Version 0.1.6 fixes the Linux bootstrap's default release selection and checks
 the actual release package through that entry point before publication.
 Version 0.1.5 added managed Linux software-update checks and first-time updater
@@ -263,6 +266,27 @@ uses a per-session binding to prevent stale tabs from writing under a new login.
 There are no external frontend assets. Opt-in query history is held in private
 server-side SQLite storage, not browser storage. An unsaved configuration draft does not survive a
 full page refresh.
+
+### Administrator credentials (unreleased)
+
+Use **Admin account** in the console to change the username and password.
+Enter the current password and the desired username/new password; confirm the new
+password in the form. Usernames use 1–64 ASCII letters, digits, hyphens or underscores;
+new passwords use the existing 12–256 byte limit. Save or explicitly discard any
+configuration draft first. Account changes are separate from DNS configuration.
+
+A successful change revokes every existing session, including the current tab,
+and requires signing in with the new credentials. It does not clear the browser
+Cookie or issue a replacement session. A wrong current password keeps the valid
+session open. If the connection fails before the result is known, do not repeat
+the change automatically: sign in explicitly with the intended credentials to
+confirm the outcome. Passwords and session bindings are neither stored in browser
+storage nor sent through cross-tab notifications.
+
+Credential rotation preserves configuration revision and rollback history, DNS
+listeners and caches, runtime SQLite, certificates, subscriptions and software-update
+state. Rolling back a DNS configuration does not roll back the account credentials.
+There is no supported forgotten-password/offline recovery flow in this change.
 
 The React console supports Simplified Chinese and English, plus light, dark and
 system-following appearance. Use the selectors at the top of any page, including

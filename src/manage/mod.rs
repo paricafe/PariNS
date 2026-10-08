@@ -1,4 +1,5 @@
 //! Authenticated management plane. DNS forwarding remains in Server/Resolver.
+mod account;
 mod auth_budget;
 mod cache;
 mod certificates;
@@ -241,6 +242,18 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::result::Result<T,
 }
 
 impl Shared {
+    async fn protected_mutation_permit(
+        &self,
+        headers: &HeaderMap,
+        transport: &Snapshot,
+    ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+        let permit = self.mutation_permit().await?;
+        // Initial HTTP authentication may precede another account transaction.
+        // Recheck after the await; this permit excludes rotation until completion.
+        self.authorized(headers, transport)?;
+        Ok(permit)
+    }
+
     /// Keep the freeze check inside the same permit used for the mutation.
     async fn mutation_permit(
         &self,
@@ -566,13 +579,21 @@ async fn api(
                     "Invalid credentials",
                 ));
             }
-            let saved = shared.manager.lock().await.saved.clone().ok_or_else(|| {
-                error(
-                    StatusCode::CONFLICT,
-                    "SETUP_REQUIRED",
-                    "Complete setup first",
-                )
-            })?;
+            let saved = shared
+                .manager
+                .lock()
+                .await
+                .saved
+                .as_ref()
+                .map(account::Credentials::from)
+                .ok_or_else(|| {
+                    error(
+                        StatusCode::CONFLICT,
+                        "SETUP_REQUIRED",
+                        "Complete setup first",
+                    )
+                })?;
+            let verified = saved.clone();
             let valid = shared
                 .auth
                 .password_work(move || {
@@ -588,6 +609,16 @@ async fn api(
                     "Invalid credentials",
                 ));
             }
+            let manager = shared.manager.lock().await;
+            if !verified.matches(manager.saved.as_ref()) {
+                return Err(error(
+                    StatusCode::UNAUTHORIZED,
+                    "LOGIN_FAILED",
+                    "Invalid credentials",
+                ));
+            }
+            // Keep Manager -> Active ordering through issuance. A completed
+            // verification of a replaced hash cannot establish a new session.
             let session = shared.session(&transport)?;
             *cookie = Some(session.token.clone());
             return Ok(with_transport(
@@ -606,6 +637,7 @@ async fn api(
             let permit = shared.mutation_permit().await?;
             let control = shared.clone();
             let host = host.to_owned();
+            let original = transport.clone();
             let result = tokio::spawn(async move {
                 let _permit = permit;
                 let mut manager = control.manager.lock().await;
@@ -624,17 +656,7 @@ async fn api(
                         "Invalid setup token",
                     ));
                 }
-                if setup.username.is_empty()
-                    || setup.username.len() > 64
-                    || !setup
-                        .username
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                {
-                    return Err(invalid(anyhow::anyhow!(
-                        "Username must be 1..64 ASCII letters, digits, hyphen or underscore",
-                    )));
-                }
+                store::validate_username(&setup.username).map_err(invalid)?;
                 let hash = control
                     .auth
                     .password_work(move || store::hash_password(&setup.password))
@@ -653,17 +675,21 @@ async fn api(
                     })
                     .await
                     .map_err(invalid)?;
-                Ok::<_, ApiError>(change)
+                let next = control.active.lock().unwrap().snapshot.clone();
+                let session = if next.realm == original.realm {
+                    Some(control.session(&original)?)
+                } else {
+                    None
+                };
+                Ok::<_, ApiError>((change, next, session))
             })
             .await
             .map_err(|_| internal())?;
-            let change = result?;
-            let next = shared.active.lock().unwrap().snapshot.clone();
-            if next.realm != transport.realm {
+            let (change, next, session) = result?;
+            let Some(session) = session else {
                 return Ok(json!({"setup_required":false,"authenticated":false,
                     "session":null,"transport":next.view(),"transport_change":change}));
-            }
-            let session = shared.session(&transport)?;
+            };
             *cookie = Some(session.token.clone());
             let mut view = with_transport(session_view(false, Some(&session)), &transport);
             view["transport_change"] = change;
@@ -681,6 +707,13 @@ async fn api(
     }
     shared.authorized(headers, &transport)?;
     match (method, path) {
+        ("GET", "/api/account") => {
+            let manager = shared.manager.lock().await;
+            Ok(json!({"username":manager.saved.as_ref().ok_or_else(internal)?.username}))
+        }
+        ("POST", "/api/account/credentials") => {
+            account::rotate(shared, transport, peer, headers, body).await
+        }
         ("GET", "/api/filter/subscriptions") => {
             Ok(json!(shared.manager.lock().await.filters.snapshot()))
         }
@@ -689,7 +722,7 @@ async fn api(
             "/api/filter/subscriptions/prepare"
             | "/api/filter/subscriptions/refresh"
             | "/api/filter/check",
-        ) => filters::api(shared, path, body).await,
+        ) => filters::api(shared, transport, headers, path, body).await,
         ("GET", "/api/updates") => Ok(shared.manager.lock().await.updates.view()),
         ("POST", "/api/updates/apply") => {
             let input: updates::operation::Apply = decode(body)?;
@@ -699,6 +732,7 @@ async fn api(
                 shared.mutation.clone().try_acquire_owned().map_err(|_| {
                     error(StatusCode::CONFLICT, "BUSY", "Another change is running")
                 })?;
+            shared.authorized(headers, &transport)?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let operation_id = updates::operation::accept(&shared, input)
@@ -714,19 +748,31 @@ async fn api(
             #[serde(deny_unknown_fields)]
             struct Check {}
             let _: Check = decode(body)?;
-            let updates = shared.manager.lock().await.updates.clone();
-            updates.request_check().await.map_err(|(code, retry)| {
-                error(
-                    if code == "rate_limited" {
-                        StatusCode::TOO_MANY_REQUESTS
-                    } else {
-                        StatusCode::SERVICE_UNAVAILABLE
-                    },
-                    code,
-                    format!("{code}; retry_at_ms={retry}"),
-                )
-            })?;
-            Ok(json!({"accepted":true,"status_url":"/api/updates"}))
+            // Checks retain their existing freeze semantics, but their durable
+            // manual request shares mutation admission and detached ownership.
+            let permit =
+                shared.mutation.clone().try_acquire_owned().map_err(|_| {
+                    error(StatusCode::CONFLICT, "BUSY", "Another change is running")
+                })?;
+            shared.authorized(headers, &transport)?;
+            tokio::spawn(async move {
+                let _permit = permit;
+                let updates = shared.manager.lock().await.updates.clone();
+                updates.request_check().await.map_err(|(code, retry)| {
+                    error(
+                        if code == "rate_limited" {
+                            StatusCode::TOO_MANY_REQUESTS
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        },
+                        code,
+                        format!("{code}; retry_at_ms={retry}"),
+                    )
+                })?;
+                Ok(json!({"accepted":true,"status_url":"/api/updates"}))
+            })
+            .await
+            .map_err(|_| internal())?
         }
         ("GET", "/api/status") => {
             let manager = shared.manager.lock().await;
@@ -767,7 +813,9 @@ async fn api(
                     (v.revision, v.history_epoch, 2)
                 }
             };
-            let permit = shared.mutation_permit().await?;
+            let permit = shared
+                .protected_mutation_permit(headers, &transport)
+                .await?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let manager = shared.manager.lock().await;
@@ -798,7 +846,9 @@ async fn api(
                 revision: u64,
             }
             let input: Reload = decode(body)?;
-            let permit = shared.mutation_permit().await?;
+            let permit = shared
+                .protected_mutation_permit(headers, &transport)
+                .await?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let mut manager = shared.manager.lock().await;
@@ -816,7 +866,9 @@ async fn api(
         }
         ("POST", "/api/certificates/import") => {
             let input: CertificateImport = decode(body)?;
-            let permit = shared.mutation_permit().await?;
+            let permit = shared
+                .protected_mutation_permit(headers, &transport)
+                .await?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let manager = shared.manager.lock().await;
@@ -859,7 +911,9 @@ async fn api(
         ("POST", "/api/cache/invalidate") => {
             let input: cache::Invalidate = decode(body)?;
             let (name, kind, scope) = input.selection().map_err(invalid)?;
-            let _permit = shared.mutation_permit().await?;
+            let _permit = shared
+                .protected_mutation_permit(headers, &transport)
+                .await?;
             let manager = shared.manager.lock().await;
             if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
                 return Err(error(
@@ -947,7 +1001,9 @@ async fn api(
                 let r: Change = decode(body)?;
                 (Some(r.toml), r.revision, r.allow_http_downgrade)
             };
-            let permit = shared.mutation_permit().await?;
+            let permit = shared
+                .protected_mutation_permit(headers, &transport)
+                .await?;
             let host = host.to_owned();
             tokio::spawn(async move {
                 let _permit = permit;

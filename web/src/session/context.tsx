@@ -3,12 +3,13 @@ import { ApiClient, ApiError, CookieUnavailable, StaleRequest, type SessionView,
 import { reloadConsole } from '../features/updates/reload';
 
 export type SessionPhase = 'checking' | 'setup' | 'setup-unknown' | 'login' | 'ready' | 'connection-error' | 'cookie-unavailable' | 'logout-unknown' | 'transport-change';
-export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string; transport?: TransportView; nextOrigin?: string | null }
+export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string; transport?: TransportView; nextOrigin?: string | null; credentials?: 'changed' | 'unknown' }
 
 interface SessionContextValue {
   state: SessionState;
   api: ApiClient;
   login(username: string, password: string): Promise<void>;
+  rotateCredentials(currentPassword: string, username: string, newPassword: string): Promise<void>;
   setup(username: string, password: string, toml: string, token: string): Promise<void>;
   logout(): Promise<void>;
   retryLogout(): Promise<void>;
@@ -33,6 +34,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const expectUpdateRestart = useCallback((expected: boolean) => { updateRestart.current = expected; }, []);
   const phase = useRef<SessionPhase>(state.phase);
   phase.current = state.phase;
+  // A lost credential response requires an explicit password check, even if its old Cookie still works.
+  const credentialLoginEpoch = useRef<number | null>(null);
+  const needsCredentialLogin = useCallback(() => credentialLoginEpoch.current === api.currentEpoch, [api]);
 
   const applySession = useCallback((view: SessionView) => {
     if (!mounted.current) return;
@@ -51,7 +55,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [api]);
 
   const recheck = useCallback(async () => {
-    if (logoutIntent.current) return;
+    if (logoutIntent.current || needsCredentialLogin()) return;
     const id = ++bootId.current;
     try {
       const view = await api.session();
@@ -63,14 +67,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         ? { ...current, error: error instanceof Error ? error.message : undefined }
         : { phase: 'connection-error', error: error instanceof Error ? error.message : undefined });
     }
-  }, [api, applySession]);
+  }, [api, applySession, needsCredentialLogin]);
 
   const maskAndRecheck = useCallback(() => {
-    if (logoutIntent.current) return;
+    if (logoutIntent.current || needsCredentialLogin()) return;
     api.replaceBinding(null);
     setState({ phase: 'checking' });
     void recheck();
-  }, [api, recheck]);
+  }, [api, recheck, needsCredentialLogin]);
 
   useEffect(() => {
     mounted.current = true;
@@ -139,7 +143,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     try {
       await authAction(async () => {
         const view = await api.session();
-        if (view.authenticated) { applySession(view); return; }
+        if (view.authenticated && !needsCredentialLogin()) { applySession(view); return; }
         await api.request('login', 'POST', { username, password }, undefined, { unauthenticated: true });
         await confirmLogin();
       });
@@ -147,7 +151,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (error instanceof CookieUnavailable) setState({ phase: 'cookie-unavailable' });
       throw error;
     }
-  }, [api, applySession, authAction, confirmLogin]);
+  }, [api, applySession, authAction, confirmLogin, needsCredentialLogin]);
+
+  const rotateCredentials = useCallback(async (currentPassword: string, username: string, newPassword: string) => {
+    const owner = api.currentEpoch;
+    const requireLogin = (result: 'changed' | 'unknown') => {
+      if (!mounted.current || owner !== api.currentEpoch) return;
+      bootId.current += 1;
+      updateRestart.current = false;
+      api.replaceBinding(null);
+      credentialLoginEpoch.current = api.currentEpoch;
+      setState((current) => ({ phase: 'login', transport: current.transport, credentials: result }));
+      announce();
+    };
+    await authAction(async () => {
+      try {
+        const result = await api.request<{ reauthentication_required: true }>('account/credentials', 'POST', {
+          current_password: currentPassword, username, new_password: newPassword,
+        });
+        if (result?.reauthentication_required !== true) throw new ApiError(200, 'BAD_RESPONSE', 'Invalid credential response');
+        requireLogin('changed');
+      } catch (error) {
+        if (error instanceof ApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) requireLogin('unknown');
+        throw error;
+      }
+    });
+  }, [api, authAction]);
 
   const setup = useCallback(async (username: string, password: string, toml: string, token: string) => {
     let sent = false;
@@ -202,6 +231,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [api, applySession, authAction]);
 
   const logout = useCallback(async () => {
+    if (authInFlight.current) throw new ApiError(409, 'BUSY', 'An authentication action is running');
     updateRestart.current = false;
     logoutBinding.current = api.currentBinding;
     logoutIntent.current = true;
@@ -216,7 +246,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     await performLogout(logoutBinding.current);
   }, [performLogout, state.phase]);
 
-  const value = useMemo<SessionContextValue>(() => ({ state, api, login, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart }), [state, api, login, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart]);
+  const value = useMemo<SessionContextValue>(() => ({ state, api, login, rotateCredentials, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart }), [state, api, login, rotateCredentials, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+
+- Add an authenticated administrator account endpoint and bilingual console form
+  for online username/password rotation with current-password verification.
+  Successful saves revoke all existing sessions without changing DNS configuration,
+  runtime data, certificates, subscriptions or software-update state.
+
+### Fixed
+
+- Recheck credential snapshots before issuing login sessions and recheck old
+  sessions at protected mutation admission. Preserve already accepted background
+  work and the updater's consumed-plan/freeze semantics.
+
+### Operational notes
+
+- Credential changes require signing in again on every tab. An unknown response
+  must be resolved by explicit login, not automatic replay. Offline recovery,
+  additional users and password-algorithm changes are not included.
+
 ## v0.1.6 — 2026-10-08
 
 ### Fixed

@@ -14,6 +14,7 @@ import { ConfirmProvider, useConfirm } from './components/ConfirmProvider';
 import { TransportHint, transportChangeText } from './components/TransportHint';
 import { UpdatesProvider } from './features/updates/context';
 import { UpdateHint } from './features/updates/UpdatePanel';
+import { AccountControls } from './features/account/AccountControls';
 
 type Theme = 'system' | 'light' | 'dark';
 const navigation = [
@@ -153,7 +154,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
     <div className="shell-main"><header className="topbar">
       <button type="button" className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label={t('showNavigation')}><Menu size={20} /></button>
       <span className="topbar-title">{current ? t(current.key) : t('overview')}</span><span className="spacer" />
-      <Preferences {...appearance} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
+      <Preferences {...appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
     </header><main id="main-content" tabIndex={-1} className="main-content">
       <a className="skip-target sr-only" id="main-content-start" href="#main-content">{t('skip')}</a>
       {logoutError && <p role="alert" className="notice error">{logoutError}</p>}

@@ -27,6 +27,14 @@ struct Sources {
 pub(super) struct Budget {
     sources: Mutex<Sources>,
     hashing: Arc<Semaphore>,
+    #[cfg(test)]
+    password_barrier: Mutex<Option<PasswordBarrier>>,
+}
+
+#[cfg(test)]
+struct PasswordBarrier {
+    completed: tokio::sync::oneshot::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
 }
 
 impl Budget {
@@ -34,6 +42,8 @@ impl Budget {
         Self {
             sources: Mutex::new(Sources::default()),
             hashing: Arc::new(Semaphore::new(MAX_HASHES)),
+            #[cfg(test)]
+            password_barrier: Mutex::new(None),
         }
     }
 
@@ -88,6 +98,17 @@ impl Budget {
                 "Authentication is busy; try again shortly",
             )
         })?;
+        #[cfg(test)]
+        let barrier = self.password_barrier.lock().unwrap().take();
+        #[cfg(test)]
+        let work = move || {
+            let result = work();
+            if let Some(barrier) = barrier {
+                let _ = barrier.completed.send(());
+                let _ = barrier.resume.recv();
+            }
+            result
+        };
         tokio::task::spawn_blocking(move || {
             // Dropping the HTTP future cannot cancel running blocking work.
             // Its CPU permit must live here, until hashing actually finishes.
@@ -96,6 +117,22 @@ impl Budget {
         })
         .await
         .map_err(|_| internal())
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_next_password_completion(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (completed, wait) = tokio::sync::oneshot::channel();
+        let (resume, receive) = std::sync::mpsc::channel();
+        *self.password_barrier.lock().unwrap() = Some(PasswordBarrier {
+            completed,
+            resume: receive,
+        });
+        (wait, resume)
     }
 }
 

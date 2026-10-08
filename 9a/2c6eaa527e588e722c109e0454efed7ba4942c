@@ -1,0 +1,79 @@
+web/src/features/account/account.test.tsx
+  s_d595d238bbd4ee::t_a561cee481ee67 102,105-106
+  s_d595d238bbd4ee::t_4cbb3b7068c827 1-101,103-104,107-134
+web/src/i18n/console.ts
+  s_d595d238bbd4ee::t_766a25b1aadb98 2
+AGENTS.md
+  s_d595d238bbd4ee::t_ac5575e83d9ff0 109-118
+web/src/AuthPages.tsx
+  s_d595d238bbd4ee::t_766a25b1aadb98 14,26
+src/manage/store.rs
+  s_d595d238bbd4ee::t_f1dacab9ba175b 204,213-231
+  s_d595d238bbd4ee::t_8d348da2bfabec 232
+tests/manage/credentials.rs
+  s_d595d238bbd4ee::t_d0e09d4c4338bf 47-50,55-63,66-71,73-82,84-96,100-115,118-122,126-129,132-144,146-164,171-179,184-202,205-216,221-236
+  s_d595d238bbd4ee::t_ce28e25802f96e 1-46,51-54,64-65,72,83,97-99,116-117,123-125,130-131,145,165-170,180-183,203-204,217-220,237-238
+web/src/i18n/account.ts
+  s_d595d238bbd4ee::t_766a25b1aadb98 1-19
+tests/manage.rs
+  s_d595d238bbd4ee::t_ce28e25802f96e 27-28
+src/manage/mod.rs
+  s_d595d238bbd4ee::t_f1dacab9ba175b 2,245-256,590,594-596,612,620-621,659,710-716,725,735,751-775,816-818,849-851,869-871,914-916,1004-1006
+  s_d595d238bbd4ee::t_6a25a13e1ed9a8 582-589,613
+  s_d595d238bbd4ee::t_a392fd0ebedeea 640,678-684,688-689,692
+  s_d595d238bbd4ee::t_1a3fd24f74a6d8 591-593,614-619
+src/manage/auth_budget.rs
+  s_d595d238bbd4ee::t_98762ed6a48ec8 103-104,111,125-128
+  s_d595d238bbd4ee::t_03dff4da903163 30-37,45-46,101-102,105-110,121-124,129-135
+  s_d595d238bbd4ee::t_d7b640040f2e47 136
+web/src/features/account/AccountControls.tsx
+  s_d595d238bbd4ee::t_c16ea393f46bb2 1-97
+web/src/session/context.test.tsx
+  s_d595d238bbd4ee::t_a49a025b07e4c0 118-135
+  s_d595d238bbd4ee::t_02b50032fe2aec 15-117
+CHANGELOG.md
+  s_d595d238bbd4ee::t_ac5575e83d9ff0 5-23
+src/manage/account.rs
+  s_d595d238bbd4ee::t_a392fd0ebedeea 1-7,12-19,24-25,43-58,67-91,93-95,97-117
+  s_d595d238bbd4ee::t_03dff4da903163 8-11
+  s_d595d238bbd4ee::t_6a25a13e1ed9a8 20-23,26-29,31-42,59-66,92
+  s_d595d238bbd4ee::t_29bf3dfab1fc23 30,96
+web/src/i18n/index.ts
+  s_d595d238bbd4ee::t_766a25b1aadb98 8,17
+README.md
+  s_d595d238bbd4ee::t_ac5575e83d9ff0 33,270-272,274-290
+  s_d595d238bbd4ee::t_e3180859a1a787 34-35
+  s_d595d238bbd4ee::t_a79474f32351c2 273
+web/src/session/context.tsx
+  s_d595d238bbd4ee::t_766a25b1aadb98 6,12,37-39,58,70,73,77,146,154-179,249
+  s_d595d238bbd4ee::t_a49a025b07e4c0 234
+src/manage/account_tests.rs
+  s_d595d238bbd4ee::t_fd6729ff27dac3 17-18,40-47,51-57,61-73,91-97,101-107,110-112,120-132,134-137,141-146,153-156,169-172,174-178,186-197,204-207,216-219,222-225,228-238,242-248,258-265,268-276,289-298,300-308,310-318,335-344,346-354,356-359,363-377,379-385,399-402,411-418,496-509,512-514,516-524,528-533
+  s_d595d238bbd4ee::t_07b0c79f269821 425-445,447-476,478-489
+  s_d595d238bbd4ee::t_d32acebf201c2d 152,494
+  s_d595d238bbd4ee::t_03dff4da903163 1-16,19-39,48-50,58-60,74-90,98-100,108-109,113-119,133,138-140,147-151,157-168,173,179-185,198-203,208-215,220-221,226-227,239-241,249-257,266-267,277-288,299,309,319-334,345,355,360-362,378,386-398,403-410,419-424,490-493,495,510-511,515,525-527,534-540
+  s_d595d238bbd4ee::t_bde86591461a76 446,477
+web/src/App.tsx
+  s_d595d238bbd4ee::t_c16ea393f46bb2 17,157
+web/src/i18n/__tests__/i18n.test.ts
+  s_d595d238bbd4ee::t_766a25b1aadb98 9,14
+src/manage/filters.rs
+  s_d595d238bbd4ee::t_07b0c79f269821 349-387
+  s_d595d238bbd4ee::t_a392fd0ebedeea 3,5,31-37,58,71,79-87,154,326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a2c6eaa527e588e722c109e0454efed7ba4942c",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

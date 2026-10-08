@@ -1,159 +1,20 @@
 //! Integration between listener ownership, one resolver, startup files and reload publication.
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+#[path = "support/runtime.rs"]
+mod runtime_support;
+
+use std::time::Duration;
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Message, ResponseCode},
     rr::{Name, RData, Record, RecordType, rdata::A},
 };
-use parins::{
-    config::Config,
-    ecs, protocol,
-    server::Server,
-    tls::{self, ListenerConfig, TlsFiles},
-};
-use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+use parins::{config::Config, protocol, server::Server, tls};
+use runtime_support::{Certificate, WAIT, answer, config, finish, query, read, run, udp, write};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::oneshot,
-    task::JoinHandle,
     time::timeout,
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
-
-const WAIT: Duration = Duration::from_secs(3);
-
-struct Certificate {
-    directory: tempfile::TempDir,
-    files: TlsFiles,
-    der: rustls::pki_types::CertificateDer<'static>,
-}
-
-impl Certificate {
-    fn new() -> Self {
-        Self::with_eku(vec![])
-    }
-
-    fn with_eku(usages: Vec<rcgen::ExtendedKeyUsagePurpose>) -> Self {
-        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
-        params.extended_key_usages = usages;
-        let key = rcgen::KeyPair::generate().unwrap();
-        let certificate = params.self_signed(&key).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let files = TlsFiles {
-            cert_file: directory.path().join("cert.pem"),
-            key_file: directory.path().join("key.pem"),
-        };
-        std::fs::write(&files.cert_file, certificate.pem()).unwrap();
-        std::fs::write(&files.key_file, key.serialize_pem()).unwrap();
-        Self {
-            directory,
-            files,
-            der: certificate.der().clone(),
-        }
-    }
-    fn listener(&self) -> ListenerConfig {
-        ListenerConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            files: self.files.clone(),
-        }
-    }
-    async fn connect(&self, address: SocketAddr) -> tokio_rustls::client::TlsStream<TcpStream> {
-        let mut roots = RootCertStore::empty();
-        roots.add(self.der.clone()).unwrap();
-        let mut client =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        client.alpn_protocols = vec![b"dot".to_vec()];
-        timeout(
-            WAIT,
-            TlsConnector::from(Arc::new(client)).connect(
-                ServerName::try_from("localhost").unwrap(),
-                TcpStream::connect(address).await.unwrap(),
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-    }
-}
-
-fn config(upstream: SocketAddr) -> Config {
-    let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
-    config.listen.set_port(0);
-    config.upstreams.servers = vec![upstream.to_string()];
-    config.query_timeout_ms = 1000;
-    config.tcp_io_timeout_ms = 1000;
-    config.shutdown_grace_ms = 200;
-    config
-}
-
-fn query(id: u16) -> Message {
-    let mut query = Message::new(id, MessageType::Query, OpCode::Query);
-    query.add_query(Query::query(
-        Name::from_ascii("runtime.test.").unwrap(),
-        RecordType::A,
-    ));
-    query
-}
-
-fn answer(query: &Message) -> Message {
-    let mut answer = protocol::error_response(query, ResponseCode::NoError);
-    answer.add_answer(Record::from_rdata(
-        query.queries[0].name().clone(),
-        60,
-        RData::A(A::new(192, 0, 2, 1)),
-    ));
-    answer
-}
-
-async fn udp(address: SocketAddr, id: u16) -> Message {
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    socket
-        .send_to(&query(id).to_vec().unwrap(), address)
-        .await
-        .unwrap();
-    let mut buffer = [0; 4096];
-    let length = timeout(WAIT, socket.recv(&mut buffer))
-        .await
-        .unwrap()
-        .unwrap();
-    protocol::decode(&buffer[..length]).unwrap()
-}
-
-async fn write(stream: &mut (impl AsyncWrite + Unpin), message: &Message) {
-    let bytes = message.to_vec().unwrap();
-    stream.write_u16(bytes.len() as u16).await.unwrap();
-    stream.write_all(&bytes).await.unwrap();
-    stream.flush().await.unwrap();
-}
-
-async fn read(stream: &mut (impl AsyncRead + Unpin)) -> Message {
-    timeout(WAIT, async {
-        let length = stream.read_u16().await.unwrap();
-        let mut bytes = vec![0; usize::from(length)];
-        stream.read_exact(&mut bytes).await.unwrap();
-        protocol::decode(&bytes).unwrap()
-    })
-    .await
-    .unwrap()
-}
-
-fn run(server: Server) -> (oneshot::Sender<()>, JoinHandle<anyhow::Result<()>>) {
-    let (stop, stopped) = oneshot::channel();
-    let task = tokio::spawn(server.run(async {
-        let _ = stopped.await;
-    }));
-    (stop, task)
-}
-
-async fn finish(stop: oneshot::Sender<()>, task: JoinHandle<anyhow::Result<()>>) {
-    stop.send(()).unwrap();
-    timeout(WAIT, task).await.unwrap().unwrap().unwrap();
-}
+use tokio_rustls::TlsAcceptor;
 
 #[tokio::test]
 async fn source_budget_is_shared_by_udp_tcp_dot_and_charges_cache_hits() {
@@ -249,82 +110,6 @@ async fn source_inflight_rejection_does_not_cancel_admitted_udp_query() {
     assert_eq!(read(&mut tcp).await.answers.len(), 1);
     assert_eq!(metrics.snapshot().counters["upstream_operations"], 1);
     finish(stop, task).await;
-}
-
-#[tokio::test]
-async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
-    let cert = Certificate::new();
-    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let mut config = config(upstream.local_addr().unwrap());
-    // Global query capacity can exceed the QUIC per-connection stream cap.
-    config.max_inflight = 2048;
-    config.ecs.enabled = true;
-    config.dot = Some(cert.listener());
-    config.doh = Some(parins::config::DohConfig {
-        listen: cert.listener().listen,
-        files: cert.listener().files,
-        http3: true,
-    });
-    config.doq = Some(cert.listener());
-    config.admin_listen = Some("127.0.0.1:0".parse().unwrap());
-    let server = Server::bind(config).await.unwrap();
-    let address = server.local_addr().unwrap();
-    let encrypted = server.encrypted_addrs().unwrap();
-    assert_eq!(
-        encrypted.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-        ["dot", "doh3", "doh", "doq"]
-    );
-    assert_eq!(encrypted[1].1, encrypted[2].1);
-    let dot = encrypted[0].1;
-    let admin = server.admin_addr().unwrap().unwrap();
-    let mock = tokio::spawn(async move {
-        let mut buffer = [0; 4096];
-        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
-        let query = protocol::decode(&buffer[..length]).unwrap();
-        let mut subnet = ecs::subnet(&query).unwrap();
-        assert_eq!(subnet.addr().to_string(), "127.0.0.0");
-        assert_eq!(subnet.source_prefix(), 24);
-        subnet.set_scope_prefix(24);
-        let mut reply = answer(&query);
-        ecs::set_subnet(&mut reply, Some(subnet));
-        upstream
-            .send_to(&reply.to_vec().unwrap(), peer)
-            .await
-            .unwrap();
-        // The mock exits: further answers must come from the shared resolver cache.
-    });
-    let (stop, task) = run(server);
-    let first = udp(address, 11).await;
-    assert_eq!((first.id, first.answers.len()), (11, 1));
-    let mut client = cert.connect(dot).await;
-    write(&mut client, &query(12)).await;
-    let second = read(&mut client).await;
-    assert_eq!((second.id, second.answers.len()), (12, 1));
-    assert!(second.edns.is_none());
-    let mut tcp = TcpStream::connect(address).await.unwrap();
-    write(&mut tcp, &query(13)).await;
-    assert_eq!(read(&mut tcp).await.id, 13);
-    let mut health = TcpStream::connect(admin).await.unwrap();
-    health
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .unwrap();
-    let mut result = String::new();
-    timeout(WAIT, health.read_to_string(&mut result))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(result.starts_with("HTTP/1.1 200"));
-    finish(stop, task).await;
-    mock.await.unwrap();
-    for (name, address) in encrypted {
-        if matches!(name, "dot" | "doh") {
-            TcpListener::bind(address).await.unwrap();
-        } else {
-            UdpSocket::bind(address).await.unwrap();
-        }
-    }
-    TcpListener::bind(admin).await.unwrap();
 }
 
 #[tokio::test]

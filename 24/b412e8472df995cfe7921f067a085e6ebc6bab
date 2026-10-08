@@ -1,0 +1,34 @@
+Cargo.toml
+  s_d595d238bbd4ee::t_e3dded784f2565 3
+README.md
+  s_d595d238bbd4ee::t_e3dded784f2565 33-35,40,48-50,62,67-69,88,173,591,593-595
+  s_d595d238bbd4ee::t_af6c01a6b2acc2 64-66
+CHANGELOG.md
+  s_d595d238bbd4ee::t_e3dded784f2565 5-23,58-60
+Cargo.lock
+  s_daf83784f6683e::t_cbaff74e1f6da7 1033
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "24b412e8472df995cfe7921f067a085e6ebc6bab",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_daf83784f6683e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd3b-06d0-7ed3-8aef-23c5d25696f9",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

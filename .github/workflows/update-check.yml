@@ -1,0 +1,56 @@
+name: Official A update check acceptance
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: official-a-update-check
+  cancel-in-progress: false
+jobs:
+  update-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.16.0'
+      - name: Fixture checks
+        run: |
+          sh -n scripts/test-systemd.sh
+          node --check scripts/test-update-check.mjs
+          node scripts/test-update-check.mjs --self-test
+          node scripts/test-filter-lifecycle.mjs --self-test
+      - name: Download the published official A package
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = paricafe/PariNS
+          version=v0.1.5
+          archive="parins-$version-linux-x86_64.tar.gz"
+          mkdir -p target/official-update-check
+          cd target/official-update-check
+          for asset in "$archive" "$archive.sha256"; do
+            curl --proto '=https' --proto-redir '=https' --fail --location \
+              --connect-timeout 15 --max-time 180 --max-filesize 536870912 \
+              "https://github.com/paricafe/PariNS/releases/download/$version/$asset" -o "$asset"
+          done
+          sha256sum --check "$archive.sha256"
+          tar -xzf "$archive"
+      - name: Three fixed official A idle and check rounds
+        run: |
+          set -euo pipefail
+          export PARINS_EXPECTED_OFFICIAL_VERSION=0.1.5
+          PARINS_EXPECTED_OFFICIAL_COMMIT=$(git rev-parse 'refs/tags/v0.1.5^{commit}')
+          export PARINS_EXPECTED_OFFICIAL_COMMIT
+          sh scripts/test-systemd.sh --ephemeral-ci \
+            --package "$PWD/target/official-update-check/parins-v0.1.5-linux-x86_64" --official-updater-check
+      - name: Preserve sanitized measurement evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: official-update-check-${{ github.sha }}
+          if-no-files-found: warn
+          path: artifacts/update-check/

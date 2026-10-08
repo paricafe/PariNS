@@ -14,11 +14,12 @@ shift
 binary="$repo/target/release/parins"
 installer="$repo/scripts/install.sh"
 build_info=
-package= binary_override=false filter_subscriptions=false filter_lifecycle=false
+package= binary_override=false filter_subscriptions=false filter_lifecycle=false official_updater_check=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --filter-subscriptions) filter_subscriptions=true; shift ;;
         --filter-lifecycle) filter_lifecycle=true; shift ;;
+        --official-updater-check) official_updater_check=true; shift ;;
         --binary-path|--package)
             [ "$#" -ge 2 ] || { printf 'Missing value for %s\n' "$1" >&2; exit 1; }
             case "$1" in
@@ -29,8 +30,12 @@ while [ "$#" -gt 0 ]; do
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
-if "$filter_subscriptions" && "$filter_lifecycle"; then
-    printf '%s\n' 'Subscription fault and lifecycle measurement suites require separate fresh runners.' >&2
+selected_suites=0
+for enabled in "$filter_subscriptions" "$filter_lifecycle" "$official_updater_check"; do
+    if "$enabled"; then selected_suites=$((selected_suites + 1)); fi
+done
+if [ "$selected_suites" -gt 1 ]; then
+    printf '%s\n' 'Acceptance suites require separate fresh runners.' >&2
     exit 1
 fi
 if [ -n "$package" ]; then
@@ -46,6 +51,13 @@ helper="$(dirname "$binary")/parins-updater"
 for command in sudo systemctl systemd-analyze curl jq openssl python3 ip ss sha256sum; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
 done
+if "$official_updater_check"; then
+    [ -n "$package" ] || { printf '%s\n' 'Official updater checks require a published package.' >&2; exit 1; }
+    [ "${PARINS_EXPECTED_OFFICIAL_VERSION:-}" = 0.1.5 ]
+    jq -e --arg commit "${PARINS_EXPECTED_OFFICIAL_COMMIT:-}" \
+        '.official_release == true and .version == "0.1.5" and ($commit | test("^[a-f0-9]{40}$")) and .source_commit == $commit' \
+        "$build_info" >/dev/null
+fi
 sudo -n true
 [ -z "$(systemctl show --property=FragmentPath --value parins-managed.service)" ]
 ! sudo test -e /var/lib/parins
@@ -388,11 +400,17 @@ sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/pa
 cmp "$fixture/tls-before" "$fixture/tls-after"
 sudo grep -Fxq 'external certificate sentinel' /var/lib/parins/tls/external.pem
 
-if "$filter_lifecycle"; then
+if "$filter_lifecycle" || "$official_updater_check"; then
     for command in node taskset lscpu; do
         command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
     done
-    fs_output="$repo/artifacts/filter-lifecycle"
+    if "$filter_lifecycle"; then
+        fs_output="$repo/artifacts/filter-lifecycle"
+        measurement_driver="$repo/scripts/test-filter-lifecycle.mjs"
+    else
+        fs_output="$repo/artifacts/update-check"
+        measurement_driver="$repo/scripts/test-update-check.mjs"
+    fi
     [ ! -e "$fs_output" ] || { printf 'Refusing existing result directory: %s\n' "$fs_output" >&2; exit 1; }
     mkdir -p "$fs_output"
     node --input-type=module - "$fixture" "$fs_output" "$repo" <<'JS'
@@ -422,7 +440,7 @@ JS
         "AllowedCPUs=$PARINS_FS_SERVER_CPUS" CPUQuota=200% MemoryMax=2147483648 MemorySwapMax=0 IOAccounting=yes
     # Restart inside the declared CPU set before measuring; no production host.
     sudo systemctl restart parins-managed.service
-    taskset --cpu-list "$PARINS_FS_DRIVER_CPUS" node "$repo/scripts/test-filter-lifecycle.mjs" "$fixture" "$fs_output"
+    taskset --cpu-list "$PARINS_FS_DRIVER_CPUS" node "$measurement_driver" "$fixture" "$fs_output"
     # The common trap disables the owned service and removes private credentials.
     exit 0
 fi

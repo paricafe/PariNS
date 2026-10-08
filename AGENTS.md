@@ -227,6 +227,12 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   Measure restart with derived indexes and rebuild from unchanged selected source
   objects separately; preserve the catalog and record CPU, RSS and disk IO without
   claiming that the host page cache was cold.
+  Manual `update-check.yml` installs the actual published first updater-capable
+  release on a disposable runner; never rebuild with a forged official identity.
+  Pin the installed version/source to its tag and independently require latest to
+  equal it. Three fixed idle/check wire rounds must use the authenticated managed
+  check endpoint, honor cooldown, and observe a new success without replaying POST.
+  Same-version checks do not download an update or prove A-to-B replacement.
   A workflow success proves only the declared fixture, not public-network capacity.
   `public-dns-acceptance.yml` is manual-only and takes an explicitly selected public
   endpoint. Keep its one-query deadline and normal certificate verification; never

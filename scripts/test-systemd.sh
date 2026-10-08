@@ -419,7 +419,7 @@ JS
     git -C "$repo" rev-parse HEAD > "$fs_output/commit.txt"
     sha256sum "$binary" > "$fs_output/binary-sha256.txt"
     sudo systemctl set-property --runtime parins-managed.service \
-        "AllowedCPUs=$PARINS_FS_SERVER_CPUS" CPUQuota=200% MemoryMax=2147483648 MemorySwapMax=0
+        "AllowedCPUs=$PARINS_FS_SERVER_CPUS" CPUQuota=200% MemoryMax=2147483648 MemorySwapMax=0 IOAccounting=yes
     # Restart inside the declared CPU set before measuring; no production host.
     sudo systemctl restart parins-managed.service
     taskset --cpu-list "$PARINS_FS_DRIVER_CPUS" node "$repo/scripts/test-filter-lifecycle.mjs" "$fixture" "$fs_output"

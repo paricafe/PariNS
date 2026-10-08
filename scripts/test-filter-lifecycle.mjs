@@ -14,7 +14,8 @@ const MiB = 1024 * 1024;
 const SLO = Object.freeze({ rate: 1000, steady_ms: 60000, update_ms: 120000,
   refresh_at_ms: 15000, client_deadline_ms: 1000, server_deadline_ms: 20000,
   steady_p99_ms: 20, update_p99_ms: 50, timeout_fraction: 0.001,
-  correct_qps: 999, steady_rss_bytes: 256 * MiB, update_rss_bytes: 512 * MiB });
+  correct_qps: 999, steady_rss_bytes: 256 * MiB, update_rss_bytes: 512 * MiB,
+  startup_ms: 30000, startup_rss_bytes: 512 * MiB });
 const SOURCES = [
   { id: 'lifecycle-corpus', format: 'domain_list', url: 'https://raw.githubusercontent.com/Natsuki-Kaede/Natsuki-List/d1e0e168589302c62373256855b0d8542f058bdf/natsuki-list.list' },
   { id: 'lifecycle-mutable', format: 'domain_list', url: 'https://raw.githubusercontent.com/paricafe/PariNS/acceptance/filter-https-source/filter-lifecycle.list' },
@@ -25,6 +26,7 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const IP = Buffer.from([192, 0, 2, 42]);
 const base = 'http://127.0.0.1:3000';
 const UNIT = 'parins-managed.service';
+const FILTER_DIR = '/var/lib/parins-managed/filter-subscriptions';
 const safeCode = value => typeof value === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(value) ? value : 'fixture_failed';
 const fail = code => Object.assign(new Error(code), { code });
 function distribution(values) {
@@ -139,7 +141,8 @@ function selected(state) {
     input_rules: state.input_rules, index_rules: state.index_rules, index_bytes: state.index_bytes,
     retained_bytes: state.retained_bytes, disk_bytes: state.disk_bytes,
     sources: state.sources.map(s => ({ id: s.id, fingerprint: s.fingerprint,
-      active: s.active, ready: s.ready, input_rules: s.input_rules })) };
+      active: s.active, ready: s.ready, input_rules: s.input_rules,
+      last_attempt: s.last_attempt, last_success: s.last_success })) };
 }
 async function operation(endpoint, body, deadline = 310000) {
   const started = performance.now();
@@ -291,13 +294,122 @@ async function configure(upstreamPort, enabled, withSources, round) {
 }
 
 async function resources(pid, cgroup) {
-  const [usage, status, peak, state] = await Promise.all([
+  const [usage, status, peak, state, io] = await Promise.all([
     linuxUsage(cgroup), readFile(`/proc/${pid}/status`, 'utf8'),
-    readFile(path.join(cgroup, 'memory.peak'), 'utf8'), snapshot(),
+    readFile(path.join(cgroup, 'memory.peak'), 'utf8'), snapshot(), readFile(path.join(cgroup, 'io.stat'), 'utf8'),
   ]);
   const number = name => { const value = status.match(new RegExp(`^${name}:\\s*(\\d+) kB$`, 'm')); assert(value); return Number(value[1]) * 1024; };
   return { at_ms: performance.now(), ...usage, rss_bytes: number('VmRSS'),
-    process_lifetime_rss_peak_bytes: number('VmHWM'), cgroup_lifetime_peak_bytes: Number(peak), ...selected(state) };
+    process_lifetime_rss_peak_bytes: number('VmHWM'), cgroup_lifetime_peak_bytes: Number(peak),
+    block_io_by_device: ioStat(io), ...selected(state) };
+}
+function ioStat(text) {
+  return Object.fromEntries(text.trim().split('\n').filter(Boolean).map(line => {
+    const [device, ...fields] = line.split(/\s+/); assert.match(device, /^\d+:\d+$/);
+    return [device, Object.fromEntries(fields.filter(field => /^(rbytes|wbytes|rios|wios)=/.test(field)).map(field => {
+      const [key, value] = field.split('='); assert.match(value, /^\d+$/); return [key, Number(value)];
+    }))];
+  }));
+}
+function mainPid() {
+  return Number(execFileSync('systemctl', ['show', '--property=MainPID', '--value', UNIT], { encoding: 'utf8' }).trim());
+}
+function privileged(pid, ...args) {
+  // Rename existing inodes, never create an owner-dependent directory. If startup
+  // failed and its namespace vanished, root can restore the same exact host path.
+  assert(Number.isSafeInteger(pid) && pid >= 0);
+  return execFileSync('sudo', ['-n', ...(pid > 1 ? ['nsenter', `--target=${pid}`, '--mount', '--root', '--'] : []), ...args],
+    { encoding: 'utf8', maxBuffer: MiB, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, LC_ALL: 'C' } }).trim();
+}
+function indexNames(pid) {
+  const names = privileged(pid, 'find', `${FILTER_DIR}/indexes`, '-mindepth', '1', '-maxdepth', '1', '-printf', '%f\n').split('\n').filter(Boolean);
+  names.forEach(name => assert.match(name, /^[a-f0-9]{64}\.bin$/)); return names;
+}
+function fileIdentity(pid, file) {
+  const stat = privileged(pid, 'stat', '--format=%F|%h|%s|%d|%i|%Y', '--', file).split('|');
+  assert.equal(stat[0], 'regular file'); assert.equal(stat[1], '1'); assert.match(stat[2], /^\d+$/);
+  const sha256 = privileged(pid, 'sha256sum', '--', file).split(/\s+/)[0]; assert.match(sha256, /^[a-f0-9]{64}$/);
+  stat.slice(3).forEach(value => assert.match(value, /^\d+$/));
+  return { bytes: Number(stat[2]), sha256, device: stat[3], inode: stat[4], mtime_secs: Number(stat[5]) };
+}
+function persistentSources(pid, state) {
+  const catalog = JSON.parse(privileged(pid, 'cat', `${FILTER_DIR}/catalog.json`));
+  assert.equal(catalog.content_revision, state.content_revision);
+  return state.sources.map(source => {
+    const record = catalog.records.find(r => r.fingerprint === source.fingerprint); assert(record);
+    assert.match(record.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(fileIdentity(pid, `${FILTER_DIR}/objects/${record.sha256}.txt`).sha256, record.sha256);
+    return { id: source.id, sha256: record.sha256, rules: record.rules, last_attempt: source.last_attempt, last_success: source.last_success };
+  });
+}
+async function startupSample({ round, mode, pid, indexName, current, fixture, output, serverCpus, driverCpus }) {
+  assert.match(indexName, /^[a-f0-9]{64}\.bin$/); assert(['derived', 'raw'].includes(mode));
+  const file = `${FILTER_DIR}/indexes/${indexName}`, backup = `${FILTER_DIR}/lifecycle-backup-r${round}.bin`;
+  const before = await snapshot(), identity = fileIdentity(pid, file), sources = persistentSources(pid, before);
+  const result = { round, mode, index_name: indexName, index_identity: identity, before: selected(before), sources, failures: [] };
+  let moved = false, cgroup, failure;
+  try {
+    if (mode === 'raw') {
+      assert.equal(privileged(pid, 'find', FILTER_DIR, '-maxdepth', '1', '-name', path.basename(backup), '-printf', '%f'), '');
+      privileged(pid, 'mv', '--', file, backup); moved = true;
+      assert.deepEqual(fileIdentity(pid, backup), identity);
+      assert(!indexNames(pid).includes(indexName), 'selected derived index is absent');
+    }
+    execFileSync('sudo', ['-n', 'systemctl', 'stop', UNIT], { timeout: 150000, stdio: ['ignore', 'pipe', 'pipe'] });
+    auth = undefined; const started = performance.now();
+    execFileSync('sudo', ['-n', 'systemctl', 'start', UNIT], { timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+    pid = mainPid(); assert(pid > 1); await waitForManagement();
+    await request('POST', '/api/login', JSON.parse(await readFile(path.join(fixture, 'credentials.json'), 'utf8')));
+    let status;
+    do {
+      status = await request('GET', '/api/status');
+      if (status.running) break;
+      await delay(100);
+    } while (performance.now() - started < SLO.startup_ms);
+    assert.equal(status.running, true); assert.equal(status.last_error, null);
+    const match = /^127\.0\.0\.1:(\d+)$/.exec(status.listen); assert(match);
+    await sentinel(Number(match[1]), current);
+    const after = await snapshot(); assert.equal(after.content_revision, before.content_revision);
+    assert.equal(after.config_revision, before.config_revision); assert.equal(after.input_rules, before.input_rules);
+    assert.deepEqual(selected(after).sources, selected(before).sources);
+    result.startup_observed_ms = performance.now() - started;
+    result.constraints = await verifyLinuxServer(pid, UNIT, serverCpus, driverCpus, 2147483648);
+    cgroup = result.constraints.hierarchy[0].directory; result.resources = await resources(pid, cgroup);
+    const stat = (await readFile(`/proc/${pid}/stat`, 'utf8')).split(') ').slice(1).join(') ').split(' ');
+    const ticks = Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8' })); assert(ticks > 0);
+    result.process_cpu_seconds = (Number(stat[11]) + Number(stat[12])) / ticks;
+    result.process_io = Object.fromEntries(privileged(0, 'cat', `/proc/${pid}/io`).split('\n')
+      .map(line => line.split(/:\s*/)).filter(([key]) => ['rchar', 'wchar', 'syscr', 'syscw', 'read_bytes', 'write_bytes'].includes(key))
+      .map(([key, value]) => { assert.match(value, /^\d+$/); return [key, Number(value)]; }));
+    assert.deepEqual(persistentSources(pid, after), sources, 'selected source bytes and download timestamps unchanged');
+    const rebuilt = fileIdentity(pid, file); result.index_after = rebuilt;
+    assert.equal(rebuilt.sha256, identity.sha256); assert.equal(rebuilt.bytes, identity.bytes);
+    if (mode === 'derived') assert.deepEqual(rebuilt, identity, 'derived restart must not rewrite the selected index');
+    else assert.notEqual(rebuilt.inode, identity.inode, 'raw startup must create a new index while the old inode remains backed up');
+    result.after = selected(after); result.temporary_backup_bytes = moved ? identity.bytes : 0;
+    if (result.startup_observed_ms > SLO.startup_ms) result.failures.push('startup_deadline');
+    if (result.resources.process_lifetime_rss_peak_bytes > SLO.startup_rss_bytes) result.failures.push('startup_rss');
+    if (['oom', 'oom_kill', 'oom_group_kill'].some(key => (result.resources.memory_events[key] ?? 0) !== 0)) result.failures.push('startup_oom');
+  } catch (error) { failure = error; result.error = safeCode(error.code); }
+  finally {
+    if (moved) {
+      try {
+        const restorePid = mainPid(); assert.deepEqual(fileIdentity(restorePid, backup), identity);
+        if (indexNames(restorePid).includes(indexName)) {
+          const target = fileIdentity(restorePid, file);
+          assert.equal(target.sha256, identity.sha256, 'preserve a mismatching rebuild alongside the recovery backup');
+          assert.equal(target.bytes, identity.bytes);
+        }
+        privileged(restorePid, 'mv', '--', backup, file);
+        assert.deepEqual(fileIdentity(restorePid, file), identity); result.backup_restored = true;
+      } catch (error) { result.restore_error = safeCode(error.code); result.recovery_backup_path = backup; failure ??= error; }
+    }
+  }
+  result.result = failure || result.failures.length ? 'failed' : 'passed';
+  await writeFile(path.join(output, `r${round}-startup-${mode}.json`), JSON.stringify(result, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+  console.log(JSON.stringify({ event: 'startup_complete', round, mode, result: result.result, startup_ms: result.startup_observed_ms, failures: result.failures }));
+  if (failure) { failure.startup_sample = result; throw failure; }
+  return { result, pid, cgroup };
 }
 async function phase({ name, port, active, duration, pid, cgroup, output, onUpdate }) {
   await probe(port, 'fresh.lifecycle.test', false);
@@ -464,10 +576,10 @@ async function run(fixture, output) {
   assert(path.isAbsolute(fixture) && path.isAbsolute(output));
   const serverCpus = cpuList(process.env.PARINS_FS_SERVER_CPUS);
   const driverCpus = cpuList(process.env.PARINS_FS_DRIVER_CPUS); assert.equal(serverCpus.length, 2);
-  const pid = Number(execFileSync('systemctl', ['show', '--property=MainPID', '--value', UNIT], { encoding: 'utf8' }).trim());
+  let pid = mainPid();
   assert(Number.isSafeInteger(pid) && pid > 1);
   const constraints = await verifyLinuxServer(pid, UNIT, serverCpus, driverCpus, 2147483648);
-  const cgroup = constraints.hierarchy[0].directory;
+  let cgroup = constraints.hierarchy[0].directory;
   await mkdir(output, { recursive: true, mode: 0o700 });
   const summary = { result: 'running', started_at: new Date().toISOString(), slo: SLO,
     source_urls: SOURCES.map(s => s.url), corpus_sha256: CORPUS_SHA,
@@ -476,7 +588,9 @@ async function run(fixture, output) {
     memory_scope: 'steady RSS sampled at 100ms; update VmHWM is conservative process-lifetime RSS peak; cgroup memory.peak includes file cache and is reported separately',
     deadlines: 'server 20000ms permits one held-generation correctness probe; every load sample uses 1000ms from its planned send time; held probe excluded from SLO',
     compilation_scope: 'one unqueried local-round-N.lifecycle.test block_exact marker is fixed across each round baseline/steady/update and differs between rounds; each updated aggregate material digest is new, preventing A/B derived-index reuse across rounds',
-    constraints, phases: [], readiness: [] };
+    startup_scope: 'full managed-process stop/start with existing selected sources; no OS page-cache flush or physical cold-disk claim; normal network remains available, source SHA and download timestamps must be unchanged; raw mode temporarily renames only the selected derived index and restores its backup in finally',
+    startup_accounting: 'wall time includes start command, read-only readiness, one login, DNS probes and sanitized state checks; process CPU/IO and lifetime RSS measured after readiness; cgroup io.stat is per-device and may include earlier unit work; raw snapshot disk_bytes includes the temporary backup and may remain cached after its removal',
+    constraints, phases: [], startups: [], readiness: [] };
   const journal = JSON.parse(execFileSync('sudo', ['-n', 'cat', '/var/lib/parins-updater/private/journal.json'],
     { maxBuffer: MiB, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   assert.match(journal.installed.build.source_commit, /^[a-f0-9]{40}$/);
@@ -515,18 +629,28 @@ async function run(fixture, output) {
       const state = await snapshot();
       const due = (state.sources.find(s => s.id === SOURCES[1].id).last_attempt ?? 0) * 1000 + 61000;
       while (Date.now() < due) await delay(Math.min(1000, due - Date.now()));
+      const indexesBefore = indexNames(pid);
       const update = await phase({ ...args, port: runtime.port, name: `r${round}-update`, active: true, duration: SLO.update_ms,
         onUpdate: () => updateEvidence({ round, current, next, runtime, upstream }) });
       summary.phases.push(update);
       if (!update.update) throw fail('update_evidence_failed');
       current = next;
+      const newIndexes = indexNames(pid).filter(name => !indexesBefore.includes(name));
+      assert.equal(newIndexes.length, 1, 'one new derived index belongs to the observed successful publication');
+      update.update.derived_index_name = newIndexes[0];
+      await writeFile(path.join(output, `${update.name}.json`), JSON.stringify(update, null, 2) + '\n', { mode: 0o600 });
+      for (const mode of ['derived', 'raw']) {
+        const startup = await startupSample({ round, mode, pid, indexName: newIndexes[0], current, fixture, output, serverCpus, driverCpus });
+        summary.startups.push(startup.result); pid = startup.pid; cgroup = startup.cgroup;
+      }
       await writeFile(artifact, JSON.stringify(summary, null, 2) + '\n', { mode: 0o600 });
     }
     summary.upstream = upstream.counts(); assert.equal(summary.upstream.invalid, 0);
     summary.constraints_after = await verifyLinuxServer(pid, UNIT, serverCpus, driverCpus, 2147483648);
-    summary.result = summary.phases.every(p => p.result === 'passed') ? 'passed' : 'failed';
+    summary.result = [...summary.phases, ...summary.startups].every(p => p.result === 'passed') ? 'passed' : 'failed';
     if (summary.result !== 'passed') process.exitCode = 1;
   } catch (error) {
+    if (error.startup_sample) summary.startups.push(error.startup_sample);
     summary.result = 'failed'; summary.error = safeCode(error.code);
     summary.location = String(error.stack).match(/test-filter-lifecycle\.mjs:\d+:\d+/)?.[0] ?? 'unknown';
     process.exitCode = 1;
@@ -560,6 +684,8 @@ function selfTest() {
   assert.notEqual(digest(CONTENT.A), digest(CONTENT.B));
   assert.match(configText(1234, true, true, 1), /query_timeout_ms=20000/);
   assert.notEqual(configText(1234, true, true, 1), configText(1234, true, true, 2));
+  assert.deepEqual(ioStat('8:0 rbytes=12 wbytes=34 rios=1 wios=2 dbytes=99\n'), { '8:0': { rbytes: 12, wbytes: 34, rios: 1, wios: 2 } });
+  assert.deepEqual(ioStat(''), {}); assert.throws(() => ioStat('bad rbytes=1'));
   console.log('filter lifecycle self-test passed');
 }
 

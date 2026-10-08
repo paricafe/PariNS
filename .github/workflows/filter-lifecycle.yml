@@ -38,7 +38,7 @@ jobs:
           sh scripts/package.sh --version "$version" --target x86_64-unknown-linux-musl
           mkdir -p target/filter-lifecycle-package
           tar -xzf "target/packages/parins-$version-linux-x86_64.tar.gz" -C target/filter-lifecycle-package
-      - name: Three fixed 2 GiB lifecycle rounds
+      - name: Three fixed 2 GiB lifecycle and recovery rounds
         run: |
           version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
           sh scripts/test-systemd.sh --ephemeral-ci --package "$PWD/target/filter-lifecycle-package/parins-$version-linux-x86_64" --filter-lifecycle

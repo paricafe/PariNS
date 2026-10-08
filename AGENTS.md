@@ -224,6 +224,9 @@ criteria pass; expand or repeat verification only for changes, failures, or new 
   public certificate validation. Fix the workload and SLO before running, retain
   all three rounds, distinguish CDN propagation from the measured refresh window,
   and prove request-held old-generation release separately from latency samples.
+  Measure restart with derived indexes and rebuild from unchanged selected source
+  objects separately; preserve the catalog and record CPU, RSS and disk IO without
+  claiming that the host page cache was cold.
   A workflow success proves only the declared fixture, not public-network capacity.
   `public-dns-acceptance.yml` is manual-only and takes an explicitly selected public
   endpoint. Keep its one-query deadline and normal certificate verification; never

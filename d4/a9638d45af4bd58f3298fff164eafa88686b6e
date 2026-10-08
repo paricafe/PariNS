@@ -1,0 +1,27 @@
+scripts/test-update-check.mjs
+  s_d595d238bbd4ee::t_7df1554ea2b411 207,316-319
+  s_d595d238bbd4ee::t_d5e436227166c3 1-206,208-315,320-334
+AGENTS.md
+  s_d595d238bbd4ee::t_d12672dee9dc8d 230-235
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_594363365d6bdd 17,22,33-38,54-57,59-60,403,407-413,443
+  s_d595d238bbd4ee::t_21609c7db52140 58
+.github/workflows/update-check.yml
+  s_d595d238bbd4ee::t_594363365d6bdd 1-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d4a9638d45af4bd58f3298fff164eafa88686b6e",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

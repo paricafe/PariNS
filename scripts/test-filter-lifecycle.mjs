@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import dgram from 'node:dgram';
+import { lookup } from 'node:dns/promises';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { cpuList, linuxUsage, nameLabels, parse, query, verifyLinuxServer } from './lib/wire-bench.mjs';
 import { aResponse, distribution, dueCount, ioStat, oracle, plannedCount, probe, runWirePhase } from './lib/managed-wire.mjs';
 
@@ -23,6 +26,7 @@ const SOURCES = [
 ];
 const CORPUS_SHA = 'd68e37b2a861e6e8ef85568db4237bb3e18d1a9f2476323b3dba977fe850af09';
 const CONTENT = { A: 'lifecycle-a.test\ncommon.lifecycle.test\n', B: 'lifecycle-b.test\ncommon.lifecycle.test\n' };
+const REPRESENTATION = 'text/plain;accept-encoding=gzip, identity;v=1';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const base = 'http://127.0.0.1:3000';
 const UNIT = 'parins-managed.service';
@@ -122,15 +126,17 @@ function selected(state) {
       active: s.active, ready: s.ready, input_rules: s.input_rules,
       last_attempt: s.last_attempt, last_success: s.last_success })) };
 }
-async function operation(endpoint, body, deadline = 310000) {
+async function operation(endpoint, body, deadline = 310000, observe) {
   const started = performance.now();
   const accepted = await request('POST', endpoint, body, 202);
   assert.match(accepted.operation_id, /^[a-f0-9]{16}$/);
+  observe?.({ id: accepted.operation_id, status: 'running' });
   while (performance.now() - started < deadline) {
     const state = await snapshot();
     const op = [state.operation, state.recent_operation].find(value => value?.id === accepted.operation_id);
     assert(op, 'accepted operation remains observable');
     if (op.status !== 'running') {
+      observe?.(op, state);
       if (op.status !== 'succeeded') throw fail(`operation_${safeCode(op.error?.code)}`);
       return { op, state, observed_ms: performance.now() - started };
     }
@@ -138,25 +144,108 @@ async function operation(endpoint, body, deadline = 310000) {
   }
   throw fail('operation_deadline');
 }
-async function sourceReady(round, expected) {
+function sourceHeaders(binding) {
+  const headers = { 'User-Agent': 'PariNS-subscriptions/1', Accept: 'text/plain',
+    'Accept-Encoding': 'gzip, identity', Connection: 'close' };
+  if (binding?.etag) headers['If-None-Match'] = binding.etag;
+  else if (binding?.last_modified) headers['If-Modified-Since'] = binding.last_modified;
+  return headers;
+}
+function sourceConditional(binding) {
+  const kind = binding?.etag ? 'etag' : binding?.last_modified ? 'last_modified' : null;
+  return { kind, validator_sha256: kind ? digest(binding[kind]) : null,
+    content_sha256: binding?.content_sha256 ?? null };
+}
+function sourceBodySha(status, encoding, bytes) {
+  if (status !== 200) return null; // In particular, 304 never proves the next fixture is ready.
+  assert(bytes.length <= 4096, 'bounded fixture transfer');
+  const normalized = (encoding ?? 'identity').toLowerCase();
+  if (!['gzip', 'identity'].includes(normalized)) throw fail('source_fixture_encoding');
+  const decoded = normalized === 'gzip' ? gunzipSync(bytes, { maxOutputLength: 4096 }) : bytes;
+  if (decoded.length > 4096) throw fail('source_fixture_body_limit');
+  return digest(decoded);
+}
+function sourceBinding(pid, state, current) {
+  const source = state.sources.find(s => s.id === SOURCES[1].id); assert(source);
+  const catalog = JSON.parse(privileged(pid, 'cat', `${FILTER_DIR}/catalog.json`));
+  assert.equal(catalog.content_revision, state.content_revision);
+  const records = catalog.records.filter(r => r.fingerprint === source.fingerprint);
+  assert.equal(records.length, 1); const record = records[0];
+  assert.equal(record.sha256, digest(CONTENT[current]));
+  assert.equal(fileIdentity(pid, `${FILTER_DIR}/objects/${record.sha256}.txt`).sha256, record.sha256);
+  const binding = record.validators;
+  assert(binding, 'prepared source has committed validators');
+  assert.equal(binding.final_url, SOURCES[1].url);
+  assert.equal(binding.representation, REPRESENTATION);
+  assert.equal(binding.content_sha256, record.sha256);
+  for (const key of ['etag', 'last_modified']) if (binding[key] !== null && binding[key] !== undefined) {
+    assert.equal(typeof binding[key], 'string'); assert(binding[key].length > 0 && binding[key].length <= 1024);
+    http.validateHeaderValue(key, binding[key]);
+  }
+  return binding;
+}
+async function sourceProbe(binding, evidence) {
+  const url = new URL(SOURCES[1].url), controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  const signal = controller.signal;
+  try {
+    // OS getaddrinfo order, as used by the Rust reader; do not race address families.
+    const addresses = await Promise.race([lookup(url.hostname, { all: true, verbatim: true }),
+      new Promise((_, reject) => signal.addEventListener('abort', () => reject(fail('source_probe_timeout')), { once: true }))]);
+    assert(addresses.length > 0 && addresses.length <= 16);
+    for (const address of addresses) {
+      let connected = false;
+      const peer = { address: address.address, family: address.family }; evidence.connection_attempts.push(peer);
+      try {
+        return await new Promise((resolve, reject) => {
+          const req = https.request(url, { method: 'GET', agent: false, signal,
+            servername: url.hostname, ALPNProtocols: ['http/1.1'], autoSelectFamily: false,
+            lookup: (_host, _options, callback) => callback(null, address.address, address.family),
+            headers: sourceHeaders(binding) }, res => {
+            evidence.probe_http_status = res.statusCode;
+            evidence.peer = { address: res.socket.remoteAddress, family: res.socket.remoteFamily };
+            const encoding = (res.headers['content-encoding'] ?? 'identity').toLowerCase();
+            evidence.probe_content_encoding = ['gzip', 'identity'].includes(encoding) ? encoding : 'unsupported';
+            let bytes = Buffer.alloc(0);
+            res.on('data', chunk => {
+              bytes = Buffer.concat([bytes, chunk]);
+              if (bytes.length > 4096) res.destroy(fail('source_fixture_body_limit'));
+            });
+            res.on('error', reject);
+            res.on('end', () => {
+              try { resolve(sourceBodySha(res.statusCode, res.headers['content-encoding'], bytes)); }
+              catch (error) { reject(error); }
+            });
+          });
+          req.on('socket', socket => socket.once('connect', () => { connected = true; peer.tcp_connected = true; }));
+          req.on('error', reject); req.end();
+        });
+      } catch (error) {
+        peer.error = safeCode(error.code);
+        // Rust selects the first TCP-reachable address; TLS/HTTP failure does not select another peer.
+        if (connected || signal.aborted) throw error;
+      }
+    }
+    throw fail('source_probe_connect_failed');
+  } finally { clearTimeout(timeout); }
+}
+async function sourceReady(round, expected, binding, evidence) {
   console.log(`LIFECYCLE_SOURCE_WAIT round=${round} expected=${expected}`);
   const started = performance.now(); let reads = 0;
+  const result = { round, expected, expected_sha256: digest(CONTENT[expected]), representation: REPRESENTATION,
+    conditional: sourceConditional(binding), probes: [] };
+  evidence.push(result);
   while (performance.now() - started < 600000) {
-    const response = await fetch(SOURCES[1].url, { redirect: 'error', signal: AbortSignal.timeout(10000) });
-    reads++;
-    if (response.ok) {
-      const reader = response.body.getReader(); let bytes = Buffer.alloc(0);
-      while (true) {
-        const next = await reader.read(); if (next.done) break;
-        bytes = Buffer.concat([bytes, next.value]);
-        if (bytes.length > 4096) { await reader.cancel(); throw fail('source_fixture_body_limit'); }
-      }
-      if (digest(bytes) === digest(CONTENT[expected])) {
-        const result = { round, expected, reads, sha256: digest(bytes), readiness_wait_ms: performance.now() - started };
-        console.log(JSON.stringify({ event: 'source_ready', ...result }));
-        return result;
-      }
-    } else await response.body?.cancel();
+    const attempt = { read: ++reads, connection_attempts: [] }; result.probes.push(attempt);
+    try { attempt.decoded_sha256 = await sourceProbe(binding, attempt); }
+    catch (error) { attempt.error = safeCode(error.code); throw error; }
+    result.reads = reads; result.readiness_wait_ms = performance.now() - started;
+    if (attempt.probe_http_status === 200 && attempt.decoded_sha256 === result.expected_sha256) {
+      result.sha256 = attempt.decoded_sha256;
+      console.log(JSON.stringify({ event: 'source_ready', round, expected, reads,
+        sha256: result.sha256, readiness_wait_ms: result.readiness_wait_ms }));
+      return result;
+    }
     await delay(5000);
   }
   throw fail('source_fixture_readiness_timeout');
@@ -376,8 +465,11 @@ async function phase({ active, pid, cgroup, port, onUpdate, ...args }) {
     itemFor: (sequence, name) => itemFor(sequence, name, active), onAction: onUpdate });
 }
 
-async function updateEvidence({ round, current, next, runtime, upstream }) {
+async function updateEvidence({ round, current, next, runtime, upstream, evidence }) {
   const before = await snapshot(); const name = `held-r${round}.lifecycle.test`;
+  const attempt = { round, expected_sha256: digest(CONTENT[next]), before: selected(before),
+    product_http_status: 'not_exposed_by_api' };
+  evidence.push(attempt);
   const hold = upstream.hold(name, `lifecycle-${current.toLowerCase()}.test`);
   const heldStarted = performance.now();
   // Attach rejection immediately: a failed held request must never be unhandled.
@@ -388,7 +480,13 @@ async function updateEvidence({ round, current, next, runtime, upstream }) {
     await Promise.race([hold.arrived, delay(1000).then(() => { throw fail('held_upstream_not_reached'); })]);
     const started = performance.now();
     const refreshed = await operation('/api/filter/subscriptions/refresh',
-      { config_revision: runtime.revision, source_id: SOURCES[1].id }, SLO.server_deadline_ms - 1000);
+      { config_revision: runtime.revision, source_id: SOURCES[1].id }, SLO.server_deadline_ms - 1000,
+      (op, state) => {
+        attempt.operation_id = op.id; attempt.operation_status = op.status;
+        attempt.actual_sha256 = op.sha256 ?? null;
+        if (op.error) attempt.operation_error = safeCode(op.error.code);
+        if (state) attempt.after = selected(state);
+      });
     if (refreshed.op.sha256 !== digest(CONTENT[next])) throw fail('fixture_not_ready');
     const pinned = await snapshot();
     assert(pinned.generation > before.generation); assert(pinned.content_revision > before.content_revision);
@@ -411,7 +509,8 @@ async function updateEvidence({ round, current, next, runtime, upstream }) {
       full_update_observed_ms: readyMs, timing_scope: 'refresh request through terminal operation and new-generation DNS checks; 100ms polling upper bound, not compile time',
       held_request_ms: performance.now() - heldStarted, second_compile_rejected: true,
       before: selected(before), held: selected(pinned), released: selected(after) };
-  } finally {
+  } catch (error) { attempt.error = safeCode(error.code); throw error; }
+  finally {
     if (!released) { try { hold.release(); } catch { /* No upstream arrival; held request is bounded. */ } }
     await held;
   }
@@ -438,7 +537,7 @@ async function run(fixture, output) {
     compilation_scope: 'one unqueried local-round-N.lifecycle.test block_exact marker is fixed across each round baseline/steady/update and differs between rounds; each updated aggregate material digest is new, preventing A/B derived-index reuse across rounds',
     startup_scope: 'full managed-process stop/start with existing selected sources; no OS page-cache flush or physical cold-disk claim; normal network remains available, source SHA and download timestamps must be unchanged; raw mode temporarily renames only the selected derived index and restores its backup in finally',
     startup_accounting: 'wall time includes start command, read-only readiness, one login, DNS probes and sanitized state checks; process CPU/IO and lifetime RSS measured after readiness; cgroup io.stat is per-device and may include earlier unit work; raw snapshot disk_bytes includes the temporary backup and may remain cached after its removal',
-    constraints, phases: [], startups: [], readiness: [] };
+    constraints, phases: [], startups: [], readiness: [], refresh_attempts: [] };
   const journal = JSON.parse(execFileSync('sudo', ['-n', 'cat', '/var/lib/parins-updater/private/journal.json'],
     { maxBuffer: MiB, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   assert.match(journal.installed.build.source_commit, /^[a-f0-9]{40}$/);
@@ -459,7 +558,7 @@ async function run(fixture, output) {
       const args = { port: runtime.port, pid, cgroup, output };
       summary.phases.push(await phase({ ...args, name: `r${round}-baseline`, active: false, duration: SLO.steady_ms }));
       if (!prepared) {
-        summary.readiness.push(await sourceReady(0, 'A'));
+        await sourceReady(0, 'A', null, summary.readiness);
         for (const source of SOURCES) {
           const result = await operation('/api/filter/subscriptions/prepare', { config_revision: runtime.revision, source });
           assert.equal(result.op.sha256, source.id === SOURCES[0].id ? CORPUS_SHA : digest(CONTENT.A));
@@ -473,13 +572,13 @@ async function run(fixture, output) {
       assert(active.sources.every(s => s.active && s.ready));
       summary.phases.push(await phase({ ...args, port: runtime.port, name: `r${round}-steady`, active: true, duration: SLO.steady_ms }));
       const next = current === 'A' ? 'B' : 'A';
-      summary.readiness.push(await sourceReady(round, next));
       const state = await snapshot();
       const due = (state.sources.find(s => s.id === SOURCES[1].id).last_attempt ?? 0) * 1000 + 61000;
       while (Date.now() < due) await delay(Math.min(1000, due - Date.now()));
+      await sourceReady(round, next, sourceBinding(pid, await snapshot(), current), summary.readiness);
       const indexesBefore = indexNames(pid);
       const update = await phase({ ...args, port: runtime.port, name: `r${round}-update`, active: true, duration: SLO.update_ms,
-        onUpdate: () => updateEvidence({ round, current, next, runtime, upstream }) });
+        onUpdate: () => updateEvidence({ round, current, next, runtime, upstream, evidence: summary.refresh_attempts }) });
       summary.phases.push(update);
       if (!update.update) throw fail('update_evidence_failed');
       current = next;
@@ -530,6 +629,20 @@ function selfTest() {
   const cname = parse(cnameResponse(packet, 'lifecycle-a.test')); assert.equal(cname.answers.length, 2);
   assert.equal(cname.answers[0].type, 5); assert.equal(cname.answers[1].type, 1);
   assert.notEqual(digest(CONTENT.A), digest(CONTENT.B));
+  const binding = { etag: '"fixture-a"', last_modified: 'Wed, 07 Oct 2026 00:00:00 GMT', content_sha256: digest(CONTENT.A) };
+  assert.deepEqual(sourceHeaders(null), { 'User-Agent': 'PariNS-subscriptions/1', Accept: 'text/plain',
+    'Accept-Encoding': 'gzip, identity', Connection: 'close' });
+  assert.equal(sourceHeaders(binding)['If-None-Match'], binding.etag);
+  assert.equal(sourceHeaders(binding)['If-Modified-Since'], undefined);
+  assert.equal(sourceHeaders({ ...binding, etag: null })['If-Modified-Since'], binding.last_modified);
+  assert.deepEqual(sourceConditional(binding), { kind: 'etag', validator_sha256: digest(binding.etag), content_sha256: digest(CONTENT.A) });
+  assert.deepEqual(sourceConditional(null), { kind: null, validator_sha256: null, content_sha256: null });
+  assert.equal(sourceBodySha(304, undefined, Buffer.alloc(0)), null);
+  assert.equal(sourceBodySha(200, undefined, Buffer.from(CONTENT.A)), digest(CONTENT.A));
+  assert.equal(sourceBodySha(200, 'gzip', gzipSync(CONTENT.B)), digest(CONTENT.B));
+  assert.throws(() => sourceBodySha(200, 'br', Buffer.from(CONTENT.A)));
+  assert.throws(() => sourceBodySha(200, 'gzip', gzipSync(Buffer.alloc(4097))));
+  assert.throws(() => sourceBodySha(200, 'identity', Buffer.alloc(4097)));
   assert.match(configText(1234, true, true, 1), /query_timeout_ms=20000/);
   for (const source of SOURCES) {
     assert(configText(1234, true, true, 1).includes(`id='${source.id}'\nname='${source.id}'`));

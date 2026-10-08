@@ -193,7 +193,8 @@ async function sourcePeer(binding, address, evidence, timeoutMs) {
     return await new Promise((resolve, reject) => {
       const req = https.request(url, { method: 'GET', agent: false, signal,
         servername: url.hostname, ALPNProtocols: ['http/1.1'], autoSelectFamily: false,
-        lookup: (_host, _options, callback) => callback(null, address.address, address.family),
+        // Match async DNS so early connection errors reach HTTPS request listeners.
+        lookup: (_host, _options, callback) => process.nextTick(callback, null, address.address, address.family),
         headers: sourceHeaders(binding) }, res => {
         evidence.probe_http_status = res.statusCode;
         evidence.peer = { address: res.socket.remoteAddress, family: res.socket.remoteFamily };

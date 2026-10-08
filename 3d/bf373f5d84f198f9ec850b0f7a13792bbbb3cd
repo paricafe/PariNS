@@ -1,0 +1,32 @@
+scripts/test-filter-lifecycle.mjs
+  s_d595d238bbd4ee::t_6f1689e3be1e3f 85,89,105,110-125,230-231,263,280,282,478,489,496,508,561-562
+  s_d595d238bbd4ee::t_e896b474a4769b 304-307,314,379-381
+  s_d595d238bbd4ee::t_82a532517ecd5e 1-84,86-88,90-104,106-109,137-229,232-262,264-279,281,283-303,308-313,315-378,382-392,394-477,479,485-488,490-492,494-495,497-507,509-560,563-575
+  s_d595d238bbd4ee::t_42d4c445cac5f9 126-136,393,480-484,493
+scripts/test-systemd.sh
+  s_d595d238bbd4ee::t_6be6c99e3859bb 17,21,32-35,154,391-428
+  s_d595d238bbd4ee::t_4a26a156acab1c 429
+.github/workflows/filter-lifecycle.yml
+  s_d595d238bbd4ee::t_6be6c99e3859bb 1-51
+AGENTS.md
+  s_d595d238bbd4ee::t_452777afeb7eec 221-227
+scripts/lib/wire-bench.mjs
+  s_d595d238bbd4ee::t_17d1a580b355b8 48-52
+  s_d595d238bbd4ee::t_6be6c99e3859bb 41-42,54,59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3dbf373f5d84f198f9ec850b0f7a13792bbbb3cd",
+  "prompts": {},
+  "sessions": {
+    "s_d595d238bbd4ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c9bb-5d67-7302-9ba7-fd4e582715c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

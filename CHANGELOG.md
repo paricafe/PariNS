@@ -11,6 +11,9 @@
 
 ### Fixed
 
+- Persist explicit updater Stage admission refusals so a rejected operation can
+  reconcile without restarting the service. Preserve the existing operation,
+  installation identity, cooldown and late-Commit fences.
 - Recheck credential snapshots before issuing login sessions and recheck old
   sessions at protected mutation admission. Preserve already accepted background
   work and the updater's consumed-plan/freeze semantics.
@@ -21,6 +24,9 @@
 
 ### Operational notes
 
+- The unreleased updater fix requires helper protocol 2. Update the application
+  and fixed helper together through the verified installer; an online binary-only
+  update cannot replace an older helper. No business-data migration is introduced.
 - Credential changes require signing in again on every tab. An unknown response
   must be resolved by explicit login, not automatic replay. Offline recovery,
   additional users and password-algorithm changes are not included.

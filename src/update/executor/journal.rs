@@ -107,6 +107,15 @@ impl Journal {
                 .filter(|o| o.status.phase.terminal())
                 .map(|o| o.status.clone())
                 .or_else(|| self.last_operation.clone()),
+            additional_terminal: self
+                .last_operation
+                .as_ref()
+                .filter(|last| {
+                    self.operation.as_ref().is_some_and(|op| {
+                        op.status.phase.terminal() && op.status.operation_id != last.operation_id
+                    })
+                })
+                .cloned(),
             pending_launch: self
                 .operation
                 .as_ref()
@@ -120,7 +129,15 @@ impl Journal {
             op.status.reason = reason.map(str::to_owned);
             op.status.updated_at_ms = now_ms();
             op.pending_launch = None;
-            self.last_operation = Some(op.status.clone());
+            // A separately rejected Stage still needs its own fence even when
+            // the installation owner later finishes. Both live in this journal.
+            if self
+                .last_operation
+                .as_ref()
+                .is_none_or(|last| last.operation_id == op.status.operation_id)
+            {
+                self.last_operation = Some(op.status.clone());
+            }
         }
     }
     pub fn commit(&mut self) -> Result<()> {

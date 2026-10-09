@@ -232,7 +232,21 @@ pub struct PublicStatus {
     pub capability: Capability,
     pub active_operation: Option<OperationStatus>,
     pub last_operation: Option<OperationStatus>,
+    pub additional_terminal: Option<OperationStatus>,
     pub pending_launch: Option<PendingLaunch>,
+}
+
+impl PublicStatus {
+    pub fn terminal_for(&self, operation_id: &str, phase_nonce: &str) -> Option<&OperationStatus> {
+        self.last_operation
+            .iter()
+            .chain(self.additional_terminal.iter())
+            .find(|status| {
+                status.operation_id == operation_id
+                    && status.phase_nonce == phase_nonce
+                    && status.phase.terminal()
+            })
+    }
 }
 
 #[cfg(test)]

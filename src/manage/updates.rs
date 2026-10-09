@@ -210,7 +210,10 @@ impl Coordinator {
         }
         let root = self.root.lock().unwrap();
         let root = root.as_ref().ok_or("helper_unavailable")?;
-        if !root.capability.available || root.installed != *identity {
+        if !root.capability.available
+            || root.installed != *identity
+            || root.capability.helper_protocol < crate::update::contract::HELPER_PROTOCOL
+        {
             return Err("helper_unavailable");
         }
         Ok(())
@@ -239,8 +242,7 @@ impl Coordinator {
                     "reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
         }).or_else(||root.as_ref().and_then(|r|r.active_operation.as_ref()).map(|o|json!(o)));
         let last = state.operation.as_ref().filter(|o| o.finished).map(|op| {
-            root.as_ref().and_then(|r| r.last_operation.as_ref())
-                .filter(|r| r.operation_id == op.operation_id && r.phase_nonce == op.phase_nonce)
+            root.as_ref().and_then(|r| r.terminal_for(&op.operation_id, &op.phase_nonce))
                 .map(|r| json!(r))
                 .unwrap_or_else(|| json!({"operation_id":op.operation_id,"phase":op.phase,"version":op.expected_version,"reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
         }).or_else(|| root.as_ref().and_then(|r|r.last_operation.as_ref()).map(|o|json!(o)));
@@ -537,7 +539,7 @@ mod tests {
             source_commit: "a".repeat(40),
             update_protocol: build.update_protocol,
             install_contract: INSTALL_CONTRACT.into(),
-            min_helper_protocol: 1,
+            min_helper_protocol: crate::update::contract::HELPER_PROTOCOL,
             durable_contract_epoch: build.durable_contract_epoch,
             runtime_database_format: build.runtime_database_format,
             cache_snapshot_format: build.cache_snapshot_format,
@@ -581,16 +583,17 @@ mod tests {
 
     #[test]
     fn not_modified_rechecks_current_identity_and_helper() {
+        let helper = crate::update::contract::HELPER_PROTOCOL;
         let (candidate, mut build) = candidate();
         assert!(
-            revalidate_cached_candidate(Some(candidate.clone()), &build, 1)
+            revalidate_cached_candidate(Some(candidate.clone()), &build, helper)
                 .unwrap()
                 .unwrap()
                 .manual_reason
                 .is_none()
         );
         assert_eq!(
-            revalidate_cached_candidate(Some(candidate.clone()), &build, 0)
+            revalidate_cached_candidate(Some(candidate.clone()), &build, helper - 1)
                 .unwrap()
                 .unwrap()
                 .manual_reason
@@ -599,7 +602,7 @@ mod tests {
         );
         build.durable_contract_epoch += 1;
         assert_eq!(
-            revalidate_cached_candidate(Some(candidate.clone()), &build, 1)
+            revalidate_cached_candidate(Some(candidate.clone()), &build, helper)
                 .unwrap()
                 .unwrap()
                 .manual_reason
@@ -608,13 +611,13 @@ mod tests {
         );
         build.version = "0.1.5".into();
         assert!(
-            revalidate_cached_candidate(Some(candidate.clone()), &build, 1)
+            revalidate_cached_candidate(Some(candidate.clone()), &build, helper)
                 .unwrap()
                 .is_none()
         );
         build.version = "0.1.6".into();
         assert!(
-            revalidate_cached_candidate(Some(candidate), &build, 1)
+            revalidate_cached_candidate(Some(candidate), &build, helper)
                 .unwrap()
                 .is_none()
         );

@@ -292,9 +292,9 @@ async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) 
         && root.capability.reason.as_deref() != Some("installation_pending")
         && coordinator.identity.as_ref() == Some(&root.installed)
         && coordinator.state.lock().unwrap().commit_intent.is_none()
-        && !root.last_operation.as_ref().is_some_and(|last| {
-            last.operation_id == op.operation_id && last.phase_nonce == op.phase_nonce
-        })
+        && root
+            .terminal_for(&op.operation_id, &op.phase_nonce)
+            .is_none()
     {
         coordinator
             .change(|state| {
@@ -313,9 +313,7 @@ async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) 
         coordinator.frozen.store(false, Ordering::Release);
         return Ok(());
     }
-    let Some(terminal) = root.last_operation.as_ref().filter(|t| {
-        t.operation_id == op.operation_id && t.phase_nonce == op.phase_nonce && t.phase.terminal()
-    }) else {
+    let Some(terminal) = root.terminal_for(&op.operation_id, &op.phase_nonce) else {
         return Ok(());
     };
     if terminal.phase == ipc::Phase::ManualRequired
@@ -468,16 +466,19 @@ async fn stage_and_commit(
         if let Some(root) = root {
             if let Some(status) = root
                 .active_operation
+                .as_ref()
                 .filter(|s| s.operation_id == op.operation_id && s.phase_nonce == op.phase_nonce)
                 && status.phase == ipc::Phase::Staged
             {
                 break;
             }
             if root
-                .last_operation
-                .is_some_and(|s| s.operation_id == op.operation_id && s.phase.terminal())
+                .terminal_for(&op.operation_id, &op.phase_nonce)
+                .is_some()
             {
-                return Err("verification_failed");
+                // Root already fenced this request. Reconcile owns completion;
+                // do not replace its reason or send a redundant Abort.
+                return Ok(());
             }
         }
         if tokio::time::Instant::now() >= deadline {
@@ -671,14 +672,297 @@ mod tests {
                 available: true,
                 reason: None,
                 checked_at_ms: now(),
-                helper_protocol: 1,
+                helper_protocol: crate::update::contract::HELPER_PROTOCOL,
                 install_contract: crate::update::contract::INSTALL_CONTRACT.into(),
             },
             active_operation: None,
             last_operation: Some(terminal),
+            additional_terminal: None,
             pending_launch: None,
         };
         (coordinator, operation, root)
+    }
+
+    #[tokio::test]
+    async fn rejected_stage_reconciles_in_same_invocation_with_exact_nonce_and_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = tempfile::tempdir().unwrap();
+        let (coordinator, mut op, _) = fixture(dir.path());
+        op.invocation_id = coordinator.invocation.clone().unwrap();
+        op.phase = "accepted".into();
+        coordinator
+            .change(|state| {
+                state.operation = Some(op.clone());
+                state.commit_intent = None;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        coordinator.frozen.store(false, Ordering::Release);
+        let identity = coordinator.identity.as_ref().unwrap();
+        let mut previous = ipc::Inbox {
+            schema: 1,
+            operation_id: "a".repeat(32),
+            phase_nonce: "f".repeat(32),
+            request: ipc::Request::Stage {
+                download: op.download.clone(),
+                current_sha256: identity.sha256.clone(),
+                invocation_id: op.invocation_id.clone(),
+                config_revision: op.config_revision,
+            },
+        };
+        let began = now();
+        crate::update::executor::consume_stage_failure_fixture(
+            root_dir.path(),
+            identity,
+            &serde_json::to_vec(&previous).unwrap(),
+            began - 5_000,
+        )
+        .unwrap();
+        previous.operation_id = op.operation_id.clone();
+        previous.phase_nonce = op.phase_nonce.clone();
+        coordinator
+            .inbox(&op, previous.request.clone())
+            .await
+            .unwrap();
+        let root = crate::update::executor::consume_stage_failure_fixture(
+            root_dir.path(),
+            identity,
+            &std::fs::read(dir.path().join(ipc::INBOX_NAME)).unwrap(),
+            began,
+        )
+        .unwrap();
+        assert_eq!(
+            root.terminal_for(&op.operation_id, &op.phase_nonce)
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("rate_limited")
+        );
+        let mut mismatched = root.clone();
+        mismatched.additional_terminal.as_mut().unwrap().phase_nonce = "0".repeat(32);
+        reconcile(&coordinator, Some(&mismatched)).await.unwrap();
+        assert!(
+            !state::read(dir.path())
+                .unwrap()
+                .unwrap()
+                .operation
+                .unwrap()
+                .finished
+        );
+        mismatched = root.clone();
+        mismatched.installed.sha256 = "0".repeat(64);
+        reconcile(&coordinator, Some(&mismatched)).await.unwrap();
+        assert!(
+            !state::read(dir.path())
+                .unwrap()
+                .unwrap()
+                .operation
+                .unwrap()
+                .finished
+        );
+        reconcile(&coordinator, Some(&root)).await.unwrap();
+        *coordinator.root.lock().unwrap() = Some(root);
+        let done = state::read(dir.path()).unwrap().unwrap().operation.unwrap();
+        assert!(done.finished);
+        assert_eq!(done.phase, "failed");
+        assert_eq!(done.reason.as_deref(), Some("rate_limited"));
+        assert!(!coordinator.frozen.load(Ordering::Acquire));
+        assert_eq!(
+            coordinator.view()["last_operation"]["operation_id"],
+            op.operation_id
+        );
+        assert_eq!(
+            coordinator.view()["last_operation"]["reason"],
+            "rate_limited"
+        );
+        assert_eq!(
+            coordinator
+                .accept(
+                    Apply {
+                        plan_id: op.plan_id,
+                        expected_version: op.expected_version,
+                        config_revision: op.config_revision,
+                    },
+                    999,
+                    false
+                )
+                .await
+                .unwrap(),
+            op.operation_id
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn early_check_delayed_apply_then_cooldown_rejection_allows_later_operation() {
+        use crate::config::UpdatesConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = tempfile::tempdir().unwrap();
+        let (mut coordinator, _, mut root) = fixture(dir.path());
+        coordinator.invocation = Some("e".repeat(32));
+        *coordinator.state.lock().unwrap() = state::AppState::default();
+        coordinator.frozen.store(false, Ordering::Release);
+        root.last_operation = None;
+        *coordinator.root.lock().unwrap() = Some(root);
+        let (candidate, _) = super::super::tests::candidate();
+        let settings = UpdatesConfig::default();
+
+        coordinator.request_check().await.unwrap();
+        coordinator
+            .perform_check_with(2, &settings, |_| async {
+                Ok((Some(candidate.clone()), None))
+            })
+            .await;
+        // The check happened two minutes before the user applied A. Keep its
+        // real persisted plan; advance only the fixture's elapsed check clock.
+        coordinator
+            .change(|state| {
+                let checked = state.check.last_check_at_ms.unwrap();
+                state.check.last_check_at_ms = Some(checked - 120_000);
+                state.check.retry_at_ms = checked - 60_000;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let check_a = state::read(dir.path())
+            .unwrap()
+            .unwrap()
+            .check
+            .last_check_at_ms
+            .unwrap();
+        let accept_plan = || {
+            let state = coordinator.state.lock().unwrap();
+            Apply {
+                plan_id: state.plan.as_ref().unwrap().plan_id.clone(),
+                expected_version: candidate.version.clone(),
+                config_revision: 2,
+            }
+        };
+        coordinator.accept(accept_plan(), 2, true).await.unwrap();
+        let op_a = state::read(dir.path()).unwrap().unwrap().operation.unwrap();
+        let at = now();
+        let send_stage = |op: &Operation| ipc::Request::Stage {
+            download: op.download.clone(),
+            current_sha256: coordinator.identity.as_ref().unwrap().sha256.clone(),
+            invocation_id: op.invocation_id.clone(),
+            config_revision: op.config_revision,
+        };
+        coordinator.inbox(&op_a, send_stage(&op_a)).await.unwrap();
+        let root_a = crate::update::executor::consume_stage_failure_fixture(
+            root_dir.path(),
+            coordinator.identity.as_ref().unwrap(),
+            &std::fs::read(dir.path().join(ipc::INBOX_NAME)).unwrap(),
+            at - 5_000,
+        )
+        .unwrap();
+        assert!(at - 5_000 - check_a >= 60_000);
+        reconcile(&coordinator, Some(&root_a)).await.unwrap();
+        *coordinator.root.lock().unwrap() = Some(root_a);
+        assert!(
+            state::read(dir.path())
+                .unwrap()
+                .unwrap()
+                .operation
+                .unwrap()
+                .finished
+        );
+
+        coordinator.request_check().await.unwrap();
+        coordinator
+            .perform_check_with(2, &settings, |_| async {
+                Ok((Some(candidate.clone()), None))
+            })
+            .await;
+        let b = accept_plan();
+        coordinator
+            .accept(
+                Apply {
+                    plan_id: b.plan_id.clone(),
+                    expected_version: b.expected_version.clone(),
+                    config_revision: b.config_revision,
+                },
+                2,
+                true,
+            )
+            .await
+            .unwrap();
+        let op_b = state::read(dir.path()).unwrap().unwrap().operation.unwrap();
+        coordinator.inbox(&op_b, send_stage(&op_b)).await.unwrap();
+        let root_b = crate::update::executor::consume_stage_failure_fixture(
+            root_dir.path(),
+            coordinator.identity.as_ref().unwrap(),
+            &std::fs::read(dir.path().join(ipc::INBOX_NAME)).unwrap(),
+            at,
+        )
+        .unwrap();
+        assert_eq!(
+            root_b
+                .terminal_for(&op_b.operation_id, &op_b.phase_nonce)
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("rate_limited")
+        );
+        assert_eq!(
+            coordinator.accept(b, 2, true).await.unwrap(),
+            op_b.operation_id
+        );
+        reconcile(&coordinator, Some(&root_b)).await.unwrap();
+        *coordinator.root.lock().unwrap() = Some(root_b);
+        assert!(
+            state::read(dir.path())
+                .unwrap()
+                .unwrap()
+                .operation
+                .unwrap()
+                .finished
+        );
+        assert!(!coordinator.frozen.load(Ordering::Acquire));
+        assert!(coordinator.request_check().await.is_err());
+
+        // Advance both independent cooldowns without waiting or restarting.
+        coordinator
+            .change(|state| {
+                state.check.retry_at_ms = now() - 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        coordinator.request_check().await.unwrap();
+        coordinator
+            .perform_check_with(2, &settings, |_| async {
+                Ok((Some(candidate.clone()), None))
+            })
+            .await;
+        coordinator.accept(accept_plan(), 2, true).await.unwrap();
+        let op_c = state::read(dir.path()).unwrap().unwrap().operation.unwrap();
+        assert_ne!(op_c.operation_id, op_b.operation_id);
+        coordinator.inbox(&op_c, send_stage(&op_c)).await.unwrap();
+        let root_c = crate::update::executor::consume_stage_failure_fixture(
+            root_dir.path(),
+            coordinator.identity.as_ref().unwrap(),
+            &std::fs::read(dir.path().join(ipc::INBOX_NAME)).unwrap(),
+            at + 60_000,
+        )
+        .unwrap();
+        assert_eq!(
+            root_c
+                .terminal_for(&op_c.operation_id, &op_c.phase_nonce)
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("verification_failed")
+        );
+        reconcile(&coordinator, Some(&root_c)).await.unwrap();
+        assert!(
+            state::read(dir.path())
+                .unwrap()
+                .unwrap()
+                .operation
+                .unwrap()
+                .finished
+        );
     }
 
     #[tokio::test]

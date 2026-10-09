@@ -147,6 +147,13 @@ use automatic binary rollback; it does not restore an old database or discard
 new query history. HTTPS and SHA256 establish transport and content integrity,
 not an independent publisher signature.
 
+The unreleased Stage-refusal fix requires helper protocol 2. Use the verified
+installer to update the application and helper together; online updates replace
+only the application binary and cannot upgrade an older helper. Explicit Stage
+refusals become durable operation results without changing the installed binary
+or resetting the existing cooldown. Unknown results still require reconciliation,
+not automatic retries or timeout-based recovery.
+
 The current installer accepts `--enable-updater` only for the exact official
 v0.1.4 managed unit and fixed installation paths. Run it from a verified **newer**
 package; the v0.1.4 download does not implement this option. The installer keeps

@@ -5,7 +5,7 @@ import { createManifest } from './update-manifest.mjs';
 function fixtures() {
   return ['x86_64', 'aarch64'].map(arch => ({
     build: { version: '0.1.4', target: `${arch}-unknown-linux-musl`, source_commit: 'a'.repeat(40), official_release: true,
-      update_protocol: 1, helper_protocol: 1, install_contract: 'linux-managed-updater-v1',
+      update_protocol: 1, helper_protocol: 2, install_contract: 'linux-managed-updater-v1',
       durable_contract_epoch: 1, runtime_database_format: 2, cache_snapshot_format: 2, cache_semantics: 2 },
     name: `parins-v0.1.4-linux-${arch}.bin`, size: 100, sha256: 'b'.repeat(64),
   }));
@@ -17,6 +17,7 @@ test('combined manifest is derived from matching native build contracts', () => 
   assert.equal(result.artifacts.length, 2);
   assert.equal(result.runtime_database_format, 2);
   assert.equal(result.durable_contract_epoch, 1);
+  assert.equal(result.min_helper_protocol, 2);
   assert.equal(result.upgrade_mode, 'in_place');
 });
 

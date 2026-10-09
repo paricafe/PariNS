@@ -173,6 +173,9 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   timeout. Only a matching terminal fence and installed identity resolve intent.
   A new invocation drives existing Abort arbitration for unfinished old work;
   root fences precommit work without changing an already committed operation.
+  Explicit Stage admission refusals are durable ID/nonce-correlated terminals in
+  the same root journal. Preserve the owning operation, its cooldown anchor and
+  fences; publish both outcomes for reconciliation without replaying Stage.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners. Candidate preflight runs as the existing app user;
   root never executes the candidate. Root journal is the sole installed anchor,

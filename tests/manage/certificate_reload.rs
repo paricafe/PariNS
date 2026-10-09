@@ -126,6 +126,173 @@ fn assert_stable_state(before: &Value, after: &Value) {
 }
 
 #[tokio::test]
+async fn updates_only_validate_and_apply_preserve_loaded_material_after_failed_reload() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert = temporary.path().join("cert.pem");
+    let key = temporary.path().join("key.pem");
+    let rules = temporary.path().join("rules.toml");
+    write_identity(&cert, &key, &identity);
+    std::fs::write(&rules, "enabled=true\nblock_exact=['example.test']\n").unwrap();
+    let source = format!(
+        "filter_file={}\n{}\n[web]\npublic_host='dns.test'\n[doh]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        json!(rules),
+        configuration(),
+        json!(cert),
+        json!(key)
+    );
+    let setup = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    server.setup_with(&setup, &source).await.expect(200);
+    let login = secure_request(
+        server.address,
+        &identity,
+        "dns.test",
+        &https_wire(
+            server.address,
+            "dns.test",
+            "POST",
+            "/api/login",
+            None,
+            Some(json!({"username":"admin", "password":PASSWORD})),
+        ),
+    )
+    .await;
+    login.expect(200);
+    let auth = login.auth();
+    let initial = api(&server, &identity, &auth, "GET", "/api/status", None)
+        .await
+        .expect(200);
+    let dns = initial["listen"].as_str().unwrap().parse().unwrap();
+    let doh = initial["doh_listen"].as_str().unwrap().parse().unwrap();
+
+    std::fs::write(&cert, "invalid replacement certificate").unwrap();
+    api(
+        &server,
+        &identity,
+        &auth,
+        "POST",
+        "/api/certificates/reload",
+        Some(json!({"revision":1})),
+    )
+    .await
+    .expect(422);
+    assert_tcp_identity(doh, &identity, b"h2").await;
+    let failed = api(&server, &identity, &auth, "GET", "/api/status", None)
+        .await
+        .expect(200);
+    assert_stable_state(&initial, &failed);
+    assert_eq!(failed["certificates"]["last_reload"]["outcome"], "failed");
+
+    for revision in 1..=2 {
+        if revision == 2 {
+            // Isolate the unchanged local-rule file from the certificate failure.
+            write_identity(&cert, &key, &identity);
+            std::fs::write(&rules, "invalid replacement rules").unwrap();
+        }
+        let next = format!(
+            "{source}\n[updates]\nauto_check=false\ncheck_interval_hours={}\n",
+            24 * revision
+        );
+        let validated = api(
+            &server,
+            &identity,
+            &auth,
+            "POST",
+            "/api/config/validate",
+            Some(json!({"toml":next})),
+        )
+        .await
+        .expect(200);
+        assert_eq!(validated["restart_required"], false);
+        assert!(validated["transport_change"].is_null());
+        api(
+            &server,
+            &identity,
+            &auth,
+            "PUT",
+            "/api/config",
+            Some(json!({"toml":next,"revision":revision+1})),
+        )
+        .await
+        .expect(409);
+        let applied = api(
+            &server,
+            &identity,
+            &auth,
+            "PUT",
+            "/api/config",
+            Some(json!({"toml":next,"revision":revision})),
+        )
+        .await
+        .expect(200);
+        assert_eq!(applied["restart_required"], false);
+        assert_eq!(applied["revision"], revision + 1);
+        let after = api(&server, &identity, &auth, "GET", "/api/status", None)
+            .await
+            .expect(200);
+        for pointer in [
+            "/generation",
+            "/dns_health/generation",
+            "/listen",
+            "/doh_listen",
+            "/cache/epoch",
+            "/diagnostics/cache/since_ms",
+            "/certificates",
+            "/storage/configured_revision",
+            "/storage/log_epoch",
+            "/storage/totals_epoch",
+            "/storage/history_epoch",
+        ] {
+            let expected = failed.pointer(pointer).expect(pointer);
+            assert!(!expected.is_null(), "missing initial {pointer}");
+            assert_eq!(after.pointer(pointer), Some(expected), "changed {pointer}");
+        }
+        assert_eq!(after["running"], true);
+        assert_tcp_identity(doh, &identity, b"h2").await;
+        assert_dns(dns).await;
+        let saved = api(&server, &identity, &auth, "GET", "/api/config", None)
+            .await
+            .expect(200);
+        assert_eq!(saved["toml"], next);
+        assert_eq!(saved["revision"], revision + 1);
+        let state = std::fs::read(directory.join("state.json")).unwrap();
+        for rejected in [
+            next.replace("query_timeout_ms = 200", "query_timeout_ms = 201"),
+            next.replace("auto_check=false", "auto_check='invalid'"),
+            next.replace(
+                &format!("check_interval_hours={}", 24 * revision),
+                "check_interval_hours=0",
+            ),
+            next.replace(&json!(cert).to_string(), "'missing-cert.pem'"),
+        ] {
+            for (method, path, body) in [
+                ("POST", "/api/config/validate", json!({"toml":rejected})),
+                (
+                    "PUT",
+                    "/api/config",
+                    json!({"toml":rejected,"revision":revision+1}),
+                ),
+            ] {
+                api(&server, &identity, &auth, method, path, Some(body))
+                    .await
+                    .expect(422);
+            }
+        }
+        assert_eq!(std::fs::read(directory.join("state.json")).unwrap(), state);
+        let rejected = api(&server, &identity, &auth, "GET", "/api/status", None)
+            .await
+            .expect(200);
+        assert_stable_state(&after, &rejected);
+        assert_eq!(rejected["certificates"], after["certificates"]);
+        assert_tcp_identity(doh, &identity, b"h2").await;
+        assert_dns(dns).await;
+    }
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn reload_is_atomic_across_transports_and_preserves_sessions_runtime_and_old_dot() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");

@@ -138,6 +138,12 @@ cache. `parins --build-info=json` reports the current source/official build iden
 `parins --manage --check --state-dir PATH` checks saved materials without starting
 services, opening the runtime database, or consuming a cache snapshot.
 
+Unreleased validation changes keep update-only edits independent of unchanged
+DNS certificates and rule files, including when a rejected on-disk candidate
+has left the previously loaded material active. Schema validation still applies;
+actual DNS or certificate configuration changes require full preparation. A
+stopped DNS service stays stopped and is reported as not requiring a restart.
+
 One-click installation requires an official Linux managed installation and the
 trusted updater components, not just a new console. The initial-development
 v0.1.4 has no updater: first enrollment requires a verified newer installation

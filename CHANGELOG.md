@@ -14,6 +14,9 @@
 - Persist explicit updater Stage admission refusals so a rejected operation can
   reconcile without restarting the service. Preserve the existing operation,
   installation identity, cooldown and late-Commit fences.
+- Use the same updates-only classification for configuration validation, restart
+  prediction and apply. Unchanged DNS materials are not reloaded when changing
+  update settings, and a stopped DNS service remains stopped.
 - Recheck credential snapshots before issuing login sessions and recheck old
   sessions at protected mutation admission. Preserve already accepted background
   work and the updater's consumed-plan/freeze semantics.

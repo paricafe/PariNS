@@ -167,6 +167,9 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
 - Software checks belong to one managed-process scheduler after setup, never a
   DNS generation or API GET. Updates-only settings preserve listeners, caches,
   RuntimeServices, certificates and sessions. File mode has no update scheduler.
+  Manager uses one updates-only classification for validation, restart impact and
+  apply. Keep schema validation without reloading unchanged DNS material, and
+  leave a stopped DNS service stopped.
 - Update commit intent is persisted before a freeze and fixed inbox request.
   Check the freeze under the existing mutation permit; release that permit
   before root waits for normal SIGTERM. Unknown helper outcomes never unlock by

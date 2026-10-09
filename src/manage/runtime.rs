@@ -385,9 +385,28 @@ impl Manager {
             .map(|r| &r.resolver)
     }
 
-    /// Compare source documents, not compiled rules. Cache/storage/filter changes
-    /// can retain the current listener and certificate ownership.
+    /// Management-only changes do not depend on live DNS or its material files.
+    fn updates_only(&self, next: &str) -> Result<bool> {
+        let Some(saved) = &self.saved else {
+            return Ok(false);
+        };
+        let stripped = |text: &str| -> Result<toml::Value> {
+            let mut value: toml::Value = toml::from_str(text)?;
+            value
+                .as_table_mut()
+                .expect("configuration table")
+                .remove("updates");
+            Ok(value)
+        };
+        Ok(saved.toml != next && stripped(&saved.toml)? == stripped(next)?)
+    }
+
+    /// Compare source documents, not compiled rules. Updates-only changes also
+    /// retain a stopped DNS state; cache/storage/filter changes require live DNS.
     pub fn hot_update(&self, next: &str) -> Option<bool> {
+        if self.updates_only(next).ok()? {
+            return Some(false);
+        }
         let previous = self.saved.as_ref().filter(|_| self.resolver().is_some())?;
         let split_cache = |text: &str| -> Option<(toml::Value, serde_json::Value, toml::Value)> {
             let mut value: toml::Value = toml::from_str(text).ok()?;
@@ -419,6 +438,10 @@ impl Manager {
     }
 
     pub async fn validate(&self, toml: String) -> Result<Config> {
+        ensure!(toml.len() <= 256 * 1024, "configuration exceeds 256 KiB");
+        if self.updates_only(&toml)? {
+            return Config::parse_in(&toml, &self.store.dir);
+        }
         let config = self.prepare(toml).await?.0;
         let local = config.local_policy_source();
         let _candidate = self
@@ -504,27 +527,17 @@ impl Manager {
     pub async fn apply(&mut self, next: Stored) -> Result<bool> {
         // Management-only settings do not inspect changed certificate files,
         // restart a stopped DNS service, or publish new storage/cache settings.
-        if let Some(saved) = &self.saved {
-            let stripped = |text: &str| -> Result<toml::Value> {
-                let mut value: toml::Value = toml::from_str(text)?;
-                value
-                    .as_table_mut()
-                    .expect("configuration table")
-                    .remove("updates");
-                Ok(value)
-            };
-            if saved.toml != next.toml && stripped(&saved.toml)? == stripped(&next.toml)? {
-                let config = Config::parse_in(&next.toml, &self.store.dir)?;
-                let store = self.store.clone();
-                let copy = next.clone();
-                tokio::task::spawn_blocking(move || store.save(&copy)).await??;
-                if let Some(running) = &mut self.running {
-                    running.config.updates = config.updates;
-                }
-                self.filters.set_revision(next.revision);
-                self.saved = Some(next);
-                return Ok(false);
+        if self.updates_only(&next.toml)? {
+            let config = Config::parse_in(&next.toml, &self.store.dir)?;
+            let store = self.store.clone();
+            let copy = next.clone();
+            tokio::task::spawn_blocking(move || store.save(&copy)).await??;
+            if let Some(running) = &mut self.running {
+                running.config.updates = config.updates;
             }
+            self.filters.set_revision(next.revision);
+            self.saved = Some(next);
+            return Ok(false);
         }
         ensure!(
             self.cache_ready,

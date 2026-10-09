@@ -578,6 +578,8 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     next.revision += 1;
     next.toml
         .push_str("\n[updates]\nauto_check=false\ncheck_interval_hours=168\n");
+    manager.validate(next.toml.clone()).await.unwrap();
+    assert_eq!(manager.hot_update(&next.toml), Some(false));
     assert!(!manager.apply(next).await.unwrap());
     assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
     assert!(Arc::ptr_eq(&cache, &manager.resolver().unwrap().cache()));
@@ -601,6 +603,8 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.toml = next.toml.replace("auto_check=false", "auto_check=true");
+    manager.validate(next.toml.clone()).await.unwrap();
+    assert_eq!(manager.hot_update(&next.toml), Some(false));
     assert!(!manager.apply(next).await.unwrap());
     assert!(manager.resolver().is_none());
     assert_eq!(manager.generation, generation);

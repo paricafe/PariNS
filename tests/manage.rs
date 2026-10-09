@@ -598,6 +598,68 @@ async fn successful_login_creates_an_independent_session_and_failed_login_preser
 }
 
 #[tokio::test]
+async fn updates_only_validate_and_apply_keep_dns_stopped() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let dns_tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dns_address = dns_tcp.local_addr().unwrap();
+    let dns_udp = UdpSocket::bind(dns_address).await.unwrap();
+    let source = configuration().replacen("127.0.0.1:0", &dns_address.to_string(), 1);
+    drop((dns_tcp, dns_udp));
+    server.setup(&directory, &source).await;
+    server.finish().await;
+
+    // A listener conflict leaves management running while DNS is stopped.
+    let occupied = TcpListener::bind(dns_address).await.unwrap();
+    let server = Management::start(&directory).await;
+    let login = server
+        .request(
+            "POST",
+            "/api/login",
+            None,
+            Some(json!({"username":"admin","password":PASSWORD})),
+        )
+        .await;
+    login.expect(200);
+    let auth = login.auth();
+    let before = server
+        .request("GET", "/api/status", Some(&auth), None)
+        .await
+        .expect(200);
+    assert_eq!(before["running"], false);
+    // Once released, an incorrect full apply would be able to start DNS.
+    drop(occupied);
+    let next = format!("{source}\n[updates]\nauto_check=false\ncheck_interval_hours=168\n");
+    for (method, path, body) in [
+        ("POST", "/api/config/validate", json!({"toml":next})),
+        ("PUT", "/api/config", json!({"toml":next,"revision":1})),
+    ] {
+        server
+            .request(method, path, None, Some(body.clone()))
+            .await
+            .expect(401);
+        let response = server
+            .request(method, path, Some(&auth), Some(body))
+            .await
+            .expect(200);
+        assert_eq!(response["restart_required"], false);
+    }
+    let after = server
+        .request("GET", "/api/status", Some(&auth), None)
+        .await
+        .expect(200);
+    assert_eq!(after["running"], false);
+    assert_eq!(after["generation"], before["generation"]);
+    assert_eq!(after["dns_health"], before["dns_health"]);
+    assert_eq!(after["certificates"], before["certificates"]);
+    assert_eq!(after["revision"], 2);
+    let available = TcpListener::bind(dns_address).await.unwrap();
+    server.finish().await;
+    drop(available);
+}
+
+#[tokio::test]
 async fn configuration_forms_are_authenticated_read_only_and_apply_with_revision() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");

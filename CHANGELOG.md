@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.1.7 — 2026-10-10
+
+### Upgrade notice
+
+- Existing v0.1.5/v0.1.6 managed installations report this version as a manual
+  upgrade: it requires updater helper protocol 2, which an online binary-only
+  update cannot install. Reinstall the current managed layout from a verified
+  v0.1.7 package or bootstrap to update the application and helper together.
+  Account, configuration and runtime data are kept; keep a separate backup first.
+  There is no automatic migration of older layouts.
+- After upgrading, sign in again. The first start begins with a cold DNS cache.
+
 ### Added
 
 - Add an authenticated administrator account endpoint and bilingual console form
@@ -45,7 +57,7 @@
   Earlier-semantic snapshots are rejected and startup begins cold; no migration
   or business-data format change is involved. This does not establish production
   cache-hit improvement.
-- The unreleased updater fix requires helper protocol 2. Update the application
+- The updater fix requires helper protocol 2. Update the application
   and fixed helper together through the verified installer; an online binary-only
   update cannot replace an older helper. No business-data migration is introduced.
 - Credential changes require signing in again on every tab. An unknown response

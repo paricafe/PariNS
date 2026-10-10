@@ -6,8 +6,8 @@ umask 077
 
 fail() { printf 'PariNS bootstrap: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.6] [--enable-updater] [--dry-run]' \
-        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.6] [--dry-run]' \
+    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.7] [--enable-updater] [--dry-run]' \
+        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.7] [--dry-run]' \
         'Linux x86_64/aarch64 and systemd are required for live installation.' \
         '--root stages files only; no service or candidate binary is executed.'
 }
@@ -35,7 +35,7 @@ cleanup() {
     exit "$status"
 }
 main() {
-    version=v0.1.6 root= dry_run=false enable_updater=false
+    version=v0.1.7 root= dry_run=false enable_updater=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--root)

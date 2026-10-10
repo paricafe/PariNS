@@ -3,7 +3,7 @@
 [Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md)
 
 This guide describes the current main branch; features marked unreleased are not
-part of the published v0.1.6 packages. See [CHANGELOG](../CHANGELOG.md) for release-specific changes.
+part of the published v0.1.7 packages. See [CHANGELOG](../CHANGELOG.md) for release-specific changes.
 
 ## Management console
 
@@ -27,9 +27,9 @@ There are no external frontend assets. Opt-in query history is held in private
 server-side SQLite storage, not browser storage. An unsaved configuration draft does not survive a
 full page refresh.
 
-### Administrator credentials (unreleased)
+### Administrator credentials
 
-This feature is on the main branch and is **not included in published v0.1.6 packages**.
+Available since v0.1.7.
 
 Use **Admin account** in the console to change the username and password.
 Enter the current password and the desired username/new password; confirm the new
@@ -105,9 +105,8 @@ Do not manually edit live state or use `--config` with `--manage`. Back up the
 whole private state directory while the service is stopped. Managed SIGHUP only
 reloads the current certificate paths; rules and configuration still use apply.
 Forgotten-password/offline recovery is not supported; keep your password and
-private state backup safe. Online
-[credential rotation](#administrator-credentials-unreleased) is an unreleased
-main-branch feature.
+private state backup safe. Use online
+[credential rotation](#administrator-credentials) to change them.
 
 ## Service commands
 
@@ -138,7 +137,7 @@ cache. `parins --build-info=json` reports the current source/official build iden
 `parins --manage --check --state-dir PATH` checks saved materials without starting
 services, opening the runtime database, or consuming a cache snapshot.
 
-Unreleased validation changes keep update-only edits independent of unchanged
+Since v0.1.7, validation keeps update-only edits independent of unchanged
 DNS certificates and rule files, including when a rejected on-disk candidate
 has left the previously loaded material active. Schema validation still applies;
 actual DNS or certificate configuration changes require full preparation. A
@@ -153,7 +152,7 @@ use automatic binary rollback; it does not restore an old database or discard
 new query history. HTTPS and SHA256 establish transport and content integrity,
 not an independent publisher signature.
 
-The unreleased Stage-refusal fix requires helper protocol 2. Use the verified
+Since v0.1.7, the Stage-refusal fix requires helper protocol 2. Use the verified
 installer to update the application and helper together; online updates replace
 only the application binary and cannot upgrade an older helper. Explicit Stage
 refusals become durable operation results without changing the installed binary

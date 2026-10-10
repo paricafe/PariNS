@@ -39,7 +39,7 @@ or a substitute for trusting the release publisher.
 This step is for an uninitialized installation, including a reinstall that only
 has a setup token. An initialized reinstall keeps its existing management address
 and administrator account; do not run setup again or infer a new HTTP/HTTPS URL
-from the server IP. The unreleased installer prints this distinction only after
+from the server IP. The installer prints this distinction only after
 the saved configuration passes its existing preflight and installation readiness
 checks. It does not inspect the setup token to decide whether setup is complete.
 
@@ -79,7 +79,7 @@ to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
 needed. Reinstalling the current managed layout preserves the account and
 configuration. Upgrading an older layout requires explicit preparation as
 described in the upgrade notice; the installer will reject it without migration.
-Pin a version with `sudo sh parins-install.sh --version v0.1.6`.
+Pin a version with `sudo sh parins-install.sh --version v0.1.7`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`

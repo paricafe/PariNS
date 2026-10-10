@@ -47,8 +47,9 @@ downgrade to plaintext. DoH uses POST over HTTP/2 by default. Enable **Prefer
 HTTP/3 for HTTPS upstreams** (`prefer_h3 = true`) to try QUIC on the same host,
 port and path first, then fall back to verified HTTP/2 on failure or timeout.
 The H3 attempt has a budget of at most 250 ms (half the configured query timeout
-if shorter), inside the original query deadline. Connections are reused; failed
-H3 attempts trigger a 30-second per-endpoint cooldown before retrying H3. Normal
+if shorter), inside the original query deadline. HTTP/3 connections are reused
+per endpoint; HTTP/2 currently opens a new TCP, TLS and HTTP/2 connection for each
+query. Failed H3 attempts trigger a 30-second per-endpoint cooldown before retrying H3. Normal
 DNS error replies still follow the selected upstream scheduling policy. This
 does not discover alternate ports through Alt-Svc or HTTPS/SVCB records. Direct
 HTTPS-origin probing and TCP fallback follow [RFC 9114 §3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-3.1).

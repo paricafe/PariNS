@@ -12,6 +12,23 @@
 - Log the cause when a stop is not quiescent and no cache snapshot is saved, for
   example `cache snapshot not saved: shutdown not quiescent (listener_drain)`;
   the cause names the first deadline or failure that forced the stop.
+- Stop DoQ/DoH3 connections that have not finished their QUIC handshake or HTTP/3
+  setup immediately, and bound QUIC close notification to half of
+  `shutdown_grace_ms`. An unfinished or unresponsive QUIC peer no longer forces a
+  normal stop and loses the clean cache snapshot.
+- Let admitted DoH requests finish during a stop even when the client closes its
+  connection, instead of forcing the stop.
+- Omit the empty `additional_terminal` field from the updater status file, so an
+  older application restored by an installer rollback can still read the status
+  written by the new helper.
+
+### Changed
+
+- Correct the HTTPS upstream documentation: HTTP/3 connections are reused, while
+  HTTP/2 currently opens a new connection for each query.
+- Show the subscription, storage and security console pages with fewer status
+  requests, keep Logs pages and messages when switching language, and align the
+  subscription disk-budget minimum with the server (256 KiB).
 
 ## v0.1.7 — 2026-10-10
 

@@ -119,7 +119,14 @@ mod tests {
             result["settings"]["upstreams"]["servers"],
             json!(["udp://1.1.1.1:53"])
         );
-        assert_eq!(result["settings"]["cache"]["max_bytes"], 8 * 1024 * 1024);
+        assert_eq!(
+            result["settings"]["cache"],
+            serde_json::to_value(crate::config::CacheConfig::default()).unwrap()
+        );
+        assert_eq!(
+            result["settings"]["query_log"],
+            serde_json::to_value(crate::query_log::Settings::default()).unwrap()
+        );
         assert_eq!(result["settings"]["source_limits"]["rate_per_sec"], 100);
         assert_eq!(result["settings"]["ecs"]["enabled"], false);
         assert_eq!(result["settings"]["coalescing"]["enabled"], true);

@@ -156,7 +156,7 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   If an upstream omits ECS after a nonzero ECS request, `ExactSource` permits reuse
   only for the identical actual outgoing family/network/source-prefix. It does
   not invent broader scope or mix privacy and no-ECS namespaces.
-- Defaults: 4096 answers, 8 MiB charged bytes, 64 subnet variants per query,
+- Defaults: 32768 answers, 32 MiB charged bytes, 64 subnet variants per query,
   four concurrent shards and a 20% negative-cache reservation. Each shard has
   separate positive/negative entry and byte budgets; unused partitions are not
   borrowed. Tiny capacities can round negative capacity down to zero. Eviction
@@ -168,6 +168,13 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   process RSS: allocator slack and empty index capacity are not tracked. Fixed
   shard partitions may reach capacity before the aggregate limit. Resolver/cache
   generations never share entries across upstream configurations.
+- Cache storage grows on demand, not by reserving the full byte budget at startup.
+  Rust owns defaults for omitted settings; the setup template mirrors them, and
+  the console displays the server's parsed values. Existing explicit limits are
+  not changed by an upgrade. Tune entry and byte limits together using interval
+  hit/miss and eviction deltas: more capacity helps a capacity-bound working set,
+  but cannot make expired or ineligible answers reusable. These limits are not a
+  process memory ceiling or a measured DNS QPS rating.
 - This is a whole-response cache, not an RRset cache. All section TTLs age;
   the earliest RR expiry invalidates the answer. Positive TTLs are capped at
   3600 seconds by default. NXDOMAIN/NODATA require a covering SOA and use the
@@ -181,7 +188,9 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
 - Hits restore the current request's ID/question and original ECS, with aged
   TTLs and normalized EDNS. There is no local DNSSEC validation.
   `[cache.persistence]` defaults to enabled with a 32 MiB snapshot budget: only
-  fresh entries are saved at terminal, quiescent shutdown. Startup ages all TTLs
+  fresh entries are saved at terminal, quiescent shutdown. The snapshot budget
+  is independent of cache accounting; its serialized format can reach the limit
+  before every fresh entry is saved. Startup ages all TTLs
   and consumes the file durably before serving. Incompatible/corrupt snapshots
   are consumed and skipped; a failed consume prevents DNS startup. No periodic
   snapshot can resurrect entries after clear, TTL0, EDE or a crash. Forced drain,

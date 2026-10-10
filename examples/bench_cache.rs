@@ -23,12 +23,7 @@ use parins::{cache::Cache, config::CacheConfig, ecs::Scope, protocol};
 struct SharedCache(Cache);
 impl SharedCache {
     fn new() -> Self {
-        let mut config = CacheConfig::default();
-        if let Ok(shards) = std::env::var("PARINS_BENCH_SHARDS") {
-            config.shards = shards.parse().expect("invalid PARINS_BENCH_SHARDS");
-            assert!(config.shards.is_power_of_two() && config.shards <= 64);
-        }
-        Self(Cache::new(config))
+        Self(Cache::new(benchmark_config()))
     }
     fn insert(&self, fixture: &Fixture, now: Instant) {
         self.0
@@ -37,6 +32,21 @@ impl SharedCache {
     fn get(&self, fixture: &Fixture, now: Instant) -> Option<(Message, Scope)> {
         self.0.get(&fixture.query, fixture.outgoing, now)
     }
+}
+
+fn benchmark_config() -> CacheConfig {
+    let mut config = CacheConfig::default();
+    for (name, value) in [
+        ("PARINS_BENCH_SHARDS", &mut config.shards),
+        ("PARINS_BENCH_MAX_ENTRIES", &mut config.max_entries),
+        ("PARINS_BENCH_MAX_BYTES", &mut config.max_bytes),
+    ] {
+        if let Ok(raw) = std::env::var(name) {
+            *value = raw.parse().unwrap_or_else(|_| panic!("invalid {name}"));
+        }
+    }
+    assert!(config.shards.is_power_of_two() && config.shards <= 64);
+    config
 }
 
 struct Fixture {
@@ -274,10 +284,10 @@ fn main() {
     println!(
         "# in-process cache; fixed seed; prebuilt queries; latency sample 1/64; synthetic TTL age 5s; no DNS sockets"
     );
+    let config = benchmark_config();
     println!(
-        "# configured shards: {}",
-        std::env::var("PARINS_BENCH_SHARDS")
-            .unwrap_or_else(|_| CacheConfig::default().shards.to_string())
+        "# configured shards: {}; max_entries: {}; max_bytes: {}",
+        config.shards, config.max_entries, config.max_bytes
     );
     println!(
         "workload,workers,seconds,operations,hits,errors,ops_per_second,sampled_p99_ns,samples"

@@ -68,9 +68,10 @@ ipv6_prefix = 56
 
 [cache]
 enabled = true
-max_entries = 4096
+# These example limits mirror the Rust defaults; explicit saved values stay unchanged.
+max_entries = 32768
 # Serialized answers + conservative entry metadata, not total process RSS.
-max_bytes = 8388608
+max_bytes = 33554432
 max_variants = 64
 max_ttl_secs = 3600
 negative_ttl_cap_secs = 300
@@ -135,6 +136,6 @@ interval_secs = 0
 # Opt-in private browsing metadata, persisted asynchronously in the runtime DB.
 [query_log]
 enabled = false
-max_entries = 1000
+max_entries = 100000
 max_bytes = 67108864
 retention_secs = 86400

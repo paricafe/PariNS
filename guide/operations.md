@@ -233,7 +233,7 @@ settings (disabled by default):
 ```toml
 [query_log]
 enabled = true
-max_entries = 1000 # independently limits actual coverage
+max_entries = 100000 # default; independently limits actual coverage
 max_bytes = 67108864
 retention_secs = 86400 # 60..2592000; an upper bound, not promised coverage
 ```
@@ -243,8 +243,11 @@ cache/filter path, winning upstream (if any), input/output ECS and EDNS flags,
 and bounded answer details (16 records, capped strings). They are authenticated,
 persisted asynchronously, periodically expired, and retained across DNS/process restart.
 Logs expose the actual oldest/latest record times, coverage and cleanup/drop reasons;
-count/byte/database limits may shorten retention. Requests cancelled
-after entering the resolver are recorded as dropped; malformed transport requests
+count/byte/database limits may shorten retention. The default 64 MiB log budget
+and 128 MiB database budget are separate limits, not preallocated space or a
+promise of 100000 retained records. Existing explicit limits remain unchanged;
+update them deliberately if a shorter history was inherited from an older setup.
+Requests cancelled after entering the resolver are recorded as dropped; malformed transport requests
 that never reach the DNS resolver are not DNS query entries. Background prefetch
 is not counted as a client request. Clearing rejects old in-flight log writes;
 future requests can create new entries. No query data is emitted to metrics or

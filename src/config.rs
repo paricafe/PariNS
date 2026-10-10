@@ -240,8 +240,8 @@ impl Default for CacheConfig {
         Self {
             persistence: CachePersistenceConfig::default(),
             enabled: true,
-            max_entries: 4096,
-            max_bytes: 8 * 1024 * 1024,
+            max_entries: 32_768,
+            max_bytes: 32 * 1024 * 1024,
             max_variants: 64,
             max_ttl_secs: 3600,
             negative_ttl_cap_secs: 300,
@@ -475,8 +475,16 @@ mod tests {
     const EXAMPLE: &str = include_str!("../parins.example.toml");
 
     #[test]
-    fn example_is_valid() {
-        Config::parse(EXAMPLE).unwrap();
+    fn example_uses_authoritative_cache_and_query_log_defaults() {
+        let config = Config::parse(EXAMPLE).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config.cache).unwrap(),
+            serde_json::to_value(CacheConfig::default()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&config.query_log).unwrap(),
+            serde_json::to_value(crate::query_log::Settings::default()).unwrap()
+        );
     }
 
     #[test]
@@ -621,9 +629,9 @@ mod tests {
             ("interval_secs = 0", "interval_secs = 3601"),
             ("ipv4_prefix = 24", "ipv4_prefix = 33"),
             ("ipv6_prefix = 56", "ipv6_prefix = 129"),
-            ("max_entries = 4096", "max_entries = 0"),
-            ("max_entries = 4096", "max_entries = 63"),
-            ("max_bytes = 8388608", "max_bytes = 511"),
+            ("max_entries = 32768", "max_entries = 0"),
+            ("max_entries = 32768", "max_entries = 63"),
+            ("max_bytes = 33554432", "max_bytes = 511"),
             ("max_variants = 64", "max_variants = 257"),
             ("max_ttl_secs = 3600", "max_ttl_secs = 0"),
             (
@@ -631,7 +639,10 @@ mod tests {
                 "negative_ttl_cap_secs = 86401",
             ),
         ] {
-            assert!(Config::parse(&EXAMPLE.replace(from, to)).is_err(), "{to}");
+            assert!(
+                Config::parse(&EXAMPLE.replacen(from, to, 1)).is_err(),
+                "{to}"
+            );
         }
     }
 

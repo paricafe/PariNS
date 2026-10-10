@@ -362,6 +362,11 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
+    let template = server
+        .request("GET", "/api/template", None, None)
+        .await
+        .expect(200);
+    assert_eq!(template["toml"], include_str!("../parins.example.toml"));
     assert_eq!(
         server
             .request("GET", "/api/session", None, None)

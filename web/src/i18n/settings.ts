@@ -72,7 +72,7 @@ export const settingsMessages = {
   "cache.enabled.label": ["启用缓存", "Enable cache"],
   "cache.max_entries.label": ["缓存条目上限", "Maximum cache entries"],
   "cache.max_bytes.label": ["缓存大小上限（字节）", "Cache size limit (bytes)"],
-  "cache.max_bytes.help": ["8 MiB = 8388608 字节。按缓存数据和元数据估算；进程的实际内存占用还包括其他开销。", "8 MiB = 8388608 bytes. Includes estimated cache data and metadata; process memory also includes other overhead."],
+  "cache.max_bytes.help": ["1 MiB = 1048576 字节。按缓存数据和元数据估算；进程的实际内存占用还包括其他开销。", "1 MiB = 1048576 bytes. Includes estimated cache data and metadata; process memory also includes other overhead."],
   "cache.max_variants.label": ["每个查询最多缓存子网数", "Maximum cached subnets per query"],
   "cache.shards.label": ["缓存分片数", "Cache shards"],
   "cache.shards.help": ["分片可减少并发争用，每片单独分配容量。请结合服务器负载调整。", "Shards reduce contention and each gets its own capacity. Tune this for your server's workload."],

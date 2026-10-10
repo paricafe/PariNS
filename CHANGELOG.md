@@ -9,8 +9,19 @@
   Successful saves revoke all existing sessions without changing DNS configuration,
   runtime data, certificates, subscriptions or software-update state.
 
+### Changed
+
+- Increase the default cache capacity from 4096 answers / 8 MiB to 32768 answers /
+  32 MiB, retaining the existing negative-cache partition, TTLs and ECS isolation.
+  The setup template mirrors the Rust defaults; omitted capacity fields use the
+  new defaults on next parse, while existing explicit settings are unchanged.
+  These are on-demand budgets, not a process memory or DNS QPS guarantee.
+
 ### Fixed
 
+- Align the setup template's query-log limit with the existing Rust default of
+  100000 entries instead of 1000. Logging remains disabled by default, with the
+  same 64 MiB log and 128 MiB database budgets; actual retention may be shorter.
 - Persist explicit updater Stage admission refusals so a rejected operation can
   reconcile without restarting the service. Preserve the existing operation,
   installation identity, cooldown and late-Commit fences.

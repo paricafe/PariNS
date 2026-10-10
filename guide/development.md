@@ -69,7 +69,10 @@ These transport microbenchmarks are not production capacity guarantees.
 1/2/4 OS workers; fixed workloads check IDs, questions, TTLs and scopes. It reports
 sampled p99 and correctness failures. Repeat under a quiet host and compare the
 same workload (`--case Multi --workers 2` selects a case; `PARINS_BENCH_SHARDS=4`
-selects shards). Positive/negative partition changes affect hit rates, so churn
+selects shards). `PARINS_BENCH_MAX_ENTRIES` and `PARINS_BENCH_MAX_BYTES` override
+capacity for an interleaved old/new-budget comparison using the same binary;
+omitted overrides use Rust defaults, and the output records the selected budgets.
+Positive/negative partition changes affect hit rates, so churn
 throughput alone is not an equal-work speed comparison. These are cache operations,
 not wire DNS QPS or proof of capacity on a 2-vCPU/4-GiB VPS.
 Packaging creates a host-native archive under `target/packages`, containing no

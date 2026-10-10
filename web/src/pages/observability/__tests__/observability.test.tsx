@@ -183,6 +183,28 @@ describe("LogsPage", () => {
     expect(screen.getByText("Query log cleared.")).toBeTruthy();
   });
 
+  it("switches language without re-requesting or losing the older page and translates failures at render time", async () => {
+    const api = fakeApi((_path, body) => {
+      const before = (body as { before_id: number | null }).before_id;
+      return { revision: 7, page: { log_epoch: 3, storage, enabled: true, total: 2, entries: [{ ...entry, name: before ? 'older.test' : 'latest.test' }], next_cursor: before ? null : 20 } };
+    });
+    const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
+    await waitFor(() => expect(screen.getAllByText('latest.test').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole('button', { name: /Older queries/ }));
+    await waitFor(() => expect(screen.getAllByText('older.test').length).toBeGreaterThan(0));
+    view.rerender(<LogsPage api={api} language="zh-CN" onOpenSettings={() => {}} />);
+    expect(screen.getAllByText('older.test').length).toBeGreaterThan(0);
+    expect(api.request).toHaveBeenCalledTimes(2);
+
+    cleanup();
+    const failing = fakeApi(() => { throw new ApiError(0, 'NETWORK', 'offline'); });
+    const failed = render(<LogsPage api={failing} language="en" onOpenSettings={() => {}} />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Connection failed'));
+    failed.rerender(<LogsPage api={failing} language="zh-CN" onOpenSettings={() => {}} />);
+    expect(screen.getByRole('alert').textContent).toContain('连接失败');
+    expect(failing.request).toHaveBeenCalledTimes(1);
+  });
+
   it("distinguishes disabled logs from an empty enabled page", async () => {
     const api = fakeApi(() => ({ revision: 7, page: { log_epoch: 3, storage, enabled: false, total: 1, entries: [entry], next_cursor: null } }));
     render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);

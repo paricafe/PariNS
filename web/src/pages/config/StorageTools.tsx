@@ -21,11 +21,14 @@ export function StorageTools({ language }: { language: Language }) {
   const [unknown, setUnknown] = useState<{ action: StorageAction; epoch: number } | null>(null);
   const requestId = useRef(0);
   const t = (key: string) => translate(`storage.${key}`, language);
-  const load = useCallback(async () => {
+  const fail = (reason: unknown) => { if (!(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : String(reason)); };
+  // Statistics totals change only through the totals reset, so they are read on mount and after that reset rather than polled.
+  const load = useCallback(async (includeStats: boolean) => {
     const owner = ++requestId.current;
     const current = await api.request<{ revision: number; storage: StorageStatus }>('status');
     if (owner !== requestId.current) throw new StaleRequest();
     setView(current);
+    if (!includeStats) return current;
     try {
       const totals = await api.request<StatsView>('stats', 'GET', undefined, undefined, { query: { range: '1h' } });
       if (owner === requestId.current) { setStats(totals); setError(null); }
@@ -33,9 +36,8 @@ export function StorageTools({ language }: { language: Language }) {
     return current;
   }, [api]);
   useEffect(() => {
-    const read = () => { if (document.visibilityState !== 'hidden') void load().catch((reason) => { if (!(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : String(reason)); }); };
-    read(); const timer = window.setInterval(read, 5000);
-    return () => { requestId.current += 1; window.clearInterval(timer); };
+    void load(true).catch(fail);
+    return () => { requestId.current += 1; };
   }, [load]);
   const act = async (action: StorageAction, trigger: HTMLElement) => {
     if (!view || busy || unknown || locked || configBusy) return;
@@ -47,11 +49,11 @@ export function StorageTools({ language }: { language: Language }) {
     try {
       await api.request(spec.path, 'POST', { revision, [spec.epoch]: epoch });
       setNotice('actionDone');
-      void load().catch((reason) => { if (!(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : String(reason)); });
+      void load(action === 'totals').catch(fail);
     } catch (reason) {
       if (!(reason instanceof StaleRequest)) {
         if (isUnknownStorageMutation(reason)) { setUnknown({ action, epoch }); setNotice('actionUnknown'); }
-        else setError(reason instanceof ApiError ? reason : String(reason));
+        else fail(reason);
       }
     } finally { setBusy(false); }
   };
@@ -59,15 +61,15 @@ export function StorageTools({ language }: { language: Language }) {
     if (!unknown) return;
     setBusy(true);
     try {
-      const current = await load();
+      const current = await load(unknown.action === 'totals');
       if (current.storage[storageActions[unknown.action].epoch] > unknown.epoch) { setUnknown(null); setNotice('actionDone'); }
       else setNotice('stillUnknown');
-    } catch (reason) { if (!(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : String(reason)); }
+    } catch (reason) { fail(reason); }
     finally { setBusy(false); }
   };
   return <div className="settings-stack">
     {view && <StorageStatusPanel status={view.storage} language={language} />}
-    <section className="panel"><div className="heading-row"><h2>{t('cumulative')}</h2><Button variant="secondary" disabled={busy} onClick={() => void load().catch((reason) => setError(String(reason)))}>{translate('ui.refresh', language)}</Button></div>
+    <section className="panel"><div className="heading-row"><h2>{t('cumulative')}</h2><Button variant="secondary" disabled={busy} onClick={() => void load(true).catch(fail)}>{translate('ui.refresh', language)}</Button></div>
       {stats && <p>{translate('storage.totalsSince', language, { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</p>}
       <p className="muted small">{t('recorded')}</p>
       <div className="button-group">{(Object.keys(storageActions) as StorageAction[]).map((action) => <Button key={action} variant="outline" disabled={!view || busy || Boolean(unknown) || locked || configBusy || view.storage.health === 'unavailable'} onClick={(event) => void act(action, event.currentTarget)}>{t(storageActions[action].label)}</Button>)}</div>

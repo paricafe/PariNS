@@ -5,7 +5,7 @@ import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'reac
 import { Activity, BookOpenText, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
 import { translate, chooseLanguage, presentIssue, type Language } from './i18n';
-import { ConfigProvider, toConfigIssue, useConfig } from './config/context';
+import { ConfigProvider, toConfigIssue, useConfig, type ConfigIssue } from './config/context';
 import { SettingsPage } from './pages/config/SettingsPage';
 import { OverviewPage, LogsPage } from './pages/observability';
 import { SessionProvider, useSession } from './session/context';
@@ -110,7 +110,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
     void pageAnimation.start({ opacity: 1, y: 0, transition: { duration: reduced ? 0 : 0.18, ease: EASE_OUT } });
   }, [location.pathname, pageAnimation, reduced]);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [logoutError, setLogoutError] = useState<ConfigIssue | null>(null);
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);
   useEffect(() => {
     if (!config.dirty) return;
@@ -123,12 +123,12 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
     if (config.busy || config.locked) return;
     if (config.dirty && !await confirmAction('app.logoutHelp', 'ui.logout')) return;
     config.discard();
-    try { await logout(); } catch (reason) { setLogoutError(reason instanceof Error ? reason.message : String(reason)); }
+    try { await logout(); } catch (reason) { setLogoutError(toConfigIssue(reason)); }
   };
   const current = navigation.find((item) => item.path === location.pathname);
   const nav = (scope: string) => <nav className="nav-groups" aria-label={t('pagesLabel')}>
     {(['observe', 'config'] as const).map((group) => <div className="nav-group" key={group}>
-      <span className="nav-caption">{group === 'observe' ? language === 'en' ? 'Observe' : '观察' : t('configuration')}</span>
+      <span className="nav-caption">{t(group === 'observe' ? 'observe' : 'configuration')}</span>
       {navigation.filter((item) => item.group === group).map((item) => <NavLink key={item.path} to={item.path} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`} onClick={(event) => {
         const draft = config.draft;
         if (item.path === '/advanced' && draft && (Object.keys(draft.fields).length || Object.keys(draft.optional).length || draft.rules !== null)) {
@@ -157,7 +157,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
       <Preferences {...appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
     </header><main id="main-content" tabIndex={-1} className="main-content">
       <a className="skip-target sr-only" id="main-content-start" href="#main-content">{t('skip')}</a>
-      {logoutError && <p role="alert" className="notice error">{logoutError}</p>}
+      {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
       <motion.div animate={pageAnimation} className="route-content"><Routes>
         <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} /></>} />

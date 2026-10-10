@@ -14,7 +14,12 @@ export interface LogsPageProps {
   onOpenSettings: () => void;
 }
 
-function localizedError(error: unknown, language: Language): string {
+/** Failures keep the error or catalog key and are translated at render time, so a language switch needs no new request. */
+type Failure = { error: unknown } | { key: string };
+
+function localizedError(failure: Failure, language: Language): string {
+  if ("key" in failure) return translate(failure.key, language);
+  const { error } = failure;
   if (error instanceof ApiError) {
     const key = `api.${error.code}`;
     if (hasTranslation(key)) return translate(key, language, { detail: error.message, status: error.status });
@@ -76,7 +81,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [result, setResult] = useState<LogListResponse | null>(null);
   const [updated, setUpdated] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
-  const [failure, setFailure] = useState("");
+  const [failure, setFailure] = useState<Failure | null>(null);
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<LogEntry | null>(null);
   const [confirmation, setConfirmation] = useState<{ revision: number; epoch: number } | null>(null);
@@ -87,18 +92,18 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const load = useCallback(async (before: number | null, filter: LogFilter) => {
     const owner = ++requestId.current;
     setLoading(true);
-    setFailure("");
+    setFailure(null);
     try {
       const next = await api.request<LogListResponse>("query-log/list", "POST", { ...filter, before_id: before, limit: 50 });
       if (owner === requestId.current) {
         setResult(next); setUpdated(Date.now());
       }
     } catch (error) {
-      if (owner === requestId.current && !(error instanceof StaleRequest)) setFailure(localizedError(error, language));
+      if (owner === requestId.current && !(error instanceof StaleRequest)) setFailure({ error });
     } finally {
       if (owner === requestId.current) setLoading(false);
     }
-  }, [api, language]);
+  }, [api]);
 
   useEffect(() => {
     if (document.visibilityState !== "hidden") void load(null, appliedRef.current);
@@ -108,9 +113,9 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   }, [load]);
   useEffect(() => {
     if (unknownEpoch !== null && result && result.page.log_epoch > unknownEpoch) {
-      setUnknownEpoch(null); setNotice(translate('app.logsCleared', language));
+      setUnknownEpoch(null); setNotice('app.logsCleared');
     }
-  }, [unknownEpoch, result, language]);
+  }, [unknownEpoch, result]);
 
   function submitFilter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -135,13 +140,13 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
     try {
       await api.request("query-log/clear", "POST", { revision, log_epoch: epoch });
       setSelected(null);
-      setNotice(translate("app.logsCleared", language));
+      setNotice("app.logsCleared");
       await load(null, applied);
     } catch (error) {
       if (!(error instanceof StaleRequest)) {
         const unknown = isUnknownStorageMutation(error);
         if (unknown) setUnknownEpoch(epoch);
-        setFailure(unknown ? translate("app.clearLogsUnknown", language) : localizedError(error, language));
+        setFailure(unknown ? { key: "app.clearLogsUnknown" } : { error });
       }
     } finally { setClearing(false); }
   }
@@ -187,8 +192,8 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
           className="min-h-11 rounded-md border border-zinc-400 px-3 text-sm disabled:opacity-50 dark:border-zinc-600">{translate("ui.clearLogs", language)}</button>
       </div>
     </div>
-    {failure && <p role="alert" className="rounded-md border border-red-300 p-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300">{failure}</p>}
-    {notice && <p role="status" className="rounded-md border border-zinc-300 p-3 text-sm dark:border-zinc-700">{notice}</p>}
+    {failure && <p role="alert" className="rounded-md border border-red-300 p-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300">{localizedError(failure, language)}</p>}
+    {notice && <p role="status" className="rounded-md border border-zinc-300 p-3 text-sm dark:border-zinc-700">{translate(notice, language)}</p>}
     {unknownEpoch !== null && <button type="button" className="button secondary" disabled={loading} onClick={() => void load(null, applied)}>{translate('storage.checkResult', language)}</button>}
 
     {page === null ? <p className="rounded-lg border border-zinc-200 bg-white p-8 text-center text-sm dark:border-zinc-800 dark:bg-zinc-900">{translate(failure ? "app.loadFailed" : "app.reading", language)}</p>

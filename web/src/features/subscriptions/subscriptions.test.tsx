@@ -8,7 +8,7 @@ import { formatDate, type Language } from '../../i18n';
 import { SubscriptionsPanel } from './SubscriptionsPanel';
 import { useSubscriptions } from './useSubscriptions';
 import { DomainCheck } from './DomainCheck';
-import type { SubscriptionState, Operation } from './types';
+import { pollDelay, type SubscriptionState, type Operation } from './types';
 
 let currentApi: ApiClient;
 vi.mock('../../session/context', () => ({ useSession: () => ({ api: currentApi }) }));
@@ -48,6 +48,18 @@ describe('subscription operations', () => {
     expect(hook.result.current.unknown).toBe(true);
     expect(request.mock.calls.filter(([path]) => path.endsWith('/refresh'))).toHaveLength(1);
     expect(hook.result.current.error).toBeNull();
+  });
+});
+
+describe('subscription polling cadence', () => {
+  it('polls every 3 s only while work or an outcome is open, otherwise 30 s, and pauses while hidden', () => {
+    const running = { ...initial, operation: { ...operation, status: 'running' as const, finished_at: null } };
+    expect(pollDelay(initial, false, false, false)).toBe(30_000);
+    expect(pollDelay(null, false, false, false)).toBe(30_000);
+    expect(pollDelay(running, false, false, false)).toBe(3_000);
+    expect(pollDelay(initial, true, false, false)).toBe(3_000);
+    expect(pollDelay(initial, false, true, false)).toBe(3_000);
+    expect(pollDelay(running, true, true, true)).toBeNull();
   });
 });
 

@@ -39,6 +39,9 @@ describe('persistent storage operations', () => {
       fireEvent.click(screen.getByRole('button', { name: label }));
       await waitFor(() => expect(mocks.request).toHaveBeenCalledWith(path, 'POST', body));
     }
+    // Totals are read on mount and again only after the totals reset; no polling.
+    await waitFor(() => expect(mocks.request.mock.calls.filter(([path]) => path === 'status')).toHaveLength(4));
+    expect(mocks.request.mock.calls.filter(([path]) => path === 'stats')).toHaveLength(2);
   });
 
   it.each([[0, 'NETWORK'], [200, 'BAD_RESPONSE'], [503, 'STORAGE_UNAVAILABLE']])('checks an unknown reset (%s %s) by reading its epoch without replaying', async (status, code) => {

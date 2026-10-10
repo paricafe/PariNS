@@ -20,3 +20,9 @@ export interface CheckResult {
   generation: number; decision: 'allowed' | 'blocked' | 'unmatched';
   witness: null | { source_id: string | null; rule: string; scope: 'exact' | 'suffix' };
 }
+
+/** Poll quickly only while a task or request outcome is in flight; `null` pauses polling for a hidden tab. */
+export function pollDelay(state: SubscriptionState | null, pending: boolean, unknown: boolean, hidden: boolean): number | null {
+  if (hidden) return null;
+  return pending || unknown || state?.operation?.status === 'running' ? 3_000 : 30_000;
+}

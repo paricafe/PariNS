@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, StaleRequest, type ApiClient } from '../../session/client';
 import type { SubscriptionDraft } from '../../model/subscriptions';
-import type { Failure, SubscriptionState } from './types';
+import { pollDelay, type Failure, type SubscriptionState } from './types';
 
 export function useSubscriptions(api: ApiClient, revision: number | undefined) {
   const [state, setState] = useState<SubscriptionState | null>(null);
@@ -26,7 +26,31 @@ export function useSubscriptions(api: ApiClient, revision: number | undefined) {
       setReadError({ code: reason instanceof ApiError ? reason.code : 'error', line: null });
     }
   }, [api]);
-  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 3000); return () => window.clearInterval(timer); }, [load, revision]);
+  const polling = useRef({ state, pending, unknown });
+  polling.current = { state, pending, unknown };
+  const reschedule = useRef(() => {});
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | undefined;
+    const schedule = () => {
+      window.clearTimeout(timer);
+      if (stopped) return;
+      const { state: current, pending: sending, unknown: unresolved } = polling.current;
+      const delay = pollDelay(current, sending, unresolved, document.visibilityState === 'hidden');
+      if (delay !== null) timer = window.setTimeout(tick, delay);
+    };
+    const tick = async () => { await load(); schedule(); };
+    const visibility = () => { if (document.visibilityState === 'hidden') window.clearTimeout(timer); else void tick(); };
+    reschedule.current = schedule;
+    if (document.visibilityState !== 'hidden') void tick();
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      stopped = true; window.clearTimeout(timer); reschedule.current = () => {};
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [load, revision]);
+  const visibleDelay = pollDelay(state, pending, unknown, false);
+  useEffect(() => { reschedule.current(); }, [visibleDelay]);
   const start = async (kind: 'prepare' | 'refresh', source: SubscriptionDraft | string | null) => {
     if (sending.current || revision === undefined) return;
     sending.current = true; setPending(true); setError(null); setUnknown(false); setOperationId(null);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useConfig } from '../../config/context';
 import { useSession } from '../../session/context';
 import { ApiError, StaleRequest } from '../../session/client';
@@ -10,58 +10,54 @@ export interface CertificateStatus {
   roles: { role: 'dot' | 'doh' | 'doq'; leaf_sha256: string; not_before_ms: number; not_after_ms: number }[];
   last_reload: null | { attempt_id: number; source: 'api' | 'signal'; started_at_ms: number; completed_at_ms: number | null; outcome: 'applied' | 'unchanged' | 'failed'; error_code: string | null };
 }
-interface View { revision: number; certificates: CertificateStatus }
+export interface CertificateView { revision: number; certificates: CertificateStatus }
 interface ReloadResult { outcome: 'applied' | 'unchanged'; revision: number; certificate_generation: number; certificates: CertificateStatus }
 
-export function CertificateTools({ language }: { language: Language }) {
+interface CertificateToolsProps {
+  language: Language;
+  view: CertificateView | null;
+  readFailure: ApiError | string | null;
+  read(): Promise<CertificateView>;
+  hold(active: boolean): void;
+  publish(view: CertificateView): void;
+}
+
+export function CertificateTools({ language, view, readFailure, read, hold, publish }: CertificateToolsProps) {
   const { api } = useSession();
   const { dirty, busy: configBusy, locked } = useConfig();
-  const [view, setView] = useState<View | null>(null);
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState(false);
   const [checked, setChecked] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<ApiError | string | null>(null);
+  const [actionError, setError] = useState<ApiError | string | null>(null);
+  const error = actionError ?? readFailure;
   const mounted = useRef(false);
   const mutation = useRef(false);
-  const request = useRef(0);
   const t = (key: string) => translate(`reliability.${key}`, language);
   const date = (time: number) => formatDate(time, language, { dateStyle: 'medium', timeStyle: 'medium' });
-  const read = useCallback(async () => {
-    const owner = ++request.current;
-    const current = await api.request<View>('status');
-    if (!mounted.current || request.current !== owner) throw new StaleRequest();
-    setView(current); setError(null);
-    return current;
-  }, [api]);
-  useEffect(() => {
-    mounted.current = true;
-    const tick = () => { if (document.visibilityState !== 'hidden' && !mutation.current) void read().catch((reason) => { if (mounted.current && !(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : String(reason)); }); };
-    tick(); const timer = window.setInterval(tick, 5000);
-    return () => { mounted.current = false; request.current += 1; window.clearInterval(timer); };
-  }, [read]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const reload = async () => {
     if (!view || mutation.current || unknown || locked || configBusy) return;
-    mutation.current = true; setBusy(true); setError(null); setNotice(null); request.current += 1;
+    mutation.current = true; setBusy(true); setError(null); setNotice(null); hold(true);
     try {
       const result = await api.request<ReloadResult>('certificates/reload', 'POST', { revision: view.revision });
-      if (mounted.current) { setView({ revision: result.revision, certificates: result.certificates }); setNotice(result.outcome); }
+      if (mounted.current) { publish({ revision: result.revision, certificates: result.certificates }); setNotice(result.outcome); }
     } catch (reason) {
       if (mounted.current && !(reason instanceof StaleRequest)) {
         if (reason instanceof ApiError && (reason.status === 0 || reason.code === 'BAD_RESPONSE' && reason.status >= 200 && reason.status < 300)) {
           setUnknown(true); setChecked(false); setNotice('unknown');
         } else { setError(reason instanceof ApiError ? reason : String(reason)); setNotice(reason instanceof ApiError && reason.status === 422 ? 'failed' : null); }
       }
-    } finally { mutation.current = false; if (mounted.current) setBusy(false); }
+    } finally { mutation.current = false; hold(false); if (mounted.current) setBusy(false); }
   };
   const check = async () => {
     if (mutation.current) return;
-    mutation.current = true; setBusy(true);
+    mutation.current = true; setBusy(true); setError(null); hold(true);
     try {
       await read();
       if (mounted.current) { setChecked(true); setNotice('concurrentResult'); }
     } catch (reason) { if (mounted.current && !(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : String(reason)); }
-    finally { mutation.current = false; if (mounted.current) setBusy(false); }
+    finally { mutation.current = false; hold(false); if (mounted.current) setBusy(false); }
   };
   const certificates = view?.certificates;
   const last = certificates?.last_reload;

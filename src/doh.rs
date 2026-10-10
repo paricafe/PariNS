@@ -143,32 +143,34 @@ async fn connection(
     };
     let permits = Arc::new(Semaphore::new(ingress.max_streams));
     let mut requests = JoinSet::new();
-    let mut stopping = *stop.borrow();
-    if stopping {
+    // Peer close notification uses at most half of the shutdown grace, so an
+    // idle peer that never acknowledges GOAWAY cannot force the stop.
+    let close_window = ingress.shutdown_grace / 2;
+    let mut close_by = stop
+        .borrow()
+        .then(|| tokio::time::Instant::now() + close_window);
+    if close_by.is_some() {
         connection.graceful_shutdown();
     }
     loop {
-        if stopping {
+        if let Some(close_by) = close_by {
             while requests.try_join_next().is_some() {}
             if requests.is_empty() {
-                // Only admitted requests keep a stopping connection. Flush what
-                // is already queued without waiting for the peer's GOAWAY/PING
-                // acknowledgement; a silent peer must not hold shutdown.
-                std::future::poll_fn(|cx| {
-                    if let std::task::Poll::Ready(Some(Ok((_, mut respond)))) =
-                        connection.poll_accept(cx)
-                    {
+                // Only admitted requests hold a stopping connection. A responsive
+                // peer completes the two-phase GOAWAY; a silent one is dropped.
+                let _ = tokio::time::timeout_at(close_by, async {
+                    while let Some(Ok((_, mut respond))) = connection.accept().await {
                         respond.send_reset(Reason::REFUSED_STREAM);
                     }
-                    std::task::Poll::Ready(())
                 })
                 .await;
                 break;
             }
         }
+        let stopping = close_by.is_some();
         tokio::select! {
             _ = stop.changed(), if !stopping => {
-                stopping = true;
+                close_by = Some(tokio::time::Instant::now() + close_window);
                 connection.graceful_shutdown();
             }
             Some(_) = requests.join_next(), if !requests.is_empty() => {},

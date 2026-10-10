@@ -202,8 +202,8 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   SIGKILL and abnormal exit start cold. Normal configuration apply is not restart
   restoration; stale-only entries are never restored. A stop forced by requests
   still running past `shutdown_grace_ms` logs
-  `cache snapshot not saved: shutdown not quiescent (<cause>)`; idle client
-  connections do not delay or force a stop.
+  `cache snapshot not saved: shutdown not quiescent (<cause>)`. Idle DoH
+  clients get at most half the grace to acknowledge the close and do not force a stop.
   The v0.1.7 CNAME-negative change advances the cache semantic fingerprint,
   not the snapshot wire format. Earlier-semantic snapshots are rejected, so the
   first start after upgrading begins cold; there is no compatibility migration.

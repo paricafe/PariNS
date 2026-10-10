@@ -4,10 +4,11 @@
 
 ### Fixed
 
-- Stop DoH HTTP/2 connections without waiting for an idle client to acknowledge
-  shutdown. A silent connection (for example a sleeping device behind NAT) no
-  longer forces a normal stop, so the clean cache snapshot is published again.
-  Requests still resolving past the shutdown grace keep forcing the stop as before.
+- Bound how long a stopping DoH HTTP/2 connection waits for an idle client to
+  acknowledge shutdown to half of `shutdown_grace_ms`. A silent connection (for
+  example a sleeping device behind NAT) no longer forces a normal stop, so the
+  clean cache snapshot is published again; responsive clients still get a
+  graceful close. Requests still resolving past the grace keep forcing the stop.
 - Log the cause when a stop is not quiescent and no cache snapshot is saved, for
   example `cache snapshot not saved: shutdown not quiescent (listener_drain)`;
   the cause names the first deadline or failure that forced the stop.

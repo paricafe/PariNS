@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::{build_info::BuildInfo, contract::valid_sha256, reader::DownloadTuple};
 
 pub const STATUS_PATH: &str = "/var/lib/parins-updater/status.json";
-pub const HEALTH_PATH: &str = "/run/parins-managed/update-health.json";
 pub const INBOX_NAME: &str = "update-request.json";
-pub const LIVE_PATH: &str = "/opt/parins-managed/parins";
 pub const INBOX_LIMIT: usize = 8192;
 pub const STATUS_LIMIT: usize = 32768;
 
@@ -232,6 +230,9 @@ pub struct PublicStatus {
     pub capability: Capability,
     pub active_operation: Option<OperationStatus>,
     pub last_operation: Option<OperationStatus>,
+    /// Omitted when empty: after an installer rollback the new helper serves an
+    /// older application whose status schema rejects unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_terminal: Option<OperationStatus>,
     pub pending_launch: Option<PendingLaunch>,
 }
@@ -270,5 +271,55 @@ mod tests {
         assert!(Inbox::parse(json.replace(&"a".repeat(32), "../candidate").as_bytes()).is_err());
         assert!(Inbox::parse(&vec![b' '; INBOX_LIMIT + 1]).is_err());
         assert!(candidate_path("../parins").is_err());
+    }
+
+    #[test]
+    fn status_without_additional_terminal_stays_readable_by_previous_schema() {
+        // Top-level schema of v0.1.6 PublicStatus, which has no additional_terminal.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Previous {
+            schema: u32,
+            installed: serde_json::Value,
+            capability: serde_json::Value,
+            active_operation: Option<serde_json::Value>,
+            last_operation: Option<serde_json::Value>,
+            pending_launch: Option<serde_json::Value>,
+        }
+        let mut status = PublicStatus {
+            schema: 1,
+            installed: InstalledIdentity {
+                build: crate::update::build_info::BuildInfo::current(),
+                sha256: "0".repeat(64),
+            },
+            capability: Capability {
+                available: true,
+                reason: None,
+                checked_at_ms: 1,
+                helper_protocol: crate::update::contract::HELPER_PROTOCOL,
+                install_contract: crate::update::contract::INSTALL_CONTRACT.into(),
+            },
+            active_operation: None,
+            last_operation: None,
+            additional_terminal: None,
+            pending_launch: None,
+        };
+        let json = serde_json::to_vec(&status).unwrap();
+        assert!(serde_json::from_slice::<Previous>(&json).is_ok());
+        assert!(serde_json::from_slice::<PublicStatus>(&json).is_ok());
+        status.additional_terminal = Some(OperationStatus {
+            operation_id: "a".repeat(32),
+            phase_nonce: "b".repeat(32),
+            phase: Phase::Aborted,
+            version: "0.1.7".into(),
+            reason: None,
+            updated_at_ms: 1,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+        });
+        let json = serde_json::to_vec(&status).unwrap();
+        let read = serde_json::from_slice::<PublicStatus>(&json).unwrap();
+        assert!(read.additional_terminal.is_some());
     }
 }

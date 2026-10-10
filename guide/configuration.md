@@ -179,8 +179,13 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   the earliest RR expiry invalidates the answer. Positive TTLs are capped at
   3600 seconds by default. NXDOMAIN/NODATA require a covering SOA and use the
   minimum of SOA TTL, SOA MINIMUM, and the 300-second negative cap.
-  Negative answers remain query-type-specific; CNAME plus negative answers
-  are not cached. These are conservative limits, not full RFC cache conformance.
+  Negative answers remain query-type-specific. Unreleased main also caches a strict
+  CNAME-only chain ending in NXDOMAIN/NODATA when it is continuous, unambiguous and
+  backed by equivalent, same-class SOAs covering the terminal name. Missing or
+  conflicting proof is not cached. Chain and all retained record TTLs also bound
+  the lifetime; these entries use the negative budget and never stale or prefetch.
+  Direct NOERROR CNAME answers and NOERROR CNAME plus the requested type remain positive.
+  These are conservative limits, not full RFC cache conformance.
 - Truncated answers, errors such as SERVFAIL/REFUSED, zero TTL, missing SOA for
   negative answers, unusable ECS, and scope longer than source bypass caching.
   Cookie/unknown EDNS options bypass caching to avoid replaying client-specific
@@ -196,6 +201,9 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   snapshot can resurrect entries after clear, TTL0, EDE or a crash. Forced drain,
   SIGKILL and abnormal exit start cold. Normal configuration apply is not restart
   restoration; stale-only entries are never restored.
+  The unreleased CNAME-negative change advances the cache semantic fingerprint,
+  not the snapshot wire format. Earlier-semantic snapshots are rejected, so the
+  first start after upgrading begins cold; there is no compatibility migration.
 - `[[cache.rules]]` selects exact names before suffixes, then most labels,
   record-type-specific before wildcard type, then first declaration. DNS labels
   (including escaped labels) determine boundaries; suffix includes the named

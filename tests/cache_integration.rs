@@ -10,10 +10,10 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
-        rdata::{A, SOA},
+        rdata::{A, CNAME, NS, SOA},
     },
 };
-use parins::{config::Config, ecs, protocol, resolver::Resolver};
+use parins::{config::Config, ecs, policy::Policy, protocol, resolver::Resolver};
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 struct Upstream {
@@ -310,4 +310,131 @@ async fn negative_answers_are_cached_only_with_soa_proof() {
     assert_eq!(hit.id, 2);
     assert!(hit.authorities[0].ttl <= 30);
     assert_eq!(upstream.count(), 1);
+}
+
+async fn cname_negative_reuses_upstream_and_preserves_filtering(code: ResponseCode) {
+    let upstream = Upstream::start(move |q| {
+        let outgoing = ecs::subnet(q).unwrap();
+        assert_eq!(outgoing.source_prefix(), 24);
+        let mut reply = protocol::error_response(q, code);
+        reply.add_answer(Record::from_rdata(
+            q.queries[0].name().clone(),
+            60,
+            RData::CNAME(CNAME(Name::from_ascii("missing.other.test.").unwrap())),
+        ));
+        reply.add_authority(Record::from_rdata(
+            Name::from_ascii("other.test.").unwrap(),
+            120,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns.other.test.").unwrap(),
+                Name::from_ascii("hostmaster.other.test.").unwrap(),
+                1,
+                60,
+                60,
+                3600,
+                30,
+            )),
+        ));
+        reply.add_authority(Record::from_rdata(
+            Name::from_ascii("other.test.").unwrap(),
+            90,
+            RData::NS(NS(Name::from_ascii("ns.other.test.").unwrap())),
+        ));
+        reply.add_additional(Record::from_rdata(
+            Name::from_ascii("ns.other.test.").unwrap(),
+            100,
+            RData::A(A::new(192, 0, 2, 53)),
+        ));
+        // No ECS echo: the resolver must retain ExactSource reuse and reconstruct
+        // the original client's ECS consistently on upstream and fresh replies.
+        ecs::set_subnet(&mut reply, None);
+        reply
+    })
+    .await;
+    let resolver = upstream.resolver();
+    let cold = resolve(&resolver, Some("192.0.2.10/32"), "192.0.2.10", 10).await;
+    assert_eq!(upstream.count(), 1);
+    let fresh = resolve(&resolver, Some("192.0.2.20/32"), "192.0.2.20", 20).await;
+    let counters = resolver.metrics().snapshot().counters;
+    assert_eq!(
+        (upstream.count(), counters["cache_lookup_fresh"]),
+        (1, 1),
+        "{code:?}: two sequential queries must need only one upstream exchange"
+    );
+    for (reply, peer, id) in [(&cold, "192.0.2.10", 10), (&fresh, "192.0.2.20", 20)] {
+        assert_eq!(reply.id, id);
+        assert_eq!(reply.queries, query(None, id).queries);
+        assert_eq!(reply.response_code, code);
+        assert!(!reply.authoritative && !reply.truncation);
+        assert_eq!(reply.answers.len(), 1);
+        assert_eq!(reply.authorities.len(), 2);
+        assert_eq!(reply.additionals.len(), 1);
+        let echoed = ecs::subnet(reply).unwrap();
+        assert_eq!(echoed.addr(), peer.parse::<IpAddr>().unwrap());
+        assert_eq!((echoed.source_prefix(), echoed.scope_prefix()), (32, 24));
+    }
+    for (original, cached) in cold
+        .answers
+        .iter()
+        .chain(&cold.authorities)
+        .chain(&cold.additionals)
+        .zip(
+            fresh
+                .answers
+                .iter()
+                .chain(&fresh.authorities)
+                .chain(&fresh.additionals),
+        )
+    {
+        assert_eq!(cached.name, original.name);
+        assert_eq!(cached.dns_class, original.dns_class);
+        assert_eq!(cached.data, original.data);
+        assert!(cached.ttl > 0 && cached.ttl <= original.ttl);
+    }
+    assert!(fresh.authorities[0].ttl <= 30);
+
+    resolver
+        .replace_policy(
+            toml::from_str("enabled = true\nblock_exact = ['missing.other.test']").unwrap(),
+        )
+        .unwrap();
+    // Filtering applies both to a fresh hit and a cold answer in another exact
+    // ECS source. Neither synthesized block may replace the upstream message.
+    for (peer, source, id, expected_upstream) in [
+        ("192.0.2.20", "192.0.2.20/32", 30, 1),
+        ("192.0.3.10", "192.0.3.10/32", 40, 2),
+        ("192.0.3.20", "192.0.3.20/32", 50, 2),
+    ] {
+        let blocked = resolve(&resolver, Some(source), peer, id).await;
+        assert_eq!(blocked.id, id);
+        assert_eq!(blocked.queries, query(None, id).queries);
+        assert_eq!(blocked.response_code, ResponseCode::NoError);
+        assert!(blocked.answers.is_empty());
+        assert!(blocked.authorities.is_empty());
+        assert!(blocked.additionals.is_empty());
+        let echoed = ecs::subnet(&blocked).unwrap();
+        assert_eq!(echoed.addr(), peer.parse::<IpAddr>().unwrap());
+        assert_eq!((echoed.source_prefix(), echoed.scope_prefix()), (32, 24));
+        assert_eq!(upstream.count(), expected_upstream);
+    }
+    resolver.replace_policy(Policy::default()).unwrap();
+    let unblocked = resolve(&resolver, Some("192.0.3.20/32"), "192.0.3.20", 60).await;
+    assert_eq!(unblocked.response_code, code);
+    assert_eq!(unblocked.answers[0].data, cold.answers[0].data);
+    assert_eq!(unblocked.authorities[0].data, cold.authorities[0].data);
+    assert!(unblocked.authorities[0].ttl <= 30);
+    assert_eq!(upstream.count(), 2);
+    let counters = resolver.metrics().snapshot().counters;
+    assert_eq!(counters["cache_lookup_fresh"], 4);
+    assert_eq!(counters["response_blocked"], 3);
+}
+
+#[tokio::test]
+async fn cname_negative_nodata_reuses_upstream_and_preserves_filtering() {
+    cname_negative_reuses_upstream_and_preserves_filtering(ResponseCode::NoError).await;
+}
+
+#[tokio::test]
+async fn cname_negative_nxdomain_reuses_upstream_and_preserves_filtering() {
+    cname_negative_reuses_upstream_and_preserves_filtering(ResponseCode::NXDomain).await;
 }

@@ -19,6 +19,9 @@
 
 ### Fixed
 
+- Cache proven CNAME-chain terminal NXDOMAIN/NODATA responses with one shared
+  classification for admission and restoration. Preserve negative TTL/budget,
+  query-type and ECS isolation, and exclude negative entries from stale/prefetch.
 - Align the setup template's query-log limit with the existing Rust default of
   100000 entries instead of 1000. Logging remains disabled by default, with the
   same 64 MiB log and 128 MiB database budgets; actual retention may be shorter.
@@ -38,6 +41,10 @@
 
 ### Operational notes
 
+- Cache semantic fingerprint advances to 3 while snapshot wire format remains 2.
+  Earlier-semantic snapshots are rejected and startup begins cold; no migration
+  or business-data format change is involved. This does not establish production
+  cache-hit improvement.
 - The unreleased updater fix requires helper protocol 2. Update the application
   and fixed helper together through the verified installer; an online binary-only
   update cannot replace an older helper. No business-data migration is introduced.

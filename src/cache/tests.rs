@@ -5,7 +5,7 @@ use hickory_proto::{
     rr::{
         Name, Record,
         rdata::opt::EdnsOption,
-        rdata::{A, SOA},
+        rdata::{A, AAAA, CNAME, NS, NULL, SOA},
     },
 };
 
@@ -244,6 +244,466 @@ fn negative_answer(q: &Message) -> Message {
     response
 }
 
+fn cname(owner: &str, target: &str, ttl: u32) -> Record {
+    Record::from_rdata(
+        Name::from_ascii(owner).unwrap(),
+        ttl,
+        RData::CNAME(CNAME(Name::from_ascii(target).unwrap())),
+    )
+}
+
+fn cname_negative_answer(q: &Message, code: ResponseCode) -> Message {
+    let mut response = negative_answer(q);
+    response.metadata.response_code = code;
+    response.add_answer(cname(
+        &q.queries[0].name().to_ascii(),
+        "missing.target.test.",
+        60,
+    ));
+    response.authorities[0].name = Name::from_ascii("target.test.").unwrap();
+    response
+}
+
+#[test]
+fn cname_negative_proves_unordered_chains_using_dns_names() {
+    for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+        for (name, links, zone) in [
+            (
+                "alias.target.test.",
+                vec![("alias.target.test.", "missing.target.test.")],
+                "target.test.",
+            ),
+            (
+                "alias.source.test.",
+                vec![("alias.source.test.", "missing.target.test.")],
+                "target.test.",
+            ),
+            (
+                "alias.source.test.",
+                vec![
+                    ("alias.source.test.", "middle.source.test."),
+                    ("middle.source.test.", "missing.target.test."),
+                ],
+                "target.test.",
+            ),
+            (
+                "alias.source.test.",
+                vec![
+                    ("middle.source.test.", "missing.target.test."),
+                    ("alias.source.test.", "middle.source.test."),
+                ],
+                "target.test.",
+            ),
+            (
+                "Alias.Source.Test.",
+                vec![
+                    ("ALIAS.source.test.", r"\155iddle.Target.Test."),
+                    ("middle.target.test.", "MISSING.Target.Test."),
+                ],
+                "TARGET.TEST.",
+            ),
+            (
+                r"alias\.source.test.",
+                vec![(r"alias\.source.test.", r"missing\.target.test.")],
+                "test.",
+            ),
+        ] {
+            let cache = Cache::new(CacheConfig::default());
+            let q = query(name);
+            let now = Instant::now();
+            let mut response = cname_negative_answer(&q, code);
+            response.answers = links
+                .iter()
+                .map(|(owner, target)| cname(owner, target, 60))
+                .collect();
+            response.authorities[0].name = Name::from_ascii(zone).unwrap();
+            let decision =
+                cache.insert_decision_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch());
+            assert!(
+                decision.admitted(),
+                "{code:?}: {name}, {links:?}: {decision:?}"
+            );
+            let hit = cache.get(&q, None, now).unwrap().0;
+            assert_eq!(hit.response_code, code);
+            assert_eq!(hit.answers, response.answers);
+            assert_eq!(cache.snapshot()["negative_entries"], 1);
+            assert_eq!(cache.snapshot()["positive_entries"], 0);
+        }
+    }
+}
+
+#[test]
+fn cname_negative_allows_duplicate_links_and_soa_with_other_sections() {
+    for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+        let cache = Cache::new(CacheConfig::default());
+        let q = query("alias.source.test.");
+        let now = Instant::now();
+        let mut response = cname_negative_answer(&q, code);
+        response.metadata.authoritative = false;
+        response.add_answer(cname("ALIAS.source.test.", "MISSING.target.test.", 20));
+        let mut duplicate = response.authorities[0].clone();
+        duplicate.ttl = 18;
+        response.add_authority(duplicate);
+        response.add_authority(Record::from_rdata(
+            Name::from_ascii("target.test.").unwrap(),
+            25,
+            RData::NS(NS(Name::from_ascii("ns.target.test.").unwrap())),
+        ));
+        for code in [RecordType::RRSIG, RecordType::NSEC] {
+            response.add_authority(Record::from_rdata(
+                Name::from_ascii("target.test.").unwrap(),
+                24,
+                RData::Unknown {
+                    code,
+                    rdata: NULL::with(vec![1, 2, 3]),
+                },
+            ));
+        }
+        response.add_additional(Record::from_rdata(
+            Name::from_ascii("ns.target.test.").unwrap(),
+            22,
+            RData::A(A::new(192, 0, 2, 1)),
+        ));
+        assert!(cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
+        let hit = cache.get(&q, None, now + Duration::from_secs(5)).unwrap().0;
+        assert!(!hit.authoritative);
+        assert_eq!(hit.answers.len(), 2);
+        assert_eq!((hit.answers[0].ttl, hit.answers[1].ttl), (55, 15));
+        assert_eq!(hit.authorities.len(), 5);
+        assert_eq!((hit.authorities[0].ttl, hit.authorities[1].ttl), (13, 13));
+        assert_eq!(hit.authorities[2].ttl, 20);
+        assert_eq!(hit.authorities[3].ttl, 19);
+        assert_eq!(hit.authorities[4].ttl, 19);
+        assert_eq!(hit.additionals[0].ttl, 17);
+        assert!(cache.get(&q, None, now + Duration::from_secs(18)).is_none());
+    }
+}
+
+#[test]
+fn cname_negative_rejects_unproved_chain_or_terminal_soa() {
+    for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+        for case in [
+            "no_soa",
+            "referral",
+            "alias_soa",
+            "escaped_soa_boundary",
+            "wrong_soa_class",
+            "conflicting_soa_data",
+            "conflicting_soa_owner",
+            "unrelated_soa",
+            "wrong_cname_class",
+            "fork",
+            "cycle",
+            "self_cycle",
+            "broken_chain",
+            "unrelated_cname",
+            "dname",
+            "rrsig",
+            "other_type",
+        ] {
+            let cache = Cache::new(CacheConfig::default());
+            let q = query("alias.source.test.");
+            let now = Instant::now();
+            let mut response = cname_negative_answer(&q, code);
+            match case {
+                "no_soa" => response.authorities.clear(),
+                "referral" => {
+                    response.authorities[0].data =
+                        RData::NS(NS(Name::from_ascii("ns.target.test.").unwrap()));
+                }
+                "alias_soa" => {
+                    response.authorities[0].name = Name::from_ascii("source.test.").unwrap();
+                }
+                "escaped_soa_boundary" => {
+                    response.answers[0] = cname("alias.source.test.", r"missing\.target.test.", 60);
+                }
+                "wrong_soa_class" => response.authorities[0].dns_class = DNSClass::CH,
+                "conflicting_soa_data" | "conflicting_soa_owner" | "unrelated_soa" => {
+                    let mut other = response.authorities[0].clone();
+                    match case {
+                        "conflicting_soa_data" => {
+                            let RData::SOA(soa) = &mut other.data else {
+                                unreachable!()
+                            };
+                            soa.serial += 1;
+                        }
+                        "conflicting_soa_owner" => {
+                            other.name = Name::from_ascii("test.").unwrap();
+                        }
+                        _ => other.name = Name::from_ascii("source.test.").unwrap(),
+                    }
+                    response.add_authority(other);
+                }
+                "wrong_cname_class" => response.answers[0].dns_class = DNSClass::CH,
+                "fork" => {
+                    response.add_answer(cname("alias.source.test.", "other.target.test.", 60));
+                }
+                "cycle" => {
+                    response.add_answer(cname("missing.target.test.", "alias.source.test.", 60));
+                }
+                "self_cycle" => {
+                    response.answers[0] = cname("alias.source.test.", "alias.source.test.", 60);
+                }
+                "broken_chain" => {
+                    response.answers[0].name = Name::from_ascii("middle.source.test.").unwrap();
+                }
+                "unrelated_cname" => {
+                    response.add_answer(cname("other.source.test.", "other.target.test.", 60));
+                }
+                "dname" | "rrsig" => {
+                    response.add_answer(Record::from_rdata(
+                        q.queries[0].name().clone(),
+                        60,
+                        RData::Unknown {
+                            code: if case == "dname" {
+                                RecordType::DNAME
+                            } else {
+                                RecordType::RRSIG
+                            },
+                            rdata: NULL::with(vec![1]),
+                        },
+                    ));
+                }
+                "other_type" => {
+                    response.add_answer(Record::from_rdata(
+                        Name::from_ascii("missing.target.test.").unwrap(),
+                        60,
+                        RData::AAAA(AAAA("2001:db8::1".parse().unwrap())),
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()),
+                "{code:?}: {case}"
+            );
+            assert!(cache.get(&q, None, now).is_none());
+        }
+    }
+}
+
+#[test]
+fn cname_direct_and_terminal_addresses_remain_positive() {
+    for kind in [RecordType::CNAME, RecordType::A, RecordType::AAAA] {
+        let cache = Cache::new(CacheConfig::default());
+        let mut q = query("alias.source.test.");
+        q.queries[0].set_query_type(kind);
+        let now = Instant::now();
+        let mut response = cname_negative_answer(&q, ResponseCode::NoError);
+        response.authorities.clear();
+        if kind != RecordType::CNAME {
+            response.add_answer(Record::from_rdata(
+                Name::from_ascii("missing.target.test.").unwrap(),
+                60,
+                if kind == RecordType::A {
+                    RData::A(A::new(192, 0, 2, 1))
+                } else {
+                    RData::AAAA(AAAA("2001:db8::1".parse().unwrap()))
+                },
+            ));
+        }
+        assert!(cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
+        assert_eq!(cache.snapshot()["positive_entries"], 1);
+        assert_eq!(cache.snapshot()["negative_entries"], 0);
+        response.metadata.response_code = ResponseCode::NXDomain;
+        response.authorities = cname_negative_answer(&q, ResponseCode::NXDomain).authorities;
+        assert!(!cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
+        assert!(cache.get(&q, None, now).is_none());
+    }
+}
+
+#[test]
+fn cname_negative_lifetime_obeys_every_existing_ttl_bound() {
+    for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+        for bound in [
+            "cname",
+            "soa",
+            "minimum",
+            "negative_cap",
+            "max_ttl",
+            "additional",
+        ] {
+            let mut cfg = CacheConfig {
+                max_ttl_secs: 100,
+                negative_ttl_cap_secs: 100,
+                ..Default::default()
+            };
+            let q = query("alias.source.test.");
+            let now = Instant::now();
+            let mut response = cname_negative_answer(&q, code);
+            response.answers[0].ttl = 100;
+            response.authorities[0].ttl = 100;
+            let RData::SOA(soa) = &mut response.authorities[0].data else {
+                unreachable!()
+            };
+            soa.minimum = if bound == "minimum" { 7 } else { 100 };
+            response.add_additional(Record::from_rdata(
+                Name::from_ascii("ns.target.test.").unwrap(),
+                100,
+                RData::A(A::new(192, 0, 2, 1)),
+            ));
+            match bound {
+                "cname" => response.answers[0].ttl = 7,
+                "soa" => response.authorities[0].ttl = 7,
+                "negative_cap" => cfg.negative_ttl_cap_secs = 7,
+                "max_ttl" => cfg.max_ttl_secs = 7,
+                "additional" => response.additionals[0].ttl = 7,
+                _ => {}
+            }
+            let cache = Cache::new(cfg);
+            assert!(cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
+            assert_eq!(
+                cache.inspect("alias.source.test.", None, now)["variants"][0]["fresh_remaining_secs"],
+                7,
+                "{code:?}: {bound}"
+            );
+            let hit = cache.get(&q, None, now + Duration::from_secs(5)).unwrap().0;
+            assert_eq!(
+                hit.answers
+                    .iter()
+                    .chain(&hit.authorities)
+                    .chain(&hit.additionals)
+                    .map(|rr| rr.ttl)
+                    .min(),
+                Some(2),
+                "{code:?}: {bound}"
+            );
+            assert!(cache.get(&q, None, now + Duration::from_secs(7)).is_none());
+        }
+        for ttl in [0, i32::MAX as u32 + 1] {
+            for section in 0..3 {
+                let cache = Cache::new(CacheConfig::default());
+                let q = query("alias.source.test.");
+                let now = Instant::now();
+                let mut response = cname_negative_answer(&q, code);
+                response.add_additional(Record::from_rdata(
+                    Name::from_ascii("ns.target.test.").unwrap(),
+                    30,
+                    RData::A(A::new(192, 0, 2, 1)),
+                ));
+                match section {
+                    0 => response.answers[0].ttl = ttl,
+                    1 => response.authorities[0].ttl = ttl,
+                    _ => response.additionals[0].ttl = ttl,
+                }
+                assert_eq!(
+                    cache.insert_decision_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()),
+                    StoreDecision::skipped(DecisionReason::TtlZero),
+                    "{code:?}: section {section}, ttl {ttl}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cname_negative_exact_source_does_not_share_namespaces_or_question_types() {
+    for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+        let cache = Cache::new(CacheConfig::default());
+        let q = query("alias.source.test.");
+        let now = Instant::now();
+        cache.insert(
+            &q,
+            &cname_negative_answer(&q, code),
+            Scope::ExactSource("192.0.2.0/24".parse().unwrap()),
+            now,
+        );
+        assert!(cache.get(&q, ecs("192.0.2.99/24"), now).is_some());
+        for outgoing in [
+            ecs("192.0.3.0/24"),
+            ecs("192.0.2.0/25"),
+            ecs("2001:db8::/32"),
+            ecs("0.0.0.0/0"),
+            ecs("::/0"),
+            None,
+        ] {
+            assert!(cache.get(&q, outgoing, now).is_none());
+        }
+        for kind in [RecordType::AAAA, RecordType::CNAME] {
+            let mut other = q.clone();
+            other.queries[0].set_query_type(kind);
+            assert!(cache.get(&other, ecs("192.0.2.0/24"), now).is_none());
+        }
+        assert!(
+            cache
+                .get(&query("missing.target.test."), ecs("192.0.2.0/24"), now)
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn cname_negative_rejection_supersedes_old_positive_and_negative_but_not_old_epoch() {
+    for old_negative in [false, true] {
+        for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+            for cause in [DecisionReason::TtlZero, DecisionReason::Capacity] {
+                let mut cfg = CacheConfig {
+                    shards: 1,
+                    max_bytes: 4096,
+                    negative_percent: 50,
+                    ..Default::default()
+                };
+                cfg.stale.enabled = true;
+                let cache = Cache::new(cfg);
+                let q = query("alias.source.test.");
+                let now = Instant::now();
+                let old = if old_negative {
+                    negative_answer(&q)
+                } else {
+                    answer(&q, 1, 60)
+                };
+                cache.insert(&q, &old, network("192.0.0.0/16"), now);
+                let mut replacement = cname_negative_answer(&q, code);
+                if cause == DecisionReason::TtlZero {
+                    replacement.answers[0].ttl = 0;
+                } else {
+                    replacement.answers = vec![replacement.answers[0].clone(); 500];
+                }
+                let old_epoch = cache.epoch();
+                cache.invalidate(Some("unrelated.test."), None, None);
+                let new_scope = Scope::ExactSource("192.0.2.0/24".parse().unwrap());
+                assert_eq!(
+                    cache.insert_decision_if_epoch(&q, &replacement, new_scope, now, old_epoch),
+                    StoreDecision::skipped(DecisionReason::EpochChanged)
+                );
+                assert_eq!(
+                    cache.get(&q, ecs("192.0.2.0/24"), now).unwrap().0.answers,
+                    old.answers
+                );
+                assert_eq!(
+                    cache.insert_decision_if_epoch(&q, &replacement, new_scope, now, cache.epoch()),
+                    StoreDecision::rejected(cause, true),
+                    "old_negative={old_negative}, code={code:?}, cause={cause:?}"
+                );
+                for outgoing in [ecs("192.0.2.0/24"), ecs("192.0.3.0/24")] {
+                    assert!(cache.lookup(&q, outgoing, now, true).is_none());
+                    assert!(
+                        cache
+                            .lookup(&q, outgoing, now + Duration::from_secs(60), true)
+                            .is_none()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_negative_keeps_existing_soa_selection() {
+    let q = query("alias.source.test.");
+    for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+        let cache = Cache::new(CacheConfig::default());
+        let now = Instant::now();
+        let mut response = negative_answer(&q);
+        response.metadata.response_code = code;
+        let mut unrelated = response.authorities[0].clone();
+        unrelated.name = Name::from_ascii("unrelated.test.").unwrap();
+        response.add_authority(unrelated);
+        assert!(cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
+        assert_eq!(cache.get(&q, None, now).unwrap().0.authorities.len(), 2);
+    }
+}
+
 #[test]
 fn eviction_removes_one_variant_not_the_entire_domain() {
     let cache = Cache::new(CacheConfig {
@@ -280,7 +740,13 @@ fn negative_churn_cannot_evict_positive_partition() {
     cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
     for i in 0..20 {
         let q = query(&format!("missing{i}.test."));
-        cache.insert(&q, &negative_answer(&q), Scope::NoEcs, now);
+        let response = match i % 3 {
+            0 => negative_answer(&q),
+            1 => cname_negative_answer(&q, ResponseCode::NoError),
+            _ => cname_negative_answer(&q, ResponseCode::NXDomain),
+        };
+        cache.insert(&q, &response, Scope::NoEcs, now);
+        assert!(cache.get(&q, None, now).is_some());
     }
     assert!(cache.get(&q, None, now).is_some());
     assert_eq!(cache.snapshot()["positive_entries"], 1);
@@ -293,6 +759,8 @@ fn stale_is_positive_only_bounded_and_never_a_normal_hit() {
     cfg.stale.enabled = true;
     cfg.stale.retention_secs = 40;
     cfg.stale.reply_ttl_secs = 20;
+    cfg.prefetch.enabled = true;
+    cfg.prefetch.min_hits = 1;
     let cache = Cache::new(cfg);
     let now = Instant::now();
     let q = query("stale.test.");
@@ -310,12 +778,23 @@ fn stale_is_positive_only_bounded_and_never_a_normal_hit() {
             .is_none()
     );
     let q = query("negative.test.");
-    cache.insert(&q, &negative_answer(&q), Scope::NoEcs, now);
-    assert!(
-        cache
-            .lookup(&q, None, now + Duration::from_secs(30), true)
-            .is_none()
-    );
+    for response in [
+        negative_answer(&q),
+        cname_negative_answer(&q, ResponseCode::NoError),
+        cname_negative_answer(&q, ResponseCode::NXDomain),
+    ] {
+        cache.insert(&q, &response, Scope::NoEcs, now);
+        let hit = cache
+            .lookup(&q, None, now + Duration::from_secs(29), false)
+            .unwrap();
+        assert!(!hit.refresh);
+        assert!(!hit.stale);
+        assert!(
+            cache
+                .lookup(&q, None, now + Duration::from_secs(30), true)
+                .is_none()
+        );
+    }
     assert_eq!(cache.snapshot()["stale_hits"], 1);
     assert_eq!(cache.snapshot()["misses"], 1);
 }

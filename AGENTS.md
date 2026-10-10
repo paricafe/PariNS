@@ -73,6 +73,11 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   matching is not a substitute for DNS name semantics.
 - Preserve positive and negative eligibility and TTL rules. Fresh lifetime, stale
   retention, and stale reply TTL are separate concepts; do not silently extend TTLs.
+- Classify responses once for admission and snapshot restoration. Nonempty negative
+  answers require an unambiguous same-class CNAME chain and equivalent covering SOAs
+  for its terminal name; CNAME presence alone is not a negative proof. Preserve the
+  original question and ECS namespace, negative budget and bounded TTL, without
+  granting negative entries stale or prefetch eligibility.
 - Keep stale serving conditional on the supported upstream failures. Do not use
   negative answers or a different privacy namespace as a stale fallback.
 - Invalidation and cache replacement must prevent older in-flight work from

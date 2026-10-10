@@ -588,18 +588,18 @@ impl Cache {
         }
         // Expensive response preparation remains outside the shard lock. Admission
         // failure is distinct from supersession: TTL=0 is still newer knowledge.
-        let prepared = prepare_response(query, response, &policy).and_then(|(stored, lifetime)| {
-            let negative =
-                stored.response_code == ResponseCode::NXDomain || stored.answers.is_empty();
-            let lifetime = restore_remaining.map_or(lifetime, |remaining| lifetime.min(remaining));
-            if lifetime == 0 {
-                return Err(DecisionReason::TtlZero);
-            }
-            stored
-                .to_vec()
-                .map(|wire| (wire, lifetime, negative))
-                .map_err(|_| DecisionReason::UncacheableResponse)
-        });
+        let prepared =
+            prepare_response(query, response, &policy).and_then(|(stored, lifetime, negative)| {
+                let lifetime =
+                    restore_remaining.map_or(lifetime, |remaining| lifetime.min(remaining));
+                if lifetime == 0 {
+                    return Err(DecisionReason::TtlZero);
+                }
+                stored
+                    .to_vec()
+                    .map(|wire| (wire, lifetime, negative))
+                    .map_err(|_| DecisionReason::UncacheableResponse)
+            });
         let mut shard = self.shards[self.shard(&key)]
             .lock()
             .expect("cache shard poisoned");
@@ -880,7 +880,7 @@ fn prepare_response(
     query: &Message,
     response: &Message,
     config: &Policy,
-) -> Result<(Message, u32), DecisionReason> {
+) -> Result<(Message, u32, bool), DecisionReason> {
     if response.truncation
         || response.signature.is_some()
         || !plain_edns(response)
@@ -899,35 +899,38 @@ fn prepare_response(
         .queries
         .first()
         .ok_or(DecisionReason::UnsupportedQuery)?;
-    let negative = response.response_code == ResponseCode::NXDomain || response.answers.is_empty();
+    let negative = response.response_code == ResponseCode::NXDomain
+        || !response
+            .answers
+            .iter()
+            .any(|rr| rr.record_type() == question.query_type());
     let mut stored = response.clone();
     let mut lifetime = config.max_ttl_secs;
     if negative {
-        // CNAME+negative answers need a canonical-target proof; defer that case.
-        if !response.answers.is_empty() {
-            return Err(DecisionReason::UncacheableResponse);
-        }
-        let negative_ttl = response
-            .authorities
-            .iter()
-            .filter_map(|rr| match &rr.data {
-                RData::SOA(soa)
-                    if rr.dns_class == question.query_class()
-                        && rr.name.zone_of(question.name()) =>
-                {
-                    Some(rr.ttl.min(soa.minimum))
-                }
-                _ => None,
-            })
-            .min()
-            .ok_or(DecisionReason::NegativeWithoutSoa)?;
+        let negative_ttl = if response.answers.is_empty() {
+            response
+                .authorities
+                .iter()
+                .filter_map(|rr| match &rr.data {
+                    RData::SOA(soa)
+                        if rr.dns_class == question.query_class()
+                            && rr.name.zone_of(question.name()) =>
+                    {
+                        Some(rr.ttl.min(soa.minimum))
+                    }
+                    _ => None,
+                })
+                .min()
+                .ok_or(DecisionReason::NegativeWithoutSoa)?
+        } else {
+            // A direct NOERROR CNAME is positive; NXDOMAIN with CNAME answers
+            // cannot establish a negative result for a CNAME question itself.
+            if question.query_type() == RecordType::CNAME {
+                return Err(DecisionReason::UncacheableResponse);
+            }
+            cname_negative_ttl(question.name(), question.query_class(), response)?
+        };
         lifetime = lifetime.min(config.negative_ttl_cap_secs).min(negative_ttl);
-    } else if !response
-        .answers
-        .iter()
-        .any(|rr| rr.record_type() == question.query_type())
-    {
-        return Err(DecisionReason::UncacheableResponse);
     }
     for rr in stored
         .answers
@@ -954,7 +957,60 @@ fn prepare_response(
     stored.metadata.id = 0;
     stored.metadata.authentic_data = false;
     stored.edns = None;
-    Ok((stored, lifetime))
+    Ok((stored, lifetime, negative))
+}
+
+fn cname_negative_ttl(
+    name: &Name,
+    class: DNSClass,
+    response: &Message,
+) -> Result<u32, DecisionReason> {
+    let mut targets = HashMap::with_capacity(response.answers.len());
+    for rr in &response.answers {
+        let RData::CNAME(target) = &rr.data else {
+            return Err(DecisionReason::UncacheableResponse);
+        };
+        if rr.dns_class != class
+            || targets
+                .insert(&rr.name, &target.0)
+                .is_some_and(|previous| previous != &target.0)
+        {
+            return Err(DecisionReason::UncacheableResponse);
+        }
+    }
+    // A terminating path with exactly one hop per unique owner proves that all
+    // CNAMEs belong to this chain. Short paths leave unrelated owners; cycles
+    // still have a next hop. Duplicate identical links do not add a hop.
+    let mut terminal = name;
+    for _ in 0..targets.len() {
+        terminal = targets
+            .get(terminal)
+            .copied()
+            .ok_or(DecisionReason::UncacheableResponse)?;
+    }
+    if targets.contains_key(terminal) {
+        return Err(DecisionReason::UncacheableResponse);
+    }
+
+    let mut identity = None;
+    let mut lifetime = None;
+    for rr in &response.authorities {
+        let RData::SOA(soa) = &rr.data else {
+            continue;
+        };
+        if rr.dns_class != class || !rr.name.zone_of(terminal) {
+            return Err(DecisionReason::NegativeWithoutSoa);
+        }
+        if let Some((owner, data)) = identity
+            && (owner != &rr.name || data != soa)
+        {
+            return Err(DecisionReason::UncacheableResponse);
+        }
+        identity = Some((&rr.name, soa));
+        let ttl = rr.ttl.min(soa.minimum);
+        lifetime = Some(lifetime.map_or(ttl, |current: u32| current.min(ttl)));
+    }
+    lifetime.ok_or(DecisionReason::NegativeWithoutSoa)
 }
 
 #[cfg(test)]

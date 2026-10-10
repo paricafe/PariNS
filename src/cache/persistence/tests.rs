@@ -1,7 +1,7 @@
 use super::*;
 use hickory_proto::rr::{
     Record as DnsRecord,
-    rdata::{A, SOA},
+    rdata::{A, CNAME, NS, SOA},
 };
 use std::io::Cursor;
 
@@ -155,6 +155,131 @@ fn negative_answers_preserve_soa_lifetime_without_stale_restore() {
         .restored,
         0
     );
+}
+
+#[test]
+fn cname_negative_restore_preserves_partition_lifetime_and_cold_state() {
+    for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+        let mut config = CacheConfig {
+            shards: 1,
+            ..CacheConfig::default()
+        };
+        config.stale.enabled = true;
+        config.prefetch.enabled = true;
+        config.prefetch.min_hits = 1;
+        config.prefetch.remaining_percent = 100;
+        let cache = Cache::new(config.clone());
+        let q = query("alias.example.");
+        let positive = query("positive.example.");
+        let scope = Scope::ExactSource("192.0.2.0/24".parse().unwrap());
+        let outgoing = Some("192.0.2.0/24".parse().unwrap());
+        let inserted = Instant::now();
+        let mut response = protocol::error_response(&q, code);
+        for (owner, target, ttl) in [
+            ("alias.example.", "bridge.example.", 80),
+            ("bridge.example.", "missing.remote.test.", 60),
+        ] {
+            response.add_answer(DnsRecord::from_rdata(
+                Name::from_ascii(owner).unwrap(),
+                ttl,
+                RData::CNAME(CNAME(Name::from_ascii(target).unwrap())),
+            ));
+        }
+        response.add_authority(DnsRecord::from_rdata(
+            Name::from_ascii("remote.test.").unwrap(),
+            100,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns.remote.test.").unwrap(),
+                Name::from_ascii("admin.remote.test.").unwrap(),
+                1,
+                60,
+                60,
+                3600,
+                30,
+            )),
+        ));
+        response.add_authority(DnsRecord::from_rdata(
+            Name::from_ascii("remote.test.").unwrap(),
+            70,
+            RData::NS(NS(Name::from_ascii("ns.remote.test.").unwrap())),
+        ));
+        response.add_additional(DnsRecord::from_rdata(
+            Name::from_ascii("ns.remote.test.").unwrap(),
+            40,
+            RData::A(A::new(192, 0, 2, 53)),
+        ));
+        assert!(cache.insert_if_epoch(&q, &response, scope, inserted, cache.epoch()));
+        cache.insert(&positive, &answer(&positive, 60), Scope::NoEcs, inserted);
+        for _ in 0..3 {
+            assert!(!cache.lookup(&q, outgoing, inserted, false).unwrap().refresh);
+        }
+        assert_eq!(cache.snapshot()["hits"], 3);
+        // Age 3.25s online (round up to 4s), then 2.1s offline (round up to 3s).
+        let bytes = encode(&cache, inserted + Duration::from_millis(3250));
+        let header: Header = serde_json::from_slice(&bytes[..HEADER_BYTES]).unwrap();
+        assert_eq!(header.version, 2);
+        let restored = Cache::new(config.clone());
+        let now = inserted + Duration::from_secs(10);
+        assert_eq!(
+            restore(&restored, bytes.clone(), 2100, now)
+                .unwrap()
+                .restored,
+            2
+        );
+        let counts = restored.snapshot();
+        assert_eq!(counts["negative_entries"], 1);
+        assert_eq!(counts["positive_entries"], 1);
+        for field in ["hits", "stale_hits", "misses", "rejections", "evictions"] {
+            assert_eq!(counts[field], 0, "{code:?}: {field}");
+        }
+        assert_eq!(restored.diagnostics_snapshot()["store"]["admitted"], 0);
+        {
+            let shard = restored.shards[0].lock().unwrap();
+            let (_, entry) = shard.partitions[1].lru.iter().next().unwrap();
+            assert!(entry.negative);
+            assert_eq!(entry.hits.load(Ordering::Relaxed), 0);
+            assert_eq!(entry.retention, entry.lifetime);
+        }
+        let hit = restored.peek(&q, outgoing, now, false).unwrap();
+        assert_eq!(hit.scope, scope);
+        assert!(!hit.stale && !hit.refresh);
+        assert_eq!(hit.message.response_code, code);
+        assert_eq!(hit.message.answers[0].ttl, 73);
+        assert_eq!(hit.message.answers[1].ttl, 53);
+        assert_eq!(hit.message.authorities[0].ttl, 23);
+        assert_eq!(hit.message.authorities[1].ttl, 63);
+        assert_eq!(hit.message.additionals[0].ttl, 33);
+        let almost_expired = now + Duration::from_secs(22);
+        assert!(
+            !restored
+                .lookup(&q, outgoing, almost_expired, false)
+                .unwrap()
+                .refresh
+        );
+        assert!(
+            restored
+                .peek(&q, outgoing, now + Duration::from_secs(23), true)
+                .is_none()
+        );
+        let expired = Cache::new(config.clone());
+        assert_eq!(
+            restore(&expired, bytes.clone(), 30_000, now)
+                .unwrap()
+                .restored,
+            1
+        );
+        assert_eq!(expired.snapshot()["negative_entries"], 0);
+        // Current negative capacity remains authoritative; positive capacity
+        // cannot absorb these entries during restore.
+        let positive_only = Cache::new(CacheConfig {
+            negative_percent: 0,
+            ..config
+        });
+        let report = restore(&positive_only, bytes, 2100, now).unwrap();
+        assert_eq!((report.restored, report.skipped), (1, 1));
+        assert_eq!(positive_only.snapshot()["negative_entries"], 0);
+        assert_eq!(positive_only.snapshot()["positive_entries"], 1);
+    }
 }
 
 #[test]
@@ -393,6 +518,51 @@ fn semantic_fingerprint_excludes_storage_and_includes_live_dns_policy() {
         original,
         semantic_fingerprint(&config, b"filter-a").unwrap()
     );
+}
+
+#[test]
+fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
+    let config =
+        crate::config::Config::parse(include_str!("../../../parins.example.toml")).unwrap();
+    let fingerprint = semantic_fingerprint(&config, b"filter-a").unwrap();
+    // Reconstruct the previous semantic contract, with otherwise identical
+    // effective configuration and a fully valid snapshot/checksum.
+    let mut cache_policy = serde_json::to_value(&config.cache).unwrap();
+    cache_policy.as_object_mut().unwrap().remove("persistence");
+    let prior = serde_json::json!({"semantics": 2, "cache": cache_policy, "ecs": config.ecs,
+        "upstreams": config.upstreams, "filter_digest": STANDARD.encode(b"filter-a")});
+    let prior_fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&prior).unwrap()));
+    assert_ne!(fingerprint, prior_fingerprint);
+    assert_eq!(VERSION, 2);
+    let cache = Cache::new(config.cache.clone());
+    let q = query("prior-semantics.test.");
+    let now = Instant::now();
+    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    let mut bytes = Cursor::new(Vec::new());
+    let saved_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+    cache
+        .write_clean_snapshot(
+            &mut bytes,
+            &prior_fingerprint,
+            saved_at,
+            now,
+            1_048_576,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let restored = Cache::new(config.cache);
+    let error = restored
+        .restore_clean_snapshot(
+            &mut bytes,
+            &fingerprint,
+            saved_at,
+            now,
+            1_048_576,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("snapshot policy mismatch"));
+    assert_eq!(restored.snapshot()["entries"], 0);
 }
 
 #[test]

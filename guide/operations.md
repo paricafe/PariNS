@@ -3,7 +3,7 @@
 [Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md)
 
 This guide describes the current main branch; features marked unreleased are not
-part of the published v0.1.7 packages. See [CHANGELOG](../CHANGELOG.md) for release-specific changes.
+part of the published v0.1.8 packages. See [CHANGELOG](../CHANGELOG.md) for release-specific changes.
 
 ## Management console
 

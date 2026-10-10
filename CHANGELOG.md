@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.1.8 — 2026-10-11
+
+### Upgrade notice
+
+- v0.1.7 managed installations can update from the console: the updater
+  contract, helper protocol and data formats are unchanged. This is the first
+  official version pair for an in-place update; treat it as such and keep a
+  separate backup. v0.1.5/v0.1.6 installations still require the installer,
+  as described for v0.1.7.
+- The cache snapshot format and semantics are unchanged, so a snapshot that
+  v0.1.7 publishes remains restorable. v0.1.7 itself may skip publishing it when
+  idle encrypted-DNS clients are connected; v0.1.8 fixes that for later stops.
+
 ### Fixed
 
 - Bound how long a stopping DoH HTTP/2 connection waits for an idle client to

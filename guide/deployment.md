@@ -79,7 +79,7 @@ to inspect traffic, then configure filtering, caching, ECS, and encrypted DNS as
 needed. Reinstalling the current managed layout preserves the account and
 configuration. Upgrading an older layout requires explicit preparation as
 described in the upgrade notice; the installer will reject it without migration.
-Pin a version with `sudo sh parins-install.sh --version v0.1.7`.
+Pin a version with `sudo sh parins-install.sh --version v0.1.8`.
 Use `--dry-run` to download/verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`

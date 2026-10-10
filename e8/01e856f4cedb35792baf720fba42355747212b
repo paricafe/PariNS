@@ -1,0 +1,31 @@
+AGENTS.md
+  s_0cc083ef6e9aa3::t_56677b0bc7220f 100-101
+  s_0cc083ef6e9aa3::t_c98183dbb14376 98-99,102-103
+src/doh.rs
+  s_0cc083ef6e9aa3::t_baae9460e7e4e4 194-197,199
+src/quic.rs
+  s_0cc083ef6e9aa3::t_a1b6a0e7e32b08 121-128,264-271
+  s_0cc083ef6e9aa3::t_56677b0bc7220f 142-144
+  s_0cc083ef6e9aa3::t_37a1ebc5f5b11c 145,148-149
+tests/listener_shutdown.rs
+  s_0cc083ef6e9aa3::t_9442a3a68bd321 134,136,150,158,164
+  s_0cc083ef6e9aa3::t_9f367bef4a0211 221-269,274-277
+  s_0cc083ef6e9aa3::t_a651fbe12456b1 95,135,161-163,165-178,185-194,200,206-213,218
+  s_0cc083ef6e9aa3::t_c9e448248cdf9a 270-273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e801e856f4cedb35792baf720fba42355747212b",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,63 @@
+web/src/i18n/__tests__/i18n.test.ts
+  s_0cc083ef6e9aa3::t_62f725ac4fd6d7 10,15
+web/src/pages/config/CertificateTools.test.tsx
+  s_0cc083ef6e9aa3::t_7b5a169a365466 5-6,15,17-18,20,26,52,72,84
+  s_0cc083ef6e9aa3::t_e52978b4a0c5a3 31-43
+  s_0cc083ef6e9aa3::t_97c454c49a4eb8 44-45
+web/src/features/subscriptions/useSubscriptions.ts
+  s_0cc083ef6e9aa3::t_a5ad5b26477a52 4,29-51
+  s_0cc083ef6e9aa3::t_dcc2e49ea47bec 52-53
+web/src/pages/config/StorageTools.tsx
+  s_0cc083ef6e9aa3::t_916e7d8ec4d0e9 24-26,31,39-40,52,56,67,72
+  s_0cc083ef6e9aa3::t_20f6925582f03a 64
+web/src/pages/config/SecurityRuntime.tsx
+  s_0cc083ef6e9aa3::t_33dfe4f06ed5e1 1-37
+  s_0cc083ef6e9aa3::t_8b012562360e6c 38-43
+web/src/features/subscriptions/subscriptions.test.tsx
+  s_0cc083ef6e9aa3::t_7b5a169a365466 11,54-62
+  s_0cc083ef6e9aa3::t_9f2c0a969ef9f6 63-65
+web/src/pages/config/CertificateTools.tsx
+  s_0cc083ef6e9aa3::t_13d7317538dae3 1,13,16-25,32-33,38,41,44,51,55
+  s_0cc083ef6e9aa3::t_411d45377d8aee 60
+web/src/pages/config/SettingsPage.tsx
+  s_0cc083ef6e9aa3::t_13e46918644a72 197,223-224,233
+  s_0cc083ef6e9aa3::t_eff1ee2918e454 5,13,123,126,135,147,157,163,175,186,239,250,271,284,307
+web/src/pages/config/DohRuntime.tsx
+  s_0cc083ef6e9aa3::t_13d7317538dae3 4,7
+web/src/pages/config/DohRuntime.test.tsx
+  s_0cc083ef6e9aa3::t_7b5a169a365466 2-3,8-11,13,16-18
+web/src/model/settings.ts
+  s_0cc083ef6e9aa3::t_546a1fc63f9518 84
+web/package.json
+  s_0cc083ef6e9aa3::t_d208f8160e8649 19
+web/src/features/subscriptions/types.ts
+  s_0cc083ef6e9aa3::t_a5ad5b26477a52 23-28
+web/src/App.tsx
+  s_0cc083ef6e9aa3::t_62f725ac4fd6d7 8,113,126,131,160
+web/src/i18n/console.ts
+  s_0cc083ef6e9aa3::t_62f725ac4fd6d7 131
+web/src/pages/observability/LogsPage.tsx
+  s_0cc083ef6e9aa3::t_763e8d494dc81b 17-22,84,95,102,106,116,118,143,149,195-196
+web/src/pages/config/StorageTools.test.tsx
+  s_0cc083ef6e9aa3::t_7b5a169a365466 42-44
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_d2b73208bc45e8 186-207
+web/package-lock.json
+  s_0cc083ef6e9aa3::t_844b94feedebe8 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fbc5624b51f402da9dc3f316ec53750f6f798ba8",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_31d281b9d40add::t_e743031370ab34 19,70-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ea90c7dcb4764c125e52f9daf12af652c2d50c11",
+  "prompts": {},
+  "sessions": {
+    "s_31d281b9d40add": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f109dd8b-ce23-44f4-9533-f88551f20520",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

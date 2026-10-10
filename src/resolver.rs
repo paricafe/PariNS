@@ -4,7 +4,7 @@ use std::{
     net::IpAddr,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -62,6 +62,52 @@ pub struct Reply {
     pub padding: protocol::Padding,
 }
 
+/// Why a shutdown stopped waiting for resolver work. Finite and free of
+/// client data so that terminal diagnostics can name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ForcedShutdown {
+    ListenerDrain = 1,
+    ListenerFailed,
+    DohDrain,
+    DohRequest,
+    DotDrain,
+    QuicDrain,
+    TaskAborted,
+    TaskPanic,
+    ManagedStopTimeout,
+}
+
+impl ForcedShutdown {
+    fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            1 => Self::ListenerDrain,
+            2 => Self::ListenerFailed,
+            3 => Self::DohDrain,
+            4 => Self::DohRequest,
+            5 => Self::DotDrain,
+            6 => Self::QuicDrain,
+            7 => Self::TaskAborted,
+            8 => Self::TaskPanic,
+            9 => Self::ManagedStopTimeout,
+            _ => return None,
+        })
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ListenerDrain => "listener_drain",
+            Self::ListenerFailed => "listener_failed",
+            Self::DohDrain => "doh_drain",
+            Self::DohRequest => "doh_request",
+            Self::DotDrain => "dot_drain",
+            Self::QuicDrain => "quic_drain",
+            Self::TaskAborted => "task_aborted",
+            Self::TaskPanic => "task_panic",
+            Self::ManagedStopTimeout => "managed_stop_timeout",
+        }
+    }
+}
+
 pub struct Resolver {
     upstream: Arc<crate::upstreams::Pool>,
     timeout: Duration,
@@ -74,7 +120,7 @@ pub struct Resolver {
     services: Arc<crate::runtime_services::RuntimeServices>,
     retired_refresh: Mutex<Vec<Arc<refresh::Refresh>>>,
     shutdown_clean: AtomicBool,
-    shutdown_forced: AtomicBool,
+    shutdown_forced: AtomicU8,
 }
 
 impl Resolver {
@@ -120,7 +166,7 @@ impl Resolver {
             services,
             retired_refresh: Mutex::new(Vec::new()),
             shutdown_clean: AtomicBool::new(false),
-            shutdown_forced: AtomicBool::new(false),
+            shutdown_forced: AtomicU8::new(0),
         })
     }
 
@@ -184,16 +230,25 @@ impl Resolver {
     pub fn policy_digest(&self) -> [u8; 32] {
         self.policy.snapshot().policy.semantic_digest()
     }
-    pub(crate) fn force_shutdown(&self) {
-        self.shutdown_forced.store(true, Ordering::Release);
+    /// Keeps the first cause; later forces only repeat upstream cancellation.
+    pub(crate) fn force_shutdown(&self, cause: ForcedShutdown) {
+        let _ = self.shutdown_forced.compare_exchange(
+            0,
+            cause as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         self.upstream.shutdown();
+    }
+    pub(crate) fn forced_shutdown(&self) -> Option<ForcedShutdown> {
+        ForcedShutdown::from_u8(self.shutdown_forced.load(Ordering::Acquire))
     }
     pub fn upstream_diagnostics(&self) -> serde_json::Value {
         self.upstream.diagnostics_snapshot()
     }
     pub(crate) fn finish_shutdown(&self) {
         self.shutdown_clean.store(
-            !self.shutdown_forced.load(Ordering::Acquire),
+            self.shutdown_forced.load(Ordering::Acquire) == 0,
             Ordering::Release,
         );
     }

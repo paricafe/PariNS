@@ -7,6 +7,7 @@ use super::{
     store::{Store, Stored},
     transport::Snapshot,
 };
+use crate::resolver::ForcedShutdown;
 use crate::runtime_health::State as HealthState;
 use crate::{
     cache::persistence::SnapshotReport,
@@ -35,7 +36,7 @@ struct RuntimeCompletion {
 impl Drop for RuntimeCompletion {
     fn drop(&mut self) {
         if !self.complete {
-            self.resolver.force_shutdown();
+            self.resolver.force_shutdown(ForcedShutdown::TaskAborted);
             self.services.set_dns_health(
                 HealthState::Failed,
                 self.generation,
@@ -93,8 +94,15 @@ impl Running {
                 Ok(Err(error)) => (Err(error), Some("listener_failed")),
                 Err(_) => (Err(anyhow!("DNS task panicked")), Some("task_panic")),
             };
-            if code.is_some() {
-                completion.resolver.force_shutdown();
+            match code {
+                Some("listener_failed") => completion
+                    .resolver
+                    .force_shutdown(ForcedShutdown::ListenerFailed),
+                Some("task_panic") => completion
+                    .resolver
+                    .force_shutdown(ForcedShutdown::TaskPanic),
+                // drain_deadline: a listener already recorded its own cause.
+                _ => {}
             }
             completion.services.set_dns_health(
                 if code.is_some() {
@@ -125,7 +133,8 @@ impl Running {
         let result = timeout(self.grace, &mut self.task).await;
         let clean = matches!(result, Ok(Ok(Ok(()))));
         if result.is_err() {
-            self.resolver.force_shutdown();
+            self.resolver
+                .force_shutdown(ForcedShutdown::ManagedStopTimeout);
             self.task.abort();
             let _ = self.task.await;
         }

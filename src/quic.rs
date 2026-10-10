@@ -145,7 +145,7 @@ async fn drain(tasks: &mut JoinSet<()>, grace: Duration, resolver: &crate::resol
         .await
         .is_err()
     {
-        resolver.force_shutdown();
+        resolver.force_shutdown(crate::resolver::ForcedShutdown::QuicDrain);
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
     }

@@ -97,6 +97,9 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
 - QUIC listener ownership includes Quinn drivers and final socket release. Server
   retains cleanup across adapter cancellation; peer close notification stays within
   the existing shutdown grace, and a completed shutdown permits immediate rebinding.
+- A stopping listener waits only for admitted request work, never for an idle peer's
+  acknowledgement. Any force records its first bounded cause, and a terminal stop
+  that cannot publish a clean snapshot logs that cause.
 - UDP adapters retain each datagram's local destination and interface for replies;
   address selection never belongs to Resolver or cache. Linux/macOS use packet info;
   unsupported platforms must reject wildcard binds rather than choose a reply source.

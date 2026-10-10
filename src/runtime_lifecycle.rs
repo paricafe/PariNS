@@ -73,6 +73,15 @@ pub async fn terminal(
             reason: Some("shutdown_not_quiescent".into()),
             ..Default::default()
         };
+        if let Some((resolver, _, false)) = &stopped {
+            // Listener causes are bounded names; other drain failures (filters,
+            // reload, managed task) are reported generically.
+            let cause = resolver
+                .forced_shutdown()
+                .map_or("drain_incomplete", |cause| cause.as_str());
+            eprintln!("cache snapshot not saved: shutdown not quiescent ({cause})");
+            report.reason = Some(format!("shutdown_not_quiescent: {cause}"));
+        }
         if let Some((resolver, config, true)) = stopped {
             let prepared = semantic_fingerprint(&config, &resolver.policy_digest());
             let result = match prepared {

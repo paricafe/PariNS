@@ -200,7 +200,10 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   are consumed and skipped; a failed consume prevents DNS startup. No periodic
   snapshot can resurrect entries after clear, TTL0, EDE or a crash. Forced drain,
   SIGKILL and abnormal exit start cold. Normal configuration apply is not restart
-  restoration; stale-only entries are never restored.
+  restoration; stale-only entries are never restored. A stop forced by requests
+  still running past `shutdown_grace_ms` logs
+  `cache snapshot not saved: shutdown not quiescent (<cause>)`; idle client
+  connections do not delay or force a stop.
   The v0.1.7 CNAME-negative change advances the cache semantic fingerprint,
   not the snapshot wire format. Earlier-semantic snapshots are rejected, so the
   first start after upgrading begins cold; there is no compatibility migration.

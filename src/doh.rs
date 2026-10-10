@@ -8,7 +8,7 @@ use http::{Request, Response};
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::{TlsAcceptor, rustls};
 
-use crate::{ingress::Ingress, metrics::Counter};
+use crate::{ingress::Ingress, metrics::Counter, resolver::ForcedShutdown};
 
 pub const PATH: &str = "/dns-query";
 pub(crate) fn alt_svc(port: Option<u16>) -> String {
@@ -119,7 +119,7 @@ pub async fn serve(
     .await
     .is_err()
     {
-        ingress.resolver.force_shutdown();
+        ingress.resolver.force_shutdown(ForcedShutdown::DohDrain);
         connections.abort_all();
         while connections.join_next().await.is_some() {}
     }
@@ -136,15 +136,36 @@ async fn connection(
     builder
         .max_concurrent_streams(ingress.max_streams as u32)
         .max_header_list_size(8192);
-    let mut connection = timeout(ingress.io_timeout, builder.handshake(tls)).await??;
+    let mut stop = ingress.stop.clone();
+    let mut connection = tokio::select! {
+        _ = stop.changed() => return Ok(()),
+        handshake = timeout(ingress.io_timeout, builder.handshake(tls)) => handshake??,
+    };
     let permits = Arc::new(Semaphore::new(ingress.max_streams));
     let mut requests = JoinSet::new();
-    let mut stop = ingress.stop.clone();
     let mut stopping = *stop.borrow();
     if stopping {
         connection.graceful_shutdown();
     }
     loop {
+        if stopping {
+            while requests.try_join_next().is_some() {}
+            if requests.is_empty() {
+                // Only admitted requests keep a stopping connection. Flush what
+                // is already queued without waiting for the peer's GOAWAY/PING
+                // acknowledgement; a silent peer must not hold shutdown.
+                std::future::poll_fn(|cx| {
+                    if let std::task::Poll::Ready(Some(Ok((_, mut respond)))) =
+                        connection.poll_accept(cx)
+                    {
+                        respond.send_reset(Reason::REFUSED_STREAM);
+                    }
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                break;
+            }
+        }
         tokio::select! {
             _ = stop.changed(), if !stopping => {
                 stopping = true;
@@ -169,8 +190,9 @@ async fn connection(
         }
     }
     // JoinSet drop aborts remaining request work; there are no detached collectors.
+    while requests.try_join_next().is_some() {}
     if *stop.borrow() && !requests.is_empty() {
-        ingress.resolver.force_shutdown();
+        ingress.resolver.force_shutdown(ForcedShutdown::DohRequest);
     }
     requests.abort_all();
     while requests.join_next().await.is_some() {}

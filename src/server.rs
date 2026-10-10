@@ -20,7 +20,7 @@ use crate::{
     config::Config,
     metrics::{Counter, Metrics},
     protocol,
-    resolver::Resolver,
+    resolver::{ForcedShutdown, Resolver},
     transport::{tcp, udp},
 };
 
@@ -431,8 +431,10 @@ impl Server {
             },
         )
         .await;
-        if !matches!(&drained, Ok(Ok(()))) || outcome.is_err() {
-            resolver.force_shutdown();
+        match (&drained, &outcome) {
+            (Ok(Ok(())), Ok(_)) => {}
+            (Err(_), Ok(_)) => resolver.force_shutdown(ForcedShutdown::ListenerDrain),
+            _ => resolver.force_shutdown(ForcedShutdown::ListenerFailed),
         }
         tasks.shutdown().await;
         adapters.shutdown().await;

@@ -551,4 +551,148 @@ mod process {
         assert_eq!(mock.requests.load(Ordering::Acquire), 3);
         stop(&mut second, true).await;
     }
+
+    /// Production-like timeouts: the DoH I/O timeout exceeds the shutdown grace.
+    fn doh_configuration(directory: &Path, upstream: SocketAddr) -> (PathBuf, Vec<u8>) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = rcgen::CertificateParams::new(vec!["localhost".into()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let files = parins::tls::TlsFiles {
+            cert_file: directory.join("cert.pem"),
+            key_file: directory.join("key.pem"),
+        };
+        fs::write(&files.cert_file, certificate.pem()).unwrap();
+        fs::write(&files.key_file, key.serialize_pem()).unwrap();
+        let mut config =
+            parins::config::Config::parse(include_str!("../parins.example.toml")).unwrap();
+        config.listen = "127.0.0.1:0".parse().unwrap();
+        config.upstreams.servers = vec![upstream.to_string()];
+        config.tcp_io_timeout_ms = 5000;
+        config.shutdown_grace_ms = 1000;
+        config.doh = Some(parins::config::DohConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            files,
+            http3: false,
+        });
+        let path = directory.join("config.toml");
+        fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        (path, certificate.der().to_vec())
+    }
+
+    async fn doh_address(directory: &Path, generation: usize) -> SocketAddr {
+        let stderr = directory.join(format!("stderr-{generation}.txt"));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(address) =
+                    fs::read_to_string(&stderr)
+                        .unwrap()
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("PariNS listening on ")
+                                .and_then(|line| line.strip_suffix(" (doh)"))
+                        })
+                {
+                    break address.parse().unwrap();
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Completes TLS and the HTTP/2 handshake, then stops reading, like a
+    /// sleeping client behind a stale NAT mapping.
+    async fn silent_h2_peer(
+        address: SocketAddr,
+        der: Vec<u8>,
+    ) -> (
+        h2::client::SendRequest<bytes::Bytes>,
+        h2::client::Connection<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+    ) {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der.into()).unwrap();
+        let mut client = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        client.alpn_protocols = vec![b"h2".to_vec()];
+        let tls = tokio_rustls::TlsConnector::from(Arc::new(client))
+            .connect(
+                "localhost".try_into().unwrap(),
+                tokio::net::TcpStream::connect(address).await.unwrap(),
+            )
+            .await
+            .unwrap();
+        // Dropping the request handle would let the client close by itself.
+        let (sender, mut connection) = h2::client::handshake(tls).await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(200), &mut connection)
+                .await
+                .is_err(),
+            "peer connection must remain open"
+        );
+        (sender, connection)
+    }
+
+    #[tokio::test]
+    async fn binary_sigterm_with_silent_doh_peer_publishes_and_restores_clean_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let mock = upstream(60).await;
+        let (config, der) = doh_configuration(directory.path(), mock.address);
+        let (mut first, endpoint) = start(directory.path(), &config, 1).await;
+        assert_eq!(address(&request(endpoint).await), 1);
+        let peer = silent_h2_peer(doh_address(directory.path(), 1).await, der).await;
+        stop(&mut first, true).await;
+        let stderr = fs::read_to_string(directory.path().join("stderr-1.txt")).unwrap();
+        assert!(!stderr.contains("not quiescent"), "{stderr}");
+        assert!(
+            directory.path().join("data").join(CLEAN_FILE).is_file(),
+            "{stderr}"
+        );
+        drop(peer);
+        let (mut second, endpoint) = start(directory.path(), &config, 2).await;
+        assert_eq!(address(&request(endpoint).await), 1);
+        assert_eq!(
+            mock.requests.load(Ordering::Acquire),
+            1,
+            "restored, no upstream"
+        );
+        stop(&mut second, true).await;
+    }
+
+    #[tokio::test]
+    async fn binary_sigterm_with_unfinished_resolution_logs_cause_and_saves_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let mock = upstream(60).await;
+        mock.mode.store(4, Ordering::Release);
+        let (config, _) = doh_configuration(directory.path(), mock.address);
+        let (mut first, endpoint) = start(directory.path(), &config, 1).await;
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (_, query, _) = filled();
+        socket
+            .send_to(&query.to_vec().unwrap(), endpoint)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            while mock.requests.load(Ordering::Acquire) == 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The 2-second query timeout outlives the 1-second shutdown grace.
+        stop(&mut first, true).await;
+        let stderr = fs::read_to_string(directory.path().join("stderr-1.txt")).unwrap();
+        assert!(
+            stderr.contains("cache snapshot not saved: shutdown not quiescent (listener_drain)"),
+            "{stderr}"
+        );
+        assert!(!directory.path().join("data").join(CLEAN_FILE).exists());
+    }
 }

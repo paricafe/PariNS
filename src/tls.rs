@@ -457,7 +457,9 @@ pub async fn serve(
     .await
     .is_err()
     {
-        ingress.resolver.force_shutdown();
+        ingress
+            .resolver
+            .force_shutdown(crate::resolver::ForcedShutdown::DotDrain);
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
     }

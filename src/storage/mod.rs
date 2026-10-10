@@ -305,12 +305,10 @@ impl Handle {
         revision: u64,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<Self> {
-        settings.validate()?;
         let (dir, lock) = private_directory(dir)?;
         Self::start(Some((dir, lock)), settings, revision, metrics)
     }
     pub fn ephemeral(settings: RuntimeSettings, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
-        settings.validate()?;
         Self::start(None, settings, 0, metrics)
     }
     fn start(

@@ -70,7 +70,6 @@ pub enum ForcedShutdown {
     ListenerDrain = 1,
     ListenerFailed,
     DohDrain,
-    DohRequest,
     DotDrain,
     QuicDrain,
     TaskAborted,
@@ -84,12 +83,11 @@ impl ForcedShutdown {
             1 => Self::ListenerDrain,
             2 => Self::ListenerFailed,
             3 => Self::DohDrain,
-            4 => Self::DohRequest,
-            5 => Self::DotDrain,
-            6 => Self::QuicDrain,
-            7 => Self::TaskAborted,
-            8 => Self::TaskPanic,
-            9 => Self::ManagedStopTimeout,
+            4 => Self::DotDrain,
+            5 => Self::QuicDrain,
+            6 => Self::TaskAborted,
+            7 => Self::TaskPanic,
+            8 => Self::ManagedStopTimeout,
             _ => return None,
         })
     }
@@ -98,7 +96,6 @@ impl ForcedShutdown {
             Self::ListenerDrain => "listener_drain",
             Self::ListenerFailed => "listener_failed",
             Self::DohDrain => "doh_drain",
-            Self::DohRequest => "doh_request",
             Self::DotDrain => "dot_drain",
             Self::QuicDrain => "quic_drain",
             Self::TaskAborted => "task_aborted",
@@ -117,7 +114,6 @@ pub struct Resolver {
     metrics: Arc<Metrics>,
     policy: Arc<PolicyHandle>,
     query_log: Arc<QueryLog>,
-    services: Arc<crate::runtime_services::RuntimeServices>,
     retired_refresh: Mutex<Vec<Arc<refresh::Refresh>>>,
     shutdown_clean: AtomicBool,
     shutdown_forced: AtomicU8,
@@ -163,7 +159,6 @@ impl Resolver {
             metrics: services.metrics.clone(),
             policy,
             query_log: services.query_log.clone(),
-            services,
             retired_refresh: Mutex::new(Vec::new()),
             shutdown_clean: AtomicBool::new(false),
             shutdown_forced: AtomicU8::new(0),
@@ -224,9 +219,6 @@ impl Resolver {
         &self.metrics
     }
 
-    pub fn services(&self) -> &Arc<crate::runtime_services::RuntimeServices> {
-        &self.services
-    }
     pub fn policy_digest(&self) -> [u8; 32] {
         self.policy.snapshot().policy.semantic_digest()
     }

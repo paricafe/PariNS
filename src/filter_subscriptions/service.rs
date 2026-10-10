@@ -25,7 +25,7 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub use material::{Material, read_only};
-pub use operations::{Begin, Work, WorkCandidate, WorkRequest};
+pub(crate) use operations::WorkRequest;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Failure {

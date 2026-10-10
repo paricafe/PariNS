@@ -31,7 +31,7 @@ impl RuntimeServices {
     pub fn ephemeral(settings: RuntimeSettings) -> Arc<Self> {
         let metrics = Arc::new(Metrics::default());
         let storage = storage::Handle::ephemeral(settings, metrics.clone())
-            .expect("validated ephemeral runtime settings");
+            .expect("start ephemeral runtime storage worker");
         Arc::new(Self {
             metrics,
             query_log: Arc::new(QueryLog::with_storage(storage.clone())),

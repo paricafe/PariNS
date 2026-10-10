@@ -42,10 +42,6 @@ impl Ingress {
         }
     }
 
-    pub async fn handle(&self, bytes: &[u8], peer: IpAddr) -> Option<Vec<u8>> {
-        self.handle_with_transport(bytes, peer, "unknown").await
-    }
-
     pub async fn handle_with_transport(
         &self,
         bytes: &[u8],

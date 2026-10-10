@@ -356,13 +356,7 @@ impl Config {
         if let Some(web) = &self.web {
             public_host(&web.public_host)?;
         }
-        self.query_log.validate()?;
-        self.storage.validate()?;
-        self.statistics.validate()?;
-        ensure!(
-            self.query_log.max_bytes <= self.storage.max_database_bytes,
-            "query_log.max_bytes must not exceed storage.max_database_bytes"
-        );
+        crate::storage::RuntimeSettings::from_config(self).validate()?;
         ensure!(
             (1024 * 1024..=512 * 1024 * 1024).contains(&self.cache.persistence.max_bytes),
             "cache.persistence.max_bytes must be 1..=512 MiB"

@@ -1,12 +1,7 @@
 //! Verified TLS configuration and DNS-over-TLS adapters (RFC 7858 / RFC 8310).
 //! No opportunistic plaintext fallback. The resolver owns upstream deadlines.
 
-use std::{
-    fmt,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
+use std::{fmt, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use hickory_proto::op::Message;
@@ -31,10 +26,7 @@ use crate::{ingress::Ingress, metrics::Counter, protocol, transport::tcp};
 mod pool;
 pub use pool::PoolSettings;
 mod certificates;
-pub use certificates::{
-    CertificateRole, CertificateSet, CertificateSources, CertificateSummary,
-    PreparedCertificateSet, RoleSummary,
-};
+pub use certificates::{CertificateRole, CertificateSet, CertificateSources};
 type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,7 +53,7 @@ pub struct ClientSettings {
 }
 
 pub fn server_config(files: &TlsFiles, alpn: &[&[u8]]) -> Result<Arc<ServerConfig>> {
-    Ok(reloading_server_config(files, alpn)?.0)
+    server_config_with_key(load_identity(files)?, alpn)
 }
 
 pub fn server_config_with_key(key: Arc<CertifiedKey>, alpn: &[&[u8]]) -> Result<Arc<ServerConfig>> {
@@ -81,62 +73,6 @@ impl ResolvesServerCert for FixedIdentity {
     fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.0.clone())
     }
-}
-
-/// A stable certificate resolver shared by all cloned server configurations.
-/// File IO happens during preparation, never on a TLS handshake's hot path.
-#[derive(Clone, Debug)]
-pub struct Identity {
-    files: TlsFiles,
-    key: Arc<RwLock<Arc<CertifiedKey>>>,
-}
-
-impl Identity {
-    pub fn from_key(files: &TlsFiles, key: Arc<CertifiedKey>) -> Self {
-        Self {
-            files: files.clone(),
-            key: Arc::new(RwLock::new(key)),
-        }
-    }
-
-    pub fn server_config(&self, alpn: &[&[u8]]) -> Result<Arc<ServerConfig>> {
-        let mut config =
-            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()?
-                .with_no_client_auth()
-                .with_cert_resolver(Arc::new(self.clone()));
-        config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
-        Ok(Arc::new(config))
-    }
-
-    pub fn prepare(&self) -> Result<Arc<CertifiedKey>> {
-        load_identity(&self.files)
-    }
-
-    pub fn install(&self, key: Arc<CertifiedKey>) {
-        // This lock never encloses fallible work or invokes caller code.
-        *self.key.write().unwrap_or_else(|error| error.into_inner()) = key;
-    }
-}
-
-impl ResolvesServerCert for Identity {
-    fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(
-            self.key
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-        )
-    }
-}
-
-pub fn reloading_server_config(
-    files: &TlsFiles,
-    alpn: &[&[u8]],
-) -> Result<(Arc<ServerConfig>, Identity)> {
-    let identity = Identity::from_key(files, load_identity(files)?);
-    let config = identity.server_config(alpn)?;
-    Ok((config, identity))
 }
 
 pub fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
@@ -239,7 +175,6 @@ impl Upstream {
     }
 
     pub fn with_pool(settings: &ClientSettings, pool: &PoolSettings) -> Result<Self> {
-        pool.validate()?;
         let server_name = ServerName::try_from(settings.server_name.clone())
             .context("invalid TLS upstream server name")?;
         let mut roots = RootCertStore::empty();

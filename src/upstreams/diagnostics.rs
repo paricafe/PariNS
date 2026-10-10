@@ -79,14 +79,12 @@ struct OperationInner {
     // No request detail vector or mutex is allocated when logging is off.
     trace: Option<Mutex<Trace>>,
     observer: Option<Observer>,
-    shutdown: AtomicBool,
 }
 impl Operation {
     pub fn new(trace_enabled: bool, observer: Option<Observer>) -> Self {
         Self(Arc::new(OperationInner {
             trace: trace_enabled.then(|| Mutex::new(Trace::default())),
             observer,
-            shutdown: AtomicBool::new(false),
         }))
     }
     pub fn trace(&self) -> Option<Trace> {
@@ -94,11 +92,6 @@ impl Operation {
             .trace
             .as_ref()
             .map(|trace| trace.lock().unwrap_or_else(|e| e.into_inner()).clone())
-    }
-    pub fn cancel(&self, reason: Reason) {
-        if reason == Reason::Shutdown {
-            self.0.shutdown.store(true, Ordering::Release);
-        }
     }
     fn record(&self, record: AttemptRecord) {
         if let Some(observer) = &self.0.observer {
@@ -383,9 +376,7 @@ impl Drop for Attempt {
         if self.finished {
             return;
         }
-        if self.scope.diagnostics.shutdown.load(Ordering::Acquire)
-            || self.scope.operation.0.shutdown.load(Ordering::Acquire)
-        {
+        if self.scope.diagnostics.shutdown.load(Ordering::Acquire) {
             self.terminal(Outcome::Cancelled, Some(Reason::Shutdown));
         } else if self
             .scope

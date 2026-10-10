@@ -213,18 +213,6 @@ impl QueryLog {
             )),
         })
     }
-    pub async fn clear(&self, epoch: u64) -> crate::storage::Result<crate::storage::ClearResult> {
-        self.storage.clear_logs(epoch).await
-    }
-    pub async fn list(&self, options: ListOptions) -> crate::storage::Result<Page> {
-        self.storage.list_logs(options).await
-    }
-    pub async fn flush(&self) -> crate::storage::Result<()> {
-        self.storage.flush().await
-    }
-    pub fn epoch(&self) -> u64 {
-        self.storage.status().log_epoch
-    }
     pub(crate) fn record(&self, epoch: u64, entry: Entry) {
         self.storage.record_log(epoch, entry);
     }
@@ -355,9 +343,10 @@ mod tests {
                 Entry::request(None, "127.0.0.1".parse().unwrap(), "udp"),
             );
         }
-        log.flush().await.unwrap();
-        let page = log
-            .list(ListOptions {
+        runtime.storage.flush().await.unwrap();
+        let page = runtime
+            .storage
+            .list_logs(ListOptions {
                 limit: Some(1),
                 ..Default::default()
             })
@@ -367,30 +356,48 @@ mod tests {
         assert_eq!(page.entries[0].id, 3);
         assert_eq!(page.next_cursor, Some(3));
         assert_eq!(
-            log.list(ListOptions {
-                before_id: page.next_cursor,
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .entries[0]
+            runtime
+                .storage
+                .list_logs(ListOptions {
+                    before_id: page.next_cursor,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .entries[0]
                 .id,
             2
         );
-        log.clear(epoch).await.unwrap();
+        runtime.storage.clear_logs(epoch).await.unwrap();
         log.record(
             epoch,
             Entry::request(None, "127.0.0.1".parse().unwrap(), "udp"),
         );
-        log.flush().await.unwrap();
-        assert_eq!(log.list(ListOptions::default()).await.unwrap().total, 0);
+        runtime.storage.flush().await.unwrap();
+        assert_eq!(
+            runtime
+                .storage
+                .list_logs(ListOptions::default())
+                .await
+                .unwrap()
+                .total,
+            0
+        );
         let new_epoch = log.begin().unwrap();
         let mut expired = Entry::request(None, "127.0.0.1".parse().unwrap(), "udp");
         expired.time_ms = 1;
         expired.duration_ms = 86_401_000.0;
         log.record(new_epoch, expired);
-        log.flush().await.unwrap();
-        assert_eq!(log.list(ListOptions::default()).await.unwrap().total, 0);
+        runtime.storage.flush().await.unwrap();
+        assert_eq!(
+            runtime
+                .storage
+                .list_logs(ListOptions::default())
+                .await
+                .unwrap()
+                .total,
+            0
+        );
         assert!(
             crate::runtime_services::RuntimeServices::ephemeral(Default::default())
                 .query_log

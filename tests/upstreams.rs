@@ -478,12 +478,12 @@ async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
 fn rejects_direct_bootstrap_and_mapped_self_loops() {
     for server in ["udp://127.0.0.1:1053", "tcp://[::ffff:127.0.0.1]:1053"] {
         let config = config(vec![server.into()], Mode::Weighted);
-        assert!(client(&config).is_err());
+        assert!(config.validate().is_err());
     }
     let mut config = config(vec!["udp://resolver.test".into()], Mode::Weighted);
     config.listen = "0.0.0.0:1053".parse().unwrap();
     config.upstreams.bootstrap = vec!["127.0.0.1:1053".parse().unwrap()];
-    assert!(client(&config).is_err());
+    assert!(config.validate().is_err());
 }
 
 #[tokio::test]

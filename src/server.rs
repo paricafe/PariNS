@@ -169,13 +169,13 @@ impl Server {
         Self::bind_with_policy(config, certificates, services, policy).await
     }
 
+    /// `config` has passed `Config::validate`; listener and upstream checks are not repeated.
     pub async fn bind_with_policy(
         mut config: Config,
         certificates: Option<Arc<crate::tls::CertificateSet>>,
         services: Arc<crate::runtime_services::RuntimeServices>,
         policy: Arc<crate::filter_subscriptions::handle::PolicyHandle>,
     ) -> Result<Self> {
-        config.validate()?;
         let certificates = match certificates {
             Some(prepared) => prepared,
             None => {

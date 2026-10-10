@@ -10,10 +10,24 @@ use parins::{
     ecs, protocol,
     query_log::{ListOptions, UpstreamRelation},
     resolver::Resolver,
+    runtime_services::RuntimeServices,
+    storage::RuntimeSettings,
     upstreams::diagnostics::{ActualProtocol, Outcome, Reason, Stage},
 };
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::net::UdpSocket;
+
+/// Tests hold the runtime services; the resolver only owns the query-log writer.
+fn with_log(config: &Config) -> (Resolver, Arc<RuntimeServices>) {
+    let services = RuntimeServices::ephemeral(RuntimeSettings::from_config(config));
+    (
+        Resolver::with_services(config, services.clone()).unwrap(),
+        services,
+    )
+}
 
 fn query(name: &str) -> Message {
     let mut q = Message::new(7, MessageType::Query, OpCode::Query);
@@ -52,7 +66,7 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
     config.ecs.enabled = true;
     config.query_log.enabled = true;
     config.filter = toml::from_str("enabled = true\nblock_suffix = ['blocked.test']").unwrap();
-    let resolver = Resolver::from_config(&config);
+    let (resolver, services) = with_log(&config);
     let q = query("cache.test.").to_vec().unwrap();
     let peer = "192.0.2.10".parse().unwrap();
     for _ in 0..2 {
@@ -72,10 +86,10 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
             .await
             .is_none()
     );
-    resolver.query_log().flush().await.unwrap();
-    let page = resolver
-        .query_log()
-        .list(ListOptions::default())
+    services.storage.flush().await.unwrap();
+    let page = services
+        .storage
+        .list_logs(ListOptions::default())
         .await
         .unwrap();
     assert_eq!(page.total, 4);
@@ -97,9 +111,9 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
     assert!(fresh.edns && fresh.dnssec_ok && fresh.checking_disabled && fresh.recursion_desired);
     assert_eq!(upstream.cache, "upstream");
     assert_eq!(
-        resolver
-            .query_log()
-            .list(ListOptions {
+        services
+            .storage
+            .list_logs(ListOptions {
                 search: Some(address.to_string()),
                 ..Default::default()
             })
@@ -124,9 +138,9 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
         upstream.outgoing_ecs.as_deref(),
         Some("192.0.2.0/24 (scope /0)")
     );
-    let filtered = resolver
-        .query_log()
-        .list(ListOptions {
+    let filtered = services
+        .storage
+        .list_logs(ListOptions {
             search: Some("CACHE.TEST".into()),
             status: Some("success".into()),
             limit: Some(1),
@@ -136,9 +150,9 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
         .unwrap();
     assert_eq!(filtered.entries.len(), 1);
     assert_eq!(filtered.entries[0].id, fresh.id);
-    let next = resolver
-        .query_log()
-        .list(ListOptions {
+    let next = services
+        .storage
+        .list_logs(ListOptions {
             search: Some("cache.test".into()),
             before_id: filtered.next_cursor,
             ..Default::default()
@@ -148,40 +162,40 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
     assert_eq!(next.entries.len(), 1);
     assert_eq!(next.entries[0].id, upstream.id);
     assert_eq!(
-        resolver
-            .query_log()
-            .clear(resolver.query_log().epoch())
+        services
+            .storage
+            .clear_logs(services.storage.status().log_epoch)
             .await
             .unwrap()
             .removed,
         4
     );
     assert_eq!(
-        resolver
-            .query_log()
-            .list(ListOptions::default())
+        services
+            .storage
+            .list_logs(ListOptions::default())
             .await
             .unwrap()
             .total,
         0
     );
     config.query_log.enabled = false;
-    let disabled = Resolver::from_config(&config);
+    let (disabled, disabled_services) = with_log(&config);
     disabled
         .resolve(&query("blocked.test.").to_vec().unwrap(), peer)
         .await;
     assert!(
-        !disabled
-            .query_log()
-            .list(ListOptions::default())
+        !disabled_services
+            .storage
+            .list_logs(ListOptions::default())
             .await
             .unwrap()
             .enabled
     );
     assert_eq!(
-        disabled
-            .query_log()
-            .list(ListOptions::default())
+        disabled_services
+            .storage
+            .list_logs(ListOptions::default())
             .await
             .unwrap()
             .total,
@@ -196,7 +210,7 @@ async fn response_detail_is_bounded_and_inflight_clear_does_not_refill() {
     config.upstreams.servers = vec![socket.local_addr().unwrap().to_string()];
     config.query_log.enabled = true;
     config.ecs.enabled = false;
-    let resolver = Resolver::from_config(&config);
+    let (resolver, services) = with_log(&config);
     let mut message = query("many.test.");
     message.queries[0].set_query_type(RecordType::TXT);
     let q = message.to_vec().unwrap();
@@ -204,9 +218,9 @@ async fn response_detail_is_bounded_and_inflight_clear_does_not_refill() {
     let serve = async {
         let mut buffer = [0; 4096];
         let (n, peer) = socket.recv_from(&mut buffer).await.unwrap();
-        resolver
-            .query_log()
-            .clear(resolver.query_log().epoch())
+        services
+            .storage
+            .clear_logs(services.storage.status().log_epoch)
             .await
             .unwrap();
         let q = protocol::decode(&buffer[..n]).unwrap();
@@ -229,11 +243,11 @@ async fn response_detail_is_bounded_and_inflight_clear_does_not_refill() {
     };
     let (reply, _) = tokio::join!(pending, serve);
     assert_eq!(reply.unwrap().message.answers.len(), 18);
-    resolver.query_log().flush().await.unwrap();
+    services.storage.flush().await.unwrap();
     assert_eq!(
-        resolver
-            .query_log()
-            .list(ListOptions::default())
+        services
+            .storage
+            .list_logs(ListOptions::default())
             .await
             .unwrap()
             .total,
@@ -244,10 +258,10 @@ async fn response_detail_is_bounded_and_inflight_clear_does_not_refill() {
         .resolve(&q, "127.0.0.1".parse().unwrap())
         .await
         .unwrap();
-    resolver.query_log().flush().await.unwrap();
-    let page = resolver
-        .query_log()
-        .list(ListOptions::default())
+    services.storage.flush().await.unwrap();
+    let page = services
+        .storage
+        .list_logs(ListOptions::default())
         .await
         .unwrap();
     assert_eq!(page.entries.len(), 1);
@@ -279,7 +293,7 @@ async fn stale_fallback_records_actual_failed_exchange_and_cached_answer() {
     config.query_log.enabled = true;
     config.ecs.enabled = false;
     config.cache.stale.enabled = true;
-    let resolver = Resolver::from_config(&config);
+    let (resolver, services) = with_log(&config);
     let q = query("stale.test.");
     let mut response = protocol::error_response(&q, ResponseCode::NoError);
     response.add_answer(Record::from_rdata(
@@ -299,10 +313,10 @@ async fn stale_fallback_records_actual_failed_exchange_and_cached_answer() {
         .unwrap();
     upstream.await.unwrap();
     assert_eq!(reply.message.response_code, ResponseCode::NoError);
-    resolver.query_log().flush().await.unwrap();
-    let page = resolver
-        .query_log()
-        .list(ListOptions::default())
+    services.storage.flush().await.unwrap();
+    let page = services
+        .storage
+        .list_logs(ListOptions::default())
         .await
         .unwrap();
     assert_eq!(page.entries.len(), 1);
@@ -332,7 +346,7 @@ async fn servfail_and_timeout_keep_trace_factual() {
     config.query_log.enabled = true;
     config.ecs.enabled = true;
     config.query_timeout_ms = 30;
-    let resolver = Resolver::from_config(&config);
+    let (resolver, services) = with_log(&config);
     let q = query("error.test.").to_vec().unwrap();
     let serve = async {
         let mut buffer = [0; 4096];
@@ -354,10 +368,10 @@ async fn servfail_and_timeout_keep_trace_factual() {
         .resolve(&q, "192.0.2.10".parse().unwrap())
         .await
         .unwrap();
-    resolver.query_log().flush().await.unwrap();
-    let page = resolver
-        .query_log()
-        .list(ListOptions::default())
+    services.storage.flush().await.unwrap();
+    let page = services
+        .storage
+        .list_logs(ListOptions::default())
         .await
         .unwrap();
     assert_eq!(page.entries.len(), 2);
@@ -400,7 +414,7 @@ async fn shared_exchange_logs_leader_and_follower_but_counts_actual_attempt_once
     config.upstreams.servers = vec![socket.local_addr().unwrap().to_string()];
     config.query_log.enabled = true;
     config.ecs.enabled = true;
-    let resolver = Resolver::from_config(&config);
+    let (resolver, services) = with_log(&config);
     let wire = query("shared.test.").to_vec().unwrap();
     let mut leader =
         Box::pin(resolver.resolve_with_transport(&wire, "192.0.2.10".parse().unwrap(), "dot"));
@@ -426,10 +440,10 @@ async fn shared_exchange_logs_leader_and_follower_but_counts_actual_attempt_once
     .await
     .unwrap();
     assert!(leader.is_some() && follower.is_some());
-    resolver.query_log().flush().await.unwrap();
-    let page = resolver
-        .query_log()
-        .list(ListOptions::default())
+    services.storage.flush().await.unwrap();
+    let page = services
+        .storage
+        .list_logs(ListOptions::default())
         .await
         .unwrap();
     assert_eq!(page.entries.len(), 2);
@@ -481,7 +495,8 @@ async fn cancelled_foreground_is_logged_once_unless_cleared_while_pending() {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     config.upstreams.servers = vec![socket.local_addr().unwrap().to_string()];
     config.query_log.enabled = true;
-    let resolver = std::sync::Arc::new(Resolver::from_config(&config));
+    let (resolver, services) = with_log(&config);
+    let resolver = std::sync::Arc::new(resolver);
     for clear in [false, true] {
         let resolver_task = resolver.clone();
         let task = tokio::spawn(async move {
@@ -499,18 +514,18 @@ async fn cancelled_foreground_is_logged_once_unless_cleared_while_pending() {
             .unwrap()
             .unwrap();
         if clear {
-            resolver
-                .query_log()
-                .clear(resolver.query_log().epoch())
+            services
+                .storage
+                .clear_logs(services.storage.status().log_epoch)
                 .await
                 .unwrap();
         }
         task.abort();
         assert!(matches!(task.await, Err(error) if error.is_cancelled()));
-        resolver.query_log().flush().await.unwrap();
-        let page = resolver
-            .query_log()
-            .list(ListOptions::default())
+        services.storage.flush().await.unwrap();
+        let page = services
+            .storage
+            .list_logs(ListOptions::default())
             .await
             .unwrap();
         if clear {

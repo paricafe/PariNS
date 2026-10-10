@@ -272,9 +272,8 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// `config` has passed `Config::validate`, which owns upstream and listener checks.
     pub fn new(settings: &Settings, config: &crate::config::Config) -> Result<Self> {
-        settings.validate()?;
-        settings.validate_listeners(config)?;
         let endpoints = settings
             .servers
             .iter()

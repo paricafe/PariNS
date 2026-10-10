@@ -95,10 +95,12 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
 - Give spawned tasks an owner and explicit shutdown/cancellation behavior. Refresh
   and foreground coalescing must share compatible work without crossing generations.
 - QUIC listener ownership includes Quinn drivers and final socket release. Server
-  retains cleanup across adapter cancellation; peer close notification stays within
-  the existing shutdown grace, and a completed shutdown permits immediate rebinding.
-- Only admitted request work can force a stop. An idle peer's graceful-close
-  acknowledgement is awaited only within half the shutdown grace, then dropped.
+  retains cleanup across adapter cancellation, and a completed shutdown permits
+  immediate rebinding.
+- Only request streams already accepted on a connection can force a stop; unfinished
+  handshakes stop at once.
+  Peer close notification (QUIC close, HTTP/2 GOAWAY acknowledgement) uses at most
+  half the shutdown grace, then the connection is dropped.
   Any force records its first bounded cause, and a terminal stop that cannot
   publish a clean snapshot logs that cause.
 - UDP adapters retain each datagram's local destination and interface for replies;

@@ -118,7 +118,14 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
                 connections.spawn(async move {
                     let _permit = permit;
                     let _source = source;
-                    let connection = match timeout(context.io_timeout,incoming).await {
+                    // An unfinished handshake owns no resolver work: stopping drops it
+                    // (recorded as HandshakeShutdown) and endpoint close finishes it.
+                    let mut stop = context.stop.clone();
+                    let handshake = tokio::select! {
+                        _ = stop.changed() => return,
+                        handshake = timeout(context.io_timeout,incoming) => handshake,
+                    };
+                    let connection = match handshake {
                         Ok(Ok(connection))=>{result.finish(Event::HandshakeEstablished);connection},
                         Ok(Err(error))=>{result.finish(diagnostics::handshake_error(&error));return;},
                         Err(_)=>{result.finish(Event::HandshakeApplicationDeadline);return;},
@@ -132,11 +139,14 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
             }
         }
     }
-    let deadline = Instant::now() + ingress.shutdown_grace;
+    // Close notification ends at most half a grace after the stop (less if the
+    // drain took longer): an unresponsive peer must not hold the listener until
+    // the server-wide grace forces the stop.
+    let close_by = Instant::now() + ingress.shutdown_grace / 2;
     drain(&mut connections, ingress.shutdown_grace, &ingress.resolver).await;
     endpoint.close(VarInt::from_u32(0), b"shutdown");
-    // Notify peers only within the existing grace; owned drivers are then joined.
-    let _ = timeout_at(deadline, endpoint.wait_idle()).await;
+    // Owned drivers are joined afterwards by the endpoint owner.
+    let _ = timeout_at(close_by, endpoint.wait_idle()).await;
     Ok(())
 }
 
@@ -251,12 +261,14 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
     let mut stop = ingress.stop.clone();
     let mut builder = h3::server::builder();
     builder.max_field_section_size(128 * 1024);
-    let Ok(Ok(mut h3)) = timeout(
-        ingress.io_timeout,
-        builder.build::<_, Bytes>(h3_quinn::Connection::new(connection.clone())),
-    )
-    .await
-    else {
+    let built = tokio::select! {
+        _ = stop.changed() => return,
+        built = timeout(
+            ingress.io_timeout,
+            builder.build::<_, Bytes>(h3_quinn::Connection::new(connection.clone())),
+        ) => built,
+    };
+    let Ok(Ok(mut h3)) = built else {
         return;
     };
     let mut streams = JoinSet::new();

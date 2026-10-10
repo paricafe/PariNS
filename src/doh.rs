@@ -191,11 +191,12 @@ async fn connection(
             }
         }
     }
-    // JoinSet drop aborts remaining request work; there are no detached collectors.
-    while requests.try_join_next().is_some() {}
-    if *stop.borrow() && !requests.is_empty() {
-        ingress.resolver.force_shutdown(ForcedShutdown::DohRequest);
+    if *stop.borrow() {
+        // During a stop, admitted requests finish even if the peer has gone;
+        // the listener grace bounds this wait and forces the stop on expiry.
+        while requests.join_next().await.is_some() {}
     }
+    // JoinSet drop aborts remaining request work; there are no detached collectors.
     requests.abort_all();
     while requests.join_next().await.is_some() {}
     Ok(())

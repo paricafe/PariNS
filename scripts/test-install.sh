@@ -29,7 +29,7 @@ mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 sed -n '/^rollback() {/,/^}$/p' "$repo/scripts/install.sh" > "$fixture/rollback-function.sh"
 sh -eu -c '
     . "$1"
-    root= changed=true committed=true stopped=true was_active=true
+    root= changed=true committed=true stopped=true was_active=true request_path_stopped=true
     flock() { printf "unexpected lock cleanup\n" >&2; return 65; }
     systemctl() { printf "unexpected service cleanup\n" >&2; return 99; }
     exec 9>&-

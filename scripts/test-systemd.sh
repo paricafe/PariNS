@@ -916,5 +916,106 @@ http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: applicat
 binding=$(jq -er '.session.binding' "$fixture/response.json")
 check_dns
 printf '%s\n' 'Online Commit, swap, Type=simple start and readiness passed.'
+# ManualRequired recovery by reinstallation, with the update request path left
+# active as in production. The restarted service holds an older invocation's
+# commit intent and writes an Abort request on its own, including inside the
+# installer window. The installer must own the path for that window, finish
+# with "Installed.", and leave the request to an idle helper afterwards.
+manual_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
+sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
+sudo python3 - "$manual_invocation" "$revision" <<'PY'
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+app = Path('/var/lib/parins-managed')
+journal_path = Path('/var/lib/parins-updater/private/journal.json')
+journal = json.loads(journal_path.read_text())
+assert journal['installation_pending'] is None
+installed = journal['installed']
+operation_id, nonce = '1' * 32, '2' * 32
+stamp = int(time.time() * 1000)
+status = dict(operation_id=operation_id, phase_nonce=nonce, phase='manual_required',
+              version=installed['build']['version'], reason='readiness_failed',
+              updated_at_ms=stamp, downloaded_bytes=0, total_bytes=0)
+journal['operation'] = dict(status=status, old=installed, candidate=installed,
+                            invocation_id=sys.argv[1], config_revision=int(sys.argv[2]),
+                            started_at_ms=stamp, rollback_attempted=True,
+                            rollback_started=True, pending_launch=None)
+state_path = app / 'update-state.json'
+# The earlier Abort scenario left a complete operation envelope; only its
+# identity, phase and intent change here.
+state = json.loads(state_path.read_text())
+state['operation'].update(operation_id=operation_id, phase_nonce=nonce,
+                          invocation_id=sys.argv[1], config_revision=int(sys.argv[2]),
+                          phase='committing', reason=None, finished=False)
+state['commit_intent'] = operation_id
+state['plan'] = None
+
+def replace(path, value, owner):
+    temporary = path.with_name('.manual-fixture-' + path.name)
+    with temporary.open('x') as output:
+        os.fchmod(output.fileno(), 0o600)
+        os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
+        json.dump(value, output)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+replace(journal_path, journal, journal_path.stat())
+replace(state_path, state, (app / 'state.json').stat())
+PY
+# A terminal operation only republishes status here.
+sudo /usr/libexec/parins-updater recover
+sudo systemctl start parins-managed.service
+# The new invocation asks root to abort the older operation. Wait for that
+# request before enabling the path, then for root to consume it: root
+# republishes the ManualRequired terminal and the application stays frozen.
+attempt=0
+until sudo jq -e '.operation_id == "11111111111111111111111111111111" and .phase_nonce == "22222222222222222222222222222222" and .request.kind == "abort"' /var/lib/parins-managed/update-request.json >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 30 ] || { printf '%s\n' 'Recovering service did not request abort arbitration.' >&2; exit 1; }
+    sleep 1
+done
+sudo systemctl start parins-updater.path
+attempt=0
+until ! sudo test -e /var/lib/parins-managed/update-request.json; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 30 ] || { printf '%s\n' 'ManualRequired fixture did not settle.' >&2; exit 1; }
+    sleep 1
+done
+sudo jq -e '.capability.reason == "manual_recovery_required" and .last_operation.phase == "manual_required"' /var/lib/parins-updater/status.json >/dev/null
+sudo jq -e '.commit_intent == "11111111111111111111111111111111"' /var/lib/parins-managed/update-state.json >/dev/null
+systemctl is-active --quiet parins-updater.path
+manual_since=$(date +%s)
+install_service
+grep -q '^Installed\. Backup: ' "$fixture/install.log"
+systemctl is-active --quiet parins-updater.path
+attempt=0
+until sudo jq -e '.installation_pending == null and .operation.status.operation_id == "11111111111111111111111111111111" and .operation.status.phase_nonce == "22222222222222222222222222222222" and .operation.status.phase == "failed" and .operation.status.reason == "superseded_by_installation"' /var/lib/parins-updater/private/journal.json >/dev/null && \
+    sudo jq -e '.commit_intent == null and .operation.finished == true and .operation.reason == "superseded_by_installation"' /var/lib/parins-managed/update-state.json >/dev/null && \
+    ! sudo test -e /var/lib/parins-managed/update-request.json; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 30 ] || { printf '%s\n' 'Reinstallation did not close ManualRequired and thaw the application.' >&2; exit 1; }
+    sleep 1
+done
+# Development builds report unsupported_installation; only the recovery state must be gone.
+sudo jq -e '.capability.reason != "manual_recovery_required" and .capability.available == .installed.build.official_release' /var/lib/parins-updater/status.json >/dev/null
+if sudo journalctl --no-pager -o cat -u parins-updater.path --since "@$manual_since" | grep -Fq 'Trigger limit hit'; then
+    printf '%s\n' 'The update request path hit its trigger limit during installation.' >&2; exit 1
+fi
+http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' \
+    --data-binary "@$fixture/credentials.json" http://127.0.0.1:3000/api/login > "$fixture/response.json"
+binding=$(jq -er '.session.binding' "$fixture/response.json")
+http --max-time 5 -H "X-PariNS-Session: $binding" http://127.0.0.1:3000/api/updates | jq -e '.frozen == false' >/dev/null
+check_dns
+printf '%s\n' 'ManualRequired recovery by reinstallation with an active request path passed.'
 python3 "$repo/scripts/test-certificate-renewal-systemd.py" --ephemeral-ci "$fixture" "$installer" "$binary" "$helper" "$build_info"
 printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

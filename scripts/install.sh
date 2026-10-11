@@ -261,6 +261,7 @@ for path in "$root/opt" "$bin_dir" "$root/etc" "$root/etc/systemd" "$unit_dir" "
     if [ ! -d "$path" ]; then install -d -m 0755 "$path"; fi
 done
 [ -d "$updater_private" ] || install -d -m 0700 "$updater_private"
+request_path_stopped=false request_path_enabled=true
 if [ -z "$root" ]; then
     for command in flock nsenter setpriv timeout prlimit; do command -v "$command" >/dev/null 2>&1 || fail "missing installer dependency: $command"; done
     # The helper duplicates this held descriptor during register. Closing it
@@ -268,6 +269,17 @@ if [ -z "$root" ]; then
     exec 9>"$updater_private/lock"
     chmod 0600 "$updater_private/lock"
     flock -n 9 || fail 'another installer or update is active'
+    # The installer owns the update request path for its whole window. A
+    # request written meanwhile (for example by the starting service) would
+    # otherwise trigger a helper that fails on this lock until systemd's
+    # trigger limit fails the path unit. Until the rollback handler is armed,
+    # an early exit releases the lock before restarting the path.
+    if systemctl is-active --quiet parins-updater.path 9>&-; then
+        request_path_stopped=true
+        trap 'exec 9>&-; systemctl start parins-updater.path || true' EXIT
+        trap 'exit 1' HUP INT TERM
+        systemctl stop parins-updater.path 9>&-
+    fi
     [ -z "$before_binary" ] || [ "$(digest "$binary_target")" = "$before_binary" ] || fail 'installed program changed before installer acquired lock'
     [ -z "$before_unit" ] || [ "$(digest "$unit_target")" = "$before_unit" ] || fail 'unit changed before installer acquired lock'
     "$helper" install-check <&9 9<&-
@@ -354,6 +366,11 @@ rollback() {
         flock -u 9; exec 9>&-; lock_held=false
         systemctl start parins-managed.service || true
     fi
+    if "$request_path_stopped" && ! "$committed"; then
+        # Release the lock first: a queued request must reach an idle helper.
+        if "$lock_held"; then flock -u 9; exec 9>&-; lock_held=false; fi
+        systemctl start parins-updater.path || printf '%s\n' 'The update request path was not restarted. Run: sudo systemctl reset-failed parins-updater.path parins-updater.service && sudo systemctl enable --now parins-updater.path' >&2
+    fi
     exit "$status"
 }
 trap rollback EXIT
@@ -436,7 +453,7 @@ if [ -z "$root" ]; then
     systemctl start parins-managed.service
     "$helper_target" install-verify "$installation_nonce" || fail 'installation readiness failed; check journalctl -u parins-managed.service'
     committed=true
-    systemctl enable --now parins-updater.path
+    systemctl enable --now parins-updater.path || request_path_enabled=false
 fi
 committed=true
 printf 'Installed. Backup: %s\n' "$backup"
@@ -459,4 +476,10 @@ else
     fi
     printf '%s\n' 'Check service: sudo systemctl status parins-managed.service' \
         'View logs: sudo journalctl -u parins-managed.service -n 50 --no-pager'
+fi
+if ! "$request_path_enabled"; then
+    # Committed: report and exit non-zero without rolling back.
+    printf 'Installed, but the update request path is not enabled. Backup: %s\n' "$backup" >&2
+    printf '%s\n' 'Enable it: sudo systemctl reset-failed parins-updater.path parins-updater.service && sudo systemctl enable --now parins-updater.path' >&2
+    exit 1
 fi

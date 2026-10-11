@@ -35,6 +35,15 @@ pub struct Installation {
     pub launch: PendingLaunch,
 }
 
+impl Installation {
+    /// `install-restore` re-anchors the previous program after a failed
+    /// installation; only that launch skips cache restoration. Its readiness
+    /// proves the rollback, not the installation, and closes nothing.
+    pub fn restores_previous(&self) -> bool {
+        self.launch.skip_cache_restore
+    }
+}
+
 impl Journal {
     pub fn load(dir: &Dir) -> Result<Self> {
         let result: Self = serde_json::from_slice(&dir.read("journal.json", 32768, true)?)?;
@@ -140,6 +149,41 @@ impl Journal {
             }
         }
     }
+    /// A registered installation keeps the previous terminal operation and
+    /// fences: the application may still hold that operation's intent and can
+    /// only reconcile against its own operation ID and phase nonce.
+    pub fn installation(
+        previous: Option<Journal>,
+        installed: InstalledIdentity,
+        pending: Installation,
+    ) -> Self {
+        let (operation, last_operation) =
+            previous.map_or((None, None), |p| (p.operation, p.last_operation));
+        Self {
+            schema: 1,
+            installed,
+            operation,
+            last_operation,
+            installation_pending: Some(pending),
+        }
+    }
+    /// A verified reinstallation closes an operation that needed manual
+    /// recovery with a terminal the application can reconcile (same ID and
+    /// phase nonce). Called only after the pending installation proved
+    /// readiness; a restored previous program leaves ManualRequired in place.
+    pub fn supersede_manual_recovery(&mut self) {
+        if self
+            .installation_pending
+            .as_ref()
+            .is_some_and(|pending| !pending.restores_previous())
+            && self
+                .operation
+                .as_ref()
+                .is_some_and(|op| op.status.phase == Phase::ManualRequired)
+        {
+            self.finish(Phase::Failed, Some("superseded_by_installation"));
+        }
+    }
     pub fn commit(&mut self) -> Result<()> {
         let op = self
             .operation
@@ -158,6 +202,39 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u64::MAX as u128) as u64
+}
+
+/// The running executable's hash, computed at most once per PID/InvocationID.
+/// `systemctl start` of a Type=simple unit returns before the target's execve,
+/// so /proc/PID/exe can still show systemd's image. Only a health receipt from
+/// that same PID/InvocationID proves the application itself is running.
+#[derive(Default)]
+pub struct ExecutableIdentity(Option<(u32, String, String)>);
+impl ExecutableIdentity {
+    pub fn verified(
+        &mut self,
+        health: Option<&Health>,
+        pid: u32,
+        invocation: &str,
+        expected: &str,
+        hash: impl FnOnce(u32) -> Option<String>,
+    ) -> bool {
+        if pid == 0 || !health.is_some_and(|h| h.pid == pid && h.invocation_id == invocation) {
+            return false;
+        }
+        if self.0.as_ref().is_none_or(|(old_pid, old_invocation, _)| {
+            *old_pid != pid || old_invocation != invocation
+        }) {
+            // A failed read is retried on the next tick rather than cached.
+            let Some(digest) = hash(pid) else {
+                return false;
+            };
+            self.0 = Some((pid, invocation.to_owned(), digest));
+        }
+        self.0
+            .as_ref()
+            .is_some_and(|(_, _, digest)| digest == expected)
+    }
 }
 
 /// Helper monotonic time, not wall time or the app timestamp, owns liveness.
@@ -256,6 +333,52 @@ mod tests {
             invocation_id: "4".repeat(32),
         };
         (pending, health)
+    }
+    /// Type=simple returns from `systemctl start` after fork but before the
+    /// target execve, so /proc/PID/exe can first show systemd's own image.
+    #[test]
+    fn executable_hash_is_taken_only_after_the_process_reported_health() {
+        let (_, health) = sample();
+        let invocation = health.invocation_id.clone();
+        let expected = "a".repeat(64);
+        // Same PID throughout: systemd's image until execve, then the target.
+        let exec_done = std::cell::Cell::new(false);
+        let image = |pid: u32| {
+            assert_eq!(pid, health.pid);
+            Some(if exec_done.get() { "a" } else { "e" }.repeat(64))
+        };
+        let mut identity = ExecutableIdentity::default();
+        // `systemctl start` returned; no receipt from this process yet.
+        assert!(!identity.verified(None, health.pid, &invocation, &expected, image));
+        // The application runs and writes its receipt.
+        exec_done.set(true);
+        assert!(identity.verified(Some(&health), health.pid, &invocation, &expected, image));
+        assert!(identity.verified(
+            Some(&health),
+            health.pid,
+            &invocation,
+            &expected,
+            |_| unreachable!()
+        ));
+        // A receipt from another process does not authorize hashing this one.
+        let mut stale = health.clone();
+        stale.pid += 1;
+        let mut fresh = ExecutableIdentity::default();
+        assert!(!fresh.verified(
+            Some(&stale),
+            health.pid,
+            &invocation,
+            &expected,
+            |_| unreachable!()
+        ));
+        // A failed read is retried rather than cached.
+        let mut retry = ExecutableIdentity::default();
+        assert!(!retry.verified(Some(&health), health.pid, &invocation, &expected, |_| None));
+        assert!(
+            retry.verified(Some(&health), health.pid, &invocation, &expected, |_| Some(
+                expected.clone()
+            ))
+        );
     }
     #[test]
     fn readiness_requires_fresh_sequences_for_ten_seconds() {

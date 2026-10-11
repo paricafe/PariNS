@@ -12,7 +12,7 @@ use crate::update::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use fs::Dir;
-use journal::{Installation, Journal, Operation, Readiness, now_ms};
+use journal::{ExecutableIdentity, Installation, Journal, Operation, Readiness, now_ms};
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -206,7 +206,7 @@ impl Executor {
             build,
             sha256: fs::sha256(self.live.file("parins", MAX_BINARY_BYTES, true)?)?,
         };
-        if self.private.exists("journal.json")? {
+        let previous = if self.private.exists("journal.json")? {
             let previous = Journal::load(&self.private)?;
             ensure!(
                 previous.installation_pending.is_none()
@@ -216,7 +216,10 @@ impl Executor {
                         .is_none_or(|o| o.status.phase.terminal()),
                 "unfinished update; manual recovery required"
             );
-        }
+            Some(previous)
+        } else {
+            None
+        };
         let preflight: Option<ManagedCheckOutput> =
             serde_json::from_slice(&self.private.read("install-preflight.json", 8192, true)?)?;
         if let Some(report) = &preflight {
@@ -232,17 +235,15 @@ impl Executor {
             phase: Phase::AwaitingReadiness,
             initialized: preflight.is_some(),
         };
-        let journal = Journal {
-            schema: 1,
-            installed: identity,
-            operation: None,
-            last_operation: None,
-            installation_pending: Some(Installation {
+        let journal = Journal::installation(
+            previous,
+            identity,
+            Installation {
                 nonce: nonce.clone(),
                 config_revision: preflight.map(|p| p.check.config_revision),
                 launch,
-            }),
-        };
+            },
+        );
         self.persist(&journal)?;
         println!("{nonce}");
         Ok(())
@@ -330,8 +331,13 @@ impl Executor {
             .context("missing installation")?;
         self.wait_launch(&pending.launch, pending.config_revision.unwrap_or(0))
             .await?;
+        self.complete_installation(&mut journal)
+    }
+    /// Only after the installed program proved readiness.
+    fn complete_installation(&self, journal: &mut Journal) -> Result<()> {
+        journal.supersede_manual_recovery();
         journal.installation_pending = None;
-        self.persist(&journal)
+        self.persist(journal)
     }
     fn actual_hash(&self) -> Result<String> {
         fs::sha256(self.live.file("parins", MAX_BINARY_BYTES, true)?)
@@ -748,7 +754,7 @@ impl Executor {
         let start = Instant::now();
         let mut readiness = Readiness::default();
         let mut invocation = String::new();
-        let mut executable_identity: Option<(u32, String, Option<String>)> = None;
+        let mut executable = ExecutableIdentity::default();
         while start.elapsed() < Duration::from_secs(60) {
             let info = service().await?;
             let pid = info
@@ -766,27 +772,18 @@ impl Executor {
                 .ok();
             // The root-owned running inode is immutable to the app. Hash once
             // per PID/InvocationID, not tens of megabytes every health tick.
-            if executable_identity
-                .as_ref()
-                .is_none_or(|(old_pid, old_invocation, _)| {
-                    *old_pid != pid || old_invocation != &current
-                })
-            {
-                let hash = if pid > 0 {
+            let verified = executable.verified(
+                health.as_ref(),
+                pid,
+                &current,
+                &pending.identity.sha256,
+                |pid| {
                     std::fs::File::open(format!("/proc/{pid}/exe"))
                         .and_then(|file| fs::sha256(file).map_err(std::io::Error::other))
                         .ok()
-                } else {
-                    None
-                };
-                executable_identity = Some((pid, current.clone(), hash));
-            }
-            let hash = executable_identity
-                .as_ref()
-                .and_then(|(_, _, hash)| hash.as_deref());
-            let matching = health
-                .as_ref()
-                .filter(|_| hash == Some(pending.identity.sha256.as_str()) && valid_id(&current));
+                },
+            );
+            let matching = health.as_ref().filter(|_| verified && valid_id(&current));
             if readiness.observe(
                 start.elapsed().as_millis() as u64,
                 matching,
@@ -1143,6 +1140,80 @@ async fn validate_units() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Non-root reinstall over a ManualRequired operation: the durable journal and
+/// public status are real; registration's ELF/systemd checks and readiness are
+/// inputs. Returns the public status before, during and after the installation.
+#[cfg(test)]
+pub(crate) fn manual_recovery_reinstall_fixture(
+    path: &Path,
+    old: &InstalledIdentity,
+    installed: &InstalledIdentity,
+    terminal: &OperationStatus,
+    verified: bool,
+    restored: bool,
+) -> Result<[PublicStatus; 3]> {
+    let executor = Executor::fixture(path)?;
+    let read = || -> Result<PublicStatus> {
+        Ok(serde_json::from_slice(&std::fs::read(
+            path.join("status.json"),
+        )?)?)
+    };
+    ensure!(
+        terminal.phase == Phase::ManualRequired,
+        "fixture needs ManualRequired"
+    );
+    executor.persist(&Journal {
+        schema: 1,
+        installed: old.clone(),
+        operation: Some(Operation {
+            status: terminal.clone(),
+            old: old.clone(),
+            candidate: installed.clone(),
+            invocation_id: "e".repeat(32),
+            config_revision: 1,
+            started_at_ms: now_ms(),
+            rollback_attempted: true,
+            rollback_started: true,
+            pending_launch: None,
+        }),
+        last_operation: Some(terminal.clone()),
+        installation_pending: None,
+    })?;
+    let before = read()?;
+    let nonce = "9".repeat(32);
+    let previous: Journal = serde_json::from_slice(&std::fs::read(path.join("journal.json"))?)?;
+    // Registration anchors the new program; install-restore re-anchors the
+    // restored previous journal after a failed installation.
+    let anchor = if restored { old } else { installed };
+    let pending = Installation {
+        nonce: nonce.clone(),
+        config_revision: Some(1),
+        launch: PendingLaunch {
+            operation_id: nonce.clone(),
+            phase_nonce: nonce,
+            launch_nonce: "8".repeat(32),
+            identity: anchor.clone(),
+            skip_cache_restore: restored,
+            phase: Phase::AwaitingReadiness,
+            initialized: true,
+        },
+    };
+    let mut journal = if restored {
+        Journal {
+            installation_pending: Some(pending),
+            ..previous
+        }
+    } else {
+        Journal::installation(Some(previous), installed.clone(), pending)
+    };
+    executor.persist(&journal)?;
+    let during = read()?;
+    if verified {
+        executor.complete_installation(&mut journal)?;
+    }
+    Ok([before, during, read()?])
 }
 
 #[cfg(test)]

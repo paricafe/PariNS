@@ -835,5 +835,86 @@ PY
     fs_fault_identity
     printf '%s\n' 'FS7 download, activation, DNS, DynamicUser, offline LKG, UP freeze and actual staging-write ENOSPC/recovery passed. Performance remains a separate gate.'
 fi
+# Online Commit -> readiness on the real Type=simple unit. systemctl start
+# returns before the target's execve, so readiness must not trust the first
+# /proc/PID/exe image. The candidate is the installed binary itself: an inert
+# copy of the actual identity, never a manufactured official release. Root runs
+# the real stop, swap, start and readiness path; nothing is downloaded.
+online_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
+sudo systemctl stop parins-updater.path
+sudo python3 - "$online_invocation" "$revision" <<'PY'
+import json
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+app = Path('/var/lib/parins-managed')
+journal_path = Path('/var/lib/parins-updater/private/journal.json')
+journal = json.loads(journal_path.read_text())
+assert journal['installation_pending'] is None
+assert journal['operation'] is None or journal['operation']['status']['phase'] in (
+    'aborted', 'failed', 'rolled_back', 'succeeded')
+installed = journal['installed']
+operation_id, nonce = 'd' * 32, 'e' * 32
+stamp = int(time.time() * 1000)
+live = Path('/opt/parins-managed/parins')
+size = live.stat().st_size
+journal['operation'] = dict(
+    status=dict(operation_id=operation_id, phase_nonce=nonce, phase='staged',
+                version=installed['build']['version'], reason=None, updated_at_ms=stamp,
+                downloaded_bytes=size, total_bytes=size),
+    old=installed, candidate=installed, invocation_id=sys.argv[1],
+    config_revision=int(sys.argv[2]), started_at_ms=stamp, rollback_attempted=False,
+    rollback_started=False, pending_launch=None)
+staging = Path('/opt/parins-managed/.update') / operation_id
+staging.mkdir(mode=0o755, parents=False, exist_ok=False)
+shutil.copyfile(live, staging / 'candidate')
+os.chmod(staging / 'candidate', 0o755)
+
+def replace(path, value, owner, mode):
+    temporary = path.with_name('.online-fixture-' + path.name)
+    with temporary.open('x') as output:
+        os.fchmod(output.fileno(), mode)
+        os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
+        json.dump(value, output)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+replace(journal_path, journal, journal_path.stat(), 0o600)
+replace(app / 'update-request.json',
+        dict(schema=1, operation_id=operation_id, phase_nonce=nonce,
+             request=dict(kind='commit', invocation_id=sys.argv[1],
+                          config_revision=int(sys.argv[2]))),
+        (app / 'state.json').stat(), 0o600)
+PY
+sudo systemctl start parins-updater.path
+attempt=0
+until sudo jq -e '.operation.status.operation_id == "dddddddddddddddddddddddddddddddd" and (.operation.status.phase | IN("succeeded", "rolled_back", "failed", "manual_required"))' /var/lib/parins-updater/private/journal.json >/dev/null; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 150 ] || { printf '%s\n' 'Online commit did not reach a terminal phase.' >&2; exit 1; }
+    sleep 1
+done
+sudo jq -e '.operation.status.phase == "succeeded" and .operation.status.reason == null and .installed == .operation.candidate and .operation.pending_launch == null' /var/lib/parins-updater/private/journal.json >/dev/null || {
+    sudo jq -c '.operation.status' /var/lib/parins-updater/private/journal.json >&2
+    printf '%s\n' 'Online commit readiness failed on the Type=simple unit.' >&2; exit 1;
+}
+test "$(systemctl show --property=InvocationID --value parins-managed.service)" != "$online_invocation"
+[ "$(sudo readlink "/proc/$(systemctl show --property=MainPID --value parins-managed.service)/exe")" = /opt/parins-managed/parins ]
+sudo cmp "$binary" /opt/parins-managed/parins
+! sudo test -e /var/lib/parins-managed/update-request.json
+# The restart revoked in-memory sessions; sign in again for the DNS check.
+http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' \
+    --data-binary "@$fixture/credentials.json" http://127.0.0.1:3000/api/login > "$fixture/response.json"
+binding=$(jq -er '.session.binding' "$fixture/response.json")
+check_dns
+printf '%s\n' 'Online Commit, swap, Type=simple start and readiness passed.'
 python3 "$repo/scripts/test-certificate-renewal-systemd.py" --ephemeral-ci "$fixture" "$installer" "$binary" "$helper" "$build_info"
 printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

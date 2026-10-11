@@ -683,6 +683,126 @@ mod tests {
         (coordinator, operation, root)
     }
 
+    /// After ManualRequired the application keeps its commit intent and stays
+    /// frozen. Only a reinstallation that proved readiness closes that same
+    /// operation (ID and phase nonce) with a reconcilable terminal.
+    #[tokio::test]
+    async fn verified_reinstall_closes_manual_recovery_and_thaws() {
+        for verified in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root_dir = tempfile::tempdir().unwrap();
+            let (coordinator, op, _) = fixture(dir.path());
+            let installed = coordinator.identity.clone().unwrap();
+            let mut old = installed.clone();
+            old.sha256 = "0".repeat(64);
+            let manual = ipc::OperationStatus {
+                operation_id: op.operation_id.clone(),
+                phase_nonce: op.phase_nonce.clone(),
+                phase: ipc::Phase::ManualRequired,
+                version: op.expected_version.clone(),
+                reason: Some("readiness_failed".into()),
+                updated_at_ms: now(),
+                downloaded_bytes: 0,
+                total_bytes: op.download.size,
+            };
+            let [before, during, after] =
+                crate::update::executor::manual_recovery_reinstall_fixture(
+                    root_dir.path(),
+                    &old,
+                    &installed,
+                    &manual,
+                    verified,
+                    false,
+                )
+                .unwrap();
+            assert_eq!(
+                before.capability.reason.as_deref(),
+                Some("manual_recovery_required")
+            );
+            assert_eq!(
+                during.capability.reason.as_deref(),
+                Some("installation_pending")
+            );
+            // Registration keeps the old terminal instead of discarding it.
+            assert_eq!(
+                during
+                    .terminal_for(&op.operation_id, &op.phase_nonce)
+                    .map(|t| t.phase),
+                Some(ipc::Phase::ManualRequired)
+            );
+            for status in [&before, &during, &after] {
+                if verified && std::ptr::eq(status, &after) {
+                    break;
+                }
+                reconcile(&coordinator, Some(status)).await.unwrap();
+                assert!(coordinator.frozen.load(Ordering::Acquire));
+                assert!(coordinator.state.lock().unwrap().commit_intent.is_some());
+            }
+            if !verified {
+                continue;
+            }
+            let closed = after
+                .terminal_for(&op.operation_id, &op.phase_nonce)
+                .unwrap();
+            assert_eq!(closed.phase, ipc::Phase::Failed);
+            assert_eq!(closed.reason.as_deref(), Some("superseded_by_installation"));
+            assert!(after.capability.available && after.pending_launch.is_none());
+            reconcile(&coordinator, Some(&after)).await.unwrap();
+            assert!(!coordinator.frozen.load(Ordering::Acquire));
+            let state = state::read(dir.path()).unwrap().unwrap();
+            assert!(state.commit_intent.is_none());
+            let done = state.operation.unwrap();
+            assert!(done.finished);
+            assert_eq!(done.phase, "failed");
+            assert_eq!(done.reason.as_deref(), Some("superseded_by_installation"));
+        }
+    }
+
+    /// The installer's rollback re-anchors and verifies the restored previous
+    /// program. That proves the rollback only: ManualRequired stays and the
+    /// application stays frozen.
+    #[test]
+    fn verified_rollback_of_a_failed_reinstall_keeps_manual_recovery() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let (_, build) = super::super::tests::candidate();
+        let installed = ipc::InstalledIdentity {
+            build,
+            sha256: "d".repeat(64),
+        };
+        let mut old = installed.clone();
+        old.sha256 = "0".repeat(64);
+        let manual = ipc::OperationStatus {
+            operation_id: "b".repeat(32),
+            phase_nonce: "c".repeat(32),
+            phase: ipc::Phase::ManualRequired,
+            version: installed.build.version.clone(),
+            reason: Some("readiness_failed".into()),
+            updated_at_ms: now(),
+            downloaded_bytes: 0,
+            total_bytes: 0,
+        };
+        let [_, _, after] = crate::update::executor::manual_recovery_reinstall_fixture(
+            root_dir.path(),
+            &old,
+            &installed,
+            &manual,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            after.capability.reason.as_deref(),
+            Some("manual_recovery_required")
+        );
+        assert_eq!(
+            after
+                .terminal_for(&manual.operation_id, &manual.phase_nonce)
+                .map(|t| t.phase),
+            Some(ipc::Phase::ManualRequired)
+        );
+        assert_eq!(after.installed, old);
+    }
+
     #[tokio::test]
     async fn rejected_stage_reconciles_in_same_invocation_with_exact_nonce_and_identity() {
         let dir = tempfile::tempdir().unwrap();

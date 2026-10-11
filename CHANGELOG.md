@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix online updates that failed readiness and rolled back although both the
+  candidate and the restored program were healthy. The updater could hash the
+  service process before systemd had executed the program; it now checks the
+  executable only after that process reports its own health.
+- A verified reinstallation now completes recovery after an update that needed
+  manual recovery: the unfinished update is closed as superseded and
+  configuration changes unfreeze. Previously the console stayed frozen even
+  after a successful reinstall. Registration keeps earlier terminal outcomes.
+- Show "Update recovery required" with the reinstall instruction instead of
+  "update components are unavailable", and report an installation in progress
+  separately.
+
+### Operational notes
+
+- Installations that are already frozen need this fixed version installed with
+  the official installer; the fix cannot be delivered by an online update while
+  the updater reports manual recovery.
+
 ## v0.1.8 — 2026-10-11
 
 ### Upgrade notice

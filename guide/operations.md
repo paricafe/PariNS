@@ -159,6 +159,16 @@ refusals become durable operation results without changing the installed binary
 or resetting the existing cooldown. Unknown results still require reconciliation,
 not automatic retries or timeout-based recovery.
 
+If an update and its automatic rollback do not finish, the console shows
+**Update recovery required** and configuration changes stay frozen. Check the
+DNS service first. Do not edit the updater journal or the application's update
+state. Reinstall the current or a newer official version with the verified
+installer. Once that installation passes its readiness check, the unfinished
+update is closed as superseded and configuration changes unfreeze without a
+restart. If the installation fails or rolls back, the state stays unchanged and
+can be retried. The installer refuses when the installed program is not the one
+the updater recorded; that case still needs recovery from a backup.
+
 The current installer accepts `--enable-updater` only for the exact official
 v0.1.4 managed unit and fixed installation paths. Run it from a verified **newer**
 package; the v0.1.4 download does not implement this option. The installer keeps

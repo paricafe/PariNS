@@ -190,6 +190,12 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   Explicit Stage admission refusals are durable ID/nonce-correlated terminals in
   the same root journal. Preserve the owning operation, its cooldown anchor and
   fences; publish both outcomes for reconciliation without replaying Stage.
+- Launch readiness hashes /proc/PID/exe only after a health receipt from that
+  PID/InvocationID, once per process; Type=simple start returns before execve.
+  Installer registration keeps prior terminal operations and fences. Only a
+  reinstallation that proved readiness closes a ManualRequired operation, as
+  Failed/superseded_by_installation with the same ID and phase nonce; a failed
+  or rolled-back installation leaves it ManualRequired. No in-place re-verify.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners. Candidate preflight runs as the existing app user;
   root never executes the candidate. Root journal is the sole installed anchor,

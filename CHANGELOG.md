@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v0.1.9 — 2026-10-11
+
+### Upgrade notice
+
+- Install this version with the official installer. The readiness fix lives in
+  the root updater helper, and an online update replaces only the application,
+  so updating online from v0.1.7 or v0.1.8 would still run the old helper and
+  can fail readiness the same way. Online updates benefit from the fix only
+  after v0.1.9 or later has been installed with the installer.
+- An installation frozen with "Update recovery required" recovers by installing
+  this version with the installer: after the new installation passes readiness,
+  the unfinished update is closed and configuration changes unfreeze. Keep a
+  separate backup first.
+
 ### Fixed
 
 - Fix online updates that failed readiness and rolled back although both the

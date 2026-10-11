@@ -1,0 +1,25 @@
+AGENTS.md
+  s_0cc083ef6e9aa3::t_dc366fa0dc7260 199-201
+CHANGELOG.md
+  s_0cc083ef6e9aa3::t_3ce7fb89195596 9-11,13-14
+  s_0cc083ef6e9aa3::t_3f5ae36ff5ab09 5-8,12,15
+guide/operations.md
+  s_0cc083ef6e9aa3::t_3ce7fb89195596 176-177
+  s_0cc083ef6e9aa3::t_3f5ae36ff5ab09 172-175,178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b1f118db27da0c939b4e7e1d13f92cd1be088cf0",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- Stop the updater's request path while the installer runs and restore it
+  afterwards. A request written during installation, such as the Abort that a
+  recovering service sends at startup, previously hit systemd's trigger limit,
+  left the path unit failed and made a successful installation exit with an
+  error.
+- If the request path cannot be enabled after a committed installation, the
+  installer now completes its usual summary, then reports that the request path
+  is not enabled with the commands to enable it, and does not roll back.
+
 ## v0.1.9 — 2026-10-11
 
 ### Upgrade notice

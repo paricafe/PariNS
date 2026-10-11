@@ -196,6 +196,9 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
   reinstallation that proved readiness closes a ManualRequired operation, as
   Failed/superseded_by_installation with the same ID and phase nonce; a failed
   or rolled-back installation leaves it ManualRequired. No in-place re-verify.
+- The installer stops an active parins-updater.path right after taking its lock
+  and restores it on rollback or enables it after commit; a failure to enable
+  after commit is reported without rollback.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners. Candidate preflight runs as the existing app user;
   root never executes the candidate. Root journal is the sole installed anchor,

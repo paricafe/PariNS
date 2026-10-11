@@ -169,6 +169,13 @@ restart. If the installation fails or rolls back, the state stays unchanged and
 can be retried. The installer refuses when the installed program is not the one
 the updater recorded; that case still needs recovery from a backup.
 
+The installer pauses the update request path while it runs. If it reports that
+the program is installed but the update request path is not enabled, the
+installation is complete; run the printed `systemctl reset-failed` and
+`systemctl enable --now parins-updater.path` commands instead of reinstalling.
+If the installer stops with "Manual recovery required", the request path stays
+paused on purpose; re-enable it with the same commands after the recovery.
+
 The current installer accepts `--enable-updater` only for the exact official
 v0.1.4 managed unit and fixed installation paths. Run it from a verified **newer**
 package; the v0.1.4 download does not implement this option. The installer keeps

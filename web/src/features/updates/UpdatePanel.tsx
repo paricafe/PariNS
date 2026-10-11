@@ -12,6 +12,7 @@ function time(value: string | number | null | undefined, language: Language): st
   if (!value || !Number.isFinite(new Date(value).getTime())) return translate('updates.none', language);
   return new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
+const RECOVERY = ['manual_recovery_required', 'installation_pending'];
 function reasonText(reason: string, language: Language): string {
   const key = `updates.${reason}`;
   return hasTranslation(key) ? translate(key, language) : translate('updates.reasonUnknown', language, { code: reason });
@@ -58,6 +59,8 @@ export function UpdatePanel({ language }: { language: Language }) {
       await updates.apply(candidate, revision);
     }
   };
+  // Recovery states need the installer, not a different release.
+  const recovery = view && RECOVERY.includes(view.capability.reason ?? '') ? view.capability.reason : null;
   const savedAutoCheck = Boolean(config.draft?.settings.updates && (config.draft.settings.updates as { auto_check?: boolean }).auto_check);
   return <section className="panel update-panel" aria-labelledby="software-updates-title">
     <div className="group-head"><div><h2 id="software-updates-title">{t('title')}</h2><p className="muted small">{t('intro')}</p></div></div>
@@ -73,8 +76,8 @@ export function UpdatePanel({ language }: { language: Language }) {
       {view.check.error && <p className="small error">{reasonText(view.check.error, language)}</p>}
       {view.check.state === 'failed' && view.check.last_success_at_ms && <p className="small muted">{t('lastSuccess')}: {time(view.check.last_success_at_ms, language)}</p>}
       {retry > Date.now() && <p className="small muted">{translate('updates.retryAt', language, { time: time(retry, language) })}</p>}
-      {(!view.capability.available || candidate?.manual_reason) && <div className="notice"><strong>{t('manual')}</strong>
-        <p className="small">{reasonText(candidate?.manual_reason ?? view.capability.reason ?? 'unsupported_installation', language)}</p><p className="small">{t('manualHelp')}</p></div>}
+      {(!view.capability.available || candidate?.manual_reason) && <div className="notice"><strong>{t(recovery ? 'recovery' : 'manual')}</strong>
+        <p className="small">{reasonText(recovery ?? candidate?.manual_reason ?? view.capability.reason ?? 'unsupported_installation', language)}</p>{!recovery && <p className="small">{t('manualHelp')}</p>}</div>}
       {candidate && <details className="update-notes"><summary>{t('notes')}</summary><pre>{candidate.notes ? candidate.notes.slice(0, 32_768) : t('noNotes')}</pre>
         {/^v\d+\.\d+\.\d+$/.test(candidate.tag) && <a href={`https://github.com/paricafe/PariNS/releases/tag/${candidate.tag}`} target="_blank" rel="noopener noreferrer">{t('officialPage')}</a>}</details>}
     </>}

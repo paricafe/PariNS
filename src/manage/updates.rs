@@ -210,8 +210,10 @@ impl Coordinator {
         }
         let root = self.root.lock().unwrap();
         let root = root.as_ref().ok_or("helper_unavailable")?;
-        if !root.capability.available
-            || root.installed != *identity
+        if !root.capability.available {
+            return Err(unavailable_reason(root.capability.reason.as_deref()));
+        }
+        if root.installed != *identity
             || root.capability.helper_protocol < crate::update::contract::HELPER_PROTOCOL
         {
             return Err("helper_unavailable");
@@ -490,6 +492,16 @@ impl Coordinator {
     }
 }
 
+/// Keeps the root's bounded recovery states distinct from missing components;
+/// each needs a different administrator action.
+fn unavailable_reason(root: Option<&str>) -> &'static str {
+    match root {
+        Some("manual_recovery_required") => "manual_recovery_required",
+        Some("installation_pending") => "installation_pending",
+        _ => "helper_unavailable",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +521,21 @@ mod tests {
             invocation: None,
             helper_scoped: false,
             reader: GithubReader::new(),
+        }
+    }
+
+    #[test]
+    fn root_recovery_states_are_not_reported_as_missing_components() {
+        assert_eq!(
+            unavailable_reason(Some("manual_recovery_required")),
+            "manual_recovery_required"
+        );
+        assert_eq!(
+            unavailable_reason(Some("installation_pending")),
+            "installation_pending"
+        );
+        for other in [None, Some("unsupported_installation"), Some("anything")] {
+            assert_eq!(unavailable_reason(other), "helper_unavailable");
         }
     }
 

@@ -1357,6 +1357,8 @@ fn update_apply_error(err: anyhow::Error) -> ApiError {
         "readiness_failed" => "readiness_failed",
         "unsupported_installation" => "unsupported_installation",
         "helper_unavailable" => "helper_unavailable",
+        "manual_recovery_required" => "manual_recovery_required",
+        "installation_pending" => "installation_pending",
         "manual_upgrade_required" => "manual_upgrade_required",
         _ => "update_state_unavailable",
     };

@@ -94,6 +94,21 @@ describe('software update presentation', () => {
     expect(screen.getByText(/Check again after/)).toBeTruthy();
   });
 
+  it('shows manual recovery with the installer action instead of missing components', async () => {
+    const current = fixture(); current.capability = { available: false, reason: 'manual_recovery_required' }; current.frozen = true;
+    current.last_operation = { operation_id: 'op-3', phase: 'manual_required', version: '0.1.8', reason: 'readiness_failed', downloaded_bytes: 100, total_bytes: 100 };
+    mocks.request.mockResolvedValue(current); mount();
+    await screen.findByText('Update recovery required');
+    expect(screen.getByText(/reinstall the current or a newer version with the official installer/)).toBeTruthy();
+    expect(screen.getByText('The program did not pass DNS and storage readiness checks.')).toBeTruthy();
+    expect(screen.queryByText(/update components are unavailable/)).toBeNull();
+    expect(screen.queryByText(/One-click updates support/)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(true);
+    cleanup(); mount('zh-CN');
+    await screen.findByText('更新需要恢复');
+    expect(screen.getByText(/用官方安装器重新安装当前或更新的版本以完成恢复/)).toBeTruthy();
+  });
+
   it('shows manual capability and real download bytes without inventing percentages', async () => {
     const current = fixture(); current.capability = { available: false, reason: 'unsupported_installation' };
     current.active_operation = { operation_id: 'other', phase: 'downloading', version: '0.1.5', reason: null, downloaded_bytes: 1024, total_bytes: null };

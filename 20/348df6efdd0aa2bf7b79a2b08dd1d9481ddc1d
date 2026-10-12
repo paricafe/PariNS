@@ -1,0 +1,139 @@
+web/src/components/UnitInput.tsx
+  s_0cc083ef6e9aa3::t_75aeb15eed4737 1-27,30-31,40-41,44-57,59-62
+  s_0cc083ef6e9aa3::t_48381630e0f376 28-29,32-39,42-43,58
+web/src/i18n/__tests__/i18n.test.ts
+  s_0cc083ef6e9aa3::t_50273a2357ee1e 11,16
+web/src/i18n/account.ts
+  s_0cc083ef6e9aa3::t_cd6ac0bf843603 3,5,9-12,14-18
+web/src/pages/config/SettingsPage.tsx
+  s_0cc083ef6e9aa3::t_bf84f47d549c7d 4
+  s_0cc083ef6e9aa3::t_6733781ea14336 17,45-47,49-50
+  s_0cc083ef6e9aa3::t_738136b9a5089c 184
+  s_0cc083ef6e9aa3::t_800d841e05522a 124,183
+  s_0cc083ef6e9aa3::t_9de099425fc136 275
+  s_0cc083ef6e9aa3::t_3da3b840e4a0c3 48
+web/src/components/ConfirmProvider.test.tsx
+  s_0cc083ef6e9aa3::t_e8fc7f66af6df7 32
+web/src/pages/observability/TrendChart.tsx
+  s_0cc083ef6e9aa3::t_8e234890f41ef5 5-6,8-10,13-28,55,68-69,81-86,91
+CHANGELOG.md
+  s_0cc083ef6e9aa3::t_db8c81a1d383b6 5-19,22-25
+web/src/i18n/reliability.ts
+  s_0cc083ef6e9aa3::t_e38e19b83b9db6 2-16,18-22,24-48,51-52,54-58
+  s_0cc083ef6e9aa3::t_cc53df5df3c92c 23,49-50
+web/src/config/context.tsx
+  s_0cc083ef6e9aa3::t_d7aa304746ba42 43,69-72,75-77,400
+web/src/components/Disclosure.tsx
+  s_0cc083ef6e9aa3::t_3db08bcb5a79d3 13
+  s_0cc083ef6e9aa3::t_9bfc5ba33214e2 1-12,14-15
+web/src/features/subscriptions/subscriptions.test.tsx
+  s_0cc083ef6e9aa3::t_d7e02c91dcce5c 123,125,133,178,181,184,188,197,207,210
+web/src/i18n/console.ts
+  s_0cc083ef6e9aa3::t_a094495cf7171d 24
+  s_0cc083ef6e9aa3::t_2fc662dd3d56c6 25
+  s_0cc083ef6e9aa3::t_91088232aec4bb 98
+  s_0cc083ef6e9aa3::t_c89f9b36ec8394 2-23,26-33,42-50,58,63,68-69,71-73,80,84,86,89,91-92,94,96-97,102,105-108,110,113-116,118-119,121,126,130-131,133,136,138,143-145,149,152,155,158,177-180,184-200,202-215,217-219,222-226,229-230,234-244,246-249,252-259,262-265
+web/src/i18n/shell.ts
+  s_0cc083ef6e9aa3::t_868164a95aaef8 30
+  s_0cc083ef6e9aa3::t_9de099425fc136 5-6
+  s_0cc083ef6e9aa3::t_3aa2f30f4c7a2e 9
+  s_0cc083ef6e9aa3::t_61011e56addb18 41
+  s_0cc083ef6e9aa3::t_23b5d4f0a48c65 7-8,10-29,31-34
+  s_0cc083ef6e9aa3::t_3dbfbfdff7019a 39-40,42-44
+  s_0cc083ef6e9aa3::t_50273a2357ee1e 1-4,55
+  s_0cc083ef6e9aa3::t_25d39d7a1ba55a 35-38
+  s_0cc083ef6e9aa3::t_6733781ea14336 45-54
+web/src/features/updates/updates.test.tsx
+  s_0cc083ef6e9aa3::t_3a0f99342baa9d 46,63,75,78,82-83,91-92,94,101,103-105,109,118,133,137,148,158,161
+web/src/i18n/views.ts
+  s_0cc083ef6e9aa3::t_6b529949e16231 4,7-8,10-15,17-18,20-21,24-35,39-42,44-49,55-69,71-73,75,77,81-87,92-97,100,102-113,116,118,120-121,124-127
+  s_0cc083ef6e9aa3::t_7eac65136a6121 74
+  s_0cc083ef6e9aa3::t_ea09f15f584ad0 50
+web/src/pages/config/StorageTools.test.tsx
+  s_0cc083ef6e9aa3::t_cdb470a3c4cd93 33,35,58,61,64,75-76
+web/src/components/beui/motion.ts
+  s_0cc083ef6e9aa3::t_c7f0e8bc110f08 5-7
+web/src/AuthPages.tsx
+  s_0cc083ef6e9aa3::t_3dbfbfdff7019a 75,93,95,97-99,101-104
+  s_0cc083ef6e9aa3::t_a6cddca4695150 49,61,94,96,100
+web/src/pages/observability/__tests__/diagnostics.test.tsx
+  s_0cc083ef6e9aa3::t_390867467706b5 13,16,21,23,29-31,34,41-42,44,49-52
+web/src/pages/config/DohRuntime.test.tsx
+  s_0cc083ef6e9aa3::t_905bda147570ed 18
+web/src/style.css
+  s_0cc083ef6e9aa3::t_10f71262e2f299 305-376
+  s_0cc083ef6e9aa3::t_207973a816eea8 4-5,8-23,25,29-41,43,51-53,55-56,61,63,66-103,107-109,111-112,114-115,118-131,134,136,139-146,148,152-153,155,161-165,176,178,183,185,188-189,195-208,212,215-218,220,224,226-233,236-237,241,251,254,256-257,260,264,270,275-279,281-282,289-290
+  s_0cc083ef6e9aa3::t_fbc952225e6b0d 383-399,403-434
+  s_0cc083ef6e9aa3::t_3ccf854c820eaf 400-402
+  s_0cc083ef6e9aa3::t_3dbfbfdff7019a 377-382
+  s_0cc083ef6e9aa3::t_96ca977df6e85b 46-47,133,137
+  s_0cc083ef6e9aa3::t_efcbe3cbf0a82b 255,269
+web/src/i18n/settings.ts
+  s_0cc083ef6e9aa3::t_047b0deb80832c 3,5,7-15,17-27,29-30,32-36,38,41,43-44,46,48-51,53-58,60-62,65,67,70-71,73,75-76,78-80,83-84,86-88,91-93,96-97,99-101,103,105-106,109-110,112,114,116,118,120-121,124,127,130,132,136-140,143-146,149-152,154-163,165,167-170,172-180
+  s_0cc083ef6e9aa3::t_6733781ea14336 28,31,37,39-40,42,63,68-69,74,81-82,90,94-95,107-108,147-148,153,171
+  s_0cc083ef6e9aa3::t_517cf958d6919f 64,102
+web/src/pages/config/CertificateTools.test.tsx
+  s_0cc083ef6e9aa3::t_905bda147570ed 19,23,27,38,53,55,59-60,62,73,75-76
+web/scripts/check-dist.mjs
+  s_0cc083ef6e9aa3::t_ec906e1950e2c9 14-18
+web/src/i18n/updates.ts
+  s_0cc083ef6e9aa3::t_b52dba3cc154a2 3,5-7,9-27,29-58
+web/src/App.tsx
+  s_0cc083ef6e9aa3::t_9de099425fc136 121
+  s_0cc083ef6e9aa3::t_5d7861128a15c9 179
+  s_0cc083ef6e9aa3::t_c7f0e8bc110f08 3,65-87,98,117-118,138-139,174,203,207,209
+  s_0cc083ef6e9aa3::t_94c99fab39c0d7 18,33-37
+  s_0cc083ef6e9aa3::t_868164a95aaef8 192
+web/src/pages/observability/TransportDiagnostics.tsx
+  s_0cc083ef6e9aa3::t_cc53df5df3c92c 12
+web/src/components/UnitInput.test.tsx
+  s_0cc083ef6e9aa3::t_838499b51056a5 42-44
+  s_0cc083ef6e9aa3::t_f3c7549c86f98c 1-10,12,14-20,23,27-30,32-41,45-53
+  s_0cc083ef6e9aa3::t_a9a0ce15e71aca 11,13,21,25,31
+  s_0cc083ef6e9aa3::t_f61cfaf90c881e 22,24,26
+web/src/pages/observability/LogsPage.tsx
+  s_0cc083ef6e9aa3::t_1edd6cadc9c2ee 10,32-33,40-42,50-51,64-65,68,70-72,158-159,161-162,164-180,185-186,190-191,193,196-197,200-203,205-208,210-220,226,232-235
+  s_0cc083ef6e9aa3::t_fbc952225e6b0d 160,163
+web/src/components/CountUp.tsx
+  s_0cc083ef6e9aa3::t_16508b5ee8ec67 22-23
+  s_0cc083ef6e9aa3::t_3cc0b190bd6775 1-21,24
+web/src/i18n/subscriptions.ts
+  s_0cc083ef6e9aa3::t_a99dce9fe7dd6c 3-22,24-37
+web/src/features/account/account.test.tsx
+  s_0cc083ef6e9aa3::t_e8fc7f66af6df7 54,58,64,75,95,98,102,105-106,131
+web/src/i18n/index.ts
+  s_0cc083ef6e9aa3::t_50273a2357ee1e 9,18
+web/src/pages/observability/OverviewPage.tsx
+  s_0cc083ef6e9aa3::t_25d39d7a1ba55a 34-37
+  s_0cc083ef6e9aa3::t_31e029bb95fa27 206
+  s_0cc083ef6e9aa3::t_cc53df5df3c92c 255
+  s_0cc083ef6e9aa3::t_868164a95aaef8 20,91,211
+  s_0cc083ef6e9aa3::t_04a6e3b3c89327 1,8-9,13,19,21-22,25-27,38-40,44-62,66,68-73,77-84,103,116-126,152,159-165,167-178,181-184,192-200,202-205,207-210,212-213,215-216,218-223,226-244,246-249,253-254,256-278
+  s_0cc083ef6e9aa3::t_3aa2f30f4c7a2e 41-43,104,166
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_dac1ebeed678f6 104
+  s_0cc083ef6e9aa3::t_c68a95031bfd2e 115,130,144-145,162,169,221,223,230,245
+  s_0cc083ef6e9aa3::t_3b8db04a3ba9ae 91-103,105-109
+web/src/i18n/storage.ts
+  s_0cc083ef6e9aa3::t_a81dbec9ac9dfe 2-3,8,11-38,40-53,57,60-66,69-70
+web/src/components/beui/style.css
+  s_0cc083ef6e9aa3::t_4bf69c5ff7ee1b 26,31,34-41,73-78,93,95,102-103,105,122,132-133,154,156,158
+web/src/pages/observability/observability.css
+  s_0cc083ef6e9aa3::t_1665b54e130a6c 3-4,7,11,17,22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "20348df6efdd0aa2bf7b79a2b08dd1d9481ddc1d",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

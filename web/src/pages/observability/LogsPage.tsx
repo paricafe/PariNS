@@ -3,11 +3,11 @@ import { ApiError, StaleRequest, type ApiClient } from "../../session/client";
 import { formatDate, formatNumber, hasTranslation, translate, type Language } from "../../i18n";
 import { pathLabel, statusLabel, type CacheFilter, type LogEntry, type LogFilter, type LogListResponse } from "./logs";
 import { Drawer, Tabs } from '../../components/beui';
-import { StorageStatusPanel } from './StorageStatusPanel';
 import { isUnknownStorageMutation } from './storage';
 import { decisionLabel, diagnosticLabel } from './diagnostics';
 import { UpstreamAttempts } from './TransportDiagnostics';
 import { CloudOff, Inbox, RefreshCw, Search, Settings2 } from 'lucide-react';
+import { Select } from '../../components/Popover';
 
 export interface LogsPageProps {
   api: ApiClient;
@@ -157,9 +157,8 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const statuses = ["", "success", "blocked", "error", "dropped"] as const;
   const label = (entry: LogEntry) => `${translate("views.details", language)} · ${entry.name || translate("views.unreadableQuery", language)} · #${entry.id}`;
   return <div className="page-stack logs-page">
-    <header className="page-head log-head">
-      <div><p className="eyebrow">{translate("ui.logsEyebrow", language)}</p>
-        <h1>{translate("ui.logs", language)}</h1>
+    <header className="page-head log-head large-title">
+      <div><h1>{translate("ui.logs", language)}</h1>
         <p className="muted">{translate("ui.logIntro", language)}</p></div>
       <button type="button" onClick={onOpenSettings} className="button secondary"><Settings2 size={16} aria-hidden="true" />{translate("ui.logSettings", language)}</button>
     </header>
@@ -168,10 +167,9 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       <form onSubmit={submitFilter} className="panel log-filter">
         <label className="field"><span>{translate("ui.logSearch", language)}</span>
           <span className="search-input"><Search size={16} aria-hidden="true" /><input value={search} maxLength={256} onChange={(event) => setSearch(event.target.value)} type="search" autoComplete="off" placeholder={translate("ui.logSearchPlaceholder", language)} /></span></label>
-        <label className="field"><span>{translate("ui.result", language)}</span>
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-            {statuses.map((status) => <option key={status} value={status}>{translate(status ? `ui.${status}` : "ui.allResults", language)}</option>)}
-          </select></label>
+        <div className="field"><span>{translate("ui.result", language)}</span>
+          <Select label={translate("ui.result", language)} value={statusFilter} onChange={setStatusFilter}
+            options={statuses.map((status) => ({ value: status, label: translate(status ? `ui.${status}` : "ui.allResults", language) }))} /></div>
         <button type="submit" className="button primary">{translate("ui.filter", language)}</button>
       </form>
       <Tabs label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} items={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
@@ -179,8 +177,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
         appliedRef.current = filter; setApplied(filter); setNotice(''); setSelected(null); void load(null, filter);
       }} />
     </div>
-    {page?.storage && <StorageStatusPanel status={page.storage} language={language} compact />}
-    {page && !page.enabled && <p className="notice">{translate('app.logsDisabled', language)} {translate('storage.recorded', language)}</p>}
+    {page && !page.enabled && <p className="notice">{translate('app.logsDisabled', language)}</p>}
 
     <div className="log-toolbar">
       <p role="status" className="muted small">{loading ? translate(page ? 'storage.filterPending' : "app.reading", language)

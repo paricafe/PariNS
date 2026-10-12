@@ -26,6 +26,19 @@ function areaFor(points: readonly TrendPoint[], x: (time: number) => number, y: 
   return path;
 }
 
+/** Time spans between continuous runs: the service was down, restarted or the clock jumped. */
+function gapsFor(points: readonly TrendPoint[]): [number, number][] {
+  const gaps: [number, number][] = [];
+  let last: number | null = null;
+  let open = false;
+  for (const point of points) {
+    if (point.value === null) { if (last !== null) open = true; continue; }
+    if (last !== null && (open || point.breakBefore)) gaps.push([last, point.time]);
+    last = point.time; open = false;
+  }
+  return gaps;
+}
+
 function pathFor(points: readonly TrendPoint[], x: (time: number) => number, y: (value: number) => number): string {
   let pen = false;
   let path = "";
@@ -78,6 +91,7 @@ export function TrendChart({ samples, hours, language, end }: { samples: readonl
           </text>
         </g>;
       })}
+      {gapsFor(series[0].points).map(([from, to]) => <rect key={from} className="trend-gap" x={x(from)} y={30} width={Math.max(2, x(to) - x(from))} height={170}><title>{translate('shell.gapTip', language)}</title></rect>)}
       <path className="trend-area" d={areaFor(series[0].points, x, y, y(0))} fill="url(#parins-trend-fill)" stroke="none" />
       {series.map((trace) => <g key={trace.key} stroke={trace.color} className={trace.dash ? "trend-area" : undefined}>
         {trace.dash

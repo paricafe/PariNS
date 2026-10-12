@@ -184,7 +184,8 @@ describe("LogsPage", () => {
     render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getAllByText("example.test").length).toBeGreaterThan(0));
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: " example.test " } });
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "success" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Result:/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Success" }));
     fireEvent.click(screen.getByRole("button", { name: "Filter" }));
     await waitFor(() => expect(requests.some((request) => request.path === "query-log/list"
       && (request.body as { search: string }).search === "example.test"

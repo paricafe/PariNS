@@ -3,6 +3,8 @@ import { networkTemplate } from './model';
 import { hasTranslation, translate, type Language } from './i18n';
 import { ApiError, CookieUnavailable } from './session/client';
 import { useSession } from './session/context';
+import { Segmented } from './components/Segmented';
+import { Switch } from './components/beui';
 
 function present(error: unknown, language: Language): string {
   if (error instanceof CookieUnavailable) return translate('app.cookieUnavailable', language);
@@ -85,9 +87,12 @@ export function SetupPage({ language }: { language: Language }) {
         <p className="muted small">{t('networkIntro')}</p>
         <label htmlFor="setup-listen">{t('listen')}</label><input id="setup-listen" value={listen} onChange={(event) => setListen(event.target.value)} required spellCheck={false} />
         <small>{t('listenHelp')}</small>
-        <label htmlFor="setup-servers">{t('upstream')}</label><textarea id="setup-servers" rows={5} value={servers} onChange={(event) => setServers(event.target.value)} required spellCheck={false} />
-        <label htmlFor="setup-mode">{translate('settings.upstreams.mode.label', language)}</label><select id="setup-mode" value={mode} onChange={(event) => setMode(event.target.value)}><option value="weighted">{translate('settings.upstreams.mode.weighted', language)}</option><option value="parallel">{translate('settings.upstreams.mode.parallel', language)}</option></select>
-        <label className="toggle-line"><input type="checkbox" checked={preferH3} onChange={(event) => setPreferH3(event.target.checked)} />{translate('settings.upstreams.prefer_h3.label', language)}</label>
+        <label htmlFor="setup-servers">{t('upstream')}</label><textarea id="setup-servers" rows={5} placeholder={translate('settings.upstreams.servers.placeholder', language)} value={servers} onChange={(event) => setServers(event.target.value)} required spellCheck={false} />
+        <span className="setup-label">{translate('settings.upstreams.mode.label', language)}</span>
+        <Segmented label={translate('settings.upstreams.mode.label', language)} value={mode} onChange={setMode}
+          options={(['weighted', 'parallel'] as const).map((value) => ({ value, label: translate(`settings.upstreams.mode.${value}`, language) }))} />
+        <small>{translate('settings.upstreams.mode.help', language)}</small>
+        <Switch checked={preferH3} onCheckedChange={setPreferH3} label={translate('settings.upstreams.prefer_h3.label', language)} />
         <label htmlFor="setup-bootstrap">{translate('settings.upstreams.bootstrap.label', language)}</label><textarea id="setup-bootstrap" rows={3} value={bootstrap} onChange={(event) => setBootstrap(event.target.value)} spellCheck={false} />
       </>}
       {step === 2 && <><p className="muted small">{t('reviewIntro')}</p>

@@ -123,9 +123,10 @@ export const viewsMessages = {
   blocks: ["拦截", "Blocked"],
   chartEmpty: ["还没有数据。DNS 运行时每分钟更新一次。", "No data yet. It updates every minute while DNS is running."],
   trendLabel: ["最近 {hours} 小时每秒的查询、缓存命中和拦截数。图中的空白表示服务暂停或重启过。", "Queries, cache hits and blocks per second over the last {hours} hours. Gaps mean the service was paused or restarted."],
-  trendSummary: ["{count} 个数据点 · 峰值 {peak} 次/秒 · 空白表示服务暂停或重启过。", "{count} data points · Peak {peak} queries/s · Gaps mean the service was paused or restarted."],
+  trendSummary: ["峰值 {peak} 次/秒", "Peak {peak} queries/s"],
   chartUnavailable: ["启动 DNS 后可以查看统计。", "Start DNS to see statistics."],
   count: ["次数", "Count"],
   distribution: ["占比", "Share"],
-  share: ["{label}占比 {percent}%", "{label}: {percent}%"]
+  share: ["{label}占比 {percent}%", "{label}: {percent}%"],
+  cleared: ["已清空缓存", "Cache cleared"],
 } as const;

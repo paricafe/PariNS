@@ -24,7 +24,7 @@ export function DomainCheck({ api, language, names }: { api: ApiClient; language
     }}><label className="field">{t('domain')}<input value={name} required spellCheck={false} onChange={(event) => { edit.current += 1; setName(event.target.value); setResult(null); }} /></label>
       <button type="submit" className="button secondary" disabled={working}>{t(working ? 'running' : 'check')}</button></form>
     {error && <p role="alert" className="error">{failureText(error, language)}</p>}
-    {result && <div className="inspection-result" role="status"><h3>{t(result.decision)}</h3><p className="muted small">{t('generation')}: {result.generation}</p>
+    {result && <div className="inspection-result" role="status"><h3>{t(result.decision)}</h3>
       {result.witness && <p>{t('witness')}: <code>{result.witness.rule}</code> · {t(result.witness.scope)} · {result.witness.source_id === null ? t('local') : names[result.witness.source_id] || result.witness.source_id}</p>}
     </div>}
   </section>;

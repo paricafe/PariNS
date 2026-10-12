@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { CacheDiagnosticsPanel } from '../CacheDiagnosticsPanel';
-import { StorageCoverage } from '../StorageCoverage';
+import { StorageStatusPanel } from '../StorageStatusPanel';
 import { TransportDiagnostics, UpstreamAttempts } from '../TransportDiagnostics';
 import { decisionLabel } from '../diagnostics';
 import { storage } from './fixtures';
@@ -22,16 +22,16 @@ describe('server-owned diagnostic presentation', () => {
     expect(screen.getByText('12')).toBeTruthy();
     expect(screen.getByText('TTL is 0')).toBeTruthy();
   });
-  it('shows actual coverage and nullable filesystem measurements, including stale/low-space states', () => {
-    const current = { ...storage, query_log_coverage: { earliest_time_ms: 1700000000000, latest_time_ms: 1700000026000, span_ms: 26000 }, filesystem: { ...storage.filesystem, total_bytes: null, available_bytes: null, error: 'filesystem_unavailable', stale: true, low_space: true } };
-    const view = render(<StorageCoverage status={current} language="en" compact={false} />);
-    expect(screen.getByText(/26 seconds/)).toBeTruthy();
-    expect(screen.getByText(/only a maximum/)).toBeTruthy();
+  it('leads with key storage facts, keeps nullable filesystem readings and raw errors, and moves counters into details', () => {
+    const current = { ...storage, dropped_logs: 2, query_log_coverage: { earliest_time_ms: 1700000000000, latest_time_ms: 1700000026000, span_ms: 26000 }, filesystem: { ...storage.filesystem, total_bytes: null, available_bytes: null, error: 'filesystem_unavailable', stale: true, low_space: true } };
+    const view = render(<StorageStatusPanel status={current} language="en" />);
+    expect(screen.getByText('2 records could not be saved')).toBeTruthy();
     expect(screen.getByText(/last readings/)).toBeTruthy();
-    expect(screen.getByRole('alert').textContent).toContain('running low on space');
-    expect(screen.getAllByText('—')).toHaveLength(2);
-    view.rerender(<StorageCoverage status={current} language="zh-CN" compact={false} />);
-    expect(screen.getByText('数据所在磁盘')).toBeTruthy();
+    expect(screen.getByText('filesystem_unavailable')).toBeTruthy();
+    expect(screen.getAllByRole('alert').some((alert) => alert.textContent?.includes('running low on space'))).toBe(true);
+    expect(screen.getByRole('button', { name: 'Detailed counts' }).getAttribute('aria-expanded')).toBe('false');
+    view.rerender(<StorageStatusPanel status={current} language="zh-CN" />);
+    expect(screen.getByText('磁盘可用')).toBeTruthy();
   });
   it('renders H3 failure and H2 success as separate attempts, with omitted count', () => {
     render(<UpstreamAttempts language="en" trace={{ omitted: 3, attempts: [

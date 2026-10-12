@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { motion, useReducedMotion } from "motion/react";
-import { useId } from "react";
-import { SPRING_LAYOUT } from "./motion";
+import { useId, useState } from "react";
+import { SPRING_IOS_FAST } from "./motion";
 
 export interface SwitchProps {
   checked: boolean;
@@ -15,11 +15,14 @@ export interface SwitchProps {
   className?: string;
 }
 
-// Based on beUI Switch, without its disabled-state shake or pressed stretch.
+// Based on beUI Switch. iOS-style: the thumb stretches toward the travel
+// direction while pressed and springs across on release.
 export function Switch({ checked, onCheckedChange, disabled, label, id, className, ...aria }: SwitchProps) {
   const generatedId = useId();
   const controlId = id ?? generatedId;
   const reduceMotion = useReducedMotion();
+  const [pressed, setPressed] = useState(false);
+  const stretched = pressed && !disabled && !reduceMotion;
   return (
     <span className={clsx("beui-switch-wrap", className)}>
       <button
@@ -34,13 +37,18 @@ export function Switch({ checked, onCheckedChange, disabled, label, id, classNam
         className="beui-switch"
         data-state={checked ? "checked" : "unchecked"}
         onClick={() => onCheckedChange(!checked)}
+        onPointerDown={() => setPressed(true)}
+        onPointerUp={() => setPressed(false)}
+        onPointerLeave={() => setPressed(false)}
+        onPointerCancel={() => setPressed(false)}
       >
         <motion.span
           aria-hidden="true"
           className="beui-switch__thumb"
           initial={false}
-          animate={{ x: checked ? 20 : 0 }}
-          transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+          style={{ transformOrigin: checked ? "right center" : "left center" }}
+          animate={{ x: checked ? 20 : 0, scaleX: stretched ? 1.22 : 1 }}
+          transition={reduceMotion ? { duration: 0 } : SPRING_IOS_FAST}
         />
       </button>
       {label && <label className="beui-switch__label" htmlFor={controlId}>{label}</label>}

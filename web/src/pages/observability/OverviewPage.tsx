@@ -5,7 +5,7 @@ import { TrendChart } from "./TrendChart";
 import { averageLatencyMillis, cacheHitRate, histogramRows, type StatsView, type StatusView } from "./metrics";
 import "./observability.css";
 import { Tabs } from '../../components/beui';
-import { CountUp } from '../../components/CountUp';
+import { Odometer } from '../../components/Odometer';
 import { Disclosure } from '../../components/Disclosure';
 import { StorageStatusPanel } from './StorageStatusPanel';
 import { CacheDiagnosticsPanel } from './CacheDiagnosticsPanel';
@@ -190,9 +190,8 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
   })) : null;
 
   return <div className="page-stack overview">
-    <header className="overview-head">
+    <header className="overview-head large-title">
       <div>
-        <p className="eyebrow">{t("ui.overviewEyebrow")}</p>
         <h1 aria-live="polite">{headline}</h1>
         {summary ? <p className="overview-summary">{summary}</p> : <div className="skeleton" style={{ width: 'min(420px, 80%)', height: 16 }} aria-hidden="true" />}
       </div>
@@ -202,23 +201,22 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
     <section className="panel status-strip" data-tone={tone} aria-label={t("ui.maintenance")}>
       <span className="pulse" aria-hidden="true" />
       <div className="status-strip-main">
-        <strong>{status === null ? t("ui.loadingStatus") : running && status.dns_health.ready ? t('shell.statusRunning') : t(`reliability.${health === 'failed' ? 'runtimeFailed' : health}`)}</strong>
-        <span className="muted">{status && <span>{t(`reliability.${status.dns_health.ready ? 'ready' : 'notReady'}`)}</span>}{status?.listen ? <> · {t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
+        {status === null ? <strong>{t("ui.loadingStatus")}</strong> : !(running && status.dns_health.ready) && <strong>{t(`reliability.${health === 'failed' ? 'runtimeFailed' : health}`)}</strong>}
+        <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
       </div>
       <dl className="status-strip-facts">
         <div><dt>{t('shell.stripInflight')}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>
         <div><dt>{t('shell.stripUpstreams')}</dt><dd>{upstreamCount === null ? "—" : t('shell.upstreamCount', { count: upstreamCount })}</dd></div>
         <div><dt>{t('shell.stripSettings')}</dt><dd>{t({ saved: 'shell.settingsSaved', unsaved: 'shell.settingsUnsaved', unknown: 'shell.settingsUnknown' }[settingsState])}</dd></div>
-        <div><dt>{t('shell.stripUpdated')}</dt><dd className="num">{updated === null ? "—" : formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</dd></div>
       </dl>
     </section>
-    {statusFailed && <p role="alert" className="notice error">{t("app.statusUnavailable")}</p>}
+    {statusFailed && <p role="alert" className="notice error">{t("app.statusUnavailable")}{updated !== null && <> {t('shell.lastUpdated', { time: formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</>}</p>}
     {status?.last_error && <p role="alert" className="notice error">{status.last_error}</p>}
 
     <section aria-label={t("ui.statsScope")} className="kpi-grid">
       {kpis.map((item) => <div key={item.key} className="kpi-card glass">
         <p className="kpi-label"><item.icon size={15} aria-hidden="true" />{item.label}</p>
-        <p className="kpi-value num">{item.raw === null ? (stats || statsFailed ? "—" : <span className="skeleton" style={{ display: 'inline-block', width: 96, height: 30 }} aria-hidden="true" />) : <CountUp value={item.raw} format={item.format} />}</p>
+        <p className="kpi-value num">{item.raw === null ? (stats || statsFailed ? "—" : <span className="skeleton" style={{ display: 'inline-block', width: 96, height: 30 }} aria-hidden="true" />) : <Odometer text={item.format(item.raw)} />}</p>
         <p className="kpi-help">{item.help}</p>
       </div>)}
     </section>
@@ -226,8 +224,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
     <div className="overview-charts">
       <section className="panel" aria-labelledby="parins-trend-title">
         <div className="panel-head">
-          <div><h2 id="parins-trend-title">{t("ui.activity")}</h2>
-            <p className="muted small">{t("storage.trendHelp")}</p></div>
+          <h2 id="parins-trend-title">{t("ui.activity")}</h2>
         </div>
         <Tabs label={t('ui.trendRange')} items={['1h', '24h', '7d', 'custom'].map((range, index) => ({ value: range, label: t(`storage.${['hour1', 'hour24', 'day7', 'custom'][index]}`) }))} value={range} onChange={(next) => { setRange(next); setRangeError(false); if (next !== 'custom') setQuery({ range: next }); }} />
         {range === 'custom' && <form className="custom-range" onSubmit={(event) => {
@@ -238,7 +235,6 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
         {rangeError && <p role="alert" className="error small">{t('storage.rangeInvalid')}</p>}
         <div className="trend-body">{statsFailed && <p role="status" className="muted small">{t("app.statsUnavailable")}</p>}
           <TrendChart samples={stats?.samples ?? []} hours={hours} end={query.range === 'custom' ? Number(query.to_ms) : undefined} language={language} /></div>
-        {stats?.samples.some((sample) => sample.gap) && <p className="small muted">{t('storage.gapCount', { count: stats.samples.filter((sample) => sample.gap).length })}</p>}
         <div className="trend-legend">
           {(["legendRequests", "legendCache", "legendBlocked"] as const).map((key, index) => <span key={key} data-series={index}>{t(`ui.${key}`)}</span>)}
         </div>

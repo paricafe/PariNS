@@ -77,7 +77,8 @@ describe('software update presentation', () => {
     expect(mocks.config.setUpdateLocked).toHaveBeenCalledWith(true);
     fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
     await waitFor(() => expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1));
-    expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(true);
+    // Actions are offered only while they can run; an unconfirmed apply hides Update now.
+    expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
     current.last_operation = { operation_id: 'op-1', phase: 'failed', version: '0.1.5', reason: 'preflight_failed', downloaded_bytes: 0, total_bytes: 100 };
     fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
     await screen.findByText("The update didn't finish");
@@ -90,7 +91,7 @@ describe('software update presentation', () => {
     mocks.request.mockResolvedValue(current); mount();
     await screen.findByText('This check failed. Showing the last result below.');
     expect(screen.queryByText("You're on the latest stable release")).toBeNull();
-    expect((screen.getByRole('button', { name: 'Check for updates' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Check for updates' })).toBeNull();
     expect(screen.getByText(/check again after/)).toBeTruthy();
   });
 
@@ -98,25 +99,24 @@ describe('software update presentation', () => {
     const current = fixture(); current.capability = { available: false, reason: 'manual_recovery_required' }; current.frozen = true;
     current.last_operation = { operation_id: 'op-3', phase: 'manual_required', version: '0.1.8', reason: 'readiness_failed', downloaded_bytes: 100, total_bytes: 100 };
     mocks.request.mockResolvedValue(current); mount();
-    await screen.findByText('Update needs recovery');
-    expect(screen.getByText(/reinstall the current or a newer version with the official installer/)).toBeTruthy();
+    await screen.findByText(/reinstall the current or a newer version with the official installer/);
     expect(screen.getByText("After starting, the new program's DNS or storage didn't work properly.")).toBeTruthy();
     expect(screen.queryByText(/update components aren't available/)).toBeNull();
     expect(screen.queryByText(/One-click updates work/)).toBeNull();
-    expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
     cleanup(); mount('zh-CN');
-    await screen.findByText('更新需要恢复');
-    expect(screen.getByText(/用官方安装器重新安装当前或更新的版本/)).toBeTruthy();
+    await screen.findByText(/用官方安装器重新安装当前或更新的版本/);
   });
 
   it('shows manual capability and real download bytes without inventing percentages', async () => {
     const current = fixture(); current.capability = { available: false, reason: 'unsupported_installation' };
     current.active_operation = { operation_id: 'other', phase: 'downloading', version: '0.1.5', reason: null, downloaded_bytes: 1024, total_bytes: null };
     mocks.request.mockResolvedValue(current); mount();
-    await screen.findByText('Downloaded 1,024 B');
+    await screen.findByText('Downloaded 1 KB');
     expect(screen.queryByRole('progressbar')).toBeNull();
-    expect(screen.getByText('This installation needs a manual update')).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/This kind of installation is updated by hand/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'How to update' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
     expect(mocks.expectRestart).not.toHaveBeenCalled();
   });
 

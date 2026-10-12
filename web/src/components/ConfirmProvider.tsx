@@ -2,6 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { translate, type Language } from '../i18n';
 import { Drawer } from './beui';
 
+// Actions that discard or remove data get the red action-sheet button.
+const DESTRUCTIVE = new Set(['app.discard', 'ui.rollback', 'views.clearAll', 'views.clearSelected', 'shell.discardPem',
+  'storage.clearLogs', 'storage.resetTotals', 'storage.clearHistory']);
+
 type ConfirmAction = (messageKey: string, actionKey: string, returnFocus?: HTMLElement) => Promise<boolean>;
 const ConfirmContext = createContext<ConfirmAction | null>(null);
 
@@ -34,11 +38,11 @@ export function ConfirmProvider({ language, children }: { language: Language; ch
 
   return <ConfirmContext.Provider value={ask}>
     {children}
-    <Drawer open={request !== null} title={translate('ui.confirm', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => settle(false)}>
-      {request && <><p>{translate(request.messageKey, language)}</p>
-        <div className="button-group confirm-actions">
+    <Drawer open={request !== null} variant="sheet" title={translate('ui.confirm', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => settle(false)}>
+      {request && <><p className="sheet-message">{translate(request.messageKey, language)}</p>
+        <div className="action-sheet">
+          <button type="button" className={`button ${DESTRUCTIVE.has(request.actionKey) ? 'destructive' : 'primary'}`} onClick={() => settle(true)}>{translate(request.actionKey, language)}</button>
           <button type="button" className="button secondary" onClick={() => settle(false)}>{translate('ui.cancel', language)}</button>
-          <button type="button" className="button primary" onClick={() => settle(true)}>{translate(request.actionKey, language)}</button>
         </div></>}
     </Drawer>
   </ConfirmContext.Provider>;

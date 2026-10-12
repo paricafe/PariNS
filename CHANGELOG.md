@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+
+- Simplify console text: each idea is explained once per page, field
+  explanations sit behind an ⓘ button, byte counts use KB/MB/GB, internal
+  version numbers and codes move into collapsed details, and buttons appear only
+  when they can be used. Raw diagnostics remain available.
+- Give the console an iOS-style layout and motion: large titles that collapse
+  into the top bar, grouped settings lists, switches, segmented controls,
+  popup menus, steppers, sheets, action sheets and banners. Previewing changes
+  moves to the save bar, and the settings toolbar becomes a More menu.
+
 ### Fixed
 
 - A cached query name whose labels contain characters such as `:` or `/`

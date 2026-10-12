@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { translate, type Language } from '../i18n';
+import { Segmented } from './Segmented';
 
 /** Presentation-only unit families; the draft always holds the base unit Rust expects. */
 export type UnitFamily = 'bytes' | 'milliseconds' | 'seconds';
@@ -55,8 +56,8 @@ export function UnitInput({ id, label, family, value, disabled, language, onChan
   return <div className="unit-input">
     <input id={id} type="text" inputMode="decimal" value={state.text} disabled={disabled} spellCheck={false} autoComplete="off" aria-describedby={describedBy}
       onChange={(event) => emit(event.target.value, state.factor)} />
-    <select aria-label={`${label} · ${translate('shell.unit', language)}`} value={state.factor} disabled={disabled} onChange={(event) => emit(state.text, Number(event.target.value))}>
-      {UNITS[family].map(([key, factor]) => <option key={key} value={factor}>{translate(`shell.unit_${key}`, language)}</option>)}
-    </select>
+    <Segmented label={`${label} · ${translate('shell.unit', language)}`} value={String(state.factor)} disabled={disabled}
+      options={UNITS[family].map(([key, factor]) => ({ value: String(factor), label: translate(`shell.unit_${key}`, language) }))}
+      onChange={(factor) => emit(state.text, Number(factor))} />
   </div>;
 }

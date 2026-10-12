@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { ApiError } from '../../session/client';
 import { storage } from '../observability/__tests__/fixtures';
 import { StorageTools } from './StorageTools';
+import { BannerProvider } from '../../components/Banner';
 
 const mocks = vi.hoisted(() => { const request = vi.fn(); return { request, api: { request }, confirm: vi.fn() }; });
 vi.mock('../../session/context', () => ({ useSession: () => ({ api: mocks.api }) }));
@@ -27,8 +28,8 @@ describe('persistent storage operations', () => {
       }
       throw new Error(`Unexpected ${path}`);
     });
-    render(<StorageTools language="en" />);
-    await waitFor(() => expect(screen.getByText('32,768 B')).toBeTruthy());
+    render(<BannerProvider><StorageTools language="en" /></BannerProvider>);
+    await waitFor(() => expect(screen.getByText('Space used')).toBeTruthy());
     const cases = [
       ['Clear query log', 'query-log/clear', { revision: 7, log_epoch: 3 }],
       ['Reset totals', 'stats/reset', { revision: 7, totals_epoch: 4 }],
@@ -52,7 +53,7 @@ describe('persistent storage operations', () => {
       if (path === 'stats/reset') throw new ApiError(status as number, code as string, 'lost response');
       throw new Error(`Unexpected ${path}`);
     });
-    render(<StorageTools language="en" />);
+    render(<BannerProvider><StorageTools language="en" /></BannerProvider>);
     await waitFor(() => expect((screen.getByRole('button', { name: 'Reset totals' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Reset totals' }));
     await waitFor(() => expect(screen.getByText(/confirm it finished/)).toBeTruthy());
@@ -70,7 +71,7 @@ describe('persistent storage operations', () => {
       if (path === 'status') return { revision: 7, storage: { ...storage, health: 'unavailable', error: 'read-only fixture' } };
       throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'read-only fixture');
     });
-    render(<StorageTools language="en" />);
+    render(<BannerProvider><StorageTools language="en" /></BannerProvider>);
     await waitFor(() => expect(screen.getAllByRole('alert').some((node) => node.textContent?.includes('read-only fixture'))).toBe(true));
     expect((screen.getByRole('button', { name: 'Clear query log' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByText('Done.')).toBeNull();

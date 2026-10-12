@@ -64,6 +64,14 @@ export function formatNumber(value: number, language: Language, options?: Intl.N
   return new Intl.NumberFormat(language, options).format(value);
 }
 
+/** Byte counts in 1024-based human units (B, KB, MB, GB, TB), as file managers show them. */
+export function formatBytes(value: number, language: Language): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let amount = value; let unit = 0;
+  while (Math.abs(amount) >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1; }
+  return `${formatNumber(amount, language, { maximumFractionDigits: unit === 0 || amount >= 100 ? 0 : 1 })} ${units[unit]}`;
+}
+
 export function formatDate(value: string | number | Date, language: Language, options?: Intl.DateTimeFormatOptions): string {
   return new Intl.DateTimeFormat(language, options).format(new Date(value));
 }

@@ -1,9 +1,11 @@
 import { useId, useRef } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import { SPRING_IOS } from '../../components/beui/motion';
 import { useConfig } from '../../config/context';
 import { useSession } from '../../session/context';
 import { getPath } from '../../model';
 import { subscriptionDraft, type SubscriptionSource } from '../../model/subscriptions';
-import { formatNumber, translate, type Language } from '../../i18n';
+import { formatBytes, formatNumber, translate, type Language } from '../../i18n';
 import { useSubscriptions } from './useSubscriptions';
 import { SourceCard, failureText } from './SourceCard';
 import { DomainCheck } from './DomainCheck';
@@ -15,6 +17,7 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
   const keyPrefix = useId();
   const nextKey = useRef(0);
   const view = useSubscriptions(api, draft?.revision);
+  const reduced = useReducedMotion();
   const t = (key: string) => translate(`subscriptions.${key}`, language);
   if (!draft) return <p role="status">{translate('app.connecting', language)}</p>;
   const saved = draft.savedSources;
@@ -31,7 +34,7 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
   return <><section className="panel subscription-panel"><div className="heading-row"><h2>{t('title')}</h2>
     <div className="button-group"><button type="button" className="button quiet" onClick={() => void view.load()}>{t('refreshStatus')}</button>
       <button type="button" className="button secondary" disabled={working || !view.state?.sources.length} onClick={() => void view.start('refresh', null)}>{t('refreshAll')}</button></div></div>
-    <p className="muted small">{t('help')}</p><p className="muted small">{t('savedOnly')}</p>
+    <p className="muted small">{t('help')}</p>
     {view.state && !revisionMatches && <p className="notice" role="status">{t('revision_conflict')}</p>}
     {view.error && <p role="alert" className="notice error">{failureText(view.error, language)}</p>}
     {view.state?.unavailable_reason && <p className="notice error" role="alert">{failureText({ code: view.state.unavailable_reason, line: null }, language)}</p>}
@@ -42,22 +45,17 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
       {observedOperation?.rules != null && <> · {formatNumber(observedOperation.rules, language)} {t('input')}</>}
       {observedOperation?.error && <> · {failureText(observedOperation.error, language)}</>}
     </p>}
-    {view.state && <><dl className="subscription-stats">
-      <div><dt>{t('generation')}</dt><dd>{formatNumber(view.state.generation, language)}</dd></div>
-      <div><dt>{t('input')}</dt><dd>{formatNumber(view.state.input_rules, language)}</dd></div>
-      <div><dt>{t('indexed')}</dt><dd>{formatNumber(view.state.index_rules, language)}</dd></div>
-      <div><dt>{t('memory')}</dt><dd>{formatNumber(view.state.index_bytes, language)} / {formatNumber(view.state.retained_bytes, language)} B</dd></div>
-      <div><dt>{t('disk')}</dt><dd>{formatNumber(view.state.disk_bytes, language)} B</dd></div>
-    </dl><p className="muted small">{t('countsHelp')}</p></>}
+    {view.state && <p className="subscription-summary">{translate('subscriptions.summary', language, { rules: formatNumber(view.state.index_rules, language), memory: formatBytes(view.state.retained_bytes, language), disk: formatBytes(view.state.disk_bytes, language) })}</p>}
     {!sources.length && <p className="muted">{t('empty')}</p>}
-    <div className="settings-stack">{sources.map((source, index) => {
+    <div className="settings-stack"><AnimatePresence initial={false}>{sources.map((source, index) => {
       const baseline = saved?.find((item) => item.id === source.id && item.url === source.url && item.format === source.format);
       const status = baseline && revisionMatches ? view.state?.sources.find((item) => item.id === source.id) : undefined;
-      return <SourceCard key={source.key} source={source} index={index} status={status} language={language} locked={locked || busy} working={working}
+      return <motion.div key={source.key} className="list-item" initial={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} animate={{ opacity: 1, height: 'auto', transitionEnd: { overflow: 'visible' } }}
+        exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><SourceCard source={source} index={index} status={status} language={language} locked={locked || busy} working={working}
         savedSource={baseline} subscriptionsEnabled={view.state?.enabled === true}
         change={(next) => setSources(sources.map((item, at) => at === index ? next : item))} remove={() => setSources(sources.filter((_, at) => at !== index))}
-        prepare={() => void view.start('prepare', source)} refresh={() => void view.start('refresh', source.id)} />;
-    })}</div>
+        prepare={() => void view.start('prepare', source)} refresh={() => void view.start('refresh', source.id)} /></motion.div>;
+    })}</AnimatePresence></div>
     <div className="button-group"><button type="button" className="button secondary" disabled={locked || busy || sources.length >= 16} onClick={() => add(false)}>{t('add')}</button>
       <button type="button" className="button quiet" disabled={locked || busy || sources.length >= 16} onClick={() => add(true)}>{t('example')}</button></div>
     <p className="muted small">{t('exampleHelp')} <a href="https://github.com/Natsuki-Kaede/Natsuki-List" target="_blank" rel="noreferrer">Natsuki List · GPLv3</a></p>

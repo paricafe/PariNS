@@ -10,17 +10,17 @@ describe('UnitInput', () => {
     const onChange = vi.fn();
     const view = render(<UnitInput id="size" label="Size" family="bytes" value="33554432" language="en" onChange={onChange} />);
     const input = screen.getByRole('textbox') as HTMLInputElement;
-    const unit = screen.getByRole('combobox', { name: 'Size · Unit' }) as HTMLSelectElement;
+    const unit = () => screen.getByRole('radiogroup', { name: 'Size · Unit' }).querySelector('[aria-checked="true"]')?.textContent;
     expect(input.value).toBe('32');
-    expect(unit.selectedOptions[0].textContent).toBe('MiB');
+    expect(unit()).toBe('MB');
     fireEvent.change(input, { target: { value: '64' } });
     expect(onChange).toHaveBeenLastCalledWith('67108864');
-    fireEvent.change(unit, { target: { value: String(1024 ** 3) } });
+    fireEvent.click(screen.getByRole('radio', { name: 'GB' }));
     expect(onChange).toHaveBeenLastCalledWith(String(64 * 1024 ** 3));
     // An external reload re-derives the display; an own edit does not.
     view.rerender(<UnitInput id="size" label="Size" family="bytes" value="2048" language="en" onChange={onChange} />);
     expect(input.value).toBe('2');
-    expect(unit.selectedOptions[0].textContent).toBe('KiB');
+    expect(unit()).toBe('KB');
     // A value that is not a whole number of a larger unit stays in bytes.
     view.rerender(<UnitInput id="size" label="Size" family="bytes" value="1536" language="en" onChange={onChange} />);
     expect(input.value).toBe('1536');

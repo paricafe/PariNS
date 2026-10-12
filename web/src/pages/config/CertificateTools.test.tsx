@@ -16,7 +16,7 @@ describe('security runtime status and certificate reload ownership', () => {
   it('uses the live revision, leaves drafts alone and shows unchanged identities bilingually', async () => {
     mocks.request.mockImplementation(async (path) => path === 'status' ? { revision: 7, certificates: base, running: true, doh_listen: '127.0.0.1:8443', doh_http3: false } : { outcome: 'unchanged', revision: 7, certificate_generation: 2, certificates: base });
     const view = render(<SecurityRuntime language="en" />);
-    await waitFor(() => expect(screen.getByText('Certificate version 2')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('a'.repeat(64))).toBeTruthy());
     expect(screen.getByText('127.0.0.1:8443 · /dns-query')).toBeTruthy();
     expect(screen.getByText(/You have unsaved changes/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Reload certificates' }));
@@ -24,7 +24,7 @@ describe('security runtime status and certificate reload ownership', () => {
     expect(mocks.request).toHaveBeenCalledWith('certificates/reload', 'POST', { revision: 7 });
     expect(mocks.request.mock.calls.every(([path]) => path === 'status' || path === 'certificates/reload')).toBe(true);
     view.rerender(<SecurityRuntime language="zh-CN" />);
-    expect(screen.getByText('证书版本 2')).toBeTruthy();
+    expect(screen.getByText('重新加载证书')).toBeTruthy();
     expect(screen.getByText('a'.repeat(64))).toBeTruthy();
   });
 
@@ -35,7 +35,7 @@ describe('security runtime status and certificate reload ownership', () => {
       const statusReads = () => mocks.request.mock.calls.filter(([path]) => path === 'status').length;
       render(<SecurityRuntime language="en" />);
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-      expect(screen.getByText('Certificate version 2')).toBeTruthy();
+      expect(screen.getByText('a'.repeat(64))).toBeTruthy();
       expect(screen.getByText('127.0.0.1:8443 · /dns-query')).toBeTruthy();
       expect(statusReads()).toBe(1);
       await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
@@ -50,13 +50,13 @@ describe('security runtime status and certificate reload ownership', () => {
       throw new ApiError(status as number, code as string, 'response missing');
     });
     render(<SecurityRuntime language="en" />);
-    await waitFor(() => expect(screen.getByText('Certificate version 2')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('a'.repeat(64))).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Reload certificates' }));
     await waitFor(() => expect(screen.getByText(/confirm the reload/)).toBeTruthy());
     expect((screen.getByRole('button', { name: 'Reload certificates' }) as HTMLButtonElement).disabled).toBe(true);
     current = { ...base, certificate_generation: 3, last_reload: { attempt_id: 8, source: 'signal', started_at_ms: 1800000000000, completed_at_ms: 1800000000010, outcome: 'applied', error_code: null } };
     fireEvent.click(screen.getByRole('button', { name: 'Check result' }));
-    await waitFor(() => expect(screen.getByText('Certificate version 3')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Reload #8/)).toBeTruthy());
     expect(screen.getByText(/may include someone else/)).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Reload certificates' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: "I've checked it" }));
@@ -70,7 +70,7 @@ describe('security runtime status and certificate reload ownership', () => {
       throw new ApiError(422, 'CERTIFICATE_NAME_MISMATCH', 'invalid SAN');
     });
     render(<SecurityRuntime language="en" />);
-    await waitFor(() => expect(screen.getByText('Certificate version 2')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('a'.repeat(64))).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Reload certificates' }));
     await waitFor(() => expect(screen.getByText(/previous certificates are still in use/)).toBeTruthy());
     expect(screen.getByRole('alert').textContent).toContain("names don't match");

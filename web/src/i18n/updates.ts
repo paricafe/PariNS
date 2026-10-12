@@ -13,9 +13,7 @@ export const updatesMessages = {
   open: ['查看软件更新', 'View software updates'], notes: ['更新内容', "What's new"],
   noNotes: ['这个版本没有提供更新说明。', "This release doesn't include release notes."],
   officialPage: ['在 GitHub 上查看', 'View on GitHub'],
-  manual: ['这个安装需要手动更新', 'This installation needs a manual update'],
   recovery: ['更新需要恢复', 'Update needs recovery'],
-  manualHelp: ['一键更新只支持用新版安装器装好的官方 Linux x86_64 / aarch64 systemd 服务。0.1.4 需要先手动装好更新组件；容器、源码编译或自定义服务请按各自的方式更新。', 'One-click updates work for official Linux x86_64 / aarch64 systemd installs set up by the new installer. Version 0.1.4 needs the update components installed by hand first. Update containers, source builds and custom services the way you deployed them.'],
   confirm: ['把 PariNS {current} 更新到 {next}。期间 DNS 会短暂中断，完成后需要重新登录。如果新版本启动失败，会自动换回原来的程序，配置、查询记录和统计都会保留，缓存可能会清空。更新完成前暂时不能修改设置。', "Update PariNS {current} to {next}. DNS stops briefly and you'll need to sign in again afterward. If the new version fails to start, PariNS switches back to the previous one and keeps your configuration, query log and statistics; the cache may start empty. Settings can't be changed until the update finishes."],
   drafts: ['你还有未保存的修改。请先保存，或者放弃修改后再确认更新。', 'You have unsaved changes. Save them, or discard them, before confirming the update.'],
   keepDraft: ['先去保存修改', 'Save my changes first'], discardDraft: ['放弃修改', 'Discard changes'],
@@ -56,4 +54,6 @@ export const updatesMessages = {
   update_state_unavailable: ['更新进度无法可靠保存，请检查数据目录和磁盘。', "Update progress can't be saved reliably. Check the data directory and disk."],
   network: ['连不上官方发布服务，请稍后再试。', "Couldn't reach the official release service. Try again later."],
   reasonUnknown: ['操作暂时无法完成。诊断代码：{code}', "This couldn't be done right now. Diagnostic code: {code}"],
+  howToUpdate: ["如何更新", "How to update"],
+  appleSilicon: ["Apple 芯片", "Apple silicon"],
 } as const;

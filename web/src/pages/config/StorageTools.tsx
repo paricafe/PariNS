@@ -3,6 +3,7 @@ import { ApiError, StaleRequest } from '../../session/client';
 import { useSession } from '../../session/context';
 import { useConfig } from '../../config/context';
 import { useConfirm } from '../../components/ConfirmProvider';
+import { useBanner } from '../../components/Banner';
 import { Button } from '../../components/beui';
 import { formatDate, presentIssue, translate, type Language } from '../../i18n';
 import { StorageStatusPanel } from '../observability/StorageStatusPanel';
@@ -13,6 +14,7 @@ export function StorageTools({ language }: { language: Language }) {
   const { api } = useSession();
   const { locked, busy: configBusy } = useConfig();
   const confirm = useConfirm();
+  const banner = useBanner();
   const [view, setView] = useState<{ revision: number; storage: StorageStatus } | null>(null);
   const [stats, setStats] = useState<StatsView | null>(null);
   const [busy, setBusy] = useState(false);
@@ -48,7 +50,7 @@ export function StorageTools({ language }: { language: Language }) {
     setBusy(true); setError(null); setNotice(null);
     try {
       await api.request(spec.path, 'POST', { revision, [spec.epoch]: epoch });
-      setNotice('actionDone');
+      setNotice('actionDone'); banner(t('actionDone'));
       void load(action === 'totals').catch(fail);
     } catch (reason) {
       if (!(reason instanceof StaleRequest)) {
@@ -62,19 +64,19 @@ export function StorageTools({ language }: { language: Language }) {
     setBusy(true);
     try {
       const current = await load(unknown.action === 'totals');
-      if (current.storage[storageActions[unknown.action].epoch] > unknown.epoch) { setUnknown(null); setNotice('actionDone'); }
+      if (current.storage[storageActions[unknown.action].epoch] > unknown.epoch) { setUnknown(null); setNotice('actionDone'); banner(t('actionDone')); }
       else setNotice('stillUnknown');
     } catch (reason) { fail(reason); }
     finally { setBusy(false); }
   };
   return <div className="settings-stack">
     {view && <StorageStatusPanel status={view.storage} language={language} />}
-    <section className="panel"><div className="heading-row"><h2>{t('cumulative')}</h2><Button variant="secondary" disabled={busy} onClick={() => void load(true).catch(fail)}>{translate('ui.refresh', language)}</Button></div>
-      {stats && <p>{translate('storage.totalsSince', language, { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</p>}
-      <p className="muted small">{t('recorded')}</p>
-      <div className="button-group">{(Object.keys(storageActions) as StorageAction[]).map((action) => <Button key={action} variant="outline" disabled={!view || busy || Boolean(unknown) || locked || configBusy || view.storage.health === 'unavailable'} onClick={(event) => void act(action, event.currentTarget)}>{t(storageActions[action].label)}</Button>)}</div>
-      {notice && <p className="notice" role="status">{t(notice)}</p>}
+    <section className="settings-group" aria-labelledby="storage-clear-title"><h2 id="storage-clear-title" className="group-title">{t('clearTitle')}</h2>
+      <div className="grouped">{(Object.keys(storageActions) as StorageAction[]).map((action) => <button type="button" key={action} className="row row-action" data-destructive=""
+        disabled={!view || busy || Boolean(unknown) || locked || configBusy || view.storage.health === 'unavailable'} onClick={(event) => void act(action, event.currentTarget)}>{t(storageActions[action].label)}</button>)}</div>
+      {stats && <p className="group-footer">{translate('storage.totalsSince', language, { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</p>}
       {unknown && <Button variant="secondary" disabled={busy} onClick={() => void reconcile()}>{t('checkResult')}</Button>}
+      {notice && notice !== 'actionDone' && <p className="notice" role="status">{t(notice)}</p>}
       {error && <p className="notice error" role="alert">{presentIssue(error, language)}</p>}
     </section>
   </div>;

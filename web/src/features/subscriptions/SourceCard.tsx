@@ -1,4 +1,5 @@
 import { Switch } from '../../components/beui';
+import { Select } from '../../components/Popover';
 import { translate, formatDate, formatNumber, hasTranslation, type Language } from '../../i18n';
 import type { SubscriptionDraft, SubscriptionSource } from '../../model/subscriptions';
 import type { Failure, SourceStatus } from './types';
@@ -20,9 +21,8 @@ export function SourceCard({ source, index, status, language, locked, working, s
       {(['name', 'id', 'url'] as const).map((field) => <label className={`field ${field === 'url' ? 'wide' : ''}`} key={field}>{t(field)}
         <input id={`setting-filter_subscriptions-sources-${index}-${field}`} value={source[field]} autoComplete="off" spellCheck={false} onChange={(event) => change({ ...source, [field]: event.target.value })} />
       </label>)}
-      <label className="field">{t('format')}<select value={source.format} onChange={(event) => change({ ...source, format: event.target.value as SubscriptionDraft['format'] })}>
-        <option value="domain_list">{t('domain_list')}</option><option value="hosts_blocklist">{t('hosts_blocklist')}</option>
-      </select></label>
+      <div className="field"><span>{t('format')}</span><Select label={t('format')} value={source.format} onChange={(format) => change({ ...source, format: format as SubscriptionDraft['format'] })}
+        options={[{ value: 'domain_list', label: t('domain_list') }, { value: 'hosts_blocklist', label: t('hosts_blocklist') }]} /></div>
       <label className="field">{t('interval')}<input id={`setting-filter_subscriptions-sources-${index}-update_interval_hours`} inputMode="numeric" value={source.update_interval_hours} onChange={(event) => change({ ...source, update_interval_hours: event.target.value })} /></label>
       <Switch label={t('enabled')} checked={source.enabled} onCheckedChange={(enabled) => change({ ...source, enabled })} />
       <Switch label={t('auto')} checked={source.auto_update} onCheckedChange={(auto_update) => change({ ...source, auto_update })} />

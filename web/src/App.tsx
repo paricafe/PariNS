@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
-import { motion, useAnimationControls, useReducedMotion } from 'motion/react';
-import { DURATION, EASE_OUT, SPRING_LAYOUT, SPRING_SOFT } from './components/beui/motion';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react';
+import { DURATION, SPRING_IOS, SPRING_IOS_FAST } from './components/beui/motion';
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { Activity, BookOpenText, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
@@ -12,6 +12,10 @@ import { SessionProvider, useSession } from './session/context';
 import { Button, Drawer } from './components/beui';
 import { ConfirmProvider, useConfirm } from './components/ConfirmProvider';
 import { TransportHint, transportChangeText } from './components/TransportHint';
+import { BannerProvider, useBanner } from './components/Banner';
+import { Select } from './components/Popover';
+import { Segmented } from './components/Segmented';
+import { lineDiff } from './pages/config/lineDiff';
 import { UpdatesProvider } from './features/updates/context';
 import { UpdateHint } from './features/updates/UpdatePanel';
 import { AccountControls } from './features/account/AccountControls';
@@ -87,21 +91,40 @@ function useCardLight() {
 
 function Preferences({ language, theme, changeLanguage, changeTheme }: ReturnType<typeof useAppearance>) {
   const t = (key: string) => translate(`ui.${key}`, language);
+  const themes = [{ value: 'system', label: t('themeAuto') }, { value: 'light', label: t('themeLight') }, { value: 'dark', label: t('themeDark') }];
   return <div className="preferences">
-    <label className="select-label"><span className="sr-only">{t('language')}</span><select aria-label={t('language')} value={language} onChange={(event) => changeLanguage(event.target.value as Language)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
-    <label className="select-label"><span className="sr-only">{t('theme')}</span><select aria-label={t('theme')} value={theme} onChange={(event) => changeTheme(event.target.value as Theme)}><option value="system">{t('themeAuto')}</option><option value="light">{t('themeLight')}</option><option value="dark">{t('themeDark')}</option></select></label>
+    <Select label={t('language')} value={language} onChange={(next) => changeLanguage(next as Language)} options={[{ value: 'zh-CN', label: '简体中文' }, { value: 'en', label: 'English' }]} />
+    {/* Segmented on wide screens, a popup menu on phones; CSS shows exactly one. */}
+    <Segmented className="theme-switch" label={t('theme')} value={theme} onChange={(next) => changeTheme(next as Theme)} options={themes} />
+    <Select className="theme-select" label={t('theme')} value={theme} onChange={(next) => changeTheme(next as Theme)} options={themes} />
   </div>;
+}
+
+function DiffSheet({ open, onClose, language }: { open: boolean; onClose(): void; language: Language }) {
+  const { draft } = useConfig();
+  const t = (key: string) => translate(key, language);
+  const diff = useMemo(() => open && draft ? lineDiff(draft.original, draft.toml) : [], [open, draft?.original, draft?.toml]);
+  return <Drawer open={open} variant="sheet" className="diff-sheet" title={t('app.diffTitle')} closeLabel={t('ui.closeDialog')} onClose={onClose}>
+    <p className="muted small">{t('app.diffHelp')}</p>
+    {draft?.previewTransportChange && <TransportHint change={draft.previewTransportChange} language={language} />}
+    {diff.some((line) => line.kind !== 'same') ? <pre className="diff-lines"><code>{diff.map((line, index) => <span className={`diff-${line.kind}`} key={index}>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text || ' '}</span>)}</code></pre>
+      : <p className="muted">{t('app.noChanges')}</p>}
+  </Drawer>;
 }
 
 function SaveBar({ language }: { language: Language }) {
   const reduced = useReducedMotion();
-  const { draft, dirty, changes, busy, prepareSave, commitPrepared, reload, resolveUnknown, setError, discard } = useConfig();
+  const { draft, dirty, changes, busy, preview, prepareSave, commitPrepared, reload, resolveUnknown, setError, discard } = useConfig();
   const { transportChanged } = useSession();
   const confirmAction = useConfirm();
-  const [notice, setNotice] = useState<string | null>(null);
-  useEffect(() => { if (dirty) setNotice(null); }, [dirty]);
-  if (!draft || (!dirty && !draft.unknownApply && !notice)) return null;
+  const banner = useBanner();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  // The trigger is disabled while the preview request runs, so the sheet cannot capture it; return focus here.
+  const previewTrigger = useRef<HTMLButtonElement>(null);
+  if (!draft || (!dirty && !draft.unknownApply)) return null;
   const t = (key: string) => translate(key, language);
+  // The bar unmounts once the draft is settled; keep keyboard focus inside the page rather than on <body>.
+  const settleFocus = () => requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) document.getElementById('main-content')?.focus({ preventScroll: true }); });
   const runSave = async (trigger: HTMLElement) => {
     try {
       const prepared = await prepareSave();
@@ -111,17 +134,23 @@ function SaveBar({ language }: { language: Language }) {
       if (!await confirmAction(message, 'app.save', trigger)) return;
       const result = await commitPrepared(prepared);
       if (result.transportChange) { discard(); transportChanged(result.transportChange); return; }
-      setNotice(result.refreshed ? t('app.configSaved') : null);
+      if (result.refreshed) banner(t('app.configSaved'));
+      settleFocus();
     } catch (reason) { setError(toConfigIssue(reason)); }
   };
-  return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 36, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={reduced ? { duration: 0 } : SPRING_SOFT}>
-    <div className="save-bar-content"><div><strong>{draft.unknownApply ? t(draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown') : dirty ? (changes === 1 ? t('shell.unsavedOne') : translate('shell.unsavedMany', language, { count: changes })) : notice}</strong>
-      {draft.unknownApply && draft.pendingTransportChange && <TransportHint change={draft.pendingTransportChange} language={language} link />}
-      {notice && (dirty || draft.unknownApply) && <span className="small">{notice}</span>}</div>
-      <div className="button-group">{!dirty && !draft.unknownApply ? <button type="button" className="button quiet" onClick={() => setNotice(null)}>{t('shell.dismiss')}</button> : draft.unknownApply ? <><button type="button" className="button secondary" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button><button type="button" className="button primary" disabled={busy} onClick={() => void resolveUnknown().then((result) => setNotice(result === 'applied' ? t(draft.pendingRollback ? 'app.rollbackComplete' : 'app.configSaved') : result === 'pending' ? t('app.saveStillUnknown') : t('api.REVISION'))).catch((reason) => setError(toConfigIssue(reason)))}>{t(draft.pendingRollback ? 'app.checkRollback' : 'app.checkSave')}</button></> : <>
-        <button type="button" className="button quiet" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button>
+  const discardChanges = () => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().then(settleFocus).catch(() => {}); });
+  return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 40, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={reduced ? { duration: 0 } : SPRING_IOS}>
+    <div className="save-bar-content"><div><strong>{draft.unknownApply ? t(draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown') : changes === 1 ? t('shell.unsavedOne') : translate('shell.unsavedMany', language, { count: changes })}</strong>
+      {draft.unknownApply && draft.pendingTransportChange && <TransportHint change={draft.pendingTransportChange} language={language} link />}</div>
+      <div className="button-group">{draft.unknownApply ? <><button type="button" className="button secondary" disabled={busy} onClick={discardChanges}>{t('app.discard')}</button><button type="button" className="button primary" disabled={busy} onClick={() => void resolveUnknown().then((result) => {
+          if (result === 'applied') { banner(t(draft.pendingRollback ? 'app.rollbackComplete' : 'app.configSaved')); settleFocus(); }
+          else setError(result === 'pending' ? 'app.saveStillUnknown' : 'api.REVISION');
+        }).catch((reason) => setError(toConfigIssue(reason)))}>{t(draft.pendingRollback ? 'app.checkRollback' : 'app.checkSave')}</button></> : <>
+        <button type="button" className="button quiet" disabled={busy} onClick={discardChanges}>{t('app.discard')}</button>
+        <button ref={previewTrigger} type="button" className="button secondary" disabled={busy} onClick={() => void preview().then(() => setPreviewOpen(true)).catch(() => {})}>{t('ui.preview')}</button>
         <Button variant="primary" disabled={busy} onClick={(event) => void runSave(event.currentTarget)}>{t('app.save')}</Button></>}</div>
     </div>
+    <DiffSheet open={previewOpen} onClose={() => { setPreviewOpen(false); requestAnimationFrame(() => previewTrigger.current?.focus()); }} language={language} />
   </motion.div>;
 }
 
@@ -133,11 +162,23 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
   const navigate = useNavigate();
   const location = useLocation();
   const reduced = useReducedMotion();
-  const pageAnimation = useAnimationControls();
+  // Page transitions use the Web Animations API: time-based, no inline styles left behind, and already
+  // finished if the tab was hidden. Phones push the new page in from the right (iOS); wider screens fade it up.
+  const routeContent = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    pageAnimation.set({ opacity: reduced ? 1 : 0, y: reduced ? 0 : 10 });
-    void pageAnimation.start({ opacity: 1, y: 0, transition: { duration: reduced ? 0 : DURATION.enter, ease: EASE_OUT } });
-  }, [location.pathname, pageAnimation, reduced]);
+    const element = routeContent.current;
+    if (!element?.animate) return;
+    const phone = window.matchMedia?.('(max-width: 767px)').matches ?? false;
+    const frames = reduced ? [{ opacity: 0 }, { opacity: 1 }]
+      : phone ? [{ opacity: 0.4, transform: 'translateX(30%)' }, { opacity: 1, transform: 'none' }]
+        : [{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }];
+    const animation = element.animate(frames, { duration: reduced ? 150 : phone ? 420 : DURATION.enter * 1000, easing: 'cubic-bezier(.2, .9, .25, 1)' });
+    return () => animation.cancel();
+  }, [location.pathname, reduced]);
+  // iOS large title: the bar title and material fade in as the page title scrolls away.
+  const { scrollY } = useScroll();
+  const titleOpacity = useTransform(scrollY, [28, 64], [0, 1]);
+  const barMaterial = useTransform(scrollY, [0, 48], [0, 1]);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [logoutError, setLogoutError] = useState<ConfigIssue | null>(null);
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);
@@ -171,7 +212,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
           return;
         }
         setMobileOpen(false);
-      }}>{({ isActive }) => <><item.icon size={18} strokeWidth={1.8} aria-hidden="true" /><span>{t(item.key)}</span>{isActive && <motion.i className="nav-indicator" aria-hidden="true" layoutId={`navigation-${scope}`} transition={reduced ? { duration: 0 } : SPRING_LAYOUT} />}</>}</NavLink>)}
+      }}>{({ isActive }) => <><item.icon size={18} strokeWidth={1.8} aria-hidden="true" /><span>{t(item.key)}</span>{isActive && <motion.i className="nav-indicator" aria-hidden="true" layoutId={`navigation-${scope}`} transition={reduced ? { duration: 0 } : SPRING_IOS_FAST} />}</>}</NavLink>)}
     </div>)}
   </nav>;
   return <div className="app-shell">
@@ -180,20 +221,20 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
       {nav('desktop')}
     </aside>
     <Drawer open={mobileOpen} onClose={() => setMobileOpen(false)} title="PariNS" side="left" closeLabel={t('closeNavigation')}>{nav('mobile')}</Drawer>
-    <div className="shell-main"><header className="topbar">
+    <div className="shell-main"><header className="topbar"><motion.span className="topbar-material" aria-hidden="true" style={{ opacity: barMaterial }} />
       <button type="button" className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label={t('showNavigation')}><Menu size={20} /></button>
-      <span className="topbar-title">{current ? t(current.key) : t('overview')}</span><span className="spacer" />
+      <motion.span className="topbar-title" style={{ opacity: titleOpacity }}>{current ? t(current.key) : t('overview')}</motion.span><span className="spacer" />
       <Preferences {...appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
     </header><main id="main-content" tabIndex={-1} className="main-content">
       <a className="skip-target sr-only" id="main-content-start" href="#main-content">{t('skip')}</a>
       {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
-      <motion.div animate={pageAnimation} className="route-content"><Routes>
+      <div ref={routeContent} className="route-content"><Routes>
         <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} settingsState={config.draft?.unknownApply ? 'unknown' : config.dirty ? 'unsaved' : 'saved'} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
         <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} />} />
         {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />
-      </Routes></motion.div>
+      </Routes></div>
     </main></div><SaveBar language={language} />
   </div>;
 }
@@ -221,4 +262,4 @@ function RootView() {
   </>;
 }
 
-export default function App() { return <SessionProvider><RootView /></SessionProvider>; }
+export default function App() { return <SessionProvider><BannerProvider><RootView /></BannerProvider></SessionProvider>; }

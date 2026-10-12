@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Prefetch now refreshes earlier and more often by default: `min_hits = 1`,
+  `remaining_percent = 25`, `max_inflight = 8` and `rate_per_sec = 20`.
+  Prefetch stays off by default. Installations that set these fields keep their
+  values; only fields left unset pick up the new defaults.
+
 ## v0.1.11 — 2026-10-12
 
 ### Upgrade notice

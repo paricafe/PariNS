@@ -922,6 +922,8 @@ fn outstanding_readers_remain_charged_after_invalidation() {
 fn inspection_and_race_checks_do_not_make_an_entry_popular() {
     let mut cfg = CacheConfig::default();
     cfg.prefetch.enabled = true;
+    // Three real lookups are needed, so peeks and inspections visibly add none.
+    cfg.prefetch.min_hits = 3;
     let cache = Cache::new(cfg);
     let now = Instant::now();
     let q = query("prefetch.test.");

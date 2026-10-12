@@ -195,10 +195,10 @@ impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            min_hits: 3,
-            remaining_percent: 10,
-            max_inflight: 2,
-            rate_per_sec: 10,
+            min_hits: 1,
+            remaining_percent: 25,
+            max_inflight: 8,
+            rate_per_sec: 20,
             backoff_secs: 5,
         }
     }

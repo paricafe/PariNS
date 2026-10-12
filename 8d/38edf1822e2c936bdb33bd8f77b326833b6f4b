@@ -1,0 +1,68 @@
+web/src/i18n/console.ts
+  s_0cc083ef6e9aa3::t_90178abd6eb1b1 41,49,62,68,70-73,78,100,108,124,178,189
+  s_0cc083ef6e9aa3::t_6f7347e5174196 135
+web/src/i18n/__tests__/i18n.test.ts
+  s_0cc083ef6e9aa3::t_b721583455ac3a 30-31
+  s_0cc083ef6e9aa3::t_60582b51071640 67
+web/src/features/updates/updates.css
+  s_0cc083ef6e9aa3::t_09f4a4273e0054 15-16
+web/src/i18n/reliability.ts
+  s_0cc083ef6e9aa3::t_c53eaf555ded4b 3
+  s_0cc083ef6e9aa3::t_7ad376dbe26418 56-57
+web/src/i18n/views.ts
+  s_0cc083ef6e9aa3::t_90178abd6eb1b1 7
+web/src/App.tsx
+  s_0cc083ef6e9aa3::t_48c71824edc811 5,34,236
+web/src/pages/observability/LogsPage.tsx
+  s_0cc083ef6e9aa3::t_d3d59ac5be3c87 161
+web/src/features/updates/updates.test.tsx
+  s_0cc083ef6e9aa3::t_0da24afc171994 45,51
+web/src/i18n/settings.ts
+  s_0cc083ef6e9aa3::t_7ad376dbe26418 45
+  s_0cc083ef6e9aa3::t_9cc57d1dc5c2cd 3,5,8,14,16,18,20-22,28,31,35,39,47,52,54,56,60,62,66,70,74,77,79,83,95,98,101,103,110,112,115,117,130,141,152,162,167,169,171-172
+web/src/features/updates/UpdatePanel.tsx
+  s_0cc083ef6e9aa3::t_48c71824edc811 48
+  s_0cc083ef6e9aa3::t_09f4a4273e0054 87-88
+  s_0cc083ef6e9aa3::t_7ad376dbe26418 82
+web/src/i18n/updates.ts
+  s_0cc083ef6e9aa3::t_7ad376dbe26418 57
+web/src/pages/observability/diagnostics.ts
+  s_0cc083ef6e9aa3::t_7ad376dbe26418 6
+web/src/model/settings.ts
+  s_0cc083ef6e9aa3::t_d5b7315641baaf 59,88-89
+  s_0cc083ef6e9aa3::t_b721583455ac3a 21-22,49,64,79,82
+  s_0cc083ef6e9aa3::t_48c71824edc811 120-121
+  s_0cc083ef6e9aa3::t_4e209ceef72362 122
+web/src/pages/observability/OverviewPage.tsx
+  s_0cc083ef6e9aa3::t_d3d59ac5be3c87 178-181,223
+  s_0cc083ef6e9aa3::t_48a3b536e37b86 158-160
+web/src/AuthPages.tsx
+  s_0cc083ef6e9aa3::t_d3d59ac5be3c87 27,34,76,88,101
+web/src/pages/config/SettingsPage.tsx
+  s_0cc083ef6e9aa3::t_48c71824edc811 359
+  s_0cc083ef6e9aa3::t_b721583455ac3a 111
+web/src/i18n/subscriptions.ts
+  s_0cc083ef6e9aa3::t_c53eaf555ded4b 3,22
+web/src/pages/observability/TransportDiagnostics.tsx
+  s_0cc083ef6e9aa3::t_7ad376dbe26418 12
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_c44bee04b2aa48 135
+web/src/i18n/shell.ts
+  s_0cc083ef6e9aa3::t_90178abd6eb1b1 40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8d38edf1822e2c936bdb33bd8f77b326833b6f4b",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

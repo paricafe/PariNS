@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.1.11 — 2026-10-12
+
+### Upgrade notice
+
+- The cache snapshot format changed. The first start after upgrading skips the
+  snapshot written by the previous version and begins with an empty cache;
+  later restarts restore normally. DNS answers are not affected.
+
 ### Changed
 
 - Simplify console text: each idea is explained once per page, field
@@ -19,12 +27,6 @@
   (for example a client asking for `https://example.com`) made the whole clean
   cache snapshot fail to restore, so the next start began with an empty cache.
   Snapshots now store names in DNS wire format, so every cached name restores.
-
-### Upgrade notice
-
-- The cache snapshot format changed. The first start after upgrading skips the
-  snapshot written by the previous version and begins with an empty cache;
-  later restarts restore normally. DNS answers are not affected.
 
 ## v0.1.10 — 2026-10-12
 

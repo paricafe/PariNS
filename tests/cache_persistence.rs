@@ -322,6 +322,18 @@ mod process {
     }
 
     async fn start(directory: &Path, config: &Path, generation: usize) -> (ChildGuard, SocketAddr) {
+        // The binary binds UDP on its TCP port, and startup consumes the clean
+        // snapshot before binding, so select a port free on both rather than retry.
+        let listen = (0..16)
+            .find_map(|_| {
+                let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = tcp.local_addr().unwrap();
+                std::net::UdpSocket::bind(address).ok().map(|_| address)
+            })
+            .expect("no loopback port free for both UDP and TCP");
+        let mut parsed = parins::config::Config::load(config).unwrap();
+        parsed.listen = listen;
+        fs::write(config, toml::to_string(&parsed).unwrap()).unwrap();
         let stderr_path = directory.join(format!("stderr-{generation}.txt"));
         let mut child = ChildGuard(
             Command::new(env!("CARGO_BIN_EXE_parins"))

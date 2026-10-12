@@ -1,0 +1,28 @@
+CHANGELOG.md
+  s_0cc083ef6e9aa3::t_040ff07cc0b53d 11-13
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_f4c6ed5579ee95 8,52-55
+  s_0cc083ef6e9aa3::t_fff416e1f9a0e5 123-128,135
+web/src/i18n/shell.ts
+  s_0cc083ef6e9aa3::t_6287988c4fad45 75
+web/src/pages/observability/OverviewPage.tsx
+  s_0cc083ef6e9aa3::t_6abff21c548076 5,158,177
+web/src/pages/observability/metrics.ts
+  s_0cc083ef6e9aa3::t_f633b0117ca3b5 106-115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "74b63032a20bcb95cc89a572d1edc119e99599c3",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

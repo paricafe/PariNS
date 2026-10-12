@@ -12,3 +12,5 @@
 .update-hint { background: var(--raised); border: 1px solid var(--divider); padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
 .update-actions { align-items: stretch; }
 @media (max-width: 767px) { .update-facts { grid-template-columns: minmax(0, 1fr); } .update-actions > * { flex: 1 1 auto; white-space: normal; } }
+.update-panel .row-note { overflow-wrap: anywhere; }
+.update-panel .row-note.error { color: var(--danger); }

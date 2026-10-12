@@ -158,8 +158,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const label = (entry: LogEntry) => `${translate("views.details", language)} · ${entry.name || translate("views.unreadableQuery", language)} · #${entry.id}`;
   return <div className="page-stack logs-page">
     <header className="page-head log-head large-title">
-      <div><h1>{translate("ui.logs", language)}</h1>
-        <p className="muted">{translate("ui.logIntro", language)}</p></div>
+      <div><h1>{translate("ui.logs", language)}</h1></div>
       <button type="button" onClick={onOpenSettings} className="button secondary"><Settings2 size={16} aria-hidden="true" />{translate("ui.logSettings", language)}</button>
     </header>
 

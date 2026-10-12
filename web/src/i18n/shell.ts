@@ -37,7 +37,7 @@ export const shellMessages = {
   durationMinutes: ['{minutes} 分钟', '{minutes} min'],
   durationJustNow: ['不到 1 分钟', 'under a minute'],
   setupFullConfig: ['查看完整配置', 'View the full configuration'],
-  setupFullConfigHelp: ['一般不需要修改；高级用户可以在这里直接编辑 TOML。', 'Usually no changes are needed; advanced users can edit the TOML here.'],
+  setupFullConfigHelp: ["一般不需要修改。", "Usually no changes are needed."],
   setupEdited: ['完整配置已手动修改，将按下面修改后的内容保存。', 'The full configuration was edited by hand and will be saved exactly as shown below.'],
   setupYes: ['是', 'Yes'],
   setupNo: ['否', 'No'],

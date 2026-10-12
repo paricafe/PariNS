@@ -108,7 +108,7 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
         </div></div>
       </div>
       {group.id === 'doh' && enabled && <p className="group-footer notice-footer">{translate(h3 === true ? 'storage.draftDoh3' : 'storage.draftDoh', language, { port: /^0+$/.test(port.trim()) ? t('storage.automaticPort') : port || '—' })}</p>}
-      <p className="group-footer">{filterExternal ? t('settings.filter_file.help') : t(group.helpKey)}</p>
+      {(filterExternal || group.helpKey) && <p className="group-footer">{t(filterExternal ? 'settings.filter_file.help' : group.helpKey!)}</p>}
     </section>;
   })}</div>;
 }
@@ -356,6 +356,6 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
           <div className="row-control"><span className="row-value transport-address">{state.transport?.origin ?? window.location.origin}</span></div></div></div>
         <p className="group-footer">{t(state.transport?.scheme === 'https' ? 'app.transportHttpsHelp' : 'app.transportHttpHelp')}</p>
       </section>}
-      {pageId === 'security' && <SecurityRuntime language={language} />}{pageId === 'storage' && <StorageTools language={language} />}{pageId === 'runtime' && <UpdatePanel language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'filters' && <SubscriptionsPanel language={language} />}{pageId === 'security' && <CertificateImport language={language} />}</>}
+      {pageId === 'security' && <SecurityRuntime language={language} />}{pageId === 'storage' && <StorageTools language={language} />}{pageId === 'updates' && <UpdatePanel language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'filters' && <SubscriptionsPanel language={language} />}{pageId === 'security' && <CertificateImport language={language} />}</>}
   </div>;
 }

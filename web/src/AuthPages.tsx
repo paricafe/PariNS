@@ -24,14 +24,14 @@ export function LoginPage({ language }: { language: Language }) {
     finally { setBusy(false); }
   };
   return <section className="auth-wrap"><div className="auth-card">
-    <p className="eyebrow">{t('welcome')}</p><h1>{t('loginTitle')}</h1><p className="muted">{t('loginIntro')}</p>
+    <h1>{t('loginTitle')}</h1>
     {state.credentials && <p className="notice" role="status">{translate(`account.${state.credentials}`, language)}</p>}
     <form onSubmit={(event) => void submit(event)} className="auth-form">
       <label htmlFor="login-username">{t('username')}</label><input id="login-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required maxLength={64} />
       <label htmlFor="login-password">{t('password')}</label><input id="login-password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required />
       {error && <p className="error" role="alert">{error}</p>}
       <button className="button primary" type="submit" disabled={busy}>{busy ? translate('app.working', language) : t('login')}</button>
-    </form><p className="muted small">{t('sessionHelp')}</p>
+    </form>
   </div></section>;
 }
 
@@ -73,7 +73,7 @@ export function SetupPage({ language }: { language: Language }) {
     finally { setBusy(false); }
   };
   return <section className="auth-wrap"><div className="auth-card setup-card">
-    <p className="eyebrow">{t('setupEyebrow')}</p><h1>{t('setupTitle')}</h1><p className="muted">{t('setupIntro')}</p>
+    <h1>{t('setupTitle')}</h1>
     <ol className="setup-steps" aria-label={t('setupProgress')}>{(['admin', 'network', 'review'] as const).map((key, index) => <li key={key} aria-current={step === index ? 'step' : undefined} data-done={step > index ? '' : undefined}><span>{`0${index + 1}`}</span> {t(key)}</li>)}</ol>
     <form onSubmit={(event) => void submit(event)} className="auth-form">
       {step === 0 && <>
@@ -85,7 +85,7 @@ export function SetupPage({ language }: { language: Language }) {
       </>}
       {step === 1 && <>
         <p className="muted small">{t('networkIntro')}</p>
-        <label htmlFor="setup-listen">{t('listen')}</label><input id="setup-listen" value={listen} onChange={(event) => setListen(event.target.value)} required spellCheck={false} />
+        <label htmlFor="setup-listen">{t('listen')}</label><input id="setup-listen" value={listen} onChange={(event) => setListen(event.target.value)} placeholder={t('listenPlaceholder')} required spellCheck={false} />
         <small>{t('listenHelp')}</small>
         <label htmlFor="setup-servers">{t('upstream')}</label><textarea id="setup-servers" rows={5} placeholder={translate('settings.upstreams.servers.placeholder', language)} value={servers} onChange={(event) => setServers(event.target.value)} required spellCheck={false} />
         <span className="setup-label">{translate('settings.upstreams.mode.label', language)}</span>
@@ -98,7 +98,7 @@ export function SetupPage({ language }: { language: Language }) {
       {step === 2 && <><p className="muted small">{t('reviewIntro')}</p>
         {toml !== generated ? <p className="notice">{translate('shell.setupEdited', language)}</p> : <dl className="setup-summary">
           <div className="detail-row"><span>{t('listen')}</span><strong className="transport-address">{listen.trim()}</strong></div>
-          <div className="detail-row"><span>{t('upstream')}</span><strong className="transport-address">{servers.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => <span key={index} style={{ display: 'block' }}>{line}</span>)}</strong></div>
+          <div className="detail-row"><span>{translate('settings.group.upstreams.title', language)}</span><strong className="transport-address">{servers.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => <span key={index} style={{ display: 'block' }}>{line}</span>)}</strong></div>
           <div className="detail-row"><span>{translate('settings.upstreams.mode.label', language)}</span><strong>{translate(`settings.upstreams.mode.${mode}`, language)}</strong></div>
           <div className="detail-row"><span>{translate('settings.upstreams.prefer_h3.label', language)}</span><strong>{translate(preferH3 ? 'shell.setupYes' : 'shell.setupNo', language)}</strong></div>
           <div className="detail-row"><span>{translate('settings.upstreams.bootstrap.label', language)}</span><strong className="transport-address">{bootstrap.trim() ? bootstrap.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(', ') : translate('shell.setupNone', language)}</strong></div>

@@ -132,7 +132,7 @@ describe("OverviewPage", () => {
     render(<OverviewPage api={api} language="en" onOpenDns={openDns} />);
     await waitFor(() => expect(screen.getByText("100")).toBeTruthy());
     expect(screen.getByText("30.0%")).toBeTruthy();
-    expect(screen.getByText("Share of lookups answered from cache")).toBeTruthy();
+    expect(screen.getByText("Cache hit rate")).toBeTruthy();
     expect(screen.getByText("2.50 ms")).toBeTruthy();
     expect(screen.getAllByText("5").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("tab", { name: "Last 7 days" }));

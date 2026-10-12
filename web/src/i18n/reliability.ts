@@ -1,6 +1,6 @@
 export const reliabilityMessages = {
   certificates: ['正在使用的证书', 'Certificates in use'], reload: ['重新加载证书', 'Reload certificates'],
-  reloadHelp: ['从已保存的路径重新读取证书。检查通过后，新连接用新证书，已有连接不受影响。', 'Reads the certificates again from the saved paths. If they check out, new connections use them and existing connections carry on.'],
+  reloadHelp: ['从已保存的路径重新读取证书，已有连接不受影响。', 'Reads the certificates again from the saved paths. Existing connections are not affected.'],
   draftHelp: ['你有未保存的修改；这里只读取已保存的路径。', 'You have unsaved changes; this only reads the saved paths.'],
   noCertificates: ['还没有开启需要证书的加密 DNS。', "No encrypted DNS that needs a certificate is turned on yet."],
   fingerprint: ['证书指纹（SHA-256）', 'Certificate fingerprint (SHA-256)'], validFrom: ['生效时间', 'Valid from'],
@@ -53,4 +53,6 @@ export const reliabilityMessages = {
   incoming: ['收到的连接', 'Incoming connections'], admission_global_rejected: ['因总连接数上限被拒', 'Rejected: overall limit'], admission_source_rejected: ['因客户端限流被拒', 'Rejected: per-client limit'],
   handshake_started: ['开始握手', 'Handshakes started'], handshake_established: ['握手成功', 'Handshakes completed'], handshake_application_deadline: ['握手超过等待时间', 'Handshakes took too long'], handshake_quinn_timeout: ['QUIC 握手超时', 'QUIC handshakes timed out'], handshake_tls: ['握手时 TLS 出错', 'TLS errors during handshake'], handshake_transport_error: ['握手时连接出错', 'Connection errors during handshake'], handshake_peer_closed: ['握手时对方断开', 'Client left during handshake'], handshake_version_mismatch: ['QUIC 版本不匹配', 'QUIC version mismatch'], handshake_cancelled: ['握手已取消', 'Handshakes cancelled'], handshake_shutdown: ['因停止服务中断握手', 'Handshakes ended by shutdown'], handshake_inflight: ['正在握手', 'Handshakes in progress'],
   stream_started: ['开始处理请求', 'Requests started'], stream_full_frame: ['完整收到请求', 'Requests fully received'], stream_read_deadline: ['接收请求超时', 'Timed out receiving requests'], stream_request_deadline: ['处理请求超时', 'Timed out handling requests'], stream_write_deadline: ['发送响应超时', 'Timed out sending replies'], stream_protocol_invalid: ['请求格式不对', 'Malformed requests'], stream_peer_cancelled: ['客户端取消了请求', 'Requests cancelled by client'], stream_connection_lost: ['处理中连接断开', 'Connection lost mid-request'], stream_response_handed_to_transport: ['已发出响应', 'Replies sent'], stream_write_failed: ['发送响应失败', 'Replies failed to send'], stream_no_response: ['没有产生响应', 'No reply produced'], stream_cancelled: ['请求已取消', 'Requests cancelled'], stream_shutdown: ['因停止服务中断请求', 'Requests ended by shutdown'], stream_inflight: ['正在处理的请求', 'Requests in progress'],
+  connection_new: ["新连接", "New connection"],
+  connection_reused: ["复用连接", "Reused connection"],
 } as const;

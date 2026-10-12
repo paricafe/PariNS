@@ -18,7 +18,8 @@ export interface SettingField {
 export interface SettingGroup {
   id: string;
   titleKey: string;
-  helpKey: string;
+  /** Footer text; omitted when the title and fields say enough. */
+  helpKey?: string;
   enableKey: string;
   fields: readonly SettingField[];
   optional?: "dot" | "doh" | "doq";
@@ -45,6 +46,7 @@ const group = (id: string, fields: readonly SettingField[], optional?: SettingGr
   id, titleKey: `settings.group.${id}.title`, helpKey: `settings.group.${id}.help`,
   enableKey: `settings.group.${id}.enable`, fields, ...(optional ? { optional } : {}),
 });
+const quiet = ({ helpKey: _, ...rest }: SettingGroup): SettingGroup => rest;
 const page = (id: string, groups: readonly SettingGroup[]): SettingPage => ({
   id, titleKey: `settings.page.${id}.title`, introKey: `settings.page.${id}.intro`, groups,
 });
@@ -54,12 +56,12 @@ export const settingPages = {
     group("upstreams", [
       field("upstreams.servers", "lines", true), { ...select("upstreams.mode", ["weighted", "parallel"]), helpKey: "settings.upstreams.mode.help" },
       field("upstreams.prefer_h3", "checkbox", true), field("upstreams.bootstrap", "lines", true),
-      number("upstreams.max_parallel", 1, 32, true), advanced(number("upstreams.max_extra_inflight", 1, 65536, true)),
+      number("upstreams.max_parallel", 1, 32, true), advanced(number("upstreams.max_extra_inflight", 1, 65536)),
       advanced(field("upstreams.ca_file", "nullable")), advanced(field("upstreams.dot_pool.enabled", "checkbox", true)),
       advanced(number("upstreams.dot_pool.max_connections", 1, 256, true)),
       advanced(number("upstreams.dot_pool.idle_timeout_ms", 1, 600000)),
     ]),
-    group("listeners", [visible(field("listen", "text", true)), number("query_timeout_ms", 1, 60000), advanced(number("tcp_io_timeout_ms", 1, 60000))]),
+    quiet(group("listeners", [visible(field("listen", "text", true)), number("query_timeout_ms", 1, 60000), advanced(number("tcp_io_timeout_ms", 1, 60000))])),
   ]),
   cache: page("cache", [
     group("persistence", [field("cache.persistence.enabled", "checkbox", true), number("cache.persistence.max_bytes", 1048576, 536870912)]),
@@ -74,17 +76,17 @@ export const settingPages = {
       number("cache.prefetch.remaining_percent", 1, 90), advanced(number("cache.prefetch.max_inflight", 1, 256)),
       advanced(number("cache.prefetch.rate_per_sec", 1, 10000)), advanced(number("cache.prefetch.backoff_secs", 1, 3600)),
     ]),
-    group("stale", [
+    quiet(group("stale", [
       field("cache.stale.enabled", "checkbox"), number("cache.stale.retention_secs", 1, 604800),
       number("cache.stale.reply_ttl_secs", 1, 300),
-    ]),
+    ])),
     group("ecs", [field("ecs.enabled", "checkbox"), number("ecs.ipv4_prefix", 0, 32, true), number("ecs.ipv6_prefix", 0, 128)]),
   ]),
   filters: page("filters", [
     group("filterSource", [field("filter_file", "nullable", true)]),
     group("filterRules", [
-      field("filter.enabled", "checkbox"), field("filter.block_exact", "lines", true),
-      field("filter.block_suffix", "lines", true), field("filter.allow_exact", "lines"),
+      field("filter.enabled", "checkbox"), field("filter.block_exact", "lines"),
+      field("filter.block_suffix", "lines"), field("filter.allow_exact", "lines"),
       field("filter.allow_suffix", "lines"),
     ]),
     group("subscriptionLimits", [field("filter_subscriptions.enabled", "checkbox", true), number("filter_subscriptions.max_rules", 1, 5000000), number("filter_subscriptions.max_memory_bytes", 1, 536870912), number("filter_subscriptions.max_disk_bytes", 262144, 2147483648)]),
@@ -105,7 +107,6 @@ export const settingPages = {
     group("storageAdvanced", [number("storage.max_database_bytes", 16777216, 4294967296, true), advanced(number("storage.flush_interval_ms", 100, 5000)), advanced(number("storage.cleanup_interval_secs", 10, 3600)), advanced(number("storage.queue_max_entries", 128, 65536)), advanced(number("storage.queue_max_bytes", 1048576, 67108864))]),
   ]),
   runtime: page("runtime", [
-    group("updates", [field("updates.auto_check", "checkbox", true), number("updates.check_interval_hours", 1, 168, true)]),
     group("concurrency", [number("max_inflight", 1, 65536), number("max_tcp_connections", 1, 65536), number("shutdown_grace_ms", 1, 60000)]),
     group("sourceLimits", [
       field("source_limits.enabled", "checkbox"), number("source_limits.rate_per_sec", 1, 1000000),
@@ -115,6 +116,9 @@ export const settingPages = {
     ]),
     group("coalescing", [field("coalescing.enabled", "checkbox"), number("coalescing.max_groups", 1, 65536), number("coalescing.max_waiters", 1, 65536)]),
     group("metrics", [number("metrics.interval_secs", 0, 3600, true), visible(field("admin_listen", "nullable", true))]),
+  ]),
+  updates: page("updates", [
+    group("updates", [field("updates.auto_check", "checkbox", true), number("updates.check_interval_hours", 1, 168)]),
   ]),
 } as const;
 

@@ -42,13 +42,13 @@ describe('software update presentation', () => {
   it('reads cached status only, renders release text safely and switches language', async () => {
     const current = fixture(); mocks.request.mockResolvedValue(current);
     const view = mount();
-    await screen.findByText('Software updates');
+    await screen.findByText('Version');
     await screen.findByRole('link', { name: 'View on GitHub' });
     expect(document.querySelector('img')).toBeNull();
     expect(screen.getByText(current.candidate!.notes)).toBeTruthy();
     expect(mocks.request.mock.calls.every(([path, method]) => path === 'updates' && !method)).toBe(true);
     view.rerender(<MemoryRouter><UpdatesProvider active><UpdateHint language="zh-CN" /><UpdatePanel language="zh-CN" /></UpdatesProvider></MemoryRouter>);
-    expect(screen.getByText('软件更新')).toBeTruthy();
+    expect(screen.getByText('版本')).toBeTruthy();
     expect(screen.getByRole('button', { name: '立即更新' })).toBeTruthy();
   });
 

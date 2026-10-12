@@ -45,7 +45,7 @@ export function UpdateHint({ language }: { language: Language }) {
   const { view } = useUpdates();
   if (!view?.candidate) return null;
   return <aside className="update-hint"><span>{translate('updates.newVersion', language, { version: view.candidate.version })}</span>
-    <Link to="/runtime">{translate('updates.open', language)}</Link></aside>;
+    <Link to="/updates">{translate('updates.open', language)}</Link></aside>;
 }
 
 export function UpdatePanel({ language }: { language: Language }) {
@@ -79,13 +79,13 @@ export function UpdatePanel({ language }: { language: Language }) {
   const statusText = !view ? '' : view.check.state === 'available' ? translate('updates.newVersion', language, { version: candidate?.version ?? '—' }) : t(view.check.state);
   const row = (label: string, value: ReactNode) => <div className="row" data-layout="inline"><div className="row-label"><span>{label}</span></div><div className="row-control"><span className="row-value">{value}</span></div></div>;
   return <section className="settings-group update-panel" aria-labelledby="software-updates-title">
-    <h2 id="software-updates-title" className="group-title">{t('title')}</h2>
+    <h2 id="software-updates-title" className="group-title">{t('versionGroup')}</h2>
     {!view ? <div className="grouped"><div className="row"><span role="status">{updates.readFailed ? t('readFailed') : translate('app.connecting', language)}</span></div></div> : <div className="grouped">
       {row(t('current'), <>{view.current.version} <span className="muted">· {platformName(view.current.target, language)}</span> <InfoTip text={view.current.target} label={t('target')} /></>)}
       <div className="row" data-layout="inline"><div className="row-label"><span ref={statusRow} tabIndex={-1} role="status" className={view.check.state === 'failed' ? 'error' : undefined}>{statusText}</span></div>
         {view.check.last_check_at_ms ? <div className="row-control"><span className="row-value muted small">{t('lastCheck')} {time(view.check.last_check_at_ms, language)}</span></div> : null}</div>
-      {view.check.error && <p className="row-note error">{reasonText(view.check.error, language)}</p>}
-      {view.check.state === 'failed' && view.check.last_success_at_ms && <p className="row-note">{t('lastSuccess')}: {time(view.check.last_success_at_ms, language)}</p>}
+      {view.check.error && <div className="row"><p className="row-note error">{reasonText(view.check.error, language)}</p></div>}
+      {view.check.state === 'failed' && view.check.last_success_at_ms && row(t('lastSuccess'), time(view.check.last_success_at_ms, language))}
       {candidate && row(t('published'), time(candidate.published_at, language))}
       {savedAutoCheck && view.check.next_check_at_ms ? row(t('nextCheck'), time(view.check.next_check_at_ms, language)) : null}
       {candidate && <ExpandRow label={t('notes')}><div className="row update-notes"><pre>{candidate.notes ? candidate.notes.slice(0, 32_768) : t('noNotes')}</pre>

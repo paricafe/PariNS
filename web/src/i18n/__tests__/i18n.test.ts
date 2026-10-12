@@ -27,7 +27,8 @@ describe("bilingual console catalog", () => {
     for (const page of Object.values(settingPages)) {
       const keys = [page.titleKey, page.introKey];
       for (const group of page.groups) {
-        keys.push(group.titleKey, group.helpKey);
+        keys.push(group.titleKey);
+        if (group.helpKey) keys.push(group.helpKey);
         if (group.optional) keys.push(group.enableKey);
         for (const field of group.fields) {
           keys.push(field.labelKey);
@@ -63,7 +64,6 @@ describe("bilingual console catalog", () => {
       "app.logoutUnknown", "app.sessionChanged", "ui.theme", "ui.themeAuto",
       "ui.themeLight", "ui.themeDark",
     ]) expect(hasTranslation(key), key).toBe(true);
-    expect(translate("ui.sessionHelp", "zh-CN")).not.toContain("需要重新登录");
-    expect(translate("ui.sessionHelp", "en")).toContain("stays signed in");
+    expect(hasTranslation("ui.sessionHelp")).toBe(false);
   });
 });

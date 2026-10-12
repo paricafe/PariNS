@@ -4,7 +4,7 @@ export const viewsMessages = {
   cacheTabRules: ["按域名设置", "Per-domain rules"],
   cacheTabInspect: ["检查缓存", "Inspect cache"],
   rules: ["按域名设置缓存", "Per-domain cache settings"],
-  rulesHelp: ["多条规则同时匹配时：完整域名优先，其次是更长的后缀、指定了记录类型的规则，再按列表顺序。规则会覆盖默认设置，但关闭缓存总开关后全部不缓存。缓存时间取上游给的 TTL 和你设的上限中较短的那个。", "When several rules match: exact domains win, then longer suffixes, then rules with a record type, then list order. Rules override the defaults, but turning caching off disables everything. Answers are cached for the shorter of the upstream TTL and your limit."],
+  rulesHelp: ["多条规则都匹配时，完整域名优先，其次是更长的后缀。缓存时间取上游给的 TTL 和你设的上限中较短的一个。", "When several rules match, exact domains win, then longer suffixes. Answers are cached for the shorter of the upstream TTL and your limit."],
   noRules: ["还没有按域名的规则。", "No per-domain rules yet."],
   usageTitle: ["缓存用量", "Cache usage"],
   bytesNote: ["这里是缓存数据的估算大小，不是程序实际占用的内存。", "This is the estimated size of cached data, not the program's actual memory use."],

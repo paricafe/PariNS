@@ -1,6 +1,6 @@
 export const subscriptionMessages = {
   title: ['在线订阅', 'Online subscriptions'],
-  help: ['添加一个 HTTPS 规则列表，验证能下载后保存配置即可生效。也可以先以停用状态保存。', 'Add an HTTPS rule list, check that it downloads, then save the configuration to use it. You can also save it turned off for now.'],
+  help: ['添加 HTTPS 规则列表，验证能下载后保存配置即可生效。', 'Add an HTTPS rule list, check that it downloads, then save the configuration to use it.'],
   empty: ['还没有订阅。', 'No subscriptions yet.'],
   add: ['添加订阅', 'Add subscription'], example: ['使用 Natsuki List 示例', 'Use the Natsuki List example'],
   exampleHelp: ['示例只帮你填好表单；请自己确认来源后再启用。', 'The example only fills in the form. Review the source yourself before turning it on.'],
@@ -19,7 +19,7 @@ export const subscriptionMessages = {
   replaced: ['这次操作已经查不到了，请重新验证后再保存。', "This operation can't be found anymore. Verify again before saving."],
   error: ['操作没有完成，请检查服务状态后重试。', "That didn't finish. Check the service status and try again."],
   line: ['第 {line} 行', 'Line {line}'],
-  checkTitle: ['测试一个域名', 'Test a domain'], checkHelp: ['用当前生效的规则判断，不会问上游，也不会追踪 CNAME。', "Checks against the rules in use. It doesn't ask upstreams or follow CNAMEs."],
+  checkTitle: ['测试一个域名', 'Test a domain'], checkHelp: ['按当前生效的规则判断，不会真的去查询。', 'Checks against the rules in use without making a real query.'],
   domain: ['域名', 'Domain'], check: ['测试', 'Test'], allowed: ['放行', 'Allowed'], blocked: ['拦截', 'Blocked'], unmatched: ['没有规则匹配', 'No rule matches'],
   local: ['本地规则', 'Local rules'], witness: ['命中的规则', 'Matching rule'], exact: ['仅这个域名', 'Exact domain'], suffix: ['域名及子域名', 'Domain and subdomains'],
   busy: ['另一个规则操作正在进行，请稍后再试。', 'Another rule operation is running. Try again in a moment.'],

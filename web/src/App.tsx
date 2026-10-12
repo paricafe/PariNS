@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react';
 import { DURATION, SPRING_IOS, SPRING_IOS_FAST } from './components/beui/motion';
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { Activity, BookOpenText, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
+import { Activity, BookOpenText, CircleArrowUp, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
 import { translate, chooseLanguage, presentIssue, type Language } from './i18n';
 import { ConfigProvider, toConfigIssue, useConfig, type ConfigIssue } from './config/context';
@@ -31,6 +31,7 @@ const navigation = [
   { path: '/security', key: 'security', icon: LockKeyhole, group: 'config' },
   { path: '/storage', key: 'storage', icon: Database, group: 'config' },
   { path: '/runtime', key: 'runtime', icon: Settings2, group: 'config' },
+  { path: '/updates', key: 'updates', icon: CircleArrowUp, group: 'config' },
   { path: '/advanced', key: 'advanced', icon: FileCode2, group: 'config' },
 ] as const;
 
@@ -232,7 +233,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
       <div ref={routeContent} className="route-content"><Routes>
         <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} settingsState={config.draft?.unknownApply ? 'unknown' : config.dirty ? 'unsaved' : 'saved'} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
         <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} />} />
-        {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
+        {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'updates', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes></div>
     </main></div><SaveBar language={language} />

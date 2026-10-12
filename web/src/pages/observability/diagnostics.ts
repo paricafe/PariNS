@@ -3,7 +3,7 @@ import { hasTranslation, translate, type Language } from '../../i18n';
 export interface DnsHealth { state: 'unconfigured' | 'starting' | 'running' | 'stopped' | 'failed'; ready: boolean; generation: number; changed_at_ms: number; code: string | null }
 export interface CacheDecision { outcome: string; reason: string | null }
 export interface UpstreamResult { protocol: string | null; stage: string; outcome: string; reason: string | null }
-export interface UpstreamAttempt extends UpstreamResult { pool_generation: number; slot: number; code: number | null; elapsed_ms: number }
+export interface UpstreamAttempt extends UpstreamResult { pool_generation: number; slot: number; code: number | null; elapsed_ms: number; connection?: 'new' | 'reused' }
 export interface UpstreamTrace { attempts: UpstreamAttempt[]; omitted: number }
 export interface UpstreamDiagnostics { scope: string; pool_generation: number; since_ms: number | null; slots: { slot: number; counts: (UpstreamResult & { count: number })[] }[] }
 export interface QuicDiagnostics { scope: string; doq: Record<string, number>; doh3: Record<string, number> }

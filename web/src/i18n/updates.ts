@@ -1,6 +1,4 @@
 export const updatesMessages = {
-  title: ['软件更新', 'Software updates'],
-  intro: ['检查 PariNS 官方稳定版。只有你点了“立即更新”才会下载安装。', "Checks for official stable PariNS releases. Nothing downloads or installs until you click Update now."],
   current: ['当前版本', 'Current version'], target: ['运行平台', 'Platform'],
   available: ['可更新到', 'Available version'], published: ['发布日期', 'Published'],
   lastCheck: ['上次检查', 'Last check'], lastSuccess: ['上次成功检查', 'Last successful check'], nextCheck: ['下次自动检查', 'Next automatic check'],
@@ -56,4 +54,5 @@ export const updatesMessages = {
   reasonUnknown: ['操作暂时无法完成。诊断代码：{code}', "This couldn't be done right now. Diagnostic code: {code}"],
   howToUpdate: ["如何更新", "How to update"],
   appleSilicon: ["Apple 芯片", "Apple silicon"],
+  versionGroup: ["版本", "Version"],
 } as const;

@@ -30,9 +30,9 @@ describe('persistent storage operations', () => {
     render(<StorageTools language="en" />);
     await waitFor(() => expect(screen.getByText('32,768 B')).toBeTruthy());
     const cases = [
-      ['Clear query records', 'query-log/clear', { revision: 7, log_epoch: 3 }],
+      ['Clear query log', 'query-log/clear', { revision: 7, log_epoch: 3 }],
       ['Reset totals', 'stats/reset', { revision: 7, totals_epoch: 4 }],
-      ['Clear trend history', 'stats/history/clear', { revision: 7, history_epoch: 5 }],
+      ['Clear trend chart', 'stats/history/clear', { revision: 7, history_epoch: 5 }],
     ] as const;
     for (const [label, path, body] of cases) {
       await waitFor(() => expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(false));
@@ -55,13 +55,13 @@ describe('persistent storage operations', () => {
     render(<StorageTools language="en" />);
     await waitFor(() => expect((screen.getByRole('button', { name: 'Reset totals' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Reset totals' }));
-    await waitFor(() => expect(screen.getByText(/The result is not confirmed/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/confirm it finished/)).toBeTruthy());
     expect((screen.getByRole('button', { name: 'Reset totals' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Check result' }));
-    await waitFor(() => expect(screen.getByText(/committed result is not visible/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/result isn't visible yet/)).toBeTruthy());
     epoch = 5;
     fireEvent.click(screen.getByRole('button', { name: 'Check result' }));
-    await waitFor(() => expect(screen.getByText('The change has been saved.')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Done.')).toBeTruthy());
     expect(mocks.request.mock.calls.filter(([path]) => path === 'stats/reset')).toHaveLength(1);
   });
 
@@ -72,7 +72,7 @@ describe('persistent storage operations', () => {
     });
     render(<StorageTools language="en" />);
     await waitFor(() => expect(screen.getAllByRole('alert').some((node) => node.textContent?.includes('read-only fixture'))).toBe(true));
-    expect((screen.getByRole('button', { name: 'Clear query records' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.queryByText('The change has been saved.')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Clear query log' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText('Done.')).toBeNull();
   });
 });

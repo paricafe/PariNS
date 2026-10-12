@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { cacheRuleDraft, defaultCacheRule, fieldDisplayValue, getPath, settingPages, ModelError, type CacheRule, type CacheRuleDraft, type RawFieldValue, type SettingField, type SettingPageId } from '../../model';
-import { formatNumber, presentIssue, translate, type Language } from '../../i18n';
+import { formatNumber, hasTranslation, presentIssue, translate, type Language } from '../../i18n';
 import { toConfigIssue, useConfig, type ConfigIssue } from '../../config/context';
 import { useSession } from '../../session/context';
 import { ApiError, StaleRequest } from '../../session/client';
@@ -14,6 +14,7 @@ import { SecurityRuntime } from './SecurityRuntime';
 import type { SnapshotReport } from '../observability/storage';
 import { UpdatePanel } from '../../features/updates/UpdatePanel';
 import { SubscriptionsPanel } from '../../features/subscriptions/SubscriptionsPanel';
+import { UnitInput, unitFamily } from '../../components/UnitInput';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
 type CacheTab = typeof cacheTabs[number];
@@ -41,6 +42,12 @@ function Field({ field, language, value, onChange, disabled }: { field: SettingF
     {field.helpKey && (field.path === 'doh.http3' ? <div className="settings-expand" data-open={value === true} inert={value !== true}><div><small>{t(field.helpKey)}</small></div></div> : <small>{t(field.helpKey)}</small>)}
   </div>;
   const textValue = typeof value === 'string' ? value : '';
+  const family = field.type === 'number' ? unitFamily(field.path) : null;
+  if (family) return <div className="field">
+    <label htmlFor={id}>{t(field.labelKey)}</label>
+    <UnitInput id={id} label={t(field.labelKey)} family={family} value={textValue} disabled={disabled} language={language} onChange={onChange} describedBy={field.helpKey ? `${id}-help` : undefined} />
+    {field.helpKey && <small id={`${id}-help`}>{t(field.helpKey)}</small>}
+  </div>;
   return <div className={`field ${field.type === 'lines' ? 'wide' : ''}`}>
     <label htmlFor={id}>{t(field.labelKey)}</label>
     {field.type === 'lines' ? <textarea id={id} rows={5} value={textValue} disabled={disabled} spellCheck={false} onChange={(event) => onChange(event.target.value)} />
@@ -114,7 +121,7 @@ function CacheRules({ language }: { language: Language }) {
 }
 
 interface CacheStatus { revision: number; running: boolean; cache?: Record<string, number>; refresh?: Record<string, number>; cache_persistence?: SnapshotReport }
-interface Inspection { revision: number; epoch: number; explanation: { state: string; reason: string; scope: string; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean } }
+interface Inspection { revision: number; epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean } }
 
 function CacheUsage({ language }: { language: Language }) {
   const { api } = useSession();
@@ -173,8 +180,8 @@ function CacheInspect({ language, dirty }: { language: Language; dirty: boolean 
       <button className="button primary" disabled={working} type="submit">{t('inspect')}</button>
     </form>
     {error && <p className="error" role="alert">{presentIssue(error, language)}</p>}
-    {result && <div className="inspection-result"><h3>{t(result.explanation.state === 'stale' ? 'staleState' : result.explanation.state)}</h3>
-      <p>{t('explanation').replace('{reason}', t(result.explanation.reason)).replace('{scope}', t(result.explanation.scope))}</p>
+    {result && <div className="inspection-result"><h3>{t(`explain${result.explanation.state[0].toUpperCase()}${result.explanation.state.slice(1)}`)}</h3>
+      <p>{t('explanation').replace('{reason}', t(result.explanation.reason)).replace('{scope}', (result.explanation.scope === null ? t('none') : hasTranslation(`views.${result.explanation.scope}`) ? t(result.explanation.scope) : result.explanation.scope))}</p>
       <p className="muted small">{t('variants')}: {result.inspection.variants.length}</p>
       <div className="variant-list">{result.inspection.variants.map((variant, index) => <details key={index}><summary>{String(variant.scope)} · {String(variant.state)}</summary><pre>{JSON.stringify(variant, null, 2)}</pre></details>)}</div>
       {result.inspection.truncated && <p>{t('variantsTruncated')}</p>}
@@ -265,7 +272,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   const title = pageId === 'advanced' ? t('app.advanced') : t(settingPages[pageId].titleKey);
   if (pageId !== 'advanced' && needsParse) return <div className="page-stack"><h1>{title}</h1><p className="notice" role="status">{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate('/advanced')}>{t('app.returnToToml')}</button></div>;
   return <div className="page-stack"><header className="page-head"><p className="eyebrow">{t('ui.configuration')}</p><h1>{title}</h1><p className="muted">{intro}</p></header>
-    {error && <div className="notice error" role="alert">{presentIssue(error, language)}<button type="button" onClick={() => setError(null)} aria-label={t('ui.closeDialog')}>×</button></div>}
+    {error && <div className="notice error" role="alert">{presentIssue(error, language)}<button type="button" onClick={() => setError(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
     {notice && <p className="notice" role="status">{notice}</p>}
     <div className="config-tools"><span>{t('ui.draft')} {draft && <small className="muted">{t('app.revision').replace('{revision}', String(draft.revision))}</small>}</span>
       <div className="button-group"><button type="button" className="button quiet" disabled={!draft || busy} onClick={() => void exportDraft().then(() => setNotice(t('app.exported'))).catch((reason) => setError(toConfigIssue(reason)))}>{t('ui.export')}</button>

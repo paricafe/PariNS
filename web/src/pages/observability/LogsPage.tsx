@@ -7,6 +7,7 @@ import { StorageStatusPanel } from './StorageStatusPanel';
 import { isUnknownStorageMutation } from './storage';
 import { decisionLabel, diagnosticLabel } from './diagnostics';
 import { UpstreamAttempts } from './TransportDiagnostics';
+import { CloudOff, Inbox, RefreshCw, Search, Settings2 } from 'lucide-react';
 
 export interface LogsPageProps {
   api: ApiClient;
@@ -28,17 +29,17 @@ function localizedError(failure: Failure, language: Language): string {
 }
 
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return <div className="grid gap-1 border-b border-zinc-100 py-2 text-sm last:border-0 dark:border-zinc-800 sm:grid-cols-[9rem_1fr]">
-    <dt className="text-zinc-500 dark:text-zinc-400">{label}</dt><dd className="min-w-0 break-all">{children}</dd>
+  return <div className="log-detail-row">
+    <dt>{label}</dt><dd>{children}</dd>
   </div>;
 }
 
 function LogDetail({ entry, language }: { entry: LogEntry; language: Language }) {
   const none = translate("views.none", language);
   const answer = entry.answer.map((record) => `${record.name} ${record.ttl} ${record.record_type} ${record.data}`).join("\n");
-  return <div className="space-y-5">
-    <section aria-labelledby="log-detail-summary"><h3 id="log-detail-summary" className="font-semibold">{translate("views.query", language)}</h3>
-      <dl className="mt-2">
+  return <div className="log-detail">
+    <section aria-labelledby="log-detail-summary"><h3 id="log-detail-summary">{translate("views.query", language)}</h3>
+      <dl>
         <DetailRow label={translate("views.recordId", language)}>{formatNumber(entry.id, language)}</DetailRow>
         <DetailRow label={translate("views.time", language)}>{formatDate(entry.time_ms, language, { dateStyle: "medium", timeStyle: "medium" })}</DetailRow>
         <DetailRow label={translate("views.name", language)}>{entry.name || translate("views.unreadableQuery", language)}</DetailRow>
@@ -46,8 +47,8 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
         <DetailRow label={translate("views.client", language)}>{entry.client}</DetailRow>
         <DetailRow label={translate("views.transport", language)}>{entry.transport}</DetailRow>
       </dl></section>
-    <section aria-labelledby="log-detail-process"><h3 id="log-detail-process" className="font-semibold">{translate("views.path", language)}</h3>
-      <dl className="mt-2">
+    <section aria-labelledby="log-detail-process"><h3 id="log-detail-process">{translate("views.path", language)}</h3>
+      <dl>
         <DetailRow label={translate("ui.result", language)}>{translate(statusLabel(entry.status), language)}</DetailRow>
         <DetailRow label={translate("views.path", language)}>{translate(pathLabel(entry.cache), language)}</DetailRow>
         <DetailRow label={translate('reliability.lookup', language)}>{decisionLabel('lookup', entry.cache_lookup, language)}</DetailRow>
@@ -60,15 +61,15 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
         <DetailRow label={translate("views.duration", language)}>{formatNumber(entry.duration_ms, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms</DetailRow>
       </dl></section>
     {entry.upstream_attempts && <UpstreamAttempts trace={{ attempts: entry.upstream_attempts, omitted: entry.upstream_attempts_omitted ?? 0 }} language={language} />}
-    <section aria-labelledby="log-detail-dns"><h3 id="log-detail-dns" className="font-semibold">{translate("views.flags", language)}</h3>
-      <dl className="mt-2">
+    <section aria-labelledby="log-detail-dns"><h3 id="log-detail-dns">{translate("views.flags", language)}</h3>
+      <dl>
         <DetailRow label={translate("views.incomingEcs", language)}>{entry.incoming_ecs || none}</DetailRow>
         <DetailRow label={translate("views.outgoingEcs", language)}>{entry.outgoing_ecs || none}</DetailRow>
-        <DetailRow label={translate("views.flags", language)}><span className="font-mono text-xs">EDNS={Number(entry.edns)} · DO={Number(entry.dnssec_ok)} · CD={Number(entry.checking_disabled)} · RD={Number(entry.recursion_desired)}</span></DetailRow>
+        <DetailRow label={translate("views.flags", language)}><span className="mono small">EDNS={Number(entry.edns)} · DO={Number(entry.dnssec_ok)} · CD={Number(entry.checking_disabled)} · RD={Number(entry.recursion_desired)}</span></DetailRow>
       </dl></section>
-    <section aria-labelledby="log-detail-answers"><h3 id="log-detail-answers" className="font-semibold">{translate("views.answers", language)}</h3>
-      <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-zinc-100 p-3 text-xs dark:bg-zinc-800">{answer || translate("views.noAnswers", language)}</pre>
-      {entry.answer_truncated && <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">{translate("views.answerTruncated", language)}</p>}
+    <section aria-labelledby="log-detail-answers"><h3 id="log-detail-answers">{translate("views.answers", language)}</h3>
+      <pre className="log-answers">{answer || translate("views.noAnswers", language)}</pre>
+      {entry.answer_truncated && <p className="muted small">{translate("views.answerTruncated", language)}</p>}
     </section>
   </div>;
 }
@@ -154,82 +155,84 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const page = result?.page ?? null;
   const entries = page?.entries ?? [];
   const statuses = ["", "success", "blocked", "error", "dropped"] as const;
-  return <div className="space-y-5 pb-28 md:pb-8">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><p className="text-xs font-semibold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">{translate("ui.logsEyebrow", language)}</p>
-        <h1 className="mt-1 text-2xl font-semibold tracking-tight">{translate("ui.logs", language)}</h1>
-        <p className="mt-2 max-w-3xl text-sm text-zinc-600 dark:text-zinc-400">{translate("ui.logIntro", language)}</p></div>
-      <button type="button" onClick={onOpenSettings} className="min-h-11 rounded-md border border-zinc-400 px-3 text-sm hover:bg-zinc-100 focus-visible:outline-2 dark:border-zinc-600 dark:hover:bg-zinc-800">
-        {translate("ui.logSettings", language)}
-      </button>
-    </div>
+  const label = (entry: LogEntry) => `${translate("views.details", language)} · ${entry.name || translate("views.unreadableQuery", language)} · #${entry.id}`;
+  return <div className="page-stack logs-page">
+    <header className="page-head log-head">
+      <div><p className="eyebrow">{translate("ui.logsEyebrow", language)}</p>
+        <h1>{translate("ui.logs", language)}</h1>
+        <p className="muted">{translate("ui.logIntro", language)}</p></div>
+      <button type="button" onClick={onOpenSettings} className="button secondary"><Settings2 size={16} aria-hidden="true" />{translate("ui.logSettings", language)}</button>
+    </header>
 
-    <form onSubmit={submitFilter} className="grid gap-3 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900 sm:grid-cols-[minmax(0,1fr)_12rem_auto] sm:items-end">
-      <label className="min-w-0 text-sm"><span className="mb-1 block font-medium">{translate("ui.logSearch", language)}</span>
-        <input value={search} maxLength={256} onChange={(event) => setSearch(event.target.value)} type="search" autoComplete="off" placeholder={translate("ui.logSearchPlaceholder", language)}
-          className="min-h-10 w-full min-w-0 rounded-md border border-zinc-400 bg-transparent px-3 outline-offset-2 dark:border-zinc-600" /></label>
-      <label className="text-sm"><span className="mb-1 block font-medium">{translate("ui.result", language)}</span>
-        <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="min-h-10 w-full rounded-md border border-zinc-400 bg-transparent px-3 dark:border-zinc-600">
-          {statuses.map((status) => <option key={status} value={status}>{translate(status ? `ui.${status}` : "ui.allResults", language)}</option>)}
-        </select></label>
-      <button type="submit" className="min-h-11 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-700 focus-visible:outline-2 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">{translate("ui.filter", language)}</button>
-    </form>
-    <Tabs label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} items={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
-      const filter = { search: search.trim(), status: statusFilter || null, cache: cache === 'all' ? null : cache as CacheFilter };
-      appliedRef.current = filter; setApplied(filter); setNotice(''); setSelected(null); void load(null, filter);
-    }} />
+    <div className="log-controls">
+      <form onSubmit={submitFilter} className="panel log-filter">
+        <label className="field"><span>{translate("ui.logSearch", language)}</span>
+          <span className="search-input"><Search size={16} aria-hidden="true" /><input value={search} maxLength={256} onChange={(event) => setSearch(event.target.value)} type="search" autoComplete="off" placeholder={translate("ui.logSearchPlaceholder", language)} /></span></label>
+        <label className="field"><span>{translate("ui.result", language)}</span>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            {statuses.map((status) => <option key={status} value={status}>{translate(status ? `ui.${status}` : "ui.allResults", language)}</option>)}
+          </select></label>
+        <button type="submit" className="button primary">{translate("ui.filter", language)}</button>
+      </form>
+      <Tabs label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} items={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
+        const filter = { search: search.trim(), status: statusFilter || null, cache: cache === 'all' ? null : cache as CacheFilter };
+        appliedRef.current = filter; setApplied(filter); setNotice(''); setSelected(null); void load(null, filter);
+      }} />
+    </div>
     {page?.storage && <StorageStatusPanel status={page.storage} language={language} compact />}
     {page && !page.enabled && <p className="notice">{translate('app.logsDisabled', language)} {translate('storage.recorded', language)}</p>}
 
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <p role="status" className="text-sm text-zinc-600 dark:text-zinc-400">{loading ? translate(page ? 'storage.filterPending' : "app.reading", language)
+    <div className="log-toolbar">
+      <p role="status" className="muted small">{loading ? translate(page ? 'storage.filterPending' : "app.reading", language)
         : page && updated !== null
           ? translate("app.logSummary", language, { count: formatNumber(entries.length, language), total: formatNumber(page.total, language), time: formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })
           : translate("ui.logsUnread", language)}</p>
-      <div className="flex flex-wrap gap-2">
-        <button type="button" onClick={() => void load(null, applied)} disabled={loading} className="min-h-11 rounded-md border border-zinc-400 px-3 text-sm disabled:opacity-50 dark:border-zinc-600">{translate("ui.refreshLatest", language)}</button>
+      <div className="button-group">
+        <button type="button" onClick={() => void load(null, applied)} disabled={loading} className="button secondary"><RefreshCw size={15} aria-hidden="true" className={loading ? 'spin' : undefined} />{translate("ui.refreshLatest", language)}</button>
         <button type="button" onClick={() => result && setConfirmation({ revision: result.revision, epoch: result.page.log_epoch })} disabled={!page?.total || clearing || unknownEpoch !== null}
-          className="min-h-11 rounded-md border border-zinc-400 px-3 text-sm disabled:opacity-50 dark:border-zinc-600">{translate("ui.clearLogs", language)}</button>
+          className="button danger">{translate("ui.clearLogs", language)}</button>
       </div>
     </div>
-    {failure && <p role="alert" className="rounded-md border border-red-300 p-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300">{localizedError(failure, language)}</p>}
-    {notice && <p role="status" className="rounded-md border border-zinc-300 p-3 text-sm dark:border-zinc-700">{translate(notice, language)}</p>}
+    {failure && <p role="alert" className="notice error">{localizedError(failure, language)}</p>}
+    {notice && <p role="status" className="notice">{translate(notice, language)}</p>}
     {unknownEpoch !== null && <button type="button" className="button secondary" disabled={loading} onClick={() => void load(null, applied)}>{translate('storage.checkResult', language)}</button>}
 
-    {page === null ? <p className="rounded-lg border border-zinc-200 bg-white p-8 text-center text-sm dark:border-zinc-800 dark:bg-zinc-900">{translate(failure ? "app.loadFailed" : "app.reading", language)}</p>
-      : entries.length === 0 ? <p className="rounded-lg border border-zinc-200 bg-white p-8 text-center text-sm dark:border-zinc-800 dark:bg-zinc-900">{translate("views.logsEmpty", language)}</p>
+    {page === null ? (failure
+      ? <div className="panel empty-state" data-tone="bad"><CloudOff size={28} aria-hidden="true" /><p>{translate("app.loadFailed", language)}</p></div>
+      : <div className="panel skeleton-stack" aria-hidden="true">{[0, 1, 2, 3, 4].map((index) => <div key={index} className="skeleton" style={{ height: 22 }} />)}</div>)
+      : entries.length === 0 ? <div className="panel empty-state"><Inbox size={28} aria-hidden="true" /><p>{translate("views.logsEmpty", language)}</p></div>
         : <>
-          <div className="space-y-2 md:hidden">{entries.map((entry) => <article key={entry.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-            <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="break-all font-mono text-sm">{entry.name || translate("views.unreadableQuery", language)}</p><p className="text-xs text-zinc-500 dark:text-zinc-400">{entry.qtype || "—"} · {formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "short" })}</p></div>
-              <button type="button" onClick={(event) => openDetail(entry, event)} aria-label={`${translate("views.details", language)} · ${entry.name || translate("views.unreadableQuery", language)} · #${entry.id}`} className="min-h-11 shrink-0 text-sm underline underline-offset-4">{translate("views.details", language)}</button></div>
-            <p className="mt-2 break-all text-xs text-zinc-600 dark:text-zinc-400">{entry.client} · {translate(statusLabel(entry.status), language)} · {translate(pathLabel(entry.cache), language)} · {formatNumber(entry.duration_ms, language, { maximumFractionDigits: 2 })} ms</p>
+          <div className="log-cards">{entries.map((entry) => <article key={entry.id} className="panel log-card">
+            <div className="log-card-head"><div><p className="mono log-name">{entry.name || translate("views.unreadableQuery", language)}</p><p className="muted small">{entry.qtype || "—"} · {formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "short" })}</p></div>
+              <button type="button" onClick={(event) => openDetail(entry, event)} aria-label={label(entry)} className="button quiet">{translate("views.details", language)}</button></div>
+            <p className="muted small log-meta"><span className="badge" data-status={entry.status}>{translate(statusLabel(entry.status), language)}</span> {entry.client} · {translate(pathLabel(entry.cache), language)} · {formatNumber(entry.duration_ms, language, { maximumFractionDigits: 2 })} ms</p>
           </article>)}</div>
-          <div tabIndex={0} role="region" aria-label={translate("views.logsRegion", language)} className="hidden overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 md:block">
-            <table className="w-full min-w-[52rem] text-left text-sm"><caption className="sr-only">{translate("views.logsCaption", language)}</caption>
-              <thead><tr className="border-b border-zinc-200 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-                {(["time", "query", "clientTransport", "resultPath", "duration", "details"] as const).map((key) => <th key={key} scope="col" className="px-3 py-3 font-medium">{translate(`views.${key}`, language)}</th>)}
-              </tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/70">
-                <td className="whitespace-nowrap px-3 py-3 tabular-nums">{formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "medium" })}</td>
-                <td className="px-3 py-3"><span className="block max-w-52 break-all font-mono">{entry.name || translate("views.unreadableQuery", language)}</span><span className="text-xs text-zinc-500 dark:text-zinc-400">{entry.qtype || "—"}</span></td>
-                <td className="px-3 py-3"><span className="block font-mono">{entry.client}</span><span className="text-xs text-zinc-500 dark:text-zinc-400">{entry.transport}</span></td>
-                <td className="px-3 py-3"><span className="block">{translate(statusLabel(entry.status), language)}</span><span className="text-xs text-zinc-500 dark:text-zinc-400">{translate(pathLabel(entry.cache), language)}</span></td>
-                <td className="whitespace-nowrap px-3 py-3 tabular-nums">{formatNumber(entry.duration_ms, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms</td>
-                <td className="px-3 py-3"><button type="button" onClick={(event) => openDetail(entry, event)} aria-label={`${translate("views.details", language)} · ${entry.name || translate("views.unreadableQuery", language)} · #${entry.id}`} className="min-h-10 underline underline-offset-4">{translate("views.details", language)}</button></td>
+          <div tabIndex={0} role="region" aria-label={translate("views.logsRegion", language)} className="panel log-table table-scroll">
+            <table className="data-table"><caption className="sr-only">{translate("views.logsCaption", language)}</caption>
+              <thead><tr>
+                {(["time", "query", "clientTransport", "resultPath", "duration", "details"] as const).map((key) => <th key={key} scope="col">{translate(`views.${key}`, language)}</th>)}
+              </tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="log-row">
+                <td className="num nowrap">{formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "medium" })}</td>
+                <td><span className="mono log-name">{entry.name || translate("views.unreadableQuery", language)}</span><span className="muted small">{entry.qtype || "—"}</span></td>
+                <td><span className="mono">{entry.client}</span><span className="muted small">{entry.transport}</span></td>
+                <td><span className="badge" data-status={entry.status}>{translate(statusLabel(entry.status), language)}</span><span className="muted small">{translate(pathLabel(entry.cache), language)}</span></td>
+                <td className="num nowrap">{formatNumber(entry.duration_ms, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms</td>
+                <td><button type="button" onClick={(event) => openDetail(entry, event)} aria-label={label(entry)} className="button quiet">{translate("views.details", language)}</button></td>
               </tr>)}</tbody></table>
           </div>
         </>}
 
     {page?.next_cursor && <button type="button" onClick={() => void load(page.next_cursor, applied)} disabled={loading}
-      className="min-h-11 rounded-md border border-zinc-400 px-4 text-sm disabled:opacity-50 dark:border-zinc-600">{translate("ui.earlier", language)}</button>}
+      className="button secondary load-more">{translate("ui.earlier", language)}</button>}
 
     <Drawer open={selected !== null} title={translate('views.details', language)} closeLabel={translate('ui.closeDetails', language)} onClose={() => setSelected(null)}>
       {selected && <LogDetail entry={selected} language={language} />}
     </Drawer>
     <Drawer open={confirmation !== null} title={translate('app.clearLogsTitle', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => setConfirmation(null)}>
-      <p id="log-clear-help" className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">{translate("app.clearLogsHelp", language)}</p>
-      <div className="mt-5 flex justify-end gap-2">
-        <button type="button" onClick={() => setConfirmation(null)} className="min-h-11 rounded-md border border-zinc-400 px-4 text-sm dark:border-zinc-600">{translate("ui.cancel", language)}</button>
-        <button type="button" onClick={() => void clearLogs()} className="min-h-11 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white dark:bg-zinc-100 dark:text-zinc-900">{translate("app.clearLogs", language)}</button>
+      <p id="log-clear-help" className="muted">{translate("app.clearLogsHelp", language)}</p>
+      <div className="button-group confirm-actions">
+        <button type="button" onClick={() => setConfirmation(null)} className="button secondary">{translate("ui.cancel", language)}</button>
+        <button type="button" onClick={() => void clearLogs()} className="button danger">{translate("app.clearLogs", language)}</button>
       </div>
     </Drawer>
   </div>;

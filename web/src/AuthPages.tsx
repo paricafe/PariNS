@@ -46,7 +46,7 @@ export function SetupPage({ language }: { language: Language }) {
   const [password, setPassword] = useState(''); const [confirmPassword, setConfirmPassword] = useState('');
   const [listen, setListen] = useState('127.0.0.1:5353'); const [servers, setServers] = useState('');
   const [bootstrap, setBootstrap] = useState(''); const [mode, setMode] = useState('weighted'); const [preferH3, setPreferH3] = useState(false);
-  const [toml, setToml] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  const [toml, setToml] = useState(''); const [generated, setGenerated] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [templateError, setTemplateError] = useState<unknown>(null);
   const t = (key: string) => translate(`ui.${key}`, language);
   useEffect(() => { void api.request<{ toml: string }>('template').then((result) => setTemplate(result.toml)).catch(setTemplateError); }, [api]);
@@ -58,7 +58,7 @@ export function SetupPage({ language }: { language: Language }) {
       const upstreams = servers.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       if (!upstreams.length) { setError(translate('settings.validation.required', language)); return; }
       if (!template) { setError(translate('app.startFailed', language)); return; }
-      try { setToml(networkTemplate(template, listen.trim(), { servers: upstreams, bootstrap: bootstrap.split(/\r?\n/).map((line) => line.trim()).filter(Boolean), mode, prefer_h3: preferH3 })); }
+      try { const candidate = networkTemplate(template, listen.trim(), { servers: upstreams, bootstrap: bootstrap.split(/\r?\n/).map((line) => line.trim()).filter(Boolean), mode, prefer_h3: preferH3 }); setToml(candidate); setGenerated(candidate); }
       catch (reason) { setError(present(reason, language)); return; }
     }
     setStep((current) => Math.min(current + 1, 2));
@@ -72,7 +72,7 @@ export function SetupPage({ language }: { language: Language }) {
   };
   return <section className="auth-wrap"><div className="auth-card setup-card">
     <p className="eyebrow">{t('setupEyebrow')}</p><h1>{t('setupTitle')}</h1><p className="muted">{t('setupIntro')}</p>
-    <ol className="setup-steps" aria-label={t('setupProgress')}>{(['admin', 'network', 'review'] as const).map((key, index) => <li key={key} aria-current={step === index ? 'step' : undefined}><span>{`0${index + 1}`}</span> {t(key)}</li>)}</ol>
+    <ol className="setup-steps" aria-label={t('setupProgress')}>{(['admin', 'network', 'review'] as const).map((key, index) => <li key={key} aria-current={step === index ? 'step' : undefined} data-done={step > index ? '' : undefined}><span>{`0${index + 1}`}</span> {t(key)}</li>)}</ol>
     <form onSubmit={(event) => void submit(event)} className="auth-form">
       {step === 0 && <>
         <p className="muted small">{t('tokenIntro')}</p>
@@ -90,7 +90,18 @@ export function SetupPage({ language }: { language: Language }) {
         <label className="toggle-line"><input type="checkbox" checked={preferH3} onChange={(event) => setPreferH3(event.target.checked)} />{translate('settings.upstreams.prefer_h3.label', language)}</label>
         <label htmlFor="setup-bootstrap">{translate('settings.upstreams.bootstrap.label', language)}</label><textarea id="setup-bootstrap" rows={3} value={bootstrap} onChange={(event) => setBootstrap(event.target.value)} spellCheck={false} />
       </>}
-      {step === 2 && <><p className="muted small">{t('reviewIntro')}</p><label htmlFor="setup-toml">{t('setupConfig')}</label><textarea id="setup-toml" className="toml-editor" value={toml} onChange={(event) => setToml(event.target.value)} spellCheck={false} /></>}
+      {step === 2 && <><p className="muted small">{t('reviewIntro')}</p>
+        {toml !== generated ? <p className="notice">{translate('shell.setupEdited', language)}</p> : <dl className="setup-summary">
+          <div className="detail-row"><span>{t('listen')}</span><strong className="transport-address">{listen.trim()}</strong></div>
+          <div className="detail-row"><span>{t('upstream')}</span><strong className="transport-address">{servers.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => <span key={index} style={{ display: 'block' }}>{line}</span>)}</strong></div>
+          <div className="detail-row"><span>{translate('settings.upstreams.mode.label', language)}</span><strong>{translate(`settings.upstreams.mode.${mode}`, language)}</strong></div>
+          <div className="detail-row"><span>{translate('settings.upstreams.prefer_h3.label', language)}</span><strong>{translate(preferH3 ? 'shell.setupYes' : 'shell.setupNo', language)}</strong></div>
+          <div className="detail-row"><span>{translate('settings.upstreams.bootstrap.label', language)}</span><strong className="transport-address">{bootstrap.trim() ? bootstrap.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(', ') : translate('shell.setupNone', language)}</strong></div>
+        </dl>}
+        <details className="setup-advanced"><summary>{translate('shell.setupFullConfig', language)}</summary>
+          <p className="muted small">{translate('shell.setupFullConfigHelp', language)}</p>
+          <label htmlFor="setup-toml">{t('setupConfig')}</label><textarea id="setup-toml" className="toml-editor" value={toml} onChange={(event) => setToml(event.target.value)} spellCheck={false} />
+        </details></>}
       {(error !== null || templateError !== null) && <p className="error" role="alert">{error ?? present(templateError, language)}</p>}
       <div className="button-group">{step > 0 && <button className="button secondary" type="button" onClick={() => setStep((current) => current - 1)}>{t('back')}</button>}
         <button className="button primary" type="submit" disabled={busy || template === null}>{busy ? translate('app.working', language) : step === 2 ? t('start') : t('continue')}</button></div>

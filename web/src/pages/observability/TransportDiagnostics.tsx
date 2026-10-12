@@ -9,7 +9,7 @@ export function UpstreamAttempts({ trace, language }: { trace: UpstreamTrace; la
   return <section><h3>{translate('reliability.attempts', language)}</h3>
     {!trace.attempts.length && <p className="muted">{translate('reliability.noAttempts', language)}</p>}
     <ol className="attempt-list">{trace.attempts.map((attempt, index) => <li key={index}>
-      <p>{translate('reliability.slot', language, { slot: attempt.slot })} · #{attempt.pool_generation} · {formatNumber(attempt.elapsed_ms, language, { maximumFractionDigits: 2 })} ms</p>
+      <p>{translate('reliability.slot', language, { slot: attempt.slot })} · <code>#{attempt.pool_generation}</code> · {formatNumber(attempt.elapsed_ms, language, { maximumFractionDigits: 2 })} ms</p>
       <p><Result value={attempt} language={language} /></p>
       {attempt.code && <p className="small"><span>{translate('reliability.code', language)}: </span><code>{attempt.code}</code></p>}
     </li>)}</ol>

@@ -6,6 +6,7 @@ import { reliabilityMessages } from './reliability';
 import { updatesMessages } from './updates';
 import { subscriptionMessages } from './subscriptions';
 import { accountMessages } from './account';
+import { shellMessages } from './shell';
 import { ModelError } from "../model/errors";
 import { ApiError } from "../session/client";
 
@@ -14,6 +15,7 @@ export type TranslationParams = Readonly<Record<string, string | number | boolea
 type MessagePair = readonly [string, string];
 
 const catalog: Record<string, MessagePair> = {
+  ...Object.fromEntries(Object.entries(shellMessages).map(([key, value]) => [`shell.${key}`, value])),
   ...Object.fromEntries(Object.entries(accountMessages).map(([key, value]) => [`account.${key}`, value])),
   ...Object.fromEntries(Object.entries(subscriptionMessages).map(([key, value]) => [`subscriptions.${key}`, value])),
   ...Object.fromEntries(Object.entries(apiMessages).map(([key, value]) => [`api.${key}`, value])),

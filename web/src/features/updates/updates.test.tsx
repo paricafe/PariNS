@@ -43,7 +43,7 @@ describe('software update presentation', () => {
     const current = fixture(); mocks.request.mockResolvedValue(current);
     const view = mount();
     await screen.findByText('Software updates');
-    await screen.findByRole('link', { name: 'View release on GitHub' });
+    await screen.findByRole('link', { name: 'View on GitHub' });
     expect(document.querySelector('img')).toBeNull();
     expect(screen.getByText(current.candidate!.notes)).toBeTruthy();
     expect(mocks.request.mock.calls.every(([path, method]) => path === 'updates' && !method)).toBe(true);
@@ -60,7 +60,7 @@ describe('software update presentation', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(mocks.confirm).not.toHaveBeenCalled();
     expect(mocks.request.mock.calls.some(([path]) => path === 'updates/apply')).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
     await waitFor(() => expect(mocks.config.reload).toHaveBeenCalledTimes(1));
     expect(mocks.confirm).not.toHaveBeenCalled();
   });
@@ -72,15 +72,15 @@ describe('software update presentation', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
     await waitFor(() => expect(mocks.request).toHaveBeenCalledWith('updates/apply', 'POST', { plan_id: 'plan-1', expected_version: '0.1.5', config_revision: 7 }));
-    await screen.findByText(/request result is not confirmed/);
+    await screen.findByText(/confirm the update request/);
     expect(mocks.expectRestart).toHaveBeenCalledWith(true);
     expect(mocks.config.setUpdateLocked).toHaveBeenCalledWith(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Read update status' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
     await waitFor(() => expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1));
     expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(true);
     current.last_operation = { operation_id: 'op-1', phase: 'failed', version: '0.1.5', reason: 'preflight_failed', downloaded_bytes: 0, total_bytes: 100 };
-    fireEvent.click(screen.getByRole('button', { name: 'Read update status' }));
-    await screen.findByText('Update did not complete');
+    fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
+    await screen.findByText("The update didn't finish");
     await waitFor(() => expect(mocks.expectRestart).toHaveBeenLastCalledWith(false));
     expect(mocks.reloadPage).not.toHaveBeenCalled();
   });
@@ -88,25 +88,25 @@ describe('software update presentation', () => {
   it('keeps a check failure distinct from stale available results and shows rate limits', async () => {
     const current = fixture(); current.check.state = 'failed'; current.check.error = 'rate_limited'; current.check.retry_at_ms = Date.now() + 90_000;
     mocks.request.mockResolvedValue(current); mount();
-    await screen.findByText('The check failed. The last result is kept below.');
-    expect(screen.queryByText('You have the latest stable release')).toBeNull();
+    await screen.findByText('This check failed. Showing the last result below.');
+    expect(screen.queryByText("You're on the latest stable release")).toBeNull();
     expect((screen.getByRole('button', { name: 'Check for updates' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/Check again after/)).toBeTruthy();
+    expect(screen.getByText(/check again after/)).toBeTruthy();
   });
 
   it('shows manual recovery with the installer action instead of missing components', async () => {
     const current = fixture(); current.capability = { available: false, reason: 'manual_recovery_required' }; current.frozen = true;
     current.last_operation = { operation_id: 'op-3', phase: 'manual_required', version: '0.1.8', reason: 'readiness_failed', downloaded_bytes: 100, total_bytes: 100 };
     mocks.request.mockResolvedValue(current); mount();
-    await screen.findByText('Update recovery required');
+    await screen.findByText('Update needs recovery');
     expect(screen.getByText(/reinstall the current or a newer version with the official installer/)).toBeTruthy();
-    expect(screen.getByText('The program did not pass DNS and storage readiness checks.')).toBeTruthy();
-    expect(screen.queryByText(/update components are unavailable/)).toBeNull();
-    expect(screen.queryByText(/One-click updates support/)).toBeNull();
+    expect(screen.getByText("After starting, the new program's DNS or storage didn't work properly.")).toBeTruthy();
+    expect(screen.queryByText(/update components aren't available/)).toBeNull();
+    expect(screen.queryByText(/One-click updates work/)).toBeNull();
     expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(true);
     cleanup(); mount('zh-CN');
     await screen.findByText('更新需要恢复');
-    expect(screen.getByText(/用官方安装器重新安装当前或更新的版本以完成恢复/)).toBeTruthy();
+    expect(screen.getByText(/用官方安装器重新安装当前或更新的版本/)).toBeTruthy();
   });
 
   it('shows manual capability and real download bytes without inventing percentages', async () => {
@@ -115,7 +115,7 @@ describe('software update presentation', () => {
     mocks.request.mockResolvedValue(current); mount();
     await screen.findByText('Downloaded 1,024 B');
     expect(screen.queryByRole('progressbar')).toBeNull();
-    expect(screen.getByText('This installation requires a manual update')).toBeTruthy();
+    expect(screen.getByText('This installation needs a manual update')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(true);
     expect(mocks.expectRestart).not.toHaveBeenCalled();
   });
@@ -130,11 +130,11 @@ describe('software update presentation', () => {
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await screen.findByText(/Waiting for the service to reconnect/);
+    await screen.findByText(/Waiting for the service to come back/);
     expect(mocks.reloadPage).not.toHaveBeenCalled();
     offline = false;
     current.last_operation = { operation_id: 'op-2', phase: 'rolled_back', version: '0.1.5', reason: 'readiness_failed', downloaded_bytes: 100, total_bytes: 100 };
-    fireEvent.click(screen.getByRole('button', { name: 'Read update status' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
     await waitFor(() => expect(mocks.reloadPage).toHaveBeenCalledTimes(1));
     expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1);
   });
@@ -145,7 +145,7 @@ describe('software update presentation', () => {
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await screen.findByText('The draft or configuration revision changed. Resolve it and confirm again.');
+    await screen.findByText('Your changes or the configuration just changed. Sort that out and confirm again.');
     expect(mocks.request.mock.calls.some(([path]) => path === 'updates/apply')).toBe(false);
   });
 
@@ -155,10 +155,10 @@ describe('software update presentation', () => {
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await screen.findByText('Configuration changed. Check again and confirm.');
+    await screen.findByText('The configuration changed. Check again and confirm.');
     expect(mocks.expectRestart).toHaveBeenLastCalledWith(false);
     expect(mocks.config.setUpdateLocked).toHaveBeenLastCalledWith(false);
-    expect(screen.queryByText(/request result is not confirmed/)).toBeNull();
+    expect(screen.queryByText(/confirm the update request/)).toBeNull();
     expect(mocks.reloadPage).not.toHaveBeenCalled();
   });
 });

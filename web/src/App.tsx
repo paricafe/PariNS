@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion, useAnimationControls, useReducedMotion } from 'motion/react';
-import { EASE_OUT } from './components/beui/motion';
+import { DURATION, EASE_OUT, SPRING_LAYOUT, SPRING_SOFT } from './components/beui/motion';
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { Activity, BookOpenText, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
@@ -15,6 +15,7 @@ import { TransportHint, transportChangeText } from './components/TransportHint';
 import { UpdatesProvider } from './features/updates/context';
 import { UpdateHint } from './features/updates/UpdatePanel';
 import { AccountControls } from './features/account/AccountControls';
+import { getPath } from './model/config';
 
 type Theme = 'system' | 'light' | 'dark';
 const navigation = [
@@ -28,6 +29,11 @@ const navigation = [
   { path: '/runtime', key: 'runtime', icon: Settings2, group: 'config' },
   { path: '/advanced', key: 'advanced', icon: FileCode2, group: 'config' },
 ] as const;
+
+function upstreamServers(settings: unknown): number | null {
+  const servers = getPath(settings, 'upstreams.servers');
+  return Array.isArray(servers) ? servers.length : null;
+}
 
 function storedLanguage(): Language {
   try { return chooseLanguage(localStorage.getItem('parins-language'), navigator.languages); }
@@ -56,6 +62,29 @@ function useAppearance() {
   return { language, theme, changeLanguage, changeTheme };
 }
 
+/** Fixed, pointer-free ambient background shared by every screen. */
+function Ambient() { return <div className="ambient" aria-hidden="true"><i /><i /><i /></div>; }
+
+/** One delegated, rAF-throttled listener lights the card under the pointer. */
+function useCardLight() {
+  const reduced = useReducedMotion();
+  useEffect(() => {
+    if (reduced || !matchMedia('(hover: hover)').matches) return;
+    let frame = 0; let lit: HTMLElement | null = null; let x = 0; let y = 0;
+    const move = (event: PointerEvent) => {
+      const card = (event.target as Element | null)?.closest?.('.panel, .kpi-card') as HTMLElement | null;
+      if (card !== lit) { lit?.removeAttribute('data-lit'); lit = card; lit?.setAttribute('data-lit', ''); }
+      if (!card) return;
+      const box = card.getBoundingClientRect(); x = event.clientX - box.left; y = event.clientY - box.top;
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; card.style.setProperty('--mx', `${x}px`); card.style.setProperty('--my', `${y}px`); });
+    };
+    const leave = () => { lit?.removeAttribute('data-lit'); lit = null; };
+    document.addEventListener('pointermove', move, { passive: true });
+    document.addEventListener('pointerleave', leave);
+    return () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerleave', leave); cancelAnimationFrame(frame); leave(); };
+  }, [reduced]);
+}
+
 function Preferences({ language, theme, changeLanguage, changeTheme }: ReturnType<typeof useAppearance>) {
   const t = (key: string) => translate(`ui.${key}`, language);
   return <div className="preferences">
@@ -66,7 +95,7 @@ function Preferences({ language, theme, changeLanguage, changeTheme }: ReturnTyp
 
 function SaveBar({ language }: { language: Language }) {
   const reduced = useReducedMotion();
-  const { draft, dirty, busy, prepareSave, commitPrepared, reload, resolveUnknown, setError, discard } = useConfig();
+  const { draft, dirty, changes, busy, prepareSave, commitPrepared, reload, resolveUnknown, setError, discard } = useConfig();
   const { transportChanged } = useSession();
   const confirmAction = useConfirm();
   const [notice, setNotice] = useState<string | null>(null);
@@ -85,11 +114,11 @@ function SaveBar({ language }: { language: Language }) {
       setNotice(result.refreshed ? t('app.configSaved') : null);
     } catch (reason) { setError(toConfigIssue(reason)); }
   };
-  return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reduced ? 0 : 0.16, ease: EASE_OUT }}>
-    <div className="save-bar-content"><div><strong>{draft.unknownApply ? t(draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown') : dirty ? t('app.dirty') : notice}</strong>
+  return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 36, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={reduced ? { duration: 0 } : SPRING_SOFT}>
+    <div className="save-bar-content"><div><strong>{draft.unknownApply ? t(draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown') : dirty ? (changes === 1 ? t('shell.unsavedOne') : translate('shell.unsavedMany', language, { count: changes })) : notice}</strong>
       {draft.unknownApply && draft.pendingTransportChange && <TransportHint change={draft.pendingTransportChange} language={language} link />}
       {notice && (dirty || draft.unknownApply) && <span className="small">{notice}</span>}</div>
-      <div className="button-group">{!dirty && !draft.unknownApply ? <button type="button" className="button quiet" onClick={() => setNotice(null)}>{t('ui.closeDialog')}</button> : draft.unknownApply ? <><button type="button" className="button secondary" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button><button type="button" className="button primary" disabled={busy} onClick={() => void resolveUnknown().then((result) => setNotice(result === 'applied' ? t(draft.pendingRollback ? 'app.rollbackComplete' : 'app.configSaved') : result === 'pending' ? t('app.saveStillUnknown') : t('api.REVISION'))).catch((reason) => setError(toConfigIssue(reason)))}>{t(draft.pendingRollback ? 'app.checkRollback' : 'app.checkSave')}</button></> : <>
+      <div className="button-group">{!dirty && !draft.unknownApply ? <button type="button" className="button quiet" onClick={() => setNotice(null)}>{t('shell.dismiss')}</button> : draft.unknownApply ? <><button type="button" className="button secondary" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button><button type="button" className="button primary" disabled={busy} onClick={() => void resolveUnknown().then((result) => setNotice(result === 'applied' ? t(draft.pendingRollback ? 'app.rollbackComplete' : 'app.configSaved') : result === 'pending' ? t('app.saveStillUnknown') : t('api.REVISION'))).catch((reason) => setError(toConfigIssue(reason)))}>{t(draft.pendingRollback ? 'app.checkRollback' : 'app.checkSave')}</button></> : <>
         <button type="button" className="button quiet" disabled={busy} onClick={() => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().catch(() => {}); })}>{t('app.discard')}</button>
         <Button variant="primary" disabled={busy} onClick={(event) => void runSave(event.currentTarget)}>{t('app.save')}</Button></>}</div>
     </div>
@@ -106,8 +135,8 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
   const reduced = useReducedMotion();
   const pageAnimation = useAnimationControls();
   useEffect(() => {
-    pageAnimation.set({ opacity: reduced ? 1 : 0, y: reduced ? 0 : 7 });
-    void pageAnimation.start({ opacity: 1, y: 0, transition: { duration: reduced ? 0 : 0.18, ease: EASE_OUT } });
+    pageAnimation.set({ opacity: reduced ? 1 : 0, y: reduced ? 0 : 10 });
+    void pageAnimation.start({ opacity: 1, y: 0, transition: { duration: reduced ? 0 : DURATION.enter, ease: EASE_OUT } });
   }, [location.pathname, pageAnimation, reduced]);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [logoutError, setLogoutError] = useState<ConfigIssue | null>(null);
@@ -142,12 +171,12 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
           return;
         }
         setMobileOpen(false);
-      }}>{({ isActive }) => <><item.icon size={18} strokeWidth={1.8} aria-hidden="true" /><span>{t(item.key)}</span>{isActive && <motion.i className="nav-indicator" aria-hidden="true" layoutId={`navigation-${scope}`} transition={{ duration: reduced ? 0 : 0.15, ease: EASE_OUT }} />}</>}</NavLink>)}
+      }}>{({ isActive }) => <><item.icon size={18} strokeWidth={1.8} aria-hidden="true" /><span>{t(item.key)}</span>{isActive && <motion.i className="nav-indicator" aria-hidden="true" layoutId={`navigation-${scope}`} transition={reduced ? { duration: 0 } : SPRING_LAYOUT} />}</>}</NavLink>)}
     </div>)}
   </nav>;
   return <div className="app-shell">
     <aside className="sidebar" aria-label={t('navLabel')}>
-      <div className="sidebar-brand"><span className="brand-mark">P</span><span><strong>PariNS</strong><small>{t('brand')}</small></span><button type="button" className="icon-button mobile-close" onClick={() => setMobileOpen(false)} aria-label={t('closeNavigation')}><X size={20} /></button></div>
+      <div className="sidebar-brand"><span className="brand-mark" aria-hidden="true">P</span><span><strong>PariNS</strong><small>{t('brand')}</small></span><button type="button" className="icon-button mobile-close" onClick={() => setMobileOpen(false)} aria-label={t('closeNavigation')}><X size={20} /></button></div>
       {nav('desktop')}
     </aside>
     <Drawer open={mobileOpen} onClose={() => setMobileOpen(false)} title="PariNS" side="left" closeLabel={t('closeNavigation')}>{nav('mobile')}</Drawer>
@@ -160,7 +189,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
       {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
       <motion.div animate={pageAnimation} className="route-content"><Routes>
-        <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} /></>} />
+        <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} settingsState={config.draft?.unknownApply ? 'unknown' : config.dirty ? 'unsaved' : 'saved'} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
         <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} />} />
         {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />
@@ -171,11 +200,13 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
 
 function RootView() {
   const appearance = useAppearance();
+  useCardLight();
   const { state, recheck, retryLogout, api } = useSession();
   const t = (key: string) => translate(key, appearance.language);
   return <>
+    <Ambient />
     <a href="#main-content" className="skip-link" onClick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>{t('ui.skip')}</a>
-    {state.phase !== 'ready' && <header className="auth-topbar"><a href="/#/overview" className="brand-link">PariNS</a><Preferences {...appearance} /></header>}
+    {state.phase !== 'ready' && <header className="auth-topbar"><a href="/#/overview" className="brand-link"><span className="brand-mark" aria-hidden="true">P</span>PariNS</a><Preferences {...appearance} /></header>}
     <ConfigProvider api={api} active={state.phase === 'ready'} refreshSession={recheck}><UpdatesProvider active={state.phase === 'ready'}>{state.phase === 'ready' ? <ConfirmProvider language={appearance.language}><ReadyConsole appearance={appearance} /></ConfirmProvider>
       : state.phase === 'setup' ? <main id="main-content" tabIndex={-1}><SetupPage language={appearance.language} /></main>
         : state.phase === 'login' ? <main id="main-content" tabIndex={-1}><LoginPage language={appearance.language} /></main>

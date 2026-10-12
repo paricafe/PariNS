@@ -120,9 +120,9 @@ describe('subscription draft and console', () => {
     await act(async () => { await config.reload(); });
     expect(next()).toBe('Manual updates only');
     view.rerender(<Console language="zh-CN" />);
-    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('仅手动更新');
+    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('只手动更新');
     fireEvent.click(screen.getByRole('switch', { name: '自动更新' }));
-    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('仅手动更新');
+    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('只手动更新');
     await act(async () => { prepared = await config.prepareSave(); });
     await act(async () => { await config.commitPrepared(prepared); });
     await waitFor(() => expect(screen.getByText('下次更新').nextElementSibling?.textContent)
@@ -130,7 +130,7 @@ describe('subscription draft and console', () => {
   });
 
   it.each([
-    { global: false, enabled: true, language: 'en' as const, label: 'Next update', expected: 'Inactive' },
+    { global: false, enabled: true, language: 'en' as const, label: 'Next update', expected: 'Off' },
     { global: true, enabled: false, language: 'zh-CN' as const, label: '下次更新', expected: '未启用' },
   ])('hides retained dates when the saved global/source setting is disabled: $global/$enabled', async ({ global, enabled, language, label, expected }) => {
     const { wrapper } = fixture({ ...scheduled, enabled: global }, { ...source, enabled });
@@ -175,17 +175,17 @@ describe('subscription draft and console', () => {
     expect(document.activeElement).toBe(name);
     fireEvent.click(screen.getByRole('button', { name: '使用 Natsuki List 示例' }));
     expect(screen.getByDisplayValue('https://raw.githubusercontent.com/Natsuki-Kaede/Natsuki-List/main/natsuki-list.list')).toBeTruthy();
-    expect(screen.getAllByRole('switch', { name: '启用来源' }).every((item) => item.getAttribute('aria-checked') === 'false')).toBe(true);
+    expect(screen.getAllByRole('switch', { name: '启用这个订阅' }).every((item) => item.getAttribute('aria-checked') === 'false')).toBe(true);
     expect(request.mock.calls.filter(([path]) => path.includes('/prepare') || path.includes('/refresh'))).toHaveLength(0);
     fireEvent.click(screen.getAllByRole('button', { name: '验证并添加' })[0]);
-    await screen.findByText(/规则格式不受支持/);
+    await screen.findByText(/规则格式不支持/);
     fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
     await waitFor(() => expect(request.mock.calls.filter(([path]) => path === 'filter/subscriptions').length).toBeGreaterThan(1));
-    expect(screen.getByText(/规则格式不受支持/)).toBeTruthy();
+    expect(screen.getByText(/规则格式不支持/)).toBeTruthy();
     expect(screen.queryByText(/onerror/)).toBeNull();
     expect(screen.getByDisplayValue('My draft')).toBeTruthy();
     view.rerender(<SubscriptionsPanel language="en" />);
-    expect(screen.getByText(/Rules are malformed/)).toBeTruthy();
+    expect(screen.getByText(/rules are malformed/)).toBeTruthy();
     delete document.documentElement.dataset.theme;
   });
 
@@ -194,7 +194,7 @@ describe('subscription draft and console', () => {
       fingerprint: 'replacement', active: true, ready: true, input_rules: 12, bytes: 50,
       last_success: 1, last_attempt: 1, next_update: null, failures: 0, error: null }] });
     render(<SubscriptionsPanel language="en" />, { wrapper });
-    await screen.findByText(/Saved configuration changed/);
+    await screen.findByText(/saved configuration changed/);
     expect(screen.getByDisplayValue(source.url)).toBeTruthy();
     expect(screen.queryByText('Active')).toBeNull();
   });
@@ -204,10 +204,10 @@ describe('subscription draft and console', () => {
     const request = vi.fn(async () => ({ generation: 3, decision: 'blocked', witness: { source_id: local ? null : 'local', rule: '.example.com', scope: 'suffix' } }));
     render(<DomainCheck api={{ request } as unknown as ApiClient} language="en" names={{ local: 'My online list' }} />);
     fireEvent.change(screen.getByRole('textbox', { name: 'Domain' }), { target: { value: 'example.com' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Check' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }));
     await screen.findByText(/Local rules/);
     local = false;
-    fireEvent.click(screen.getByRole('button', { name: 'Check' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }));
     await screen.findByText(/My online list/);
     expect(request.mock.calls).toHaveLength(2);
   });

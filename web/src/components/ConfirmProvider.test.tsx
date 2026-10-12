@@ -29,7 +29,7 @@ describe('console confirmation', () => {
     fireEvent.click(trigger);
     view.rerender(<ConfirmProvider language="zh-CN"><Probe /></ConfirmProvider>);
     expect(screen.getByRole('dialog', { name: '确认' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '放弃草稿并加载' }));
+    fireEvent.click(screen.getByRole('button', { name: '放弃修改' }));
     await waitFor(() => expect(screen.getByText('accepted')).toBeTruthy());
   });
 });

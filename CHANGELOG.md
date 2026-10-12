@@ -2,8 +2,27 @@
 
 ## Unreleased
 
+### Changed
+
+- Redesign the web console with a glass look, light and dark themes, and
+  restrained motion that respects reduced-motion and reduced-transparency
+  settings. The overview now leads with a one-line status, a status strip and
+  four key numbers, and moves storage, timing, cache and transport diagnostics
+  into a collapsed "Advanced diagnostics" section.
+- Show byte, millisecond and second settings with a unit selector. The
+  configuration still stores the original units, and input that cannot be
+  converted exactly is passed to validation unchanged.
+- Summarize the network settings in the last first-run setup step and keep the
+  full TOML in a collapsed editor.
+- Rewrite console text in both languages to describe results instead of
+  internal mechanisms. Raw diagnostic values remain visible.
+
 ### Fixed
 
+- Cache inspection showed untranslated labels for a miss and for an empty ECS
+  scope.
+- Address-in-use and invalid-query errors from the management API showed only
+  the raw English message.
 - Stop the updater's request path while the installer runs and restore it
   afterwards. A request written during installation, such as the Abort that a
   recovering service sends at startup, previously hit systemd's trigger limit,

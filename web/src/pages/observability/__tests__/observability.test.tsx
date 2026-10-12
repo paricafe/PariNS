@@ -88,12 +88,31 @@ describe("observability data math", () => {
 });
 
 describe("OverviewPage", () => {
+  it('judges upstream health only from a polled window of upstream counters', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let operations = 100; let failures = 0;
+      const api = fakeApi((path) => path === 'status'
+        ? { ...status, metrics: { ...status.metrics, counters: { ...status.metrics!.counters, upstream_operations: operations, upstream_failures: failures } } }
+        : stats);
+      render(<OverviewPage api={api} language="en" onOpenDns={() => {}} />);
+      // One sample has no delta, so the page does not yet claim upstreams are healthy.
+      await waitFor(() => expect(screen.getByText('DNS is running')).toBeTruthy());
+      operations += 10; failures += 8;
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await waitFor(() => expect(screen.getByText('Upstreams are not responding')).toBeTruthy());
+      // Once the failing samples leave the 65 s window, the warning clears.
+      operations += 10;
+      await act(async () => { await vi.advanceTimersByTimeAsync(70_000); });
+      await waitFor(() => expect(screen.getByText('Everything is running normally')).toBeTruthy());
+    } finally { vi.useRealTimers(); }
+  });
   it('distinguishes a failed runtime from an ordinary stop while retaining cumulative totals', async () => {
     const failed = { ...status, running: false, dns_health: { ...status.dns_health, state: 'failed', ready: false, code: 'task_panic' } };
     const api = fakeApi((path) => path === 'status' ? failed : stats);
     render(<OverviewPage api={api} language="en" onOpenDns={() => {}} />);
     await waitFor(() => expect(screen.getByText('Service stopped unexpectedly')).toBeTruthy());
-    expect(screen.getByText('Not ready')).toBeTruthy();
+    expect(screen.getByText('Not ready yet')).toBeTruthy();
     expect(screen.getByText('task_panic')).toBeTruthy();
     expect(screen.getByText('100')).toBeTruthy();
   });
@@ -108,7 +127,7 @@ describe("OverviewPage", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Last 7 days" }));
     expect(screen.getByRole("tab", { name: "Last 7 days" }).getAttribute("aria-selected")).toBe("true");
     expect(api.request).toHaveBeenCalledWith('stats', 'GET', undefined, undefined, { query: { range: '7d' } });
-    fireEvent.click(screen.getByRole("button", { name: /DNS settings/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Upstreams & listeners/ }));
     expect(openDns).toHaveBeenCalledOnce();
   });
 
@@ -122,8 +141,8 @@ describe("OverviewPage", () => {
     });
     render(<OverviewPage api={api} language="en" onOpenDns={() => {}} />);
     await waitFor(() => expect(screen.getByText("100")).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("temporarily unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("unavailable right now"));
     expect(screen.getByText("100")).toBeTruthy();
   });
 });
@@ -140,14 +159,14 @@ describe("LogsPage", () => {
     const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getAllByText('fresh.test').length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole('button', { name: /Older queries/ }));
-    fireEvent.click(screen.getByRole('tab', { name: 'Expired fallback' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Old-answer fallback' }));
     await waitFor(() => expect(screen.getAllByText('stale.test').length).toBeGreaterThan(0));
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: 'stale', before_id: null, limit: 50 });
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });
     expect(screen.queryByText('late.test')).toBeNull();
     fireEvent.click(screen.getAllByRole('button', { name: /Details · stale.test/ })[0]);
     expect(screen.getByText('exact_ecs:192.0.2.0/24')).toBeTruthy();
-    expect(screen.getByText('Reused only for the exact same ECS prefix')).toBeTruthy();
+    expect(screen.getByText('Only the exact same ECS network')).toBeTruthy();
     view.unmount();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByText('192.0.2.0/24')).toBeNull();
@@ -199,16 +218,16 @@ describe("LogsPage", () => {
     cleanup();
     const failing = fakeApi(() => { throw new ApiError(0, 'NETWORK', 'offline'); });
     const failed = render(<LogsPage api={failing} language="en" onOpenSettings={() => {}} />);
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Connection failed'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain("Can't reach PariNS"));
     failed.rerender(<LogsPage api={failing} language="zh-CN" onOpenSettings={() => {}} />);
-    expect(screen.getByRole('alert').textContent).toContain('连接失败');
+    expect(screen.getByRole('alert').textContent).toContain('连接不上');
     expect(failing.request).toHaveBeenCalledTimes(1);
   });
 
   it("distinguishes disabled logs from an empty enabled page", async () => {
     const api = fakeApi(() => ({ revision: 7, page: { log_epoch: 3, storage, enabled: false, total: 1, entries: [entry], next_cursor: null } }));
     render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
-    await waitFor(() => expect(screen.getByText(/Query logging is off/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/query log is off/)).toBeTruthy());
     expect(screen.getAllByText('example.test').length).toBeGreaterThan(0);
   });
 
@@ -223,7 +242,7 @@ describe("LogsPage", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /Clear log/ })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /Clear log/ }));
     fireEvent.click(screen.getByRole("button", { name: "Clear log" }));
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("not confirmed"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("couldn't confirm"));
     expect(clearCalls).toBe(1);
     expect((screen.getByRole('button', { name: 'Clear log…' }) as HTMLButtonElement).disabled).toBe(true);
     epoch = 4;

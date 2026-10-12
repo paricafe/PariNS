@@ -15,7 +15,7 @@ describe('DoH runtime summary', () => {
   });
   it('never presents a stopped DNS listener as running', () => {
     render(<DohRuntime status={{ running: false, doh_listen: null, doh_http3: false }} failed={false} language="en" />);
-    expect(screen.getByText(/DoH is not running/)).toBeTruthy();
+    expect(screen.getByText(/DoH isn't running/)).toBeTruthy();
     expect(screen.queryByText(/HTTP\/2 · TCP/)).toBeNull();
   });
 });

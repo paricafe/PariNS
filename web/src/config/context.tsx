@@ -40,6 +40,7 @@ interface ConfigContextValue {
   locked: boolean;
   error: ConfigIssue | null;
   dirty: boolean;
+  changes: number;
   setError(error: ConfigIssue | null): void;
   updateField(path: string, value: RawFieldValue): void;
   setOptional(protocol: string, enabled: boolean): void;
@@ -65,13 +66,15 @@ const ConfigContext = createContext<ConfigContextValue | null>(null);
 const fieldByPath = new Map(Object.values(settingPages).flatMap((page) => page.groups.flatMap((group) => group.fields)).map((field) => [field.path, field]));
 const EMPTY_LISTENER = { listen: '', cert_file: '', key_file: '' };
 
-function dirty(draft: ConfigDraft | null): boolean {
-  if (!draft) return false;
-  if (draft.toml !== draft.original || draft.rules !== null || draft.sources !== null || Object.keys(draft.optional).length) return true;
-  return Object.entries(draft.fields).some(([path, raw]) => {
+/** Number of unsaved changes shown to the user; zero means the draft is clean. */
+function changeCount(draft: ConfigDraft | null): number {
+  if (!draft) return 0;
+  const fields = Object.entries(draft.fields).filter(([path, raw]) => {
     const field = fieldByPath.get(path);
     return field && JSON.stringify(raw) !== JSON.stringify(fieldDisplayValue(getPath(draft.settings, path), field));
-  });
+  }).length;
+  const total = fields + Object.keys(draft.optional).length + (draft.rules !== null ? 1 : 0) + (draft.sources !== null ? 1 : 0);
+  return total || (draft.toml !== draft.original ? 1 : 0);
 }
 
 function createDraft(config: ConfigResponse, parsed: ParsedResponse): ConfigDraft {
@@ -394,7 +397,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, [flush]);
 
-  const value = useMemo<ConfigContextValue>(() => ({ draft, busy: busy || updateLocked, locked: writeLock.current || updateLocked || Boolean(draft?.unknownApply), error, dirty: dirty(draft), setError, updateField,
+  const value = useMemo<ConfigContextValue>(() => ({ draft, busy: busy || updateLocked, locked: writeLock.current || updateLocked || Boolean(draft?.unknownApply), error, dirty: changeCount(draft) > 0, changes: changeCount(draft), setError, updateField,
     setOptional, setRules, setSources, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked }),
   [draft, busy, updateLocked, error, updateField, setOptional, setRules, setSources, setToml, importCertificate, preview, validate, prepareSave, commitPrepared, ensureParsed, reload, previewRollback, rollback, resolveUnknown, exportDraft, discard, setUpdateLocked]);
   return <ConfigContext.Provider value={value}>{children}</ConfigContext.Provider>;

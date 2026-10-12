@@ -1,0 +1,29 @@
+guide/operations.md
+  s_0cc083ef6e9aa3::t_801b3159b6ad41 6
+CHANGELOG.md
+  s_0cc083ef6e9aa3::t_801b3159b6ad41 5-12
+guide/deployment.md
+  s_0cc083ef6e9aa3::t_801b3159b6ad41 82
+Cargo.toml
+  s_0cc083ef6e9aa3::t_801b3159b6ad41 3
+scripts/bootstrap.sh
+  s_0cc083ef6e9aa3::t_801b3159b6ad41 9-10,38
+Cargo.lock
+  s_0cc083ef6e9aa3::t_373a6b9942e721 1033
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a63a277bb1adee90f949b1068390a5147860e369",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

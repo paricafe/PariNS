@@ -87,6 +87,9 @@ enum Action {
     Truncated,
     Partial(oneshot::Sender<()>),
     CloseAfterReply(oneshot::Sender<()>),
+    /// Reply, then keep the connection open but never read or answer again,
+    /// like a middlebox that silently forgot an idle connection.
+    SilentAfterReply(oneshot::Sender<()>),
 }
 
 struct Request {
@@ -159,6 +162,10 @@ impl Peer {
                                     drop(stream);
                                     let _ = closed.send(());
                                     return;
+                                }
+                                if let Action::SilentAfterReply(silent) = action {
+                                    let _ = silent.send(());
+                                    std::future::pending::<()>().await;
                                 }
                             }
                         });
@@ -500,4 +507,37 @@ async fn resolver_query_deadline_includes_pool_wait_without_opening_an_extra_con
     let response = timeout(DEADLINE, next).await.unwrap().unwrap();
     assert_eq!(response.message.response_code, ResponseCode::NoError);
     assert_eq!(response.message.id, 102);
+}
+
+#[tokio::test]
+async fn silently_dropped_idle_connection_costs_one_query_deadline_then_recovers() {
+    // Documents current behaviour: unlike a peer close (reconnected at once),
+    // a silent peer is only detected when the caller's deadline expires.
+    let cert = Certificate::new();
+    let mut peer = Peer::new(&cert).await;
+    let upstream = cert.upstream(1);
+    let first = exchange(&upstream, peer.address, 80);
+    let (silent, ready) = oneshot::channel();
+    peer.reply(Action::SilentAfterReply(silent)).await;
+    timeout(DEADLINE, ready).await.unwrap().unwrap();
+    success(first, 80).await;
+    let started = tokio::time::Instant::now();
+    assert!(
+        timeout(
+            Duration::from_millis(300),
+            upstream.exchange(&query(81), peer.address)
+        )
+        .await
+        .is_err(),
+        "the reused silent connection never answers"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert_eq!(peer.count(), 1, "no reconnect before the deadline");
+    let next = exchange(&upstream, peer.address, 82);
+    assert_eq!(
+        peer.reply(Action::Reply).await,
+        2,
+        "the next query opens a fresh connection"
+    );
+    success(next, 82).await;
 }

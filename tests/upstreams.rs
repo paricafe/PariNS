@@ -602,6 +602,21 @@ async fn doh_rejects_redirect_wrong_content_type_and_oversize_body() {
     }
 }
 
+/// RFC 8484 GET: the query travels base64url-encoded (unpadded) in `dns`.
+fn doh_get_query(uri: &http::Uri) -> Message {
+    use base64::Engine;
+    let value = uri
+        .query()
+        .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("dns=")))
+        .expect("dns parameter");
+    Message::from_vec(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
 fn h3_endpoint(tls: &rustls::ServerConfig) -> quinn::Endpoint {
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls.clone()).unwrap();
     quinn::Endpoint::server(
@@ -628,7 +643,7 @@ async fn dual_endpoint(tls: &rustls::ServerConfig) -> (quinn::Endpoint, TcpListe
 }
 
 async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
-    use bytes::{Buf, Bytes};
+    use bytes::Bytes;
     let connection = endpoint.accept().await.unwrap().await.unwrap();
     let mut server = h3::server::builder()
         .build::<_, Bytes>(h3_quinn::Connection::new(connection.clone()))
@@ -645,13 +660,10 @@ async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
                 count += 1;
                 handlers.spawn(async move {
                     let (request, mut stream) = request.resolve_request().await.unwrap();
-                    assert_eq!(request.method(), "POST");
+                    assert_eq!(request.method(), "GET");
                     assert_eq!(request.uri().path(), "/dns-query");
-                    let mut body = Vec::new();
-                    while let Some(mut bytes) = stream.recv_data().await.unwrap() {
-                        body.extend_from_slice(&bytes.copy_to_bytes(bytes.remaining()));
-                    }
-                    let received = Message::from_vec(&body).unwrap();
+                    assert!(stream.recv_data().await.unwrap().is_none(), "GET has no body");
+                    let received = doh_get_query(request.uri());
                     assert_eq!(received.id, 0);
                     let mut response = verify_forwarded(received, &query());
                     if case == 4 { response.metadata.truncation = true; }
@@ -664,7 +676,7 @@ async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
                     if case == 8 { tokio::time::sleep(Duration::from_millis(350)).await; }
                     if case == 10 { response.metadata.response_code = ResponseCode::ServFail; }
                     let mut headers = http::Response::builder()
-                        .status(if case == 1 { 302 } else { 200 })
+                        .status(match case { 1 => 302, 11 => 405, _ => 200 })
                         .header("content-type", if case == 2 { "text/plain" } else { "application/dns-message" });
                     if case == 9 { headers = headers.header("x-large", "a".repeat(17 * 1024)); }
                     let headers = headers.body(()).unwrap();
@@ -683,40 +695,84 @@ async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
     count
 }
 
-async fn serve_h2(listener: TcpListener, tls: Arc<rustls::ServerConfig>, count: usize) {
-    for _ in 0..count {
+/// Serves `requests` DoH POSTs, handling concurrent streams on each connection.
+/// After `per_connection` requests the connection is closed gracefully (GOAWAY).
+/// With `stall_first`, the very first request is held open and never answered.
+/// Returns the number of TCP connections the client opened.
+async fn serve_h2_with(
+    listener: TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+    requests: usize,
+    per_connection: usize,
+    stall_first: bool,
+) -> usize {
+    let mut connections = 0;
+    let mut served = 0;
+    let mut stalled = Vec::new();
+    while served < requests {
         let (socket, _) = listener.accept().await.unwrap();
+        connections += 1;
         let stream = tokio_rustls::TlsAcceptor::from(tls.clone())
             .accept(socket)
             .await
             .unwrap();
         let mut connection = h2::server::handshake(stream).await.unwrap();
-        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
-        let handler = async move {
-            let mut bytes = Vec::new();
-            let mut body = request.into_body();
-            while let Some(data) = body.data().await {
-                let data = data.unwrap();
-                bytes.extend_from_slice(&data);
-                body.flow_control().release_capacity(data.len()).unwrap();
+        let mut on_connection = 0;
+        let mut handlers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                request = connection.accept() => {
+                    let Some(Ok((request, respond))) = request else { break };
+                    if stall_first && served == 0 && on_connection == 0 && connections == 1 && stalled.is_empty() {
+                        stalled.push((request, respond));
+                        on_connection += 1;
+                        continue;
+                    }
+                    served += 1;
+                    on_connection += 1;
+                    handlers.spawn(answer_h2(request, respond));
+                    if on_connection == per_connection || served == requests {
+                        connection.graceful_shutdown();
+                    }
+                }
+                Some(result) = handlers.join_next(), if !handlers.is_empty() => result.unwrap(),
             }
-            let response = verify_forwarded(Message::from_vec(&bytes).unwrap(), &query());
-            respond
-                .send_response(
-                    http::Response::builder()
-                        .header("content-type", "application/dns-message")
-                        .body(())
-                        .unwrap(),
-                    false,
-                )
-                .unwrap()
-                .send_data(bytes::Bytes::from(response.to_vec().unwrap()), true)
-                .unwrap();
-        };
-        tokio::pin!(handler);
-        tokio::select! { _ = &mut handler => {}, _ = connection.accept() => panic!("closed early") }
-        while connection.accept().await.is_some() {}
+        }
+        while let Some(result) = handlers.join_next().await {
+            result.unwrap();
+        }
     }
+    connections
+}
+
+async fn answer_h2(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<bytes::Bytes>,
+) {
+    assert_eq!(request.method(), "POST");
+    let mut bytes = Vec::new();
+    let mut body = request.into_body();
+    while let Some(data) = body.data().await {
+        let data = data.unwrap();
+        bytes.extend_from_slice(&data);
+        body.flow_control().release_capacity(data.len()).unwrap();
+    }
+    let response = verify_forwarded(Message::from_vec(&bytes).unwrap(), &query());
+    respond
+        .send_response(
+            http::Response::builder()
+                .header("content-type", "application/dns-message")
+                .body(())
+                .unwrap(),
+            false,
+        )
+        .unwrap()
+        .send_data(bytes::Bytes::from(response.to_vec().unwrap()), true)
+        .unwrap();
+}
+
+async fn serve_h2(listener: TcpListener, tls: Arc<rustls::ServerConfig>, requests: usize) -> usize {
+    serve_h2_with(listener, tls, requests, usize::MAX, false).await
 }
 
 #[tokio::test]
@@ -1067,7 +1123,7 @@ async fn h3_valid_dns_failure_is_not_a_transport_failure() {
 
 #[tokio::test]
 async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() {
-    use bytes::{Buf, Bytes};
+    use bytes::Bytes;
     let (_dir, ca, tls) = identity(b"h3");
     let endpoint = h3_endpoint(&tls);
     let mut config = config(
@@ -1094,7 +1150,7 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
             .unwrap();
         while stalled.recv_data().await.unwrap().is_some() {}
         started.send(()).unwrap();
-        let (_, mut stream) = server
+        let (request, mut stream) = server
             .accept()
             .await
             .unwrap()
@@ -1103,11 +1159,8 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
             .await
             .unwrap();
         let handler = async move {
-            let mut body = Vec::new();
-            while let Some(mut bytes) = stream.recv_data().await.unwrap() {
-                body.extend_from_slice(&bytes.copy_to_bytes(bytes.remaining()));
-            }
-            let response = verify_forwarded(Message::from_vec(&body).unwrap(), &query());
+            while stream.recv_data().await.unwrap().is_some() {}
+            let response = verify_forwarded(doh_get_query(request.uri()), &query());
             stream
                 .send_response(
                     http::Response::builder()
@@ -1216,7 +1269,7 @@ async fn age_upstream(
     Arc<std::sync::atomic::AtomicUsize>,
     tokio::task::JoinHandle<()>,
 ) {
-    use bytes::{Buf, Bytes};
+    use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (directory, ca, tls) = identity(if h3 { b"h3" } else { b"h2" });
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1239,14 +1292,11 @@ async fn age_upstream(
                 .await
                 .unwrap();
             while let Ok(Some(request)) = server.accept().await {
-                let (_, mut stream) = request.resolve_request().await.unwrap();
+                let (request, mut stream) = request.resolve_request().await.unwrap();
                 let handler = async {
-                    let mut bytes = Vec::new();
-                    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
-                        bytes.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
-                    }
+                    while stream.recv_data().await.unwrap().is_some() {}
                     count.fetch_add(1, Ordering::SeqCst);
-                    let answer = age_answer(Message::from_vec(&bytes).unwrap(), negative);
+                    let answer = age_answer(doh_get_query(request.uri()), negative);
                     stream.send_response(headers()).await.unwrap();
                     stream
                         .send_data(Bytes::from(answer.to_vec().unwrap()))
@@ -1270,26 +1320,26 @@ async fn age_upstream(
                     .await
                     .unwrap();
                 let mut connection = h2::server::handshake(stream).await.unwrap();
-                let (request, mut respond) = connection.accept().await.unwrap().unwrap();
-                let handler = async {
-                    let mut bytes = Vec::new();
-                    let mut body = request.into_body();
-                    while let Some(chunk) = body.data().await {
-                        let chunk = chunk.unwrap();
-                        bytes.extend_from_slice(&chunk);
-                        body.flow_control().release_capacity(chunk.len()).unwrap();
-                    }
-                    count.fetch_add(1, Ordering::SeqCst);
-                    let answer = age_answer(Message::from_vec(&bytes).unwrap(), negative);
-                    respond
-                        .send_response(headers(), false)
-                        .unwrap()
-                        .send_data(Bytes::from(answer.to_vec().unwrap()), true)
-                        .unwrap();
-                };
-                tokio::pin!(handler);
-                tokio::select! { _ = &mut handler => {}, _ = connection.accept() => panic!("closed early") }
-                while connection.accept().await.is_some() {}
+                // The client reuses one HTTP/2 connection; answer each request on it.
+                while let Some(Ok((request, mut respond))) = connection.accept().await {
+                    let count = count.clone();
+                    tokio::spawn(async move {
+                        let mut bytes = Vec::new();
+                        let mut body = request.into_body();
+                        while let Some(chunk) = body.data().await {
+                            let chunk = chunk.unwrap();
+                            bytes.extend_from_slice(&chunk);
+                            body.flow_control().release_capacity(chunk.len()).unwrap();
+                        }
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let answer = age_answer(Message::from_vec(&bytes).unwrap(), negative);
+                        respond
+                            .send_response(headers(), false)
+                            .unwrap()
+                            .send_data(Bytes::from(answer.to_vec().unwrap()), true)
+                            .unwrap();
+                    });
+                }
             }
         });
         (address, task)
@@ -1505,4 +1555,311 @@ async fn doq_rotated_owner_closes_when_last_request_is_cancelled() {
     timeout(Duration::from_secs(5), doq_rotation(true))
         .await
         .unwrap();
+}
+
+fn observed(
+    trace: &parins::upstreams::diagnostics::Trace,
+) -> Vec<(
+    Option<parins::upstreams::diagnostics::ActualProtocol>,
+    Option<parins::upstreams::diagnostics::ConnectionUse>,
+)> {
+    trace
+        .attempts
+        .iter()
+        .map(|attempt| (attempt.protocol, attempt.connection))
+        .collect()
+}
+
+#[tokio::test]
+async fn h2_reuses_one_connection_for_sequential_and_concurrent_queries() {
+    use parins::upstreams::diagnostics::{ActualProtocol, ConnectionUse, Operation};
+    let (_dir, ca, tls) = identity(b"h2");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(
+        vec![format!("https://{}", listener.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    config.upstreams.ca_file = Some(ca);
+    let server = tokio::spawn(serve_h2(listener, tls, 4));
+    let client = client(&config).unwrap();
+    let deadline = || tokio::time::Instant::now() + Duration::from_secs(2);
+    let first = Operation::new(true, None);
+    assert_eq!(
+        client
+            .exchange_observed(&query(), deadline(), &first)
+            .await
+            .unwrap()
+            .message
+            .id,
+        123
+    );
+    assert_eq!(
+        observed(&first.trace().unwrap()),
+        [(Some(ActualProtocol::Doh2), Some(ConnectionUse::New))]
+    );
+    let operations = [
+        Operation::new(true, None),
+        Operation::new(true, None),
+        Operation::new(true, None),
+    ];
+    let q = query();
+    let (a, b, c) = tokio::join!(
+        client.exchange_observed(&q, deadline(), &operations[0]),
+        client.exchange_observed(&q, deadline(), &operations[1]),
+        client.exchange_observed(&q, deadline(), &operations[2]),
+    );
+    for response in [a, b, c] {
+        assert_eq!(response.unwrap().message.id, 123);
+    }
+    for operation in &operations {
+        assert_eq!(
+            observed(&operation.trace().unwrap()),
+            [(Some(ActualProtocol::Doh2), Some(ConnectionUse::Reused))]
+        );
+    }
+    assert_eq!(
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        1,
+        "one TCP+TLS connection served all queries"
+    );
+}
+
+#[tokio::test]
+async fn h2_goaway_moves_new_queries_to_a_new_connection_without_replay() {
+    let (_dir, ca, tls) = identity(b"h2");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(
+        vec![format!("https://{}", listener.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    config.upstreams.ca_file = Some(ca);
+    // The server sends GOAWAY after each answered request.
+    let server = tokio::spawn(serve_h2_with(listener, tls, 3, 1, false));
+    let client = client(&config).unwrap();
+    for _ in 0..3 {
+        assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+        // Let the GOAWAY arrive before the next query, as it would between queries in production.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn h2_caller_cancellation_resets_one_stream_and_keeps_the_connection() {
+    let (_dir, ca, tls) = identity(b"h2");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(
+        vec![format!("https://{}", listener.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    config.upstreams.ca_file = Some(ca);
+    // The first request is held unanswered; the caller gives up on it.
+    let server = tokio::spawn(serve_h2_with(listener, tls, 2, usize::MAX, true));
+    let client = client(&config).unwrap();
+    let stalled = timeout(Duration::from_millis(200), client.exchange(&query())).await;
+    assert!(
+        stalled.is_err(),
+        "the stalled query is cancelled by its caller"
+    );
+    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    assert_eq!(
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        1,
+        "cancellation did not close the connection"
+    );
+}
+
+#[tokio::test]
+async fn h3_definite_refusal_stops_h3_for_the_pool_generation() {
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome, Reason};
+    let (_dir, ca, tls) = identity(b"h3");
+    let (endpoint, listener) = dual_endpoint(&tls).await;
+    let address = listener.local_addr().unwrap();
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.prefer_h3 = true;
+    let mut h2_tls = (*tls).clone();
+    h2_tls.alpn_protocols = vec![b"h2".to_vec()];
+    let quic_server = tokio::spawn(serve_h3(endpoint, 11));
+    let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 2));
+    let client = client(&config).unwrap();
+    let deadline = || tokio::time::Instant::now() + Duration::from_secs(2);
+    let first = Operation::new(true, None);
+    assert_eq!(
+        client
+            .exchange_observed(&query(), deadline(), &first)
+            .await
+            .unwrap()
+            .message
+            .id,
+        123
+    );
+    let trace = first.trace().unwrap();
+    assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+    assert_eq!(
+        (trace.attempts[0].reason, trace.attempts[0].code),
+        (Some(Reason::HttpStatus), Some(405))
+    );
+    assert_eq!(trace.attempts[1].outcome, Outcome::Succeeded);
+    let second = Operation::new(true, None);
+    assert_eq!(
+        client
+            .exchange_observed(&query(), deadline(), &second)
+            .await
+            .unwrap()
+            .message
+            .id,
+        123
+    );
+    let trace = second.trace().unwrap();
+    // Unlike a cooldown skip (no reason), a refusal skip names the status.
+    assert_eq!(trace.attempts[0].outcome, Outcome::Skipped);
+    assert_eq!(
+        (trace.attempts[0].reason, trace.attempts[0].code),
+        (Some(Reason::HttpStatus), Some(405))
+    );
+    drop(client);
+    assert_eq!(
+        timeout(Duration::from_secs(2), quic_server)
+            .await
+            .unwrap()
+            .unwrap(),
+        1,
+        "one HTTP/3 request only"
+    );
+    timeout(Duration::from_secs(2), tcp_server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn h2_concurrent_first_queries_share_one_connect() {
+    let (_dir, ca, tls) = identity(b"h2");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(
+        vec![format!("https://{}", listener.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    config.upstreams.ca_file = Some(ca);
+    let server = tokio::spawn(serve_h2(listener, tls, 3));
+    let client = client(&config).unwrap();
+    let q = query();
+    let (a, b, c) = tokio::join!(
+        client.exchange(&q),
+        client.exchange(&q),
+        client.exchange(&q)
+    );
+    for response in [a, b, c] {
+        assert_eq!(response.unwrap().message.id, 123);
+    }
+    assert_eq!(
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        1,
+        "concurrent misses waited for one connect"
+    );
+}
+
+#[tokio::test]
+async fn h2_silently_dead_connection_is_retired_by_keepalive() {
+    let (_dir, ca, tls) = identity(b"h2");
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = accepted.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (socket, _) = upstream.accept().await.unwrap();
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let acceptor = tokio_rustls::TlsAcceptor::from(tls.clone());
+            tokio::spawn(async move {
+                let mut connection = h2::server::handshake(acceptor.accept(socket).await.unwrap())
+                    .await
+                    .unwrap();
+                while let Some(Ok((request, respond))) = connection.accept().await {
+                    tokio::spawn(answer_h2(request, respond));
+                }
+            });
+        }
+    });
+    // A relay that can silently drop everything on existing connections while
+    // keeping their sockets open, like a dead network path.
+    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(
+        vec![format!("https://{}", relay.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    config.upstreams.ca_file = Some(ca);
+    let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let blackhole = dead.clone();
+    let relay = tokio::spawn(async move {
+        loop {
+            let (client_side, _) = relay.accept().await.unwrap();
+            let server_side = tokio::net::TcpStream::connect(upstream_address)
+                .await
+                .unwrap();
+            let ((client_read, client_write), (server_read, server_write)) =
+                (client_side.into_split(), server_side.into_split());
+            for (mut from, mut to) in [(client_read, server_write), (server_read, client_write)] {
+                let dead = blackhole.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    while let Ok(read @ 1..) = from.read(&mut buffer).await {
+                        if !dead.load(std::sync::atomic::Ordering::SeqCst)
+                            && to.write_all(&buffer[..read]).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    let _keep_open = to;
+                    std::future::pending::<()>().await;
+                });
+            }
+        }
+    });
+    let client = client(&config).unwrap();
+    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    dead.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The next query rides the dead connection and is lost to its caller's deadline.
+    assert!(
+        timeout(Duration::from_millis(300), client.exchange(&query()))
+            .await
+            .is_err()
+    );
+    // The PING that follows goes unanswered and the connection is retired.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // Restore the path: had the old connection survived, it would be reused here.
+    dead.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        timeout(Duration::from_secs(2), client.exchange(&query()))
+            .await
+            .unwrap()
+            .unwrap()
+            .message
+            .id,
+        123
+    );
+    assert_eq!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a new connection replaced the dead one"
+    );
+    server.abort();
+    relay.abort();
 }

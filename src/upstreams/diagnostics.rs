@@ -55,6 +55,14 @@ pub enum Outcome {
     Skipped,
 }
 
+/// Whether an attempt reused a pooled connection (H2, DoT) or opened a new one.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionUse {
+    New,
+    Reused,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AttemptRecord {
     pub pool_generation: u64,
@@ -65,6 +73,10 @@ pub struct AttemptRecord {
     pub reason: Option<Reason>,
     pub code: Option<u64>,
     pub elapsed_ms: u64,
+    /// Absent for protocols without connection pooling and in records saved
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionUse>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Trace {
@@ -224,6 +236,7 @@ impl AttemptScope {
             stage: Stage::Wait,
             reason: None,
             code: None,
+            connection: None,
             finished: false,
         }
     }
@@ -238,9 +251,13 @@ pub(crate) struct Attempt {
     stage: Stage,
     reason: Option<Reason>,
     code: Option<u64>,
+    connection: Option<ConnectionUse>,
     finished: bool,
 }
 impl Attempt {
+    pub(crate) fn connection(&mut self, connection: ConnectionUse) {
+        self.connection = Some(connection);
+    }
     pub(crate) fn stage(&mut self, stage: Stage) {
         self.stage = stage;
         self.reason = None;
@@ -349,8 +366,9 @@ impl Attempt {
             self.terminal(Outcome::Succeeded, None);
         }
     }
+    /// A skip keeps a reason already set (an HTTP/3 endpoint disabled by a 4xx).
     pub(crate) fn skipped(&mut self) {
-        self.terminal(Outcome::Skipped, None);
+        self.terminal(Outcome::Skipped, self.reason);
     }
     fn terminal(&mut self, outcome: Outcome, reason: Option<Reason>) {
         if self.finished {
@@ -366,6 +384,7 @@ impl Attempt {
             reason,
             code: self.code,
             elapsed_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            connection: self.connection,
         };
         self.scope.diagnostics.record(&record);
         self.scope.operation.record(record);

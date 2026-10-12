@@ -218,10 +218,16 @@ impl Upstream {
         address: SocketAddr,
         scope: Option<&crate::upstreams::diagnostics::AttemptScope>,
     ) -> Result<Message> {
-        use crate::upstreams::diagnostics::{ActualProtocol, Stage};
+        use crate::upstreams::diagnostics::{ActualProtocol, ConnectionUse, Stage};
         let mut attempt = scope.map(|scope| scope.start(Some(ActualProtocol::Dot)));
+        let mark = |attempt: &mut Option<crate::upstreams::diagnostics::Attempt>, used| {
+            if let Some(attempt) = attempt {
+                attempt.connection(used);
+            }
+        };
         let result = async {
             let Some(pool) = &self.pool else {
+                mark(&mut attempt, ConnectionUse::New);
                 return transaction(
                     &mut self.connect(address, &mut attempt).await?,
                     query,
@@ -237,6 +243,14 @@ impl Upstream {
                 idle.address == address && idle.returned.elapsed() < pool.idle_timeout
             });
             let reused = cached.is_some();
+            mark(
+                &mut attempt,
+                if reused {
+                    ConnectionUse::Reused
+                } else {
+                    ConnectionUse::New
+                },
+            );
             let mut stream = match cached {
                 Some(idle) => idle.stream,
                 None => self.connect(address, &mut attempt).await?,
@@ -255,6 +269,7 @@ impl Upstream {
                         "DoT deadline exhausted before reconnect"
                     );
                     attempt = scope.map(|scope| scope.start(Some(ActualProtocol::Dot)));
+                    mark(&mut attempt, ConnectionUse::New);
                     stream = self.connect(address, &mut attempt).await?;
                     transaction(&mut stream, query, &mut attempt).await?
                 }

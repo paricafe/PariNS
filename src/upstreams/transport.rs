@@ -21,7 +21,7 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
-use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, Stage};
+use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, ConnectionUse, Stage};
 use super::{Endpoint, Protocol, Settings, valid_address};
 use crate::{protocol, transport::tcp};
 
@@ -58,6 +58,66 @@ pub(super) fn apply_http_age(response: &mut Message, age: u32) {
     }
 }
 
+/// One reusable HTTP/2 connection per configured HTTPS endpoint (like H3).
+/// The driver task owns the socket; dropping the last handle aborts it.
+struct H2Connection {
+    address: SocketAddr,
+    sender: h2::client::SendRequest<Bytes>,
+    /// Local stream cap. h2 itself queues streams above the peer's SETTINGS
+    /// limit; both waits stay inside the caller's deadline.
+    streams: Arc<tokio::sync::Semaphore>,
+    usage: Arc<H2Usage>,
+    driver: tokio::task::JoinHandle<()>,
+}
+impl Drop for H2Connection {
+    fn drop(&mut self) {
+        self.driver.abort();
+    }
+}
+
+const H2_MAX_STREAMS: usize = 64;
+const H2_IDLE: Duration = Duration::from_secs(10);
+/// While requests are in flight, a PING proves the path still works. A path
+/// that dies silently (NAT or middlebox state loss) is retired within about two
+/// seconds instead of stalling every query until TCP gives up.
+const H2_PING_INTERVAL: Duration = Duration::from_secs(1);
+const H2_PING_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+struct H2Usage {
+    active: std::sync::atomic::AtomicUsize,
+    last_used: std::sync::Mutex<Option<Instant>>,
+}
+
+/// Counts one in-flight request; the idle clock starts when the last one ends.
+struct H2Stream(Arc<H2Usage>);
+impl H2Stream {
+    fn new(usage: &Arc<H2Usage>) -> Self {
+        usage
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(usage.clone())
+    }
+}
+impl Drop for H2Stream {
+    fn drop(&mut self) {
+        *self.0.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        self.0
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// The request never reached the connection, so a fresh connection may carry it.
+#[derive(Debug)]
+struct NotSent;
+impl std::fmt::Display for NotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HTTP/2 connection unavailable before the request was sent")
+    }
+}
+impl std::error::Error for NotSent {}
+
 pub(super) struct Client {
     pub spec: Endpoint,
     bootstrap: Vec<SocketAddr>,
@@ -66,6 +126,8 @@ pub(super) struct Client {
     dot: Option<crate::tls::Upstream>,
     listeners: Vec<SocketAddr>,
     quic: Mutex<Option<Arc<QuicConnection>>>,
+    h2: std::sync::Mutex<Option<Arc<H2Connection>>>,
+    h2_connecting: Mutex<()>,
     h3: Option<super::h3::Client>,
 }
 
@@ -126,6 +188,8 @@ impl Client {
             dot,
             listeners,
             quic: Mutex::new(None),
+            h2: std::sync::Mutex::new(None),
+            h2_connecting: Mutex::new(()),
             h3,
         })
     }
@@ -302,12 +366,36 @@ impl Client {
         Err(error)
     }
 
-    async fn https(
+    fn h2_cached(&self, address: SocketAddr) -> Option<Arc<H2Connection>> {
+        let mut state = self.h2.lock().unwrap_or_else(|e| e.into_inner());
+        if state.as_ref().is_some_and(|c| c.driver.is_finished()) {
+            *state = None;
+        }
+        state.as_ref().filter(|c| c.address == address).cloned()
+    }
+
+    fn h2_retire(&self, connection: &Arc<H2Connection>) {
+        let mut state = self.h2.lock().unwrap_or_else(|e| e.into_inner());
+        if state.as_ref().is_some_and(|c| Arc::ptr_eq(c, connection)) {
+            *state = None;
+        }
+    }
+
+    /// Reuse the endpoint's connection when it serves this address; otherwise
+    /// connect once under the endpoint lock so concurrent misses share it.
+    async fn h2_connection(
         &self,
-        query: &Message,
         address: SocketAddr,
         attempt: &mut Attempt,
-    ) -> Result<Message> {
+    ) -> Result<(Arc<H2Connection>, ConnectionUse)> {
+        if let Some(connection) = self.h2_cached(address) {
+            return Ok((connection, ConnectionUse::Reused));
+        }
+        attempt.stage(Stage::Wait);
+        let _connecting = self.h2_connecting.lock().await;
+        if let Some(connection) = self.h2_cached(address) {
+            return Ok((connection, ConnectionUse::Reused));
+        }
         attempt.stage(Stage::Connect);
         let socket = TcpStream::connect(address).await?;
         attempt.stage(Stage::TlsHandshake);
@@ -320,89 +408,194 @@ impl Client {
             "DoH upstream must negotiate HTTP/2"
         );
         attempt.stage(Stage::RequestWrite);
-        let (sender, connection) = h2::client::Builder::new()
+        let (sender, mut connection) = h2::client::Builder::new()
+            .enable_push(false)
             .max_header_list_size(16 * 1024)
             .handshake(stream)
             .await?;
-        let transaction = async {
-            attempt.stage(Stage::Wait);
-            let mut sender = sender.ready().await?;
-            let host = if self.spec.host.contains(':') {
-                format!("[{}]", self.spec.host)
-            } else {
-                self.spec.host.clone()
-            };
-            let request = http::Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "https://{host}:{}{}",
-                    self.spec.port, self.spec.path
-                ))
-                .header("content-type", "application/dns-message")
-                .header("accept", "application/dns-message")
-                .body(())?;
-            let mut outbound = query.clone();
-            outbound.metadata.id = 0;
-            attempt.stage(Stage::RequestWrite);
-            let (response, mut body) = sender.send_request(request, false)?;
-            body.send_data(
-                Bytes::from(protocol::encode_upstream(&outbound, true)?),
-                true,
-            )?;
-            attempt.stage(Stage::ResponseHeaders);
-            let response = response.await?;
-            if response.status() != http::StatusCode::OK {
-                attempt.http_status(response.status().as_u16());
-            }
-            ensure!(
-                response.status() == http::StatusCode::OK,
-                "DoH HTTP status {}",
-                response.status()
-            );
-            attempt.stage(Stage::Validate);
-            ensure!(
-                response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| v
-                        .split(';')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .eq_ignore_ascii_case("application/dns-message")),
-                "invalid DoH content type"
-            );
-            let age = http_age(response.headers());
-            let mut body = response.into_body();
-            let mut bytes = Vec::new();
-            attempt.stage(Stage::ResponseRead);
-            while let Some(chunk) = body.data().await {
-                let chunk = chunk?;
-                if bytes.len() + chunk.len() > protocol::MAX_MESSAGE {
-                    attempt.reason(super::diagnostics::Reason::ProtocolInvalid);
+        let usage = Arc::new(H2Usage::default());
+        let mut ping_pong = connection
+            .ping_pong()
+            .context("HTTP/2 keepalive unavailable")?;
+        let keepalive = {
+            let usage = usage.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(H2_PING_INTERVAL).await;
+                    // Probe while busy or just after a request ended (a caller may
+                    // have given up on a dead path); an idle connection stays quiet.
+                    let recent = usage
+                        .last_used
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some_and(|last| last.elapsed() < H2_PING_INTERVAL);
+                    if usage.active.load(std::sync::atomic::Ordering::Acquire) == 0 && !recent {
+                        continue;
+                    }
+                    let pong = timeout(H2_PING_TIMEOUT, ping_pong.ping(h2::Ping::opaque())).await;
+                    if !matches!(pong, Ok(Ok(_))) {
+                        return;
+                    }
                 }
-                ensure!(
-                    bytes.len() + chunk.len() <= protocol::MAX_MESSAGE,
-                    "DoH response too large"
-                );
-                bytes.extend_from_slice(&chunk);
-                body.flow_control().release_capacity(chunk.len())?;
             }
-            attempt.stage(Stage::Decode);
-            let mut response = protocol::decode(&bytes)?;
-            attempt.stage(Stage::Validate);
-            ensure!(
-                protocol::matches_response(&outbound, &response) && !response.truncation,
-                "invalid DoH response"
-            );
-            apply_http_age(&mut response, age);
-            response.metadata.id = query.id;
-            Ok(response)
         };
-        tokio::pin!(connection);
-        tokio::pin!(transaction);
-        tokio::select! { biased; result = &mut transaction => result, result = &mut connection => { result?; transaction.await } }
+        let idle = {
+            let usage = usage.clone();
+            async move {
+                loop {
+                    let last = *usage.last_used.lock().unwrap_or_else(|e| e.into_inner());
+                    let busy = usage.active.load(std::sync::atomic::Ordering::Acquire) > 0;
+                    let wait = last.map_or(H2_IDLE, |last| {
+                        (last + H2_IDLE).saturating_duration_since(Instant::now())
+                    });
+                    if !busy && wait.is_zero() {
+                        return;
+                    }
+                    tokio::time::sleep(if wait.is_zero() { H2_IDLE } else { wait }).await;
+                }
+            }
+        };
+        // GOAWAY, a connection error, a missed PING or idleness ends the driver;
+        // dropping the connection closes its socket without delaying shutdown.
+        let driver = tokio::spawn(async move {
+            tokio::select! { _ = connection => {}, () = idle => {}, () = keepalive => {} }
+        });
+        let connection = Arc::new(H2Connection {
+            address,
+            sender,
+            streams: Arc::new(tokio::sync::Semaphore::new(H2_MAX_STREAMS)),
+            usage,
+            driver,
+        });
+        *self.h2.lock().unwrap_or_else(|e| e.into_inner()) = Some(connection.clone());
+        Ok((connection, ConnectionUse::New))
+    }
+
+    async fn https(
+        &self,
+        query: &Message,
+        address: SocketAddr,
+        attempt: &mut Attempt,
+    ) -> Result<Message> {
+        let (connection, used) = self.h2_connection(address, attempt).await?;
+        attempt.connection(used);
+        match self.h2_request(&connection, query, attempt).await {
+            // A reused connection that closed before taking the request (idle
+            // close, GOAWAY): nothing was sent, so carry it on a new connection.
+            Err(error) if used == ConnectionUse::Reused && error.is::<NotSent>() => {
+                self.h2_retire(&connection);
+                drop(connection);
+                let (connection, used) = self.h2_connection(address, attempt).await?;
+                attempt.connection(used);
+                self.h2_request(&connection, query, attempt).await
+            }
+            Err(error) => {
+                // A stream reset affects one request; GOAWAY or an I/O error ends
+                // the connection for new requests (accepted streams finish per h2).
+                let connection_failed = error.is::<NotSent>()
+                    || error
+                        .downcast_ref::<h2::Error>()
+                        .is_some_and(|e| e.is_go_away() || e.is_io());
+                if connection_failed {
+                    self.h2_retire(&connection);
+                }
+                Err(error)
+            }
+            result => result,
+        }
+    }
+
+    async fn h2_request(
+        &self,
+        connection: &Arc<H2Connection>,
+        query: &Message,
+        attempt: &mut Attempt,
+    ) -> Result<Message> {
+        attempt.stage(Stage::Wait);
+        // Both waits count against the caller's deadline, which encloses this call.
+        let _permit = connection.streams.acquire().await?;
+        let _stream = H2Stream::new(&connection.usage);
+        let mut sender = connection
+            .sender
+            .clone()
+            .ready()
+            .await
+            .map_err(|error| anyhow::Error::new(NotSent).context(error))?;
+        let host = if self.spec.host.contains(':') {
+            format!("[{}]", self.spec.host)
+        } else {
+            self.spec.host.clone()
+        };
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "https://{host}:{}{}",
+                self.spec.port, self.spec.path
+            ))
+            .header("content-type", "application/dns-message")
+            .header("accept", "application/dns-message")
+            .body(())?;
+        let mut outbound = query.clone();
+        outbound.metadata.id = 0;
+        attempt.stage(Stage::RequestWrite);
+        // Dropping these on cancellation resets only this stream (RST_STREAM).
+        let (response, mut body) = sender
+            .send_request(request, false)
+            .map_err(|error| anyhow::Error::new(NotSent).context(error))?;
+        body.send_data(
+            Bytes::from(protocol::encode_upstream(&outbound, true)?),
+            true,
+        )?;
+        attempt.stage(Stage::ResponseHeaders);
+        let response = response.await?;
+        if response.status() != http::StatusCode::OK {
+            attempt.http_status(response.status().as_u16());
+        }
+        ensure!(
+            response.status() == http::StatusCode::OK,
+            "DoH HTTP status {}",
+            response.status()
+        );
+        attempt.stage(Stage::Validate);
+        ensure!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("application/dns-message")),
+            "invalid DoH content type"
+        );
+        let age = http_age(response.headers());
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        attempt.stage(Stage::ResponseRead);
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk?;
+            if bytes.len() + chunk.len() > protocol::MAX_MESSAGE {
+                attempt.reason(super::diagnostics::Reason::ProtocolInvalid);
+            }
+            ensure!(
+                bytes.len() + chunk.len() <= protocol::MAX_MESSAGE,
+                "DoH response too large"
+            );
+            bytes.extend_from_slice(&chunk);
+            body.flow_control().release_capacity(chunk.len())?;
+        }
+        attempt.stage(Stage::Decode);
+        let mut response = protocol::decode(&bytes)?;
+        attempt.stage(Stage::Validate);
+        ensure!(
+            protocol::matches_response(&outbound, &response) && !response.truncation,
+            "invalid DoH response"
+        );
+        apply_http_age(&mut response, age);
+        response.metadata.id = query.id;
+        Ok(response)
     }
 
     async fn quic_connection(

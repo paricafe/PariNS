@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
+use base64::Engine;
 use bytes::{Buf, Bytes};
 use hickory_proto::op::Message;
 use tokio::time::{Instant, timeout};
@@ -28,6 +29,14 @@ pub(super) struct Client {
 struct State {
     connection: Option<Arc<Connection>>,
     retry_after: Option<Instant>,
+    /// A definite 4xx (for example 405) will not change on retry: stop trying
+    /// HTTP/3 for this endpoint until the pool generation is replaced.
+    refused: Option<u16>,
+}
+
+/// Client errors that a retry cannot fix. 408, 421, 425 and 429 invite a retry.
+fn definite_refusal(status: http::StatusCode) -> bool {
+    status.is_client_error() && !matches!(status.as_u16(), 408 | 421 | 425 | 429)
 }
 
 // Own the endpoint even during a cancelled handshake, before a driver exists.
@@ -82,6 +91,12 @@ impl Client {
         scope: &AttemptScope,
     ) -> Result<Message> {
         let mut attempt = scope.start(Some(ActualProtocol::Doh3));
+        let refused = self.state.lock().unwrap_or_else(|e| e.into_inner()).refused;
+        if let Some(status) = refused {
+            attempt.http_status(status);
+            attempt.skipped();
+            anyhow::bail!("HTTP/3 refused with status {status}");
+        }
         if self.cooling_down() {
             attempt.skipped();
             anyhow::bail!("HTTP/3 cooling down");
@@ -207,25 +222,34 @@ impl Client {
         } else {
             spec.host.clone()
         };
-        let request = http::Request::builder()
-            .method("POST")
-            .uri(format!("https://{host}:{}{}", spec.port, spec.path))
-            .header("content-type", "application/dns-message")
-            .header("accept", "application/dns-message")
-            .body(())?;
         let mut outbound = query.clone();
         outbound.metadata.id = 0;
+        // RFC 8484 GET: the message travels base64url-encoded (unpadded) in the
+        // `dns` parameter, inside the encrypted stream. Production HTTP/3 POSTs
+        // were answered 405 while HTTP/2 POST worked; servers must accept GET.
+        let separator = if spec.path.contains('?') { '&' } else { '?' };
+        let request = http::Request::builder()
+            .method("GET")
+            .uri(format!(
+                "https://{host}:{}{}{separator}dns={}",
+                spec.port,
+                spec.path,
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(protocol::encode_upstream(&outbound, true)?)
+            ))
+            .header("accept", "application/dns-message")
+            .body(())?;
         attempt.stage(Stage::RequestWrite);
         let mut stream = RequestGuard(sender.send_request(request).await?, false);
-        stream
-            .0
-            .send_data(Bytes::from(protocol::encode_upstream(&outbound, true)?))
-            .await?;
         stream.0.finish().await?;
         attempt.stage(Stage::ResponseHeaders);
         let response = stream.0.recv_response().await?;
         if response.status() != http::StatusCode::OK {
             attempt.http_status(response.status().as_u16());
+            if definite_refusal(response.status()) {
+                self.state.lock().unwrap_or_else(|e| e.into_inner()).refused =
+                    Some(response.status().as_u16());
+            }
         }
         ensure!(
             response.status() == http::StatusCode::OK,

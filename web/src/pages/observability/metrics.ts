@@ -103,6 +103,16 @@ export function cacheHitRate(counters: Record<string, number> | null | undefined
   return lookups > 0 ? hits / lookups * 100 : null;
 }
 
+/**
+ * Share of cache lookups that missed but joined an identical query already in
+ * flight, so no extra upstream request was made. Not part of the hit rate.
+ */
+export function coalescedShare(counters: Record<string, number> | null | undefined): number | null {
+  if (!counters) return null;
+  const lookups = (counters.cache_hits ?? 0) + (counters.cache_misses ?? 0);
+  return lookups > 0 && (counters.flight_joined ?? 0) > 0 ? (counters.flight_joined ?? 0) / lookups * 100 : null;
+}
+
 export function averageLatencyMillis(latency: RequestLatency | null | undefined): number | null {
   return latency?.count ? latency.sum_micros / latency.count / 1000 : null;
 }

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "../../session/client";
 import { formatDate, formatNumber, translate, type Language } from "../../i18n";
 import { TrendChart } from "./TrendChart";
-import { averageLatencyMillis, cacheHitRate, histogramRows, type StatsView, type StatusView } from "./metrics";
+import { averageLatencyMillis, cacheHitRate, coalescedShare, histogramRows, type StatsView, type StatusView } from "./metrics";
 import "./observability.css";
 import { Tabs } from '../../components/beui';
 import { Odometer } from '../../components/Odometer';
@@ -155,6 +155,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
   const latency = stats?.totals.metrics.request_latency;
   const hours = query.range === 'custom' ? (Number(query.to_ms) - Number(query.from_ms)) / 3_600_000 : query.range === '7d' ? 168 : query.range === '24h' ? 24 : 1;
   const hitRate = cacheHitRate(counters);
+  const coalesced = coalescedShare(counters);
   const average = averageLatencyMillis(latency);
   const blocked = counters ? (counters.query_blocked ?? 0) + (counters.response_blocked ?? 0) : null;
   const health = status?.dns_health.state;
@@ -173,7 +174,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
               : t('shell.summaryQueries', { count: value(counters.requests, language), percent: formatNumber(hitRate, language, { maximumFractionDigits: 0 }) }) : null;
   const kpis = [
     { key: "requests", icon: Search, label: t("ui.requests"), help: t("ui.currentInstance"), raw: counters?.requests ?? null, format: (n: number) => formatNumber(Math.round(n), language) },
-    { key: "cache", icon: Zap, label: t("ui.hitRate"), help: t("ui.hitRateHelp"), raw: hitRate, format: (n: number) => `${formatNumber(n, language, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` },
+    { key: "cache", icon: Zap, label: t("ui.hitRate"), help: coalesced === null ? t("ui.hitRateHelp") : t('shell.coalescedShare', { percent: formatNumber(coalesced, language, { maximumFractionDigits: 1 }) }), raw: hitRate, format: (n: number) => `${formatNumber(n, language, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` },
     { key: "latency", icon: Gauge, label: t("ui.latency"), help: t("ui.latencyHelp"), raw: average, format: (n: number) => `${formatNumber(n, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms` },
     { key: "blocked", icon: Ban, label: t("ui.blocked"), help: t("ui.blockedHelp"), raw: blocked, format: (n: number) => formatNumber(Math.round(n), language) },
   ];

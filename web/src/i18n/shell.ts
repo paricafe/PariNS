@@ -72,4 +72,5 @@ export const shellMessages = {
   hitRateValue: ["{percent}%（{hits} 次命中 · {misses} 次未命中）", "{percent}% ({hits} hits · {misses} misses)"],
   enableProtocolFirst: ["先在上面开启 DoT、DoH 或 DoQ，再导入证书。", "Turn on DoT, DoH or DoQ above before importing a certificate."],
   exportConfig: ["导出配置", "Export configuration"],
+  coalescedShare: ["另有 {percent}% 合并到同时进行的相同查询，没有另外问上游", "Another {percent}% joined an identical query already in progress, without a separate upstream request"],
 } as const satisfies Record<string, readonly [string, string]>;

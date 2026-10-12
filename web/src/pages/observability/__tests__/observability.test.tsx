@@ -5,7 +5,7 @@ import { ApiError } from "../../../session/client";
 import type { ApiClient } from "../../../session/client";
 import { LogsPage } from "../LogsPage";
 import { OverviewPage } from "../OverviewPage";
-import { averageLatencyMillis, cacheHitRate, histogramRows, isolatedPoints, trendSeries, type HistorySample, type StatusView } from "../metrics";
+import { averageLatencyMillis, cacheHitRate, coalescedShare, histogramRows, isolatedPoints, trendSeries, type HistorySample, type StatusView } from "../metrics";
 import type { LogEntry, LogListResponse } from "../logs";
 import { storage } from './fixtures';
 
@@ -49,6 +49,10 @@ describe("observability data math", () => {
   it("uses cache lookups and request timer counts as denominators", () => {
     expect(cacheHitRate(status.metrics?.counters)).toBe(30);
     expect(cacheHitRate({ cache_hits: 0, cache_misses: 0 })).toBeNull();
+    // Coalesced followers are reported beside the hit rate, never folded into it.
+    expect(coalescedShare({ cache_hits: 30, cache_misses: 70, flight_joined: 8 })).toBe(8);
+    expect(coalescedShare({ cache_hits: 30, cache_misses: 70, flight_joined: 0 })).toBeNull();
+    expect(cacheHitRate({ cache_hits: 30, cache_misses: 70, flight_joined: 8 })).toBe(30);
     expect(averageLatencyMillis(status.metrics?.request_latency)).toBe(2.5);
     expect(averageLatencyMillis({ count: 0, sum_micros: 0, buckets: [] })).toBeNull();
   });
@@ -116,12 +120,19 @@ describe("OverviewPage", () => {
     expect(screen.getByText('task_panic')).toBeTruthy();
     expect(screen.getByText('100')).toBeTruthy();
   });
+  it('reports coalesced followers beside the unchanged hit rate', async () => {
+    const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, flight_joined: 9 } } } };
+    render(<OverviewPage api={fakeApi((path) => path === 'status' ? status : totals)} language="en" onOpenDns={() => {}} />);
+    await waitFor(() => expect(screen.getByText(/Another 9% joined an identical query already in progress/)).toBeTruthy());
+    expect(screen.getByText("30.0%")).toBeTruthy();
+  });
   it("renders cumulative metrics separately from time-window trend", async () => {
     const api = fakeApi((path) => path === "status" ? status : stats);
     const openDns = vi.fn();
     render(<OverviewPage api={api} language="en" onOpenDns={openDns} />);
     await waitFor(() => expect(screen.getByText("100")).toBeTruthy());
     expect(screen.getByText("30.0%")).toBeTruthy();
+    expect(screen.getByText("Share of lookups answered from cache")).toBeTruthy();
     expect(screen.getByText("2.50 ms")).toBeTruthy();
     expect(screen.getAllByText("5").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("tab", { name: "Last 7 days" }));

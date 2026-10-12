@@ -8,6 +8,9 @@
   `remaining_percent = 25`, `max_inflight = 8` and `rate_per_sec = 20`.
   Prefetch stays off by default. Installations that set these fields keep their
   values; only fields left unset pick up the new defaults.
+- The overview shows, next to the cache hit rate, the share of queries that
+  joined an identical query already in progress instead of asking an upstream
+  again. The hit rate itself is unchanged.
 
 ## v0.1.11 — 2026-10-12
 

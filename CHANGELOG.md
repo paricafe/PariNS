@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.10 — 2026-10-12
+
 ### Changed
 
 - Redesign the web console with a glass look, light and dark themes, and

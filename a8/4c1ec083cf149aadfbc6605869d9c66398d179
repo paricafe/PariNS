@@ -1,0 +1,40 @@
+src/cache/persistence.rs
+  s_0cc083ef6e9aa3::t_37dd4e3e910d5a 12-15,21,58-59,129-131,133,135,259
+  s_0cc083ef6e9aa3::t_b79e4def215626 132
+src/manage/cache.rs
+  s_0cc083ef6e9aa3::t_8d259a5c77e21b 95
+  s_0cc083ef6e9aa3::t_37dd4e3e910d5a 84
+  s_0cc083ef6e9aa3::t_4b9441d976592d 142
+src/manage/mod.rs
+  s_0cc083ef6e9aa3::t_37dd4e3e910d5a 906,935
+CHANGELOG.md
+  s_0cc083ef6e9aa3::t_5a719d8866e96d 5-17
+src/cache/tests.rs
+  s_0cc083ef6e9aa3::t_fa51b4f9a831c7 28-31
+  s_0cc083ef6e9aa3::t_2900358dfa88eb 560,667,934,1006,1232
+  s_0cc083ef6e9aa3::t_8d259a5c77e21b 889-893,1012-1015
+src/cache/tests/reliability.rs
+  s_0cc083ef6e9aa3::t_4b9441d976592d 31,231
+src/cache/persistence/tests.rs
+  s_0cc083ef6e9aa3::t_d8834ca7ad4096 220,536
+  s_0cc083ef6e9aa3::t_e5c432caeb30ea 568-571,577-649,654-656,663-682,829
+  s_0cc083ef6e9aa3::t_8d259a5c77e21b 572-576,650-653,657-662,696-701
+src/cache.rs
+  s_0cc083ef6e9aa3::t_d9402e1021a94a 38,55,732,736,753,795-796,804,816,825,860-862,864
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a84c1ec083cf149aadfbc6605869d9c66398d179",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

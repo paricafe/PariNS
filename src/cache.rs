@@ -35,7 +35,7 @@ pub use decision::{
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Key {
-    name: Box<str>,
+    name: Name,
     kind: RecordType,
     class: DNSClass,
     dnssec_ok: bool,
@@ -51,10 +51,8 @@ impl Key {
         {
             return None;
         }
-        let mut name = question.name().to_lowercase();
-        name.set_fqdn(true);
         Some(Self {
-            name: name.to_ascii().into_boxed_str(),
+            name: key_name(question.name()),
             kind: question.query_type(),
             class: question.query_class(),
             dnssec_ok: query
@@ -731,11 +729,11 @@ impl Cache {
     /// with admission, including work whose encoding started before this call.
     pub fn invalidate(
         &self,
-        name: Option<&str>,
+        name: Option<&Name>,
         kind: Option<RecordType>,
         scope: Option<Scope>,
     ) -> usize {
-        let name = name.map(canonical);
+        let name = name.map(key_name);
         let mut shards: Vec<_> = self
             .shards
             .iter()
@@ -752,7 +750,7 @@ impl Cache {
                     p.lru
                         .iter()
                         .filter(|(_, e)| {
-                            name.as_ref().is_none_or(|n| e.key.name.as_ref() == n)
+                            name.as_ref().is_none_or(|n| &e.key.name == n)
                                 && kind.is_none_or(|k| e.key.kind == k)
                                 && scope.is_none_or(|s| e.scope == s)
                         })
@@ -794,8 +792,8 @@ impl Cache {
             "shards":self.shards.len(),"epoch":self.epoch()})
     }
 
-    pub fn inspect(&self, name: &str, kind: Option<RecordType>, now: Instant) -> Value {
-        let name = canonical(name);
+    pub fn inspect(&self, name: &Name, kind: Option<RecordType>, now: Instant) -> Value {
+        let name = key_name(name);
         // Copy at most 256 Arc entries under locks, then build JSON outside them.
         let mut entries = Vec::new();
         let mut truncated = false;
@@ -803,7 +801,7 @@ impl Cache {
             let shard = shard.lock().expect("cache shard poisoned");
             for p in &shard.partitions {
                 for (_, e) in &p.lru {
-                    if e.key.name.as_ref() == name && kind.is_none_or(|k| e.key.kind == k) {
+                    if e.key.name == name && kind.is_none_or(|k| e.key.kind == k) {
                         if entries.len() == 256 {
                             truncated = true;
                             break;
@@ -815,7 +813,7 @@ impl Cache {
         }
         let variants: Vec<_> = entries.iter().map(|e| {
             let age = now.saturating_duration_since(e.inserted);
-            json!({"name":e.key.name,"qtype":e.key.kind.to_string(),
+            json!({"name":e.key.name.to_ascii(),"qtype":e.key.kind.to_string(),
                 "dnssec_ok":e.key.dnssec_ok,"checking_disabled":e.key.checking_disabled,
                 "recursion_desired":e.key.recursion_desired,"edns":e.key.edns,
                 "scope":scope_text(e.scope),"negative":e.negative,
@@ -824,7 +822,7 @@ impl Cache {
                 "hits":e.hits.load(Ordering::Relaxed),"bytes":e.charge,
                 "state":if age < e.lifetime {"fresh"} else if age < e.retention {"stale"} else {"expired"}})
         }).collect();
-        json!({"name":name,"variants":variants,"truncated":truncated})
+        json!({"name":name.to_ascii(),"variants":variants,"truncated":truncated})
     }
 
     pub fn explain(&self, query: &Message, outgoing: Option<ClientSubnet>, now: Instant) -> Value {
@@ -859,12 +857,11 @@ fn scope_text(scope: Scope) -> String {
     scope.tag()
 }
 
-fn canonical(name: &str) -> String {
-    let Ok(mut name) = Name::from_ascii(name) else {
-        return name.to_ascii_lowercase();
-    };
+/// Cache keys hold lowercase FQDNs, so `Name` equality is exact label-wise byte equality.
+fn key_name(name: &Name) -> Name {
+    let mut name = name.to_lowercase();
     name.set_fqdn(true);
-    name.to_lowercase().to_ascii()
+    name
 }
 
 fn scopes_overlap(a: Scope, b: Scope) -> bool {

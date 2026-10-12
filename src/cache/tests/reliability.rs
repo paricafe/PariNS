@@ -28,7 +28,7 @@ fn exact_source_matches_only_identical_family_network_and_prefix() {
             assert!(cache.peek(&query, outgoing, now, false).is_none());
         }
         assert_eq!(
-            cache.inspect("exact.test.", None, now)["variants"][0]["scope"],
+            cache.inspect(&Name::from_ascii("exact.test.").unwrap(), None, now)["variants"][0]["scope"],
             format!("exact_ecs:{scope}")
         );
         assert_eq!(cache.invalidate(None, None, Some(network(scope))), 0);
@@ -228,7 +228,7 @@ fn diagnostic_decisions_report_actual_branches_without_budget_misclassification(
     );
     let before = cache.diagnostics_snapshot();
     cache.peek(&query, None, now, false);
-    cache.inspect("decisions.test.", None, now);
+    cache.inspect(&Name::from_ascii("decisions.test.").unwrap(), None, now);
     assert_eq!(before, cache.diagnostics_snapshot());
     assert_eq!(before["store"]["reasons"]["ttl_zero"], 1);
     assert_eq!(before["store"]["reasons"]["negative_without_soa"], 1);

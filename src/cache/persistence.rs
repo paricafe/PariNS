@@ -9,13 +9,16 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use hickory_proto::op::{MessageType, OpCode, Query};
+use hickory_proto::{
+    op::{MessageType, OpCode, Query},
+    serialize::binary::{BinDecodable, BinEncodable},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::*;
 
-pub(crate) const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 3;
 pub(crate) const CACHE_SEMANTICS: u32 = 3;
 const HEADER_BYTES: usize = 512;
 const MAX_RECORD_BYTES: usize = 96 * 1024;
@@ -52,6 +55,8 @@ struct Header {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SavedKey {
+    /// Base64 wire-format name. Presentation text does not round-trip every
+    /// legal label (for example `:` or `/`), so it is never parsed here.
     name: String,
     kind: u16,
     class: u16,
@@ -121,9 +126,13 @@ impl Record {
             !self.key.dnssec_ok || self.key.edns,
             "DNSSEC flag without EDNS"
         );
-        let name = Name::from_ascii(&self.key.name).context("invalid snapshot name")?;
+        let wire = STANDARD
+            .decode(&self.key.name)
+            .context("invalid snapshot name")?;
+        let name = Name::from_bytes(&wire).context("invalid snapshot name")?;
+        // Re-encoding the lowercase name rejects uppercase, compression and trailing bytes.
         ensure!(
-            canonical(&self.key.name) == self.key.name && self.key.name.len() <= 1024,
+            name.to_lowercase().to_bytes()? == wire,
             "noncanonical snapshot name"
         );
         let mut query = Message::new(0, MessageType::Query, OpCode::Query);
@@ -247,7 +256,7 @@ impl Cache {
                 age_records(&mut response, elapsed);
                 let record = Record {
                     key: SavedKey {
-                        name: entry.key.name.to_string(),
+                        name: STANDARD.encode(entry.key.name.to_bytes()?),
                         kind: entry.key.kind.into(),
                         class: entry.key.class.into(),
                         dnssec_ok: entry.key.dnssec_ok,

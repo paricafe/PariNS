@@ -81,7 +81,7 @@ pub(super) struct Invalidate {
     pub scope: Option<String>,
 }
 
-pub(super) type Selection = (Option<String>, Option<RecordType>, Option<Scope>);
+pub(super) type Selection = (Option<Name>, Option<RecordType>, Option<Scope>);
 impl Invalidate {
     pub fn selection(&self) -> Result<Selection> {
         ensure!(
@@ -92,11 +92,7 @@ impl Invalidate {
             !self.all || (self.qtype.is_none() && self.scope.is_none()),
             "all cannot be combined with filters"
         );
-        let name = self
-            .name
-            .as_ref()
-            .map(|value| name(value).map(|name| name.to_ascii()))
-            .transpose()?;
+        let name = self.name.as_ref().map(|value| name(value)).transpose()?;
         let kind = self
             .qtype
             .as_ref()
@@ -143,7 +139,7 @@ mod tests {
         assert_eq!(
             input.selection().unwrap(),
             (
-                Some("test.".into()),
+                Some(Name::from_ascii("test.").unwrap()),
                 None,
                 Some(Scope::Privacy { ipv4: false })
             )

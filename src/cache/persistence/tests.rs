@@ -217,7 +217,7 @@ fn cname_negative_restore_preserves_partition_lifetime_and_cold_state() {
         // Age 3.25s online (round up to 4s), then 2.1s offline (round up to 3s).
         let bytes = encode(&cache, inserted + Duration::from_millis(3250));
         let header: Header = serde_json::from_slice(&bytes[..HEADER_BYTES]).unwrap();
-        assert_eq!(header.version, 2);
+        assert_eq!(header.version, 3);
         let restored = Cache::new(config.clone());
         let now = inserted + Duration::from_secs(10);
         assert_eq!(
@@ -533,7 +533,7 @@ fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
         "upstreams": config.upstreams, "filter_digest": STANDARD.encode(b"filter-a")});
     let prior_fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&prior).unwrap()));
     assert_ne!(fingerprint, prior_fingerprint);
-    assert_eq!(VERSION, 2);
+    assert_eq!(VERSION, 3);
     let cache = Cache::new(config.cache.clone());
     let q = query("prior-semantics.test.");
     let now = Instant::now();
@@ -566,6 +566,121 @@ fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
 }
 
 #[test]
+fn names_without_presentation_round_trip_restore_with_positive_and_negative_entries() {
+    let long = |n: usize| vec![b'a'; n];
+    let names: Vec<Name> = [
+        vec![
+            b"https://ac".to_vec(),
+            b"example".to_vec(),
+            b"test".to_vec(),
+        ],
+        vec![br"back\slash".to_vec(), b"test".to_vec()],
+        vec![b"with space".to_vec(), b"test".to_vec()],
+        vec![b"dot.inside".to_vec(), b"test".to_vec()],
+        vec![b"\xff\x00bin".to_vec(), b"test".to_vec()],
+        vec![b"UPPER".to_vec(), b"Test".to_vec()],
+        vec![long(63), b"test".to_vec()],
+        // 3 * 64 + 57 + 5 + 1 = 255 wire bytes, the maximum.
+        vec![long(63), long(63), long(63), long(56), b"test".to_vec()],
+    ]
+    .into_iter()
+    .map(|labels| Name::from_labels(labels).unwrap())
+    .collect();
+    assert_eq!(names.last().unwrap().to_bytes().unwrap().len(), 255);
+    let question = |name: &Name, kind| {
+        let mut query = Message::new(1, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(name.clone(), kind));
+        query
+    };
+    let cache = Cache::new(CacheConfig::default());
+    let now = Instant::now();
+    for name in &names {
+        let positive = question(name, RecordType::A);
+        cache.insert(&positive, &answer(&positive, 60), Scope::NoEcs, now);
+        let negative = question(name, RecordType::AAAA);
+        let mut response = protocol::error_response(&negative, ResponseCode::NXDomain);
+        response.add_authority(DnsRecord::from_rdata(
+            Name::from_ascii("test.").unwrap(),
+            100,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns.test.").unwrap(),
+                Name::from_ascii("admin.test.").unwrap(),
+                1,
+                60,
+                60,
+                3600,
+                30,
+            )),
+        ));
+        cache.insert(&negative, &response, Scope::NoEcs, now);
+    }
+    assert_eq!(cache.snapshot()["entries"], 2 * names.len());
+    let restored = Cache::new(CacheConfig::default());
+    let report = restore(&restored, encode(&cache, now), 0, now).unwrap();
+    assert_eq!((report.restored, report.reason), (2 * names.len(), None));
+    for name in &names {
+        let positive = restored
+            .peek(&question(name, RecordType::A), None, now, false)
+            .unwrap()
+            .message;
+        assert_eq!(positive.answers[0].data, RData::A(A::new(192, 0, 2, 1)));
+        let negative = restored
+            .peek(&question(name, RecordType::AAAA), None, now, false)
+            .unwrap()
+            .message;
+        assert_eq!(negative.response_code, ResponseCode::NXDomain);
+        assert_eq!(
+            restored.inspect(name, None, now)["variants"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    assert_eq!(restored.invalidate(Some(&names[0]), None, None), 2);
+}
+
+#[test]
+fn restore_rejects_noncanonical_wire_names() {
+    let cache = Cache::new(CacheConfig::default());
+    let q = query("question.test.");
+    let now = Instant::now();
+    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    let original = encode(&cache, now);
+    let mut trailing = Name::from_ascii("question.test.")
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    trailing.push(0);
+    for name in [
+        "question.test.".to_string(),
+        STANDARD.encode(
+            Name::from_ascii("Question.test.")
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+        ),
+        STANDARD.encode(trailing),
+    ] {
+        let mut header: Header = serde_json::from_slice(&original[..HEADER_BYTES]).unwrap();
+        let mut record: Record = serde_json::from_slice(&original[HEADER_BYTES..]).unwrap();
+        record.key.name = name;
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        let mut hash = Sha256::new();
+        hash.update(&line);
+        header.checksum = digest(hash, &header);
+        let encoded = serde_json::to_vec(&header).unwrap();
+        let mut bytes = vec![b' '; HEADER_BYTES];
+        bytes[..encoded.len()].copy_from_slice(&encoded);
+        bytes.extend(line);
+        let restored = Cache::new(CacheConfig::default());
+        assert!(restore(&restored, bytes, 0, now).is_err());
+        assert_eq!(restored.snapshot()["entries"], 0);
+    }
+}
+
+#[test]
 fn restore_rejects_malformed_scope_and_question_even_with_recomputed_checksum() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("question.test.");
@@ -578,7 +693,12 @@ fn restore_rejects_malformed_scope_and_question_even_with_recomputed_checksum() 
         if bad_scope {
             record.scope = SavedScope::Network("192.0.2.1/24".into());
         } else {
-            record.key.name = "another.test.".into();
+            record.key.name = STANDARD.encode(
+                Name::from_ascii("another.test.")
+                    .unwrap()
+                    .to_bytes()
+                    .unwrap(),
+            );
         }
         let mut line = serde_json::to_vec(&record).unwrap();
         line.push(b'\n');
@@ -706,7 +826,7 @@ fn exact_source_without_client_edns_round_trips_and_prior_format_is_rejected() {
     );
     let mut legacy = bytes;
     let mut header: Header = serde_json::from_slice(&legacy[..HEADER_BYTES]).unwrap();
-    header.version = 1;
+    header.version = 2;
     let encoded = serde_json::to_vec(&header).unwrap();
     legacy[..HEADER_BYTES].fill(b' ');
     legacy[..encoded.len()].copy_from_slice(&encoded);

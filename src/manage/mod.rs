@@ -900,11 +900,10 @@ async fn api(
                 .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
             let cache = resolver.cache();
             let now = Instant::now();
-            let name = query.queries[0].name().to_ascii();
             Ok(json!({
                 "revision": manager.saved.as_ref().map_or(0, |s| s.revision),
                 "epoch": cache.epoch(),
-                "inspection": cache.inspect(&name, Some(query.queries[0].query_type()), now),
+                "inspection": cache.inspect(query.queries[0].name(), Some(query.queries[0].query_type()), now),
                 "explanation": cache.explain(&query, subnet, now),
             }))
         }
@@ -933,7 +932,7 @@ async fn api(
                     "Cache changed; refresh before invalidating",
                 ));
             }
-            let removed = cache.invalidate(name.as_deref(), kind, scope);
+            let removed = cache.invalidate(name.as_ref(), kind, scope);
             Ok(json!({"removed":removed,"epoch":cache.epoch(),"revision":input.revision}))
         }
         ("GET", "/api/config") => {

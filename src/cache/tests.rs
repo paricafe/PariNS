@@ -25,6 +25,10 @@ fn answer(q: &Message, address: u8, ttl: u32) -> Message {
     r
 }
 
+fn name(text: &str) -> Name {
+    Name::from_ascii(text).unwrap()
+}
+
 fn network(text: &str) -> Scope {
     Scope::Network(text.parse().unwrap())
 }
@@ -553,7 +557,7 @@ fn cname_negative_lifetime_obeys_every_existing_ttl_bound() {
             let cache = Cache::new(cfg);
             assert!(cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
             assert_eq!(
-                cache.inspect("alias.source.test.", None, now)["variants"][0]["fresh_remaining_secs"],
+                cache.inspect(&name("alias.source.test."), None, now)["variants"][0]["fresh_remaining_secs"],
                 7,
                 "{code:?}: {bound}"
             );
@@ -660,7 +664,7 @@ fn cname_negative_rejection_supersedes_old_positive_and_negative_but_not_old_epo
                     replacement.answers = vec![replacement.answers[0].clone(); 500];
                 }
                 let old_epoch = cache.epoch();
-                cache.invalidate(Some("unrelated.test."), None, None);
+                cache.invalidate(Some(&name("unrelated.test.")), None, None);
                 let new_scope = Scope::ExactSource("192.0.2.0/24".parse().unwrap());
                 assert_eq!(
                     cache.insert_decision_if_epoch(&q, &replacement, new_scope, now, old_epoch),
@@ -882,7 +886,11 @@ fn targeted_invalidation_blocks_old_epoch_and_keeps_unrelated_scopes() {
     cache.insert(&q, &answer(&q, 1, 60), network("192.0.2.0/24"), now);
     cache.insert(&q, &answer(&q, 2, 60), Scope::NoEcs, now);
     assert_eq!(
-        cache.invalidate(Some("CLEAR.test"), Some(RecordType::A), Some(Scope::NoEcs)),
+        cache.invalidate(
+            Some(&name("CLEAR.test")),
+            Some(RecordType::A),
+            Some(Scope::NoEcs)
+        ),
         1
     );
     assert!(!cache.insert_if_epoch(&q, &answer(&q, 2, 60), Scope::NoEcs, now, epoch));
@@ -923,7 +931,7 @@ fn inspection_and_race_checks_do_not_make_an_entry_popular() {
         assert!(!cache.peek(&q, None, later, false).unwrap().refresh);
         assert_eq!(cache.explain(&q, None, later)["state"], "fresh");
         assert_eq!(
-            cache.inspect("PREFETCH.test", None, later)["variants"][0]["hits"],
+            cache.inspect(&name("PREFETCH.test"), None, later)["variants"][0]["hits"],
             0
         );
     }
@@ -995,13 +1003,16 @@ fn cache_rules_use_dns_labels_and_equivalent_escaped_names() {
     cache.insert(&exact, &answer(&exact, 1, 300), Scope::NoEcs, now);
     assert_eq!(cache.get(&exact, None, now).unwrap().0.answers[0].ttl, 17);
     assert_eq!(
-        cache.inspect(r"\145xample.test", None, now)["variants"]
+        cache.inspect(&name(r"\145xample.test"), None, now)["variants"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
-    assert_eq!(cache.invalidate(Some(r"\145xample.test"), None, None), 1);
+    assert_eq!(
+        cache.invalidate(Some(&name(r"\145xample.test")), None, None),
+        1
+    );
     let literal_star = query("*.example.test.");
     assert_eq!(cache.explain(&literal_star, None, now)["eligible"], false);
 }
@@ -1218,7 +1229,7 @@ fn failed_truncated_or_client_specific_updates_do_not_supersede() {
         );
     }
     let old_epoch = cache.epoch();
-    cache.invalidate(Some("unrelated.test"), None, None);
+    cache.invalidate(Some(&name("unrelated.test")), None, None);
     assert!(!cache.insert_if_epoch(&q, &answer(&q, 2, 0), Scope::NoEcs, now, old_epoch));
     assert!(!cache.insert_if_epoch(
         &q,

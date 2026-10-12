@@ -1,0 +1,27 @@
+src/cache/tests.rs
+  s_0cc083ef6e9aa3::t_b324e7327c8135 925-926
+parins.example.toml
+  s_0cc083ef6e9aa3::t_ae069174546e8c 83-86
+CHANGELOG.md
+  s_0cc083ef6e9aa3::t_040ff07cc0b53d 5-11
+guide/configuration.md
+  s_0cc083ef6e9aa3::t_ae069174546e8c 240-243
+src/config.rs
+  s_0cc083ef6e9aa3::t_ae069174546e8c 198-201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "45224134f52e3d49a856e07cfb2a7638f8c2431a",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

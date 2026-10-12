@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.12 — 2026-10-12
 
 ### Changed
 
@@ -11,6 +11,27 @@
 - The overview shows, next to the cache hit rate, the share of queries that
   joined an identical query already in progress instead of asking an upstream
   again. The hit rate itself is unchanged.
+- DoH over HTTP/2 keeps one reusable connection per upstream instead of opening
+  a new TLS connection for every query, so most queries skip the connection
+  setup round trips. A connection closes after 10 seconds without queries, is
+  replaced after the server sends GOAWAY or fails, and is retired when an
+  HTTP/2 PING goes unanswered. A query that was already sent is never resent.
+- Upstream attempt details in query logs and transport diagnostics show whether
+  an HTTP/2 or DoT query used a new or reused connection.
+- Software updates has its own page in the console navigation instead of
+  sitting under Performance and limits.
+- Console text is shorter: the login and first-run pages show only what is
+  needed to sign in or set up, page eyebrow labels and explanations under the
+  overview numbers are gone, and the remaining help uses plain short sentences.
+
+### Fixed
+
+- DoH over HTTP/3 now sends queries as RFC 8484 GET requests. Some servers
+  answered the previous POST requests with 405, which made every query wait for
+  the HTTP/2 fallback. When a server still refuses HTTP/3 with a definite
+  client error, PariNS stops trying HTTP/3 for that upstream until the upstream
+  configuration is next applied, instead of retrying every 30 seconds.
+- A failed update check's diagnostic code stays inside the version group.
 
 ## v0.1.11 — 2026-10-12
 

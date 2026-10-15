@@ -204,7 +204,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
     <section className="panel status-strip" data-tone={tone} aria-label={t("ui.maintenance")}>
       <span className="pulse" aria-hidden="true" />
       <div className="status-strip-main">
-        {status === null ? <strong>{t("ui.loadingStatus")}</strong> : !(running && status.dns_health.ready) && <strong>{t(`reliability.${health === 'failed' ? 'runtimeFailed' : health}`)}</strong>}
+        {status === null ? <strong>{t("ui.loadingStatus")}</strong> : !(running && status.dns_health.ready) && <strong>{t(`reliability.${health === 'failed' ? status.dns_health.code === 'startup_failed' ? 'startupFailed' : 'runtimeFailed' : health}`)}</strong>}
         <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
       </div>
       <dl className="status-strip-facts">
@@ -214,7 +214,9 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
       </dl>
     </section>
     {statusFailed && <p role="alert" className="notice error">{t("app.statusUnavailable")}{updated !== null && <> {t('shell.lastUpdated', { time: formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</>}</p>}
-    {status?.last_error && <p role="alert" className="notice error">{status.last_error}</p>}
+    {status?.last_error && (status.dns_health.code === 'startup_failed'
+      ? <StartupFailure error={status.last_error} t={t} />
+      : <p role="alert" className="notice error">{status.last_error}</p>)}
 
     <section aria-label={t("ui.statsScope")} className="kpi-grid">
       {kpis.map((item) => <div key={item.key} className="kpi-card glass">
@@ -275,5 +277,16 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
         </section>
       </div>
     </Disclosure>
+  </div>;
+}
+
+/** A saved configuration that cannot start (for example a port held by another program); Rust retries it automatically. */
+function StartupFailure({ error, t }: { error: string; t: (key: string, params?: Record<string, string | number>) => string }) {
+  const conflict = /bind (.+?) (\S+:\d+): address (?:already )?in use/i.exec(error);
+  return <div role="alert" className="notice error startup-failure">
+    <strong>{t('shell.startupFailedTitle')}</strong>
+    {conflict && <p>{t('shell.startupPortInUse', { protocol: conflict[1], address: conflict[2] })}</p>}
+    <p>{t('shell.startupRetrying')}</p>
+    <code>{error}</code>
   </div>;
 }

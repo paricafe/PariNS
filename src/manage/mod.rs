@@ -4,6 +4,7 @@ mod auth_budget;
 mod cache;
 mod certificates;
 pub mod check;
+mod dns_retry;
 mod filters;
 mod runtime;
 mod settings;
@@ -1248,6 +1249,7 @@ pub async fn serve(
     let (update_stop, update_stopping) = tokio::sync::watch::channel(false);
     let update_task = tokio::spawn(update_checks::run(shared.clone(), update_stopping.clone()));
     let filter_task = tokio::spawn(filters::run(shared.clone(), update_stopping.clone()));
+    let retry_task = tokio::spawn(dns_retry::run(shared.clone(), update_stopping.clone()));
     let update_operation_task =
         tokio::spawn(updates::operation::run(shared.clone(), update_stopping));
     let initial = active.lock().unwrap().snapshot.clone();
@@ -1325,6 +1327,7 @@ pub async fn serve(
         tasks.shutdown().await;
         let _ = update_task.await;
         let _ = filter_task.await;
+        let _ = retry_task.await;
         // A disconnected HTTP admission may still own the mutation permit and
         // register its rule task. Cross that barrier before draining the owner.
         {

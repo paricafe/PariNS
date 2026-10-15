@@ -118,6 +118,11 @@ until preview/validation.
 - DNS terminal health is published once per generation to readiness and storage
   sampling. Attempt diagnostics use bounded slots and finite typed dimensions;
   cancellation/shutdown are not upstream faults. Management API 200 is not DNS readiness.
+- A managed generation starts all listeners or none. A failed start is logged with
+  the failing listener and retried by one process-owned task with bounded backoff
+  (5 s doubling to 60 s, rate-limited logs) that yields to mutations, restarts only
+  the saved revision (also during an update freeze) and stops with management shutdown. Listener exits after start are not
+  restarted automatically. Details: `src/manage/dns_retry.rs`.
 
 ## Management, runtime and security
 

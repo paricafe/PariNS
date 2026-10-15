@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Semaphore, watch},
@@ -185,17 +185,31 @@ impl Server {
             }
         };
         use crate::tls::CertificateRole as Role;
-        let tcp = TcpListener::bind(config.listen).await?;
-        let udp = Arc::new(udp::Socket::bind(tcp.local_addr()?).await?);
+        // Name the protocol and address in bind errors: "address in use" alone
+        // does not tell an operator which listener collided.
+        let tcp = TcpListener::bind(config.listen)
+            .await
+            .with_context(|| format!("bind DNS TCP {}", config.listen))?;
+        let udp = Arc::new(
+            udp::Socket::bind(tcp.local_addr()?)
+                .await
+                .with_context(|| format!("bind DNS UDP {}", config.listen))?,
+        );
         config.listen = tcp.local_addr()?;
         let admin = match config.admin_listen {
-            Some(address) => Some(TcpListener::bind(address).await?),
+            Some(address) => Some(
+                TcpListener::bind(address)
+                    .await
+                    .with_context(|| format!("bind admin {address}"))?,
+            ),
             None => None,
         };
         let mut encrypted = Vec::new();
         if let Some(settings) = &mut config.dot {
             let tls = certificates.server_config(Role::Dot, &[b"dot"])?;
-            let listener = TcpListener::bind(settings.listen).await?;
+            let listener = TcpListener::bind(settings.listen)
+                .await
+                .with_context(|| format!("bind DoT {}", settings.listen))?;
             settings.listen = listener.local_addr()?;
             encrypted.push(Encrypted::Dot(listener, tls));
         }
@@ -203,7 +217,9 @@ impl Server {
             let tls = certificates.server_config(Role::Doh, &[b"h2"])?;
             // Select the TCP port first. H3 must bind the exact same address;
             // failure drops the whole candidate before it can serve requests.
-            let listener = TcpListener::bind(settings.listen).await?;
+            let listener = TcpListener::bind(settings.listen)
+                .await
+                .with_context(|| format!("bind DoH {}", settings.listen))?;
             let address = listener.local_addr()?;
             settings.listen = address;
             if settings.http3 {
@@ -213,7 +229,8 @@ impl Server {
                         certificates.server_config(Role::Doh, &[b"h3"])?,
                         config.max_inflight.min(1024),
                         crate::quic::Protocol::H3,
-                    )?,
+                    )
+                    .with_context(|| format!("bind DoH HTTP/3 UDP {address}"))?,
                     crate::quic::Protocol::H3,
                 ));
             }
@@ -230,7 +247,8 @@ impl Server {
                 tls,
                 config.max_inflight.min(1024),
                 crate::quic::Protocol::Doq,
-            )?;
+            )
+            .with_context(|| format!("bind DoQ {}", settings.listen))?;
             settings.listen = endpoint.local_addr()?;
             encrypted.push(Encrypted::Quic(endpoint, crate::quic::Protocol::Doq));
         }

@@ -120,6 +120,23 @@ describe("OverviewPage", () => {
     expect(screen.getByText('task_panic')).toBeTruthy();
     expect(screen.getByText('100')).toBeTruthy();
   });
+  it('explains a startup failure with the occupied listener and the automatic retry', async () => {
+    const error = 'DNS unavailable: bind DoH 0.0.0.0:443: Address in use (os error 98)';
+    const failed = { ...status, running: false, last_error: error, dns_health: { ...status.dns_health, state: 'failed', ready: false, code: 'startup_failed' } };
+    const view = render(<OverviewPage api={fakeApi((path) => path === 'status' ? failed : stats)} language="en" onOpenDns={() => {}} />);
+    await waitFor(() => expect(screen.getByText('DNS is not running')).toBeTruthy());
+    expect(screen.getByText('0.0.0.0:443 for DoH is used by another program.')).toBeTruthy();
+    expect(screen.getByText(/Retrying automatically/)).toBeTruthy();
+    expect(screen.getByText('Could not start')).toBeTruthy();
+    expect(screen.getByText(error)).toBeTruthy();
+    view.unmount();
+    // Another startup error keeps the generic explanation and the raw text.
+    const other = { ...failed, last_error: 'DNS unavailable: subscription_material_missing: DNS policy unavailable' };
+    render(<OverviewPage api={fakeApi((path) => path === 'status' ? other : stats)} language="zh-CN" onOpenDns={() => {}} />);
+    await waitFor(() => expect(screen.getByText('DNS 没有运行')).toBeTruthy());
+    expect(screen.queryByText(/被其他程序占用/)).toBeNull();
+    expect(screen.getByText(/正在自动重试/)).toBeTruthy();
+  });
   it('reports coalesced followers beside the unchanged hit rate', async () => {
     const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, flight_joined: 9 } } } };
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? status : totals)} language="en" onOpenDns={() => {}} />);

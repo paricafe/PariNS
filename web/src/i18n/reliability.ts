@@ -16,7 +16,7 @@ export const reliabilityMessages = {
   started: ['开始于 {time}', 'Started {time}'], completed: ['完成于 {time}', 'Finished {time}'],
   dnsHealth: ['DNS 服务状态', 'DNS service status'],
   unconfigured: ['还没设置', 'Not set up yet'], starting: ['正在启动', 'Starting'], running: ['运行中', 'Running'], stopped: ['已停止', 'Stopped'],
-  runtimeFailed: ['服务意外停止', 'Service stopped unexpectedly'], ready: ['可以处理查询', 'Ready for queries'], notReady: ['还没准备好', 'Not ready yet'],
+  runtimeFailed: ['服务意外停止', 'Service stopped unexpectedly'], startupFailed: ['没能启动', 'Could not start'], ready: ['可以处理查询', 'Ready for queries'], notReady: ['还没准备好', 'Not ready yet'],
   runtimeGeneration: ['第 {generation} 次运行 · 自 {time} 启动', 'Run {generation} · started at {time}'],
   diagnostics: ['缓存决策', 'Cache decisions'], diagnosticsScope: ['自 {time} 缓存重建以来', 'Since the cache was rebuilt at {time}'],
   unknownTime: ['时间未知', 'unknown time'], lookup: ['读取缓存', 'Cache lookups'], store: ['存入缓存', 'Cache writes'],

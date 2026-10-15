@@ -284,12 +284,24 @@ Low-space warnings use less than 10% available, or less than the database budget
 plus twice the snapshot budget plus 64 MiB. This is an early warning, not a promise
 that writes will succeed. No other application's files are cleaned up.
 
-The `dns_health` field of authenticated `GET /api/status` reports managed DNS
-readiness; a reachable management API alone is not proof that DNS is running.
-Unexpected listener exits
+Monitor DNS with the `dns_health` field of authenticated `GET /api/status`
+(`ready`, `state` and `code`); a reachable management API or `/healthz` alone is
+not proof that DNS is running. PariNS does not send alerts itself, so connect this
+check to your own monitoring.
+
+If the saved configuration cannot start, for example because another program
+holds a listener port after a reboot, `code` is `startup_failed`, the journal and
+`last_error` name the listener (such as `bind DoH 0.0.0.0:443: Address in use`),
+and the console overview says so. The manager retries the same configuration
+after 5 seconds, doubling to at most once a minute, until it starts, another
+configuration is applied, or PariNS stops. The journal repeats an unchanged error
+at most every ten minutes and records the recovery. All listeners start together:
+one failed listener keeps the whole generation stopped.
+
+Listeners that exit unexpectedly after starting
 publish a generation-scoped failure also used by statistics sampling. Reapply
-configuration after diagnosing the failure; there is no automatic restart loop
-inside the manager. Process-local typed cache/upstream/QUIC counters remain usable
+configuration after diagnosing the failure; those exits are not restarted
+automatically. Process-local typed cache/upstream/QUIC counters remain usable
 with query logging disabled. Upstream endpoint slots belong to their displayed
 pool generation, and bounded query traces contain at most eight attempts, keeping
 the winning or final failure result. Caller cancellation, parallel race losers and

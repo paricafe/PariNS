@@ -606,3 +606,66 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     assert_eq!(manager.generation, generation);
     manager.terminal_shutdown().await;
 }
+
+#[tokio::test]
+async fn startup_failure_names_the_listener_backs_off_and_recovers_when_the_port_is_free() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    // Another program holds the DNS TCP port, as after the production reboot.
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = holder.local_addr().unwrap().port();
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+            toml: config().replace("127.0.0.1:0", &format!("127.0.0.1:{port}")),
+            previous: None,
+            revision: 1,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: vec![],
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active)
+        .await
+        .unwrap();
+    assert!(manager.resolver().is_none());
+    let error = manager.last_error.clone().unwrap();
+    assert!(
+        error.contains(&format!("bind DNS TCP 127.0.0.1:{port}")),
+        "{error}"
+    );
+    assert_eq!(
+        manager.services.health.snapshot().code,
+        Some("startup_failed")
+    );
+    let first = manager.startup.as_ref().unwrap().failed_at;
+    assert_eq!(
+        manager.startup_retry_at(),
+        Some(first + Duration::from_secs(5))
+    );
+    // A failed retry doubles the delay; it stays bounded at 60 seconds.
+    manager.retry_startup().await;
+    let failure = manager.startup.as_ref().unwrap();
+    assert_eq!(failure.attempts, 2);
+    assert_eq!(
+        manager.startup_retry_at(),
+        Some(failure.failed_at + Duration::from_secs(10))
+    );
+    manager.startup.as_mut().unwrap().attempts = 9;
+    let failed_at = manager.startup.as_ref().unwrap().failed_at;
+    assert_eq!(
+        manager.startup_retry_at(),
+        Some(failed_at + Duration::from_secs(60))
+    );
+    // The conflict ends: the next retry starts the same saved configuration.
+    drop(holder);
+    manager.retry_startup().await;
+    assert!(manager.resolver().is_some());
+    assert!(manager.last_error.is_none());
+    assert!(manager.startup.is_none());
+    assert_eq!(manager.startup_retry_at(), None);
+    assert!(manager.services.health.snapshot().ready);
+    manager.terminal_shutdown().await;
+}

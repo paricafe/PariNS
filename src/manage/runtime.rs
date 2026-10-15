@@ -159,7 +159,20 @@ pub(super) struct Manager {
     active: Arc<Mutex<Active>>,
     last_reload: Option<Value>,
     reload_attempt: u64,
+    startup: Option<StartupFailure>,
 }
+
+/// The saved configuration failed to start (for example a port held by another
+/// program). `dns_retry` restarts it with bounded backoff until it succeeds, a
+/// new configuration is applied, or management shuts down.
+struct StartupFailure {
+    error: String,
+    attempts: u32,
+    failed_at: Instant,
+    logged_at: Instant,
+}
+
+const STARTUP_LOG_INTERVAL: Duration = Duration::from_secs(600);
 
 impl Manager {
     pub async fn open(
@@ -274,6 +287,7 @@ impl Manager {
             active,
             last_reload: None,
             reload_attempt: 0,
+            startup: None,
         };
         if let Some(saved) = this.saved.clone() {
             if let Some(error) = local_error {
@@ -520,15 +534,77 @@ impl Manager {
             Ok(running) => {
                 self.running = Some(running);
                 self.last_error = None;
+                self.startup_recovered();
             }
             Err(error) => {
+                // The full chain names the listener, e.g. "bind DoH 0.0.0.0:443:
+                // Address in use"; the outer message alone does not.
+                let error = format!("{error:#}");
                 self.last_error = Some(format!("DNS unavailable: {error}"));
                 self.services.set_dns_health(
                     HealthState::Failed,
                     self.generation,
                     Some("startup_failed"),
                 );
+                self.startup_failed(error);
             }
+        }
+    }
+
+    /// Logs the first failure, a changed error, and the same error at most every
+    /// ten minutes, so a long outage stays visible without flooding the journal.
+    fn startup_failed(&mut self, error: String) {
+        let now = Instant::now();
+        let attempts = self
+            .startup
+            .as_ref()
+            .map_or(1, |s| s.attempts.saturating_add(1));
+        let log = self.startup.as_ref().is_none_or(|s| {
+            s.error != error || now.duration_since(s.logged_at) >= STARTUP_LOG_INTERVAL
+        });
+        if log {
+            eprintln!("PariNS DNS failed to start: {error}; retrying automatically");
+        }
+        let logged_at = match &self.startup {
+            Some(s) if !log => s.logged_at,
+            _ => now,
+        };
+        self.startup = Some(StartupFailure {
+            error,
+            attempts,
+            failed_at: now,
+            logged_at,
+        });
+    }
+
+    fn startup_recovered(&mut self) {
+        if let Some(failure) = self.startup.take() {
+            eprintln!(
+                "PariNS DNS started after {} failed attempt(s)",
+                failure.attempts
+            );
+        }
+    }
+
+    /// When the next automatic restart is due: 5 s after the first failure,
+    /// doubling to at most 60 s. `None` when nothing needs restarting.
+    pub fn startup_retry_at(&self) -> Option<Instant> {
+        let failure = self.startup.as_ref()?;
+        if self.running.is_some() || self.saved.is_none() {
+            return None;
+        }
+        let delay = Duration::from_secs(5)
+            .saturating_mul(1 << failure.attempts.saturating_sub(1).min(4))
+            .min(Duration::from_secs(60));
+        Some(failure.failed_at + delay)
+    }
+
+    /// Restarts the saved configuration; the caller holds the mutation permit.
+    pub async fn retry_startup(&mut self) {
+        if let Some(saved) = self.saved.clone()
+            && self.running.is_none()
+        {
+            self.restore(&saved.toml, None).await;
         }
     }
 
@@ -617,14 +693,17 @@ impl Manager {
                 self.running = Some(running);
                 self.saved = Some(next);
                 self.last_error = None;
+                self.startup_recovered();
                 Ok(true)
             }
             Err(error) => {
                 if let Some(previous) = previous {
                     self.restore(&previous.toml, None).await;
                 }
-                if self.running.is_none() {
-                    self.last_error = Some(format!("Apply failed; DNS is stopped: {error}"));
+                // A failed restart of the previous configuration already explains
+                // what dns_retry keeps restarting; keep that message.
+                if self.running.is_none() && self.startup.is_none() {
+                    self.last_error = Some(format!("Apply failed; DNS is stopped: {error:#}"));
                 }
                 Err(error.context("configuration not applied"))
             }

@@ -23,15 +23,18 @@ describe('server-owned diagnostic presentation', () => {
     expect(screen.getByText('TTL is 0')).toBeTruthy();
   });
   it('leads with key storage facts, keeps nullable filesystem readings and raw errors, and moves counters into details', () => {
-    const current = { ...storage, dropped_logs: 2, query_log_coverage: { earliest_time_ms: 1700000000000, latest_time_ms: 1700000026000, span_ms: 26000 }, filesystem: { ...storage.filesystem, total_bytes: null, available_bytes: null, error: 'filesystem_unavailable', stale: true, low_space: true } };
+    const current = { ...storage, dropped_logs: 2, last_dropped_log_at_ms: 1700000000000, query_log_coverage: { earliest_time_ms: 1700000000000, latest_time_ms: 1700000026000, span_ms: 26000 }, filesystem: { ...storage.filesystem, total_bytes: null, available_bytes: null, error: 'filesystem_unavailable', stale: true, low_space: true } };
     const view = render(<StorageStatusPanel status={current} language="en" />);
-    expect(screen.getByText('2 records could not be saved')).toBeTruthy();
+    // An earlier day shows the date as well as the time.
+    expect(screen.getByText(/^2 records could not be saved · last query log drop: \d+\/\d+\/\d+, /)).toBeTruthy();
     expect(screen.getByText(/last readings/)).toBeTruthy();
     expect(screen.getByText('filesystem_unavailable')).toBeTruthy();
     expect(screen.getAllByRole('alert').some((alert) => alert.textContent?.includes('running low on space'))).toBe(true);
     expect(screen.getByRole('button', { name: 'Detailed counts' }).getAttribute('aria-expanded')).toBe('false');
     view.rerender(<StorageStatusPanel status={current} language="zh-CN" />);
     expect(screen.getByText('磁盘可用')).toBeTruthy();
+    view.rerender(<StorageStatusPanel status={{ ...current, last_dropped_log_at_ms: Date.now() }} language="en" />);
+    expect(screen.getByText(/^2 records could not be saved · last query log drop: \d{1,2}:\d{2}\s?[AP]M$/)).toBeTruthy();
   });
   it('renders H3 failure and H2 success as separate attempts, with omitted count', () => {
     render(<UpstreamAttempts language="en" trace={{ omitted: 3, attempts: [

@@ -146,7 +146,7 @@ pub(super) fn run(
                     break;
                 };
                 release(&shared, &item);
-                shared.dropped.io_failure.fetch_add(1, Ordering::Relaxed);
+                shared.dropped.record(&shared.dropped.io_failure);
             }
         }
         if last_filesystem.elapsed() >= Duration::from_secs(60) {
@@ -481,8 +481,7 @@ impl Database {
         if result.is_err() {
             shared
                 .dropped
-                .io_failure
-                .fetch_add(batch.len() as u64, Ordering::Relaxed);
+                .record_many(&shared.dropped.io_failure, batch.len() as u64);
             let mut owner = shared.stats.lock().expect("statistics owner");
             if owner.latest.is_none() {
                 owner.latest = latest;

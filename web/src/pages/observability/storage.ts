@@ -21,6 +21,7 @@ export interface StorageStatus {
   pending_bytes: number;
   pending_points: number;
   dropped_logs: number;
+  last_dropped_log_at_ms: number | null;
   dropped_points: number;
   last_commit_at_ms: number | null;
   persist_lag_ms: number;

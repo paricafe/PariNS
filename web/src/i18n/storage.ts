@@ -72,6 +72,7 @@ export const storageMessages = {
   losses: ["保存失败", "Not saved"],
   lossesNone: ["没有", "None"],
   lossesSome: ["有 {count} 条记录没能保存", "{count} records could not be saved"],
+  lastDrop: ["查询记录最近一次丢弃：{time}", "last query log drop: {time}"],
   detailedCounts: ["详细计数", "Detailed counts"],
   clearTitle: ["清空数据", "Clear data"],
 } as const;

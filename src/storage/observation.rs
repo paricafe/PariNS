@@ -77,8 +77,22 @@ pub(super) struct Drops {
     pub io_failure: AtomicU64,
     pub entry_too_large: AtomicU64,
     pub stopped: AtomicU64,
+    /// Wall-clock time of the most recent drop; 0 until one happens.
+    last_at_ms: AtomicU64,
 }
 impl Drops {
+    pub fn record(&self, counter: &AtomicU64) {
+        self.record_many(counter, 1);
+    }
+    pub fn record_many(&self, counter: &AtomicU64, count: u64) {
+        if count > 0 {
+            counter.fetch_add(count, Ordering::Relaxed);
+            self.last_at_ms.store(now_ms(), Ordering::Relaxed);
+        }
+    }
+    pub fn last_at_ms(&self) -> Option<u64> {
+        Some(self.last_at_ms.load(Ordering::Relaxed)).filter(|at| *at != 0)
+    }
     pub fn snapshot(&self) -> DropCounts {
         DropCounts {
             queue_full: self.queue_full.load(Ordering::Relaxed),

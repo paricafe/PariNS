@@ -16,6 +16,11 @@ export function StorageStatusPanel({ status, language, compact = false }: { stat
   const disk = status.filesystem;
   const used = status.database_bytes + status.journal_bytes + status.cache_snapshot_bytes;
   const dropped = status.dropped_logs + status.dropped_points;
+  const lastDrop = status.last_dropped_log_at_ms;
+  // Time only for today; otherwise include the date.
+  const lastDropText = lastDrop === null ? null : translate('storage.lastDrop', language, {
+    time: new Date(lastDrop).toDateString() === new Date().toDateString() ? formatDate(lastDrop, language, { timeStyle: 'short' }) : date(lastDrop),
+  });
   const bytes = (value: number | null) => value === null ? '—' : formatBytes(value, language);
   const counts: [string, string][] = [
     [t('database'), bytes(status.database_bytes)], [t('journal'), bytes(status.journal_bytes)], [t('snapshot'), bytes(status.cache_snapshot_bytes)],
@@ -37,7 +42,7 @@ export function StorageStatusPanel({ status, language, compact = false }: { stat
       <div className="row" data-layout="inline"><div className="row-label"><span>{r('coverage')}</span></div><div className="row-control"><span className="row-value">
         {coverage.earliest_time_ms === null || coverage.latest_time_ms === null ? r('coverageEmpty') : `${date(coverage.earliest_time_ms)} – ${date(coverage.latest_time_ms)}`}</span></div></div>
       <div className="row" data-layout="inline"><div className="row-label"><span>{t('losses')}</span></div><div className="row-control"><span className="row-value" data-tone={dropped ? 'warn' : undefined}>
-        {dropped ? translate('storage.lossesSome', language, { count: formatNumber(dropped, language) }) : t('lossesNone')}</span></div></div>
+        {dropped ? translate('storage.lossesSome', language, { count: formatNumber(dropped, language) }) : t('lossesNone')}{lastDropText && ` · ${lastDropText}`}</span></div></div>
       {!compact && <ExpandRow label={t('detailedCounts')}>
         {counts.map(([label, value]) => <div className="row" data-layout="inline" key={label}><div className="row-label"><span>{label}</span></div><div className="row-control"><span className="row-value num">{value}</span></div></div>)}
         {status.cleanup.last_reason && status.cleanup.last_at_ms !== null && <p className="row-note">{translate('reliability.lastCleanup', language, { reason: diagnosticLabel(`cleanup_${status.cleanup.last_reason}`, language), time: date(status.cleanup.last_at_ms) })}</p>}

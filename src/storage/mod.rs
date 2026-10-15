@@ -194,6 +194,7 @@ pub struct Status {
     pub pending_bytes: u64,
     pub pending_points: usize,
     pub dropped_logs: u64,
+    pub last_dropped_log_at_ms: Option<u64>,
     pub dropped_points: u64,
     pub last_commit_at_ms: Option<u64>,
     pub persist_lag_ms: u64,
@@ -224,6 +225,7 @@ impl Default for Status {
             pending_bytes: 0,
             pending_points: 0,
             dropped_logs: 0,
+            last_dropped_log_at_ms: None,
             dropped_points: 0,
             last_commit_at_ms: None,
             persist_lag_ms: 0,
@@ -401,17 +403,17 @@ impl Handle {
             return;
         }
         let Ok(mut payload) = serde_json::to_vec(&entry) else {
-            s.dropped.entry_too_large.fetch_add(1, Ordering::Relaxed);
+            s.dropped.record(&s.dropped.entry_too_large);
             return;
         };
         payload.shrink_to_fit();
         let charge = (payload.capacity() + std::mem::size_of::<LogItem>()) as u64;
         if charge > 131072 {
-            s.dropped.entry_too_large.fetch_add(1, Ordering::Relaxed);
+            s.dropped.record(&s.dropped.entry_too_large);
             return;
         }
         if s.stop.load(Ordering::Acquire) {
-            s.dropped.stopped.fetch_add(1, Ordering::Relaxed);
+            s.dropped.record(&s.dropped.stopped);
             return;
         }
         if s.queue_entries
@@ -420,7 +422,7 @@ impl Handle {
             })
             .is_err()
         {
-            s.dropped.queue_full.fetch_add(1, Ordering::Relaxed);
+            s.dropped.record(&s.dropped.queue_full);
             return;
         }
         if s.queue_bytes
@@ -431,7 +433,7 @@ impl Handle {
             .is_err()
         {
             s.queue_entries.fetch_sub(1, Ordering::Relaxed);
-            s.dropped.queue_full.fetch_add(1, Ordering::Relaxed);
+            s.dropped.record(&s.dropped.queue_full);
             return;
         }
         if self
@@ -447,7 +449,7 @@ impl Handle {
         {
             s.queue_entries.fetch_sub(1, Ordering::Relaxed);
             s.queue_bytes.fetch_sub(charge, Ordering::Relaxed);
-            s.dropped.queue_full.fetch_add(1, Ordering::Relaxed);
+            s.dropped.record(&s.dropped.queue_full);
         }
         if s.queue_entries.load(Ordering::Relaxed) >= 256 {
             self.0.worker.unpark();
@@ -517,6 +519,7 @@ fn status(shared: &Shared) -> Status {
     result.pending_bytes = shared.queue_bytes.load(Ordering::Relaxed);
     result.dropped_by_reason = shared.dropped.snapshot();
     result.dropped_logs = result.dropped_by_reason.total();
+    result.last_dropped_log_at_ms = shared.dropped.last_at_ms();
     result.filesystem.stale = result
         .filesystem
         .sampled_at_ms

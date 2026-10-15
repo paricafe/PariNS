@@ -262,6 +262,8 @@ async fn byte_limit_and_reliable_settings_survive_full_queues() {
     config.storage.queue_max_entries = 65536;
     let runtime = RuntimeServices::ephemeral(config.clone());
     let (release, paused) = pause(&runtime.storage).await;
+    assert_eq!(runtime.status().last_dropped_log_at_ms, None);
+    let before = now_ms();
     let mut large = entry("fresh");
     large.name = "x".repeat(60_000);
     for _ in 0..100 {
@@ -269,6 +271,8 @@ async fn byte_limit_and_reliable_settings_survive_full_queues() {
     }
     assert!(runtime.status().pending_bytes <= 1_048_576);
     assert!(runtime.status().dropped_logs > 0);
+    let last = runtime.status().last_dropped_log_at_ms.unwrap();
+    assert!((before..=now_ms()).contains(&last));
     config.query_log.enabled = false;
     runtime.publish_settings(config, 37);
     assert!(runtime.query_log.begin().is_none());
@@ -637,10 +641,12 @@ async fn byte_age_cleanup_and_io_drops_have_distinct_reasons() {
     })
     .await
     .unwrap();
+    assert_eq!(runtime.status().last_dropped_log_at_ms, None);
     runtime.storage.record_log(0, entry("fresh"));
     assert!(runtime.flush().await.is_err());
     let status = runtime.status();
     assert_eq!(status.dropped_by_reason.io_failure, 1);
+    assert!(status.last_dropped_log_at_ms.is_some());
     assert_eq!(status.dropped_by_reason.queue_full, 0);
     inspect(&runtime.storage, |conn| {
         conn.execute_batch("PRAGMA query_only=OFF")?;

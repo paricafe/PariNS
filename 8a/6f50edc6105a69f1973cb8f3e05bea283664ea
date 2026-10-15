@@ -1,0 +1,54 @@
+AGENTS.md
+  s_0cc083ef6e9aa3::t_3ad645c9d69946 121-122,125
+  s_0cc083ef6e9aa3::t_c752574a5fbbe2 123-124
+src/server.rs
+  s_0cc083ef6e9aa3::t_6e6bb3bdf36a4f 188-197,200-204,210-212,220-222,232-233,250-251
+  s_0cc083ef6e9aa3::t_9c82d835d33fd7 11
+src/manage/runtime_tests.rs
+  s_0cc083ef6e9aa3::t_65e4a2fd8f95de 635-642,644-647
+  s_0cc083ef6e9aa3::t_b7922a2d7e8972 609-634,643,648-671
+src/manage/mod.rs
+  s_0cc083ef6e9aa3::t_65e4a2fd8f95de 7
+  s_0cc083ef6e9aa3::t_ed1e4f289507b3 1252,1330
+web/src/pages/observability/OverviewPage.tsx
+  s_0cc083ef6e9aa3::t_f9c89180428927 217-219,282-290
+  s_0cc083ef6e9aa3::t_e2b188dffc4441 207
+  s_0cc083ef6e9aa3::t_8765c4201df944 291-292
+web/src/style.css
+  s_0cc083ef6e9aa3::t_f9c89180428927 115-117
+guide/operations.md
+  s_0cc083ef6e9aa3::t_3ad645c9d69946 287-301,303-304
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_9e5237b6d894ad 130
+  s_0cc083ef6e9aa3::t_d69fd2e2e49547 123-129,131-139
+web/src/i18n/reliability.ts
+  s_0cc083ef6e9aa3::t_9e5237b6d894ad 19
+web/src/i18n/shell.ts
+  s_0cc083ef6e9aa3::t_f9c89180428927 21-23
+src/manage/dns_retry.rs
+  s_0cc083ef6e9aa3::t_f8fa6d1189ee47 19-28,37
+  s_0cc083ef6e9aa3::t_ed1e4f289507b3 1-9,12-13,15-18,29,33-36,39-41,110-111
+  s_0cc083ef6e9aa3::t_c752574a5fbbe2 79-87,106
+  s_0cc083ef6e9aa3::t_51e7c5c479caa9 10-11,14,30-32,38
+  s_0cc083ef6e9aa3::t_6ad42f087fefc4 42-78,88-105,107-109
+src/manage/runtime.rs
+  s_0cc083ef6e9aa3::t_51e7c5c479caa9 703-706
+  s_0cc083ef6e9aa3::t_9c82d835d33fd7 162,165-176,290,537,540-542,549,554-557,562-610,696
+  s_0cc083ef6e9aa3::t_65e4a2fd8f95de 558-561
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8a6f50edc6105a69f1973cb8f3e05bea283664ea",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

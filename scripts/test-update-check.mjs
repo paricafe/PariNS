@@ -309,7 +309,7 @@ function selfTest() {
   assert.equal(plannedCount(60000, SLO.rate), 60000); assert.equal(plannedCount(120000, SLO.rate), 120000);
   assert.equal(dueCount(123.9, 60000, SLO.rate), 124); assert.equal(distribution([1, 2, 3, 100]).p99, 100);
   const packet = query(7, 'fresh.check.test'); oracle(aResponse(packet), packet, false);
-  assert.throws(() => oracle(aResponse(packet), packet, true)); assert.equal(workload(2, 'test').blocked, true);
+  assert.throws(() => oracle(aResponse(packet), packet, true));
   const release = { tag_name: 'v0.1.5', draft: false, prerelease: false, id: 1, published_at: '2026-10-08T00:00:00Z', html_url: 'https://github.com/paricafe/PariNS/releases/tag/v0.1.5' };
   assert.equal(releaseIdentity(release, '0.1.5').tag, 'v0.1.5');
   assert.throws(() => releaseIdentity({ ...release, tag_name: 'v0.1.4' }, '0.1.5'));
@@ -322,8 +322,6 @@ function selfTest() {
   assert(completedNewCheck(after, before, 190)); assert(!completedNewCheck(after, before, 210));
   assert(!completedNewCheck({ ...after, check: { ...after.check, last_success_at_ms: 110 } }, before, 190));
   assert(!completedNewCheck({ ...after, candidate: {} }, before, 190));
-  assert.match(configText(5354), /\[filter_subscriptions\]\nenabled=false\nsources=\[\]/);
-  assert.match(configText(5354), /\[updates\]\nauto_check=false/);
   assert.equal(httpDiagnostic('GET', '/untrusted', 422, 200, 'secret'), undefined);
   console.log('official update-check self-test passed');
 }

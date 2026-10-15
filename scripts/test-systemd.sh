@@ -214,35 +214,9 @@ http() {
         --cookie "$fixture/cookies.txt" --cookie-jar "$fixture/cookies.txt" "$@"
 }
 session() { http --max-time 5 http://127.0.0.1:3000/api/session; }
-refuse_install() {
-    if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info" > "$fixture/refusal.log" 2>&1; then
-        printf '%s\n' 'Expected installation refusal before changing files or service.' >&2
-        exit 1
-    fi
-    ! sudo test -e /opt/parins-managed/parins
-}
-# Real systemd must never get the chance to claim unknown or legacy state.
-sudo mkdir -m 0700 /var/lib/parins-managed
-refuse_install
-sudo rmdir /var/lib/parins-managed
-sudo ln -s /var/lib/private/parins-managed /var/lib/parins-managed
-refuse_install
-sudo rm /var/lib/parins-managed
-sudo install -d -m 0700 /var/lib/private/parins-managed
-refuse_install
-sudo rmdir /var/lib/private/parins-managed
-sudo install -d -m 0700 /var/lib/parins
-for name in state.json setup-token; do
-    printf 'legacy managed sentinel\n' | sudo tee "/var/lib/parins/$name" >/dev/null
-    refuse_install
-    sudo grep -Fxq 'legacy managed sentinel' "/var/lib/parins/$name"
-    sudo rm "/var/lib/parins/$name"
-done
-printf '# PariNS managed installer unit v1\n[Service]\nDynamicUser=yes\nStateDirectory=parins\n' |
-    sudo tee /etc/systemd/system/parins-managed.service >/dev/null
-refuse_install
-sudo rm /etc/systemd/system/parins-managed.service
+# Unknown and legacy layout refusals are covered by test-install.sh staged roots.
 # External TLS files under the old shared path can coexist unchanged.
+sudo install -d -m 0700 /var/lib/parins
 sudo install -d -m 0750 /var/lib/parins/tls
 printf 'external certificate sentinel\n' | sudo tee /var/lib/parins/tls/external.pem >/dev/null
 sudo chmod 0640 /var/lib/parins/tls/external.pem

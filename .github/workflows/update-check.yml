@@ -23,7 +23,6 @@ jobs:
           sh -n scripts/test-systemd.sh
           node --check scripts/test-update-check.mjs
           node scripts/test-update-check.mjs --self-test
-          node scripts/test-filter-lifecycle.mjs --self-test
       - name: Download the published official A package
         run: |
           set -euo pipefail

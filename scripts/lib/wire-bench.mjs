@@ -1,7 +1,5 @@
-// Shared wire fixture helpers from bench-runtime.mjs; parse also exposes owner/TTL.
+// Shared wire and Linux cgroup fixture helpers; parse also exposes owner/TTL.
 import assert from 'node:assert/strict';
-import http from 'node:http';
-import { platform } from 'node:os';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -38,18 +36,16 @@ export async function linuxConstraints(pid) {
   return { pid, allowed_cpus: status.match(/^Cpus_allowed_list:\s*(.+)$/m)?.[1], cgroup: relative, hierarchy };
 }
 
-export async function verifyLinuxServer(pid, unit, serviceCpus, driverCpus, memoryBytes = 4294967296) {
-  assert([2147483648, 4294967296].includes(memoryBytes), 'expected a declared 2 or 4 GiB fixture');
+export async function verifyLinuxServer(pid, unit, serviceCpus, driverCpus, memoryBytes) {
+  assert(memoryBytes === 2147483648, 'expected the declared 2 GiB fixture');
   const snapshot = await linuxConstraints(pid);
   assert(snapshot.cgroup.endsWith(`/${unit}`), 'fixture is outside its owned transient unit');
   assert.deepEqual(cpuList(snapshot.allowed_cpus), serviceCpus, 'server affinity differs from the fixed two CPUs');
   const own = snapshot.hierarchy[0];
   assert(own, 'missing fixture cgroup');
-  if (memoryBytes === 2147483648) {
-    const [quota, period] = own['cpu.max'].split(/\s+/);
-    assert(quota !== 'max' && Number(period) > 0 && Number(quota) / Number(period) === 2,
-      'lifecycle service must have exactly a 200% CPU quota');
-  }
+  const [quota, period] = own['cpu.max'].split(/\s+/);
+  assert(quota !== 'max' && Number(period) > 0 && Number(quota) / Number(period) === 2,
+    'service must have exactly a 200% CPU quota');
   assert.deepEqual(cpuList(own['cpuset.cpus.effective']), serviceCpus, 'effective service cpuset differs');
   assert.equal(own['memory.max'], String(memoryBytes), 'service memory limit differs from the declared fixture');
   assert.equal(own['memory.swap.max'], '0', 'service swap must be disabled');
@@ -131,37 +127,4 @@ export function parse(wire) {
   }
   assert.equal(at, wire.length, 'trailing DNS bytes');
   return { questionEnd, answers, options };
-}
-export function bounded(promise, ms, label) {
-  let timer;
-  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(label)), ms); })]).finally(() => clearTimeout(timer));
-}
-export function resource(stderr) {
-  const number = pattern => { const value = stderr.match(pattern)?.[1]; return value === undefined ? null : Number(value); };
-  const darwin = platform() === 'darwin';
-  const rss = number(darwin ? /(\d+)\s+maximum resident set size/ : /Maximum resident set size \(kbytes\):\s*(\d+)/);
-  return {
-    resource_scope: 'whole server process including startup/shutdown; excludes load generator',
-    cpu_user_secs: number(darwin ? /([\d.]+) user/ : /User time \(seconds\):\s*([\d.]+)/),
-    cpu_system_secs: number(darwin ? /([\d.]+) sys/ : /System time \(seconds\):\s*([\d.]+)/),
-    max_rss_bytes: rss === null ? null : rss * (darwin ? 1 : 1024),
-    block_output_operations: darwin ? number(/(\d+)\s+block output operations/) : null,
-    linux_file_system_outputs: platform() === 'linux' ? number(/File system outputs:\s*(\d+)/) : null,
-  };
-}
-export function metrics(port, includeTimers = false) {
-  return new Promise((resolve, reject) => {
-    const request = http.get({ hostname: '127.0.0.1', port, path: '/metrics', agent: false }, response => {
-      let body = '';
-      response.on('data', chunk => { body += chunk; if (body.length > 1024 * 1024) request.destroy(new Error('metrics too large')); });
-      response.on('end', () => { try {
-        assert.equal(response.statusCode, 200);
-        const values = Object.fromEntries([...body.matchAll(/^parins_([a-z_]+)_total (\d+)$/gm)].map(match => [match[1], Number(match[2])]));
-        if (includeTimers) for (const match of body.matchAll(/^parins_(request|upstream)_duration_seconds_(count|sum) ([\d.]+)$/gm)) values[`${match[1]}_duration_${match[2]}`] = Number(match[3]);
-        resolve(values);
-      } catch (error) { reject(error); } });
-      response.on('error', reject);
-    });
-    request.setTimeout(2000, () => request.destroy(new Error('metrics timeout'))); request.on('error', reject);
-  });
 }

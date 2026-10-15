@@ -26,29 +26,41 @@ jobs:
           node-version: '22.16.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Build and test management console
+      # macOS builds the embedded console and runs only the Rust checks.
+      - name: Install console dependencies
+        working-directory: web
+        run: npm ci --ignore-scripts
+      - name: Check management console
+        if: runner.os == 'Linux'
         working-directory: web
         run: |
-          npm ci --ignore-scripts
           npm run typecheck
           npm test
-          npm run build
+      - name: Build management console
+        working-directory: web
+        run: npm run build
       - name: Audit frontend dependencies
+        if: runner.os == 'Linux'
         working-directory: web
         run: npm audit --registry https://registry.npmjs.org --audit-level=high
       - name: Install pinned toolchain
         run: rustup show active-toolchain
       - name: Release notes regression
+        if: runner.os == 'Linux'
         run: node --test scripts/test-release-notes.mjs scripts/test-update-manifest.mjs
-      - run: cargo fmt --check
+      - if: runner.os == 'Linux'
+        run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
       - name: Isolated UDP source-address acceptance
         if: runner.os == 'Linux'
         run: sh scripts/test-udp.sh --ephemeral-ci
-      - run: cargo build --locked --release
-      - run: ./target/release/parins --config parins.example.toml --check
+      - if: runner.os == 'Linux'
+        run: cargo build --locked --release
+      - if: runner.os == 'Linux'
+        run: ./target/release/parins --config parins.example.toml --check
       - name: Installer fixture tests
+        if: runner.os == 'Linux'
         run: |
           for script in scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/test-udp.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh; do
             sh -n "$script"
@@ -68,6 +80,7 @@ jobs:
           cargo build --locked --release --bins --target x86_64-unknown-linux-musl
           sh scripts/test-systemd.sh --ephemeral-ci --binary-path "$PWD/target/x86_64-unknown-linux-musl/release/parins"
       - name: Packaging smoke
+        if: runner.os == 'Linux'
         run: sh scripts/package.sh
   audit:
     runs-on: ubuntu-latest

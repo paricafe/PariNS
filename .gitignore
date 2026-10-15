@@ -3,7 +3,6 @@
 
 # Rust build output.
 /target/
-/artifacts/filter-performance/
 /artifacts/filter-subscriptions/
 
 # Built management console and installed frontend dependencies.

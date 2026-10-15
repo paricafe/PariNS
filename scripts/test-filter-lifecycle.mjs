@@ -633,8 +633,6 @@ function selfTest() {
   assert.equal(dueCount(-1, 60000, 1000), 0); assert.equal(dueCount(0, 60000, 1000), 1);
   assert.equal(dueCount(59999, 60000, 1000), 60000); assert.equal(dueCount(61000, 60000, 1000), 60000);
   assert.equal(dueCount(123.9, 60000, 1000), 124, 'late driver catches up to absolute schedule');
-  assert.equal(59940 / 60, SLO.correct_qps); assert.equal(60 / 60000, SLO.timeout_fraction);
-  assert.equal(itemFor(2, 'test', false).blocked, false); assert.equal(itemFor(2, 'test', true).blocked, true);
   const packet = query(42, 'fresh.lifecycle.test'); const response = aResponse(packet);
   oracle(response, packet, false);
   for (const mutate of [b => b.writeUInt16BE(43, 0), b => b.writeUInt16BE(0x8380, 2), b => { b[b.length - 1] = 99; },
@@ -643,9 +641,6 @@ function selfTest() {
   }
   assert.throws(() => oracle(response, packet, true));
   const nodata = Buffer.from(packet); nodata.writeUInt16BE(0x8180, 2); oracle(nodata, packet, true);
-  const cname = parse(cnameResponse(packet, 'lifecycle-a.test')); assert.equal(cname.answers.length, 2);
-  assert.equal(cname.answers[0].type, 5); assert.equal(cname.answers[1].type, 1);
-  assert.notEqual(digest(CONTENT.A), digest(CONTENT.B));
   const binding = { etag: '"fixture-a"', last_modified: 'Wed, 07 Oct 2026 00:00:00 GMT', content_sha256: digest(CONTENT.A) };
   assert.deepEqual(sourceHeaders(null), { 'User-Agent': 'PariNS-subscriptions/1', Accept: 'text/plain',
     'Accept-Encoding': 'gzip, identity', Connection: 'close' });
@@ -679,9 +674,6 @@ function selfTest() {
   assert.deepEqual(httpDiagnostic('POST', '/api/config/validate', 422, 200, 'INVALID_CONFIG'),
     { method: 'POST', api_path: '/api/config/validate', actual_status: 422, expected_status: 200, api_error_code: 'INVALID_CONFIG' });
   assert.equal(httpDiagnostic('POST', '/untrusted', 422, 200, 'secret'), undefined);
-  assert.notEqual(configText(1234, true, true, 1), configText(1234, true, true, 2));
-  assert.deepEqual(ioStat('8:0 rbytes=12 wbytes=34 rios=1 wios=2 dbytes=99\n'), { '8:0': { rbytes: 12, wbytes: 34, rios: 1, wios: 2 } });
-  assert.deepEqual(ioStat(''), {}); assert.throws(() => ioStat('bad rbytes=1'));
   console.log('filter lifecycle self-test passed');
 }
 

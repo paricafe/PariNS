@@ -7,10 +7,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/filter-acceptance.yml'
-      - 'scripts/bench-filter-wire.mjs'
-      - 'scripts/lib/wire-bench.mjs'
-      - 'scripts/test-filter-performance.sh'
-      - 'scripts/test-filter-subscriptions-systemd*'
+      - 'scripts/test-filter-subscriptions-systemd.mjs'
       - 'scripts/test-systemd.sh'
 permissions:
   contents: read
@@ -18,41 +15,7 @@ concurrency:
   group: filter-acceptance-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  select-suites:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      matrix: ${{ steps.select.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - id: select
-        env:
-          BEFORE: ${{ github.event.before }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          node <<'JS'
-          const {execFileSync} = require('node:child_process');
-          const {appendFileSync} = require('node:fs');
-          const all = ['performance', 'subscriptions'];
-          let suites = all;
-          if (process.env.EVENT === 'push' && /^[0-9a-f]{40}$/.test(process.env.BEFORE) && !/^0+$/.test(process.env.BEFORE)) {
-            const files = execFileSync('git', ['diff', '--name-only', process.env.BEFORE, process.env.GITHUB_SHA], {encoding:'utf8'}).trim().split('\n');
-            const performance = files.some(file => ['scripts/bench-filter-wire.mjs', 'scripts/lib/wire-bench.mjs', 'scripts/test-filter-performance.sh'].includes(file));
-            const subscriptions = files.some(file => file === 'scripts/test-systemd.sh' || file.startsWith('scripts/test-filter-subscriptions-systemd'));
-            if (performance || subscriptions) suites = all.filter(suite => suite === 'performance' ? performance : subscriptions);
-          }
-          appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({suite:suites})}\n`);
-          console.log(`Acceptance suites: ${suites.join(', ')}`);
-          JS
-  acceptance:
-    needs: select-suites
-    name: ${{ matrix.suite }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.select-suites.outputs.matrix) }}
+  subscriptions:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -74,17 +37,9 @@ jobs:
       - name: Pinned toolchain and script syntax
         run: |
           rustup show active-toolchain
-          for script in scripts/test-filter-performance.sh scripts/test-filter-subscriptions-systemd.sh scripts/test-systemd.sh; do
-            sh -n "$script"
-          done
-          node --check scripts/bench-filter-wire.mjs
-          node --check scripts/lib/wire-bench.mjs
+          sh -n scripts/test-systemd.sh
           node --check scripts/test-filter-subscriptions-systemd.mjs
-      - name: Fixed-resource wire matrix
-        if: matrix.suite == 'performance'
-        run: sh scripts/test-filter-performance.sh --ephemeral-ci
-      - name: Build native static service
-        if: matrix.suite == 'subscriptions'
+      - name: Subscription service suite
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CC_x86_64_unknown_linux_musl: musl-gcc
@@ -96,11 +51,11 @@ jobs:
           sh scripts/package.sh --version "$version" --target x86_64-unknown-linux-musl
           mkdir -p target/filter-acceptance-package
           tar -xzf "target/packages/parins-$version-linux-x86_64.tar.gz" -C target/filter-acceptance-package
-          sh scripts/test-filter-subscriptions-systemd.sh --ephemeral-ci --package "$PWD/target/filter-acceptance-package/parins-$version-linux-x86_64"
+          sh scripts/test-systemd.sh --ephemeral-ci --package "$PWD/target/filter-acceptance-package/parins-$version-linux-x86_64" --filter-subscriptions
       - name: Preserve acceptance evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: filter-${{ matrix.suite }}-${{ github.sha }}
+          name: filter-subscriptions-${{ github.sha }}
           if-no-files-found: warn
-          path: artifacts/filter-${{ matrix.suite }}/
+          path: artifacts/filter-subscriptions/

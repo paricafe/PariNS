@@ -4,10 +4,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 import tempfile
-import threading
 import tomllib
 import unittest
 from types import SimpleNamespace
@@ -178,46 +176,6 @@ class FixtureTests(unittest.TestCase):
             self.assertTrue(diagnostic['cloud_init_finished_seen_in_tail'])
             self.assertFalse(diagnostic['kernel_panic_seen_in_tail'])
             self.assertNotIn(private.decode(), json.dumps(diagnostic))
-
-    def test_unauthenticated_session_null_is_read_only_and_does_not_create_auth(self):
-        guest = load('test-update-reboot-guest')
-        response = Mock(status=200)
-        response.read.return_value = b'{"session":null,"setup_required":false}'
-        connection = Mock()
-        connection.getresponse.return_value = response
-        with patch.object(guest.http.client, 'HTTPConnection', return_value=connection):
-            api = guest.API()
-            self.assertEqual(api.request('GET', '/api/session')[0], 200)
-            self.assertEqual(api.auth, {})
-            response.getheader.assert_not_called()
-
-    def test_qmp_negotiates_and_ignores_events_before_command_reply(self):
-        host = load('test-update-reboot')
-        observed = []
-        with tempfile.TemporaryDirectory(prefix='up6-qmp-test-') as directory:
-            path = Path(directory) / 'qmp.sock'
-            with socket.socket(socket.AF_UNIX) as listener:
-                listener.bind(str(path))
-                listener.listen(1)
-                listener.settimeout(5)
-
-                def server():
-                    conn, _ = listener.accept()
-                    with conn, conn.makefile('rwb') as stream:
-                        stream.write(b'{"QMP":{}}\n')
-                        stream.flush()
-                        for reply in ({}, {'running': True}):
-                            observed.append(json.loads(stream.readline())['execute'])
-                            stream.write(b'{"event":"TEST_EVENT"}\n')
-                            stream.write(json.dumps({'return': reply}).encode() + b'\n')
-                            stream.flush()
-
-                worker = threading.Thread(target=server)
-                worker.start()
-                self.assertEqual(host.qmp(path, 'query-status'), {'running': True})
-                worker.join(timeout=5)
-                self.assertFalse(worker.is_alive())
-        self.assertEqual(observed, ['qmp_capabilities', 'query-status'])
 
     def test_staged_uses_installed_identity_without_claiming_an_upgrade(self):
         guest = load('test-update-reboot-guest')

@@ -1,0 +1,33 @@
+src/storage/tests.rs
+  s_0cc083ef6e9aa3::t_88b7115d8f2d31 135-139
+  s_0cc083ef6e9aa3::t_10326d0c42f178 92
+  s_0cc083ef6e9aa3::t_822a7d36e8611f 56-91,93-134,140-147,169,197,487,664,799,836,923,946,976
+src/storage/database.rs
+  s_0cc083ef6e9aa3::t_3ad645c9d69946 423-424
+  s_0cc083ef6e9aa3::t_51e7c5c479caa9 200-201,204-210
+  s_0cc083ef6e9aa3::t_11f278e4d0b6c5 36-53,67-83,86,94-96,102-105,180,195-199,202-203,211-244,278-287,332-335,345-376,378,381,405,415,420-422,425-426,617-619,626
+web/src/i18n/storage.ts
+  s_0cc083ef6e9aa3::t_91b3bfbbc4fde7 8
+web/src/style.css
+  s_0cc083ef6e9aa3::t_c5df91f1d62ff5 486
+AGENTS.md
+  s_0cc083ef6e9aa3::t_a288efc083154d 143-145
+src/storage/mod.rs
+  s_0cc083ef6e9aa3::t_11f278e4d0b6c5 273-275,327
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fcdb5ea60b9733d974ff6084cee01612e46eeb51",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

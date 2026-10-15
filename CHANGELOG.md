@@ -22,6 +22,11 @@
   whole upstream.
 - Some servers answered HTTP/2 POST queries with 405; GET avoids this.
 
+### Security
+
+- Update rustls to 0.23.46 for RUSTSEC-2026-0346, RUSTSEC-2026-0347,
+  RUSTSEC-2026-0348 and RUSTSEC-2026-0349.
+
 ## v0.1.12 — 2026-10-12
 
 ### Changed

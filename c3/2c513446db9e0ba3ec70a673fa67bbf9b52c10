@@ -1,0 +1,143 @@
+src/upstreams/h3.rs
+  s_0cc083ef6e9aa3::t_afef9ae8011a7f 29,277-279,281,284,286
+  s_0cc083ef6e9aa3::t_50db772d0925a7 3-15
+tests/doh.rs
+  s_0cc083ef6e9aa3::t_7ced6754596b10 12
+  s_0cc083ef6e9aa3::t_cf8b3ee4c9ac68 75,77-83,85
+src/manage/account.rs
+  s_0cc083ef6e9aa3::t_50db772d0925a7 2-13
+src/manage/settings.rs
+  s_0cc083ef6e9aa3::t_50db772d0925a7 24
+tests/cache_encrypted.rs
+  s_0cc083ef6e9aa3::t_cf8b3ee4c9ac68 3-4,68-69,115-116
+tests/ecs.rs
+  s_0cc083ef6e9aa3::t_722323ff60c20a 6,8
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 1-2,21
+src/manage/auth_budget.rs
+  s_0cc083ef6e9aa3::t_50db772d0925a7 3-6
+src/filter_subscriptions/writer.rs
+  s_0cc083ef6e9aa3::t_747dd61346c781 110-111,128-129,146,149
+src/manage/mod.rs
+  s_0cc083ef6e9aa3::t_c3bff281400a0c 1350-1362,1364-1368
+src/filter_subscriptions/mod.rs
+  s_0cc083ef6e9aa3::t_50db772d0925a7 2-24
+src/policy/radix.rs
+  s_0cc083ef6e9aa3::t_c7e7f2e9a286d1 74
+src/filter_subscriptions/service/tests.rs
+  s_0cc083ef6e9aa3::t_747dd61346c781 25,51
+src/upstreams.rs
+  s_0cc083ef6e9aa3::t_d5024aa1f793aa 58-60,84,105,113,265-268,274-275,425-427,431,436
+  s_0cc083ef6e9aa3::t_3238019181c398 432-435
+src/filter_subscriptions/store.rs
+  s_0cc083ef6e9aa3::t_2e5914dd7ad65c 115,117,163-173,222
+  s_0cc083ef6e9aa3::t_cb79fb8c3ec2d9 128-129
+  s_0cc083ef6e9aa3::t_fb605a8a63ae69 280
+  s_0cc083ef6e9aa3::t_72f9ae5a813e3b 127
+  s_0cc083ef6e9aa3::t_737a42dc9bb6ac 193,255-256,328,406,601
+  s_0cc083ef6e9aa3::t_ec00db648b5f49 174
+src/tls/certificates.rs
+  s_0cc083ef6e9aa3::t_50db772d0925a7 3-11
+tests/quic.rs
+  s_0cc083ef6e9aa3::t_cf8b3ee4c9ac68 1-2,48-49,83-89
+src/manage/runtime_tests.rs
+  s_0cc083ef6e9aa3::t_1a81a9aba3d8ef 36,39,65,171
+src/policy/canonical_tests.rs
+  s_0cc083ef6e9aa3::t_b1ca776fa07a0b 225-236,238-333,336,340-346,349-369
+  s_0cc083ef6e9aa3::t_4a1286713be8b6 37,39-40,42,44-45,112
+src/filter_subscriptions/service/operations.rs
+  s_0cc083ef6e9aa3::t_747dd61346c781 163,370
+src/filter_subscriptions/service/material.rs
+  s_0cc083ef6e9aa3::t_3d8f8acc7ec706 48,203
+  s_0cc083ef6e9aa3::t_c107363b7bbc81 278
+  s_0cc083ef6e9aa3::t_c049bfa2e10af4 227
+tests/tls.rs
+  s_0cc083ef6e9aa3::t_a7eb8082d496fb 23
+  s_0cc083ef6e9aa3::t_69eebd97a31074 5,7-8,13,46,49-54,56-59,63,98,101,143
+tests/quic_shutdown.rs
+  s_0cc083ef6e9aa3::t_cf8b3ee4c9ac68 4-5,39-40
+  s_0cc083ef6e9aa3::t_7ced6754596b10 8,62
+tests/query_log.rs
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 1-2,35
+  s_0cc083ef6e9aa3::t_722323ff60c20a 4,6
+src/update/contract.rs
+  s_0cc083ef6e9aa3::t_a612d6319198c1 12-13
+src/filter_subscriptions/service.rs
+  s_0cc083ef6e9aa3::t_747dd61346c781 218-219,640
+tests/upstreams.rs
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 33
+  s_0cc083ef6e9aa3::t_5c4ac859c56caa 204-209
+  s_0cc083ef6e9aa3::t_4ea75182d4db2d 1-2,185-203,210-265,1270,1272
+src/quic.rs
+  s_0cc083ef6e9aa3::t_50db772d0925a7 2-11
+tests/cache_integration.rs
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 1-2,72
+  s_0cc083ef6e9aa3::t_722323ff60c20a 12
+tests/server.rs
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 1-2,22
+  s_0cc083ef6e9aa3::t_722323ff60c20a 6
+src/policy/radix_tests.rs
+  s_0cc083ef6e9aa3::t_c7e7f2e9a286d1 11
+  s_0cc083ef6e9aa3::t_6c0b5aaad31d60 27,55
+tests/upstream_diagnostics.rs
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 1-2,28
+  s_0cc083ef6e9aa3::t_722323ff60c20a 4-5
+tests/manage.rs
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 1-2,337
+  s_0cc083ef6e9aa3::t_722323ff60c20a 6-7
+tests/common/mod.rs
+  s_0cc083ef6e9aa3::t_7c6a7d2edf17cd 1-11,20-38,43-79
+  s_0cc083ef6e9aa3::t_a7eb8082d496fb 39-42
+src/policy.rs
+  s_0cc083ef6e9aa3::t_7ea1c06ac8bbf9 374
+src/resolver.rs
+  s_0cc083ef6e9aa3::t_b6bd2625b5d5c7 571-572,604,607-608,622-623,636,675
+src/upstreams/transport.rs
+  s_0cc083ef6e9aa3::t_d5024aa1f793aa 26
+  s_0cc083ef6e9aa3::t_afef9ae8011a7f 40,60,71-129,619,624,627
+  s_0cc083ef6e9aa3::t_50db772d0925a7 1-13
+  s_0cc083ef6e9aa3::t_bcad33fd26290f 239-240,260-268,280-283,288,503-504,650-652
+  s_0cc083ef6e9aa3::t_85e29e4ece5555 130
+tests/resolver.rs
+  s_0cc083ef6e9aa3::t_722323ff60c20a 6
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 13
+src/policy/canonical.rs
+  s_0cc083ef6e9aa3::t_c7e7f2e9a286d1 313,578
+src/tls.rs
+  s_0cc083ef6e9aa3::t_bcad33fd26290f 4-9,170-190,206
+tests/cache_refresh.rs
+  s_0cc083ef6e9aa3::t_722323ff60c20a 13
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 1-2,114
+src/filter_subscriptions/store_tests.rs
+  s_0cc083ef6e9aa3::t_747dd61346c781 6,12-13,32,47,50,60,72,76,84,106,123,145,173,213,215,220,224,228,265,322,349,360,366,377,380,382,384,386,393,395,398,408,413,425,427,431,436,454,461,467,484,486,523,532,539,585,595,606,629,645,649
+  s_0cc083ef6e9aa3::t_da843c34427c97 662,689
+src/update/executor/mod.rs
+  s_0cc083ef6e9aa3::t_50db772d0925a7 4-23
+  s_0cc083ef6e9aa3::t_45009b028e0a54 31,1277-1278
+  s_0cc083ef6e9aa3::t_3238019181c398 381-384,446-451,453-454,456,460,465-466,476-478,503,509-510,514,530-531,540-541,544-545,554-555,557-558,560,923-953,1276,1415-1418,1438-1442,1448-1452,1465-1469,1500-1504,1545-1549,1557-1561,1568-1572,1576-1580,1613-1618,1631-1634,1663-1666
+tests/tls_pool.rs
+  s_0cc083ef6e9aa3::t_6ef8d1f24fc53b 13,15-16,22
+  s_0cc083ef6e9aa3::t_1d80c25003c19c 2-3,35-36,39-40,52,86,200,202,213,215-216,230,233,269,271,315,321,334,337,371,373,398,401,414,417,433,487,489
+tests/padding.rs
+  s_0cc083ef6e9aa3::t_722323ff60c20a 4
+  s_0cc083ef6e9aa3::t_7ced6754596b10 10
+  s_0cc083ef6e9aa3::t_bd5d20f5deee63 26
+  s_0cc083ef6e9aa3::t_cf8b3ee4c9ac68 1-2,275-276
+src/config.rs
+  s_0cc083ef6e9aa3::t_962e58e9a0efe0 364
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c32c513446db9e0ba3ec70a673fa67bbf9b52c10",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

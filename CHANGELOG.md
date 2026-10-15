@@ -218,7 +218,7 @@
   32 MiB, retaining the existing negative-cache partition, TTLs and ECS isolation.
   The setup template mirrors the Rust defaults; omitted capacity fields use the
   new defaults on next parse, while existing explicit settings are unchanged.
-  These are on-demand budgets, not a process memory or DNS QPS guarantee.
+  Memory grows on demand rather than being reserved up front.
 
 ### Fixed
 
@@ -244,16 +244,11 @@
 
 ### Operational notes
 
-- Cache semantic fingerprint advances to 3 while snapshot wire format remains 2.
-  Earlier-semantic snapshots are rejected and startup begins cold; no migration
-  or business-data format change is involved. This does not establish production
-  cache-hit improvement.
-- The updater fix requires helper protocol 2. Update the application
-  and fixed helper together through the verified installer; an online binary-only
-  update cannot replace an older helper. No business-data migration is introduced.
-- Credential changes require signing in again on every tab. An unknown response
-  must be resolved by explicit login, not automatic replay. Offline recovery,
-  additional users and password-algorithm changes are not included.
+- The cache semantic fingerprint advances to 3 (snapshot wire format stays 2), so
+  older snapshots are skipped. No business-data format changes.
+- After a credential change, sign in again on every tab; resolve an unknown result
+  by explicit login, not by repeating the change. Offline recovery, additional users
+  and password-algorithm changes are not included.
 
 ## v0.1.6 — 2026-10-08
 
@@ -269,8 +264,7 @@
 ### Operational notes
 
 - DNS, filtering, updater protocols and durable-data formats are unchanged from
-  v0.1.5. Official two-version update, rollback and data round-trip acceptance
-  still require their own completed checks; publishing this patch is not proof.
+  v0.1.5.
 - Existing v0.1.4 installations still require explicit updater enrollment from
   a verified newer package. Follow the
   [v0.1.5 enrollment guidance](https://github.com/paricafe/PariNS/blob/v0.1.5/CHANGELOG.md#v015--2026-10-08)
@@ -287,11 +281,6 @@
   performed. Keep a separate backup before enrollment. If enrollment fails after
   the new binary has run, v0.1.4 is not restarted automatically against data it
   may no longer understand.
-- The first updater-capable release cannot itself prove an official same-epoch
-  two-version update or rollback. End-to-end A-to-B update, reverse data access,
-  and rollback acceptance require a later independently changed official release
-  with a compatible durable contract. Isolated development-build recovery checks
-  do not substitute for that official version pair.
 
 ### Added and changed
 
@@ -329,9 +318,6 @@
   preflights when the installer runs under dash.
 - Duplicate the updater's inherited installation lock with close-on-exec set
   atomically, preventing concurrent child execution from retaining the lock.
-- Automated checks and isolated Linux fixtures do not establish capacity on a
-  deployment host. Validate performance against the intended workload and
-  resources before relying on this release for that host.
 
 ## v0.1.4 — 2026-09-24
 
@@ -388,10 +374,8 @@
 
 - Certificate reload is available starting with v0.1.4; do not send SIGHUP to a
   managed v0.1.3 process expecting this behavior.
-- Query logs use bounded asynchronous storage and can drop records under overload.
-  Retention time is a maximum, not guaranteed coverage or a lossless audit trail.
-- Local tests and release CI are not a production capacity guarantee. Public
-  DoQ paths, external renewal hooks and target-VPS resources need operator acceptance.
+- Query logs use bounded asynchronous storage and can drop records under overload;
+  retention time is a maximum, not guaranteed coverage.
 
 ## v0.1.3 — 2026-09-24
 
@@ -473,8 +457,8 @@
   rollback preserve DNS listeners while replacing cache/refresh state.
 - Reproducible cache contention benchmarks and lifecycle/management regressions.
 
-Byte accounting now includes conservative per-entry metadata; the same byte
-budget may hold fewer responses. Budgets are partitioned, not a process RSS cap.
+Byte accounting now includes conservative per-entry metadata, so the same byte
+budget may hold fewer responses; positive and negative budgets are partitioned.
 
 ### Removed
 
@@ -516,31 +500,17 @@ First public release of PariNS, a self-hosted caching and filtering DNS forwarde
 
 ### Deployment notes
 
-- Linux installation requires systemd and root privileges. The installer does
-  not change system DNS, firewall rules, or existing conflicting services.
-- Management defaults to `0.0.0.0:3000` over HTTPS. Verify the self-signed
-  certificate fingerprint; wildcard-generated certificates cannot infer a
-  public/NAT IP for name matching. Restrict management access to administrators.
-- DNS starts after setup. Select a reachable upstream and an appropriate DNS
-  listen address/port; the wizard starts with loopback DNS on port 5353.
+- Linux installation requires systemd and root privileges.
+- Management listens on `0.0.0.0:3000` over self-signed HTTPS; verify its
+  certificate fingerprint and restrict access to administrators. Use a systemd
+  override for loopback-only management.
+- DNS starts after setup; the wizard starts with loopback DNS on port 5353.
 - Configuration application restarts DNS and clears in-memory caches/metrics.
-  Self-signed HTTPS identities and administrator/configuration state survive
-  restarts and reinstalls.
-- Existing source installations using the original HTTP console move to HTTPS;
-  the managed unit now listens on all IPv4 interfaces. Use an explicit systemd
-  override if loopback-only management is required.
 
 ### Known limits
 
-- Early release, not a production capacity guarantee or an unrestricted public
-  resolver deployment. Infrastructure abuse protection remains the operator's
-  responsibility.
-- Not an authoritative or iterative DNS server; no local DNSSEC validation,
-  automatic certificate renewal, external blocklist downloads, or DoH/DoQ
-  upstream clients.
-- Management supports direct IP access, not arbitrary domain/reverse-proxy
-  configuration. Password changes/account recovery and zero-downtime full
-  configuration replacement are not yet provided.
-- Release SHA256 files detect corruption; they are not independent signatures.
-- Aggregate history is memory-only; no query logs, domain rankings or client-IP
-  tracking are collected by the management dashboard.
+- Infrastructure abuse protection remains the operator's responsibility.
+- No local DNSSEC validation, automatic certificate renewal, external blocklist
+  downloads, DoH/DoQ upstream clients, password changes or reverse-proxy
+  management configuration.
+- Aggregate history is memory-only.

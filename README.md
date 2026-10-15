@@ -42,7 +42,8 @@ first; there is no automatic migration of older layouts.
 ### 2. Complete setup
 
 The new console listens on `0.0.0.0:3000` over **unencrypted HTTP**. Restrict TCP
-3000 to administrators and use local access or an SSH tunnel for initial setup.
+3000 to administrators and use local access or an SSH tunnel for initial setup
+([details](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md#first-setup)).
 Read the one-time token on the server:
 
 ```sh
@@ -69,8 +70,8 @@ dig @127.0.0.1 -p 5353 example.com A
 
 For LAN use, select the server's LAN IP and port 53 in the console, allow your
 intended clients through the firewall, and point their DNS settings to that IP.
-Port 53 must be free. The installer does not change host DNS or firewall rules,
-or stop conflicting DNS services.
+Port 53 must be free; the installer leaves host DNS, firewall rules and other DNS
+services unchanged ([details](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md#install-a-linux-release)).
 
 ## Documentation
 

@@ -21,8 +21,8 @@ servers. Enter one endpoint per line. The first-run wizard uses the same
 list, query modes, explicit bootstrap and H3 preference.
 Supported syntax is IP with optional port, `udp://`, `tcp://`, `tls://`,
 `https://host/dns-query`, and `quic://`; bracket IPv6 literals. A trailing
-`weight=N` (1..1000) sets a static weight. This is smooth weighted round-robin,
-not AdGuard Home's adaptive latency/failure weighting. Parallel mode starts all
+`weight=N` (1..1000) sets a static weight for smooth weighted round-robin, without
+adaptive latency/failure weighting. Parallel mode starts all
 configured endpoints when the global extra-operation budget allows, returning
 the first NOERROR/NXDOMAIN response and cancelling remaining requests. DNS errors
 are held as fallback while other requests remain pending; all share the caller's
@@ -130,7 +130,7 @@ configuration are ignored by Git. Provision certificates outside this repository
   `tcp_io_timeout_ms` also bounds encrypted handshakes
   and complete HTTP/QUIC request work. HTTP/2 headers are limited to 8 KiB;
   HTTP/3 field sections to 128 KiB; DNS payloads to 65535 bytes. Large DNS GET URLs
-  may exceed header limits; use POST. These budgets are not an RSS guarantee.
+  may exceed header limits; use POST.
 - H2 stream reset, DoQ response cancellation and H3 connection closure cancel
   their active DNS waiter. H3 **single-stream** cancellation is currently observed
   on response write or at the finite request deadline: the selected H3 library
@@ -180,8 +180,7 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   the console displays the server's parsed values. Existing explicit limits are
   not changed by an upgrade. Tune entry and byte limits together using interval
   hit/miss and eviction deltas: more capacity helps a capacity-bound working set,
-  but cannot make expired or ineligible answers reusable. These limits are not a
-  process memory ceiling or a measured DNS QPS rating.
+  but cannot make expired or ineligible answers reusable.
 - This is a whole-response cache, not an RRset cache. All section TTLs age;
   the earliest RR expiry invalidates the answer. Positive TTLs are capped at
   3600 seconds by default. NXDOMAIN/NODATA require a covering SOA and use the
@@ -192,7 +191,6 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   conflicting proof is not cached. Chain and all retained record TTLs also bound
   the lifetime; these entries use the negative budget and never stale or prefetch.
   Direct NOERROR CNAME answers and NOERROR CNAME plus the requested type remain positive.
-  These are conservative limits, not full RFC cache conformance.
 - Truncated answers, errors such as SERVFAIL/REFUSED, zero TTL, missing SOA for
   negative answers, unusable ECS, and scope longer than source bypass caching.
   Cookie/unknown EDNS options bypass caching to avoid replaying client-specific
@@ -211,9 +209,8 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   still running past `shutdown_grace_ms` logs
   `cache snapshot not saved: shutdown not quiescent (<cause>)`. Idle DoH
   clients get at most half the grace to acknowledge the close and do not force a stop.
-  The v0.1.7 CNAME-negative change advances the cache semantic fingerprint,
-  not the snapshot wire format. Earlier-semantic snapshots are rejected, so the
-  first start after upgrading begins cold; there is no compatibility migration.
+  Snapshots from a different cache semantic version are skipped, so the first start
+  after such an upgrade begins cold.
 - `[[cache.rules]]` selects exact names before suffixes, then most labels,
   record-type-specific before wildcard type, then first declaration. DNS labels
   (including escaped labels) determine boundaries; suffix includes the named
@@ -322,10 +319,8 @@ CNAME checks alone are not a complete DNS/application firewall.
 
 ### Online subscriptions (v0.1.5)
 
-The console supports HTTPS rule subscriptions alongside local rules. Automated
-fixed-resource performance and isolated Linux checks do not establish capacity
-on a target machine; do not interpret the compact index as a capacity claim.
-No lists are bundled, and the default empty source list makes no network requests.
+The console supports HTTPS rule subscriptions alongside local rules. No lists are
+bundled, and the default empty source list makes no network requests.
 The local filter switch controls only local rules; enabled local allow rules also
 take precedence over subscription blocks.
 
@@ -360,7 +355,7 @@ Natsuki List use its `.list` domain-list source, not the unsupported Legacy file
 Third-party list licensing and content remain the administrator's responsibility.
 
 At most 16 sources are configured. Rule counts are charged before deduplication;
-the memory budget includes construction and retained generations, not process RSS.
+the memory budget includes construction and retained generations.
 Each source is bounded to 16 MiB, all source input to 32 MiB, and each line to
 4096 bytes. Automatic intervals are 1–168 hours with bounded jitter and failure
 backoff. Downloads use verified HTTPS and public pinned addresses; proxy environment
@@ -443,7 +438,7 @@ validation and provider protection. Configuration changes require restart.
 
 The example and setup wizard default to loopback **DNS**; the management console
 defaults separately to `0.0.0.0:3000` over HTTP until inbound DoH is enabled.
-PariNS is not yet accepted as a production public resolver: production capacity
-validation and network-level abuse protection are not implemented. Process logs contain
+Network-level abuse protection is not implemented; see
+[Deployment choices](deployment.md#deployment-choices). Process logs contain
 startup/shutdown/reload events and optional aggregate metrics, not query names
 or client IP addresses.

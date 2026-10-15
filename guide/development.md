@@ -4,8 +4,9 @@
 
 Commands below run from the repository root. Use the toolchain in
 [rust-toolchain.toml](../rust-toolchain.toml), locked dependencies and the current
-[contributor rules](../AGENTS.md). The full CI gate is defined in
-[ci.yml](../.github/workflows/ci.yml).
+[contributor rules](../AGENTS.md). Module responsibilities are listed under
+[Ownership](../AGENTS.md#ownership); detailed invariants live in each module's `//!`
+documentation. The full CI gate is defined in [ci.yml](../.github/workflows/ci.yml).
 
 ## Build and test
 
@@ -36,16 +37,17 @@ Rust route. The repository's strict CSP is retained. The adapted beUI motion
 components are free MIT-licensed source with their notice shipped in release
 archives; see [the beUI notice](../web/src/components/beui/README.md).
 
-The example uses loopback addresses and an upstream on port 5354. Set
-`upstreams.servers` to your chosen resolver(s) before sending queries. Unknown configuration
-keys and invalid resource limits are rejected at startup.
+The example configuration uses a loopback test upstream; see
+[Configuration](configuration.md) before sending real queries. Tests use controlled
+loopback upstreams and do not rely on public DNS answers.
 
 The binary uses Tokio's multi-thread runtime, normally one worker per available
 CPU; `TOKIO_WORKER_THREADS=2` can explicitly select two workers. This is not CPU
 affinity or a memory limit. Cache and coalescing state use short shared locks;
 UDP has one receive loop followed by spawned query tasks. More workers do not
-guarantee linear scaling. Cache byte limits use conservative entry charges,
-not process RSS. Measure on the target machine before increasing resource budgets.
+guarantee linear scaling.
+
+## Benchmarks and packaging
 
 ```sh
 cargo run --locked --release --example bench -- 1000 32
@@ -56,57 +58,107 @@ cargo audit --deny warnings
 sh scripts/package.sh
 ```
 
-The benchmark runs only synthetic loopback upstreams and emits JSON for warm
-cache, cold single-upstream and cold parallel-upstream scenarios. It is a Resolver baseline,
-not network/TLS throughput, RSS measurement or production capacity evidence.
-`bench_dot` separately compares fresh and pooled authenticated DoT transactions
-against one synthetic loopback TLS peer, without response caching or artificial
-delay. JSON includes checked answers, errors, connection/handshake counts and
-latency percentiles. Full handshakes are counted separately from TLS session
-resumption; compare repeated runs with the same query count and concurrency.
-These transport microbenchmarks are not production capacity guarantees.
-`bench_cache` separately measures hot-key, multi-key, ECS and negative churn with
-1/2/4 OS workers; fixed workloads check IDs, questions, TTLs and scopes. It reports
-sampled p99 and correctness failures. Repeat under a quiet host and compare the
-same workload (`--case Multi --workers 2` selects a case; `PARINS_BENCH_SHARDS=4`
-selects shards). `PARINS_BENCH_MAX_ENTRIES` and `PARINS_BENCH_MAX_BYTES` override
-capacity for an interleaved old/new-budget comparison using the same binary;
-omitted overrides use Rust defaults, and the output records the selected budgets.
-Positive/negative partition changes affect hit rates, so churn
-throughput alone is not an equal-work speed comparison. These are cache operations,
-not wire DNS QPS or proof of capacity on a 2-vCPU/4-GiB VPS.
+- `bench` runs synthetic loopback upstreams and emits JSON for warm cache, cold
+  single-upstream and cold parallel-upstream Resolver scenarios.
+- `bench_dot` compares fresh and pooled authenticated DoT transactions against one
+  synthetic loopback TLS peer, without caching or artificial delay. JSON includes
+  checked answers, errors, connection/handshake counts (full handshakes separately
+  from session resumption) and latency percentiles.
+- `bench_cache` measures hot-key, multi-key, ECS and negative churn with 1/2/4 OS
+  workers; fixed workloads check IDs, questions, TTLs and scopes, and report sampled
+  p99 and correctness failures. `--case Multi --workers 2` selects a case and
+  `PARINS_BENCH_SHARDS=4` selects shards. `PARINS_BENCH_MAX_ENTRIES` and
+  `PARINS_BENCH_MAX_BYTES` override capacity for an interleaved old/new-budget
+  comparison with the same binary; the output records the selected budgets.
+  Positive/negative partition changes affect hit rates, so churn throughput alone
+  is not an equal-work comparison.
+
+Compare repeated runs with the same workload on a quiet host. These are
+microbenchmarks: they do not measure network/TLS throughput, process RSS, wire DNS
+QPS or capacity on any deployment host.
+
 Packaging creates a host-native archive under `target/packages`, containing no
-keys or private configuration. `deploy/parins.service` is a Linux systemd template,
-not an installed service; review paths, file permissions, firewall and source
-limits before deployment. The template defaults to unprivileged ports. CI runs
-formatting, Clippy, tests, release build, configuration check, audit and packaging;
-Linux/macOS CI results must be checked separately from local macOS acceptance.
+keys or private configuration. `deploy/parins.service` is a Linux systemd template
+for file-configured mode, not an installed service; review paths, file permissions,
+firewall and source limits before using it. The template defaults to unprivileged
+ports.
 
-## Module boundaries
+CI runs the web checks, formatting, Clippy, tests, release build, configuration
+check, audit, installer fixtures, managed-service acceptance and packaging on Linux;
+macOS runs Clippy and the Rust tests. Check CI results separately from local runs.
 
-| Module | Responsibility |
-| --- | --- |
-| `config` | Parse and validate startup configuration |
-| `protocol` | DNS parsing, request rules, response correlation, UDP encoding |
-| `ecs` | Peer provenance, subnet selection, wire validation, scope and client echo |
-| `cache` | Independent subnet answers, TTL/negative policy, bounded LRU eviction |
-| `policy` | Immutable local rules, label matching, allow precedence, CNAME filtering |
-| `flight` | Bounded in-flight sharing and cancellation ownership |
-| `metrics` | Fixed counters, RAII lifecycle gauges and cumulative latency buckets |
-| `resolver` | Compose policy, ECS, cache, upstream deadline and response restoration |
-| `upstream` | Independent UDP exchange and validated TCP fallback |
-| `upstreams` | Unified endpoints, explicit bootstrap, weighted/parallel scheduling, H3 preference |
-| `tls` / `doh` / `quic` | Authenticated transport, framing, HTTP/stream lifecycle |
-| `ingress` | Shared encrypted-query admission and response serialization |
-| `limits` | Bounded socket-subnet token buckets and RAII query/connection quotas |
-| `admin` | Loopback read-only metrics and process liveness |
-| `manage` | HTTP/HTTPS management transport, authentication, private state, and transactional DNS configuration changes |
-| `web` | Embedded setup wizard, dashboard, and configuration editor |
-| `transport::tcp` | Length-prefixed framing used on both sides |
-| `server` | Listener ownership, admission budgets, client tasks, shutdown |
-| `main` | CLI arguments, startup, OS signals |
+## Installer and bootstrap checks
 
-Tests use controlled loopback upstreams and do not rely on public DNS answers.
+`sh scripts/test-install.sh` and `sh scripts/test-bootstrap.sh` run in staged roots
+without systemd. They cover these installer contracts:
+
+- Bootstrap fixtures use the Cargo release version and exercise the default,
+  unpinned entry point. Each actual native release package is staged through that
+  entry point before publication, and the public quick-start check asserts the exact
+  published version.
+- Success guidance distinguishes first setup from an initialized installation only
+  after the existing identity-preserving preflight succeeds. It never parses private
+  state or infers initialization from a token file. Staging and `--dry-run` start no
+  service.
+- Unknown, legacy and symlinked target layouts are rejected before any write.
+
+## Acceptance workflows
+
+Suites that install or change a real system refuse to run without `--ephemeral-ci`
+on a disposable GitHub-hosted Linux runner. Never run them on a developer host or
+an existing installation, and keep their guards intact. Release and public DNS
+acceptance do not change the host. Each result proves only its declared fixture.
+
+- **Managed service** (`ci.yml`, `release.yml`): `scripts/test-systemd.sh
+  --ephemeral-ci` installs native musl binaries or a release package through the real
+  installer and systemd, including the managed updater's installation contract.
+- **UDP source address** (`ci.yml`): `sh scripts/test-udp.sh --ephemeral-ci` checks
+  IPv4/IPv6 reply source addresses in isolated network namespaces.
+- **Release** (`release.yml`): runs on version tags and manual dispatch. It builds
+  and verifies both native packages and the update manifest; only a tag publishes.
+- **Filter acceptance** (`filter-acceptance.yml`): `scripts/test-systemd.sh
+  --ephemeral-ci --package DIR --filter-subscriptions` runs the isolated
+  subscription service suite against a real HTTPS fixture, including offline
+  restart, update freeze and ENOSPC recovery.
+- **Filter lifecycle** (`filter-lifecycle.yml`, manual): the real managed service
+  runs in a verified 2 CPU/2 GiB, no-swap cgroup with a separately pinned load
+  generator. Its synthetic HTTPS source branch changes only fixture domains; keep CI
+  read-only and public certificate validation normal. Fix the workload and SLO
+  before running, retain all three rounds, distinguish CDN propagation from the
+  measured refresh window, and prove request-held old-generation release separately
+  from latency samples. Measure restart with derived indexes and rebuild from
+  unchanged selected source objects separately; preserve the catalog and record CPU,
+  RSS and disk IO without claiming that the host page cache was cold.
+- **Official update check** (`update-check.yml`, manual): installs the actual
+  published first updater-capable release; never rebuild with a forged official
+  identity. Pin the installed version/source to its tag and independently require
+  latest to equal it. Three fixed idle/check wire rounds use the authenticated
+  managed check endpoint, honor cooldown, and observe a new success without
+  replaying POST. Same-version checks do not download an update or prove A-to-B
+  replacement.
+- **Public DNS acceptance** (`public-dns-acceptance.yml`, manual): takes an
+  explicitly selected public address, certificate hostname and DoQ port, sends one
+  `example.com. A` query within one deadline, and verifies the public CA, hostname,
+  ALPN and response with normal certificate verification. Never hardcode deployment
+  targets or add production credentials to CI; ordinary CI does not contact your
+  deployment. A pass covers that address family and network path at that time.
+- **Update boot recovery** (`update-recovery.yml`): a hosted runner controls a
+  disposable QEMU guest. Keep the host guard, pinned image digest, pinned guest SSH
+  identity and private cleanup; never reboot the runner or fake hosted-runner flags
+  inside a guest. Normal reboot, virtual hard reset and bounded journal-volume ENOSPC
+  are separate fresh-guest scenarios. Disk-fault acceptance must observe the real
+  helper's failed journal write and recovery on that same volume after space is
+  freed, preserving the installed binary and managed configuration. This uses a
+  development package: it does not cover official upgrade/rollback, physical
+  power loss or full update-disk faults.
+
+### Deployment acceptance
+
+Before deployment, choose management/DNS network access rules, provision readable
+external certificates, review backups, measure capacity on the target host, and
+validate independent encrypted clients. Use **Public DNS acceptance** for an
+independent public DoQ check; local loopback results do not prove public
+reachability.
 
 ## Planned scope
 
@@ -114,8 +166,9 @@ Tests use controlled loopback upstreams and do not rely on public DNS answers.
 - Licensed third-party rule import and additional filtering response modes.
 - DoT pipelining and alternate HTTP/3 endpoint discovery.
 - Measured public-service capacity, network abuse protection and deployment/rollback acceptance.
-- Zero-downtime full configuration replacement; console application currently restarts DNS.
+- Zero-downtime replacement for changes that currently restart DNS (anything outside
+  the [listener-preserving settings](operations.md#configuration-changes-and-statistics)).
 
-The initial design focuses on forwarding to existing resolvers. A standalone
-iterative resolver is outside the initial scope. The implementation uses Rust,
-Tokio for asynchronous IO, and Hickory for DNS message parsing and encoding.
+The design forwards to existing resolvers; a standalone iterative resolver is out
+of scope. The implementation uses Rust, Tokio for asynchronous IO, and Hickory for
+DNS message parsing and encoding.

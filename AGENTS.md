@@ -5,33 +5,29 @@
 PariNS is a self-hosted DNS forwarding, filtering, caching, and management service.
 Do not expand it into a full recursive resolver without an explicit design decision.
 
-- Read the relevant implementation and tests before changing behavior. Trace the
-  request flow and identify the owner of each affected contract.
+- Read the relevant implementation, tests and module `//!` documentation before
+  changing behavior. Trace the request flow and identify each affected contract's owner.
 - Preserve unrelated working-tree and staged changes. Make focused changes and
   stage explicit paths; do not include another task's work in a commit.
 - Reviews, explanations, and plans do not authorize implementation. Reuse existing
   authorization, but distinguish committing, pushing, releasing, and deploying.
 
-## Current-version design and proportional safeguards
+## Design principles
 
-- Target the current PariNS design, not backward compatibility with older PariNS
-  versions. Do not retain or add legacy configuration aliases, API adapters,
-  parallel old/new implementations, automatic migrations, or silent legacy fallbacks.
-  When replacing a contract, update its callers, UI, examples, and tests together;
-  remove superseded paths within that change and document required user actions.
-  Reject obsolete input clearly rather than guessing how to translate it.
-- This is a project-version policy, not permission to break supported DNS/transport
-  standards or remove required protocol negotiation and operational fallbacks.
-- Prefer existing mechanisms and dependencies. Before adding validation, guards,
-  retries, fallbacks, or abstractions, identify the concrete requirement or reachable
-  failure, explain why existing guarantees are insufficient, and choose the simplest
-  complete solution. Do not build protection for hypothetical future scenarios.
-- Validate at the owning trust boundary and rely on established internal contracts.
-  Avoid repeated checks across layers, catch-all error suppression, and defensive
-  defaults that conceal broken contracts. Preserve necessary DNS correctness,
-  authentication, TLS verification, resource bounds, and persistence integrity.
-- Apply these rules to the requested change; they do not authorize unrelated
-  compatibility removal or a repository-wide defensive-code cleanup.
+- Target the current design, not compatibility with older PariNS versions: no legacy
+  aliases, API adapters, parallel old/new implementations, automatic migrations, or
+  silent legacy fallbacks. When replacing a contract, update callers, UI, examples
+  and tests together, remove the superseded path, document required user actions,
+  and reject obsolete input clearly. This never permits breaking supported
+  DNS/transport standards or required protocol negotiation and operational fallbacks.
+- Prefer existing mechanisms. Before adding validation, guards, retries, fallbacks
+  or abstractions, name the concrete requirement or reachable failure, why existing
+  guarantees are insufficient, and the simplest complete fix.
+- Validate at the owning trust boundary and rely on established internal contracts;
+  avoid repeated checks, catch-all suppression and defaults that conceal broken
+  contracts. Preserve DNS correctness, authentication, TLS verification, resource
+  bounds and persistence integrity. These rules apply to the requested change, not
+  to unrelated repository-wide cleanup.
 
 ## Ownership
 
@@ -39,291 +35,183 @@ Do not expand it into a full recursive resolver without an explicit design decis
 | --- | --- |
 | `src/config.rs` | Authoritative configuration schema, defaults, and validation. |
 | `src/protocol.rs`, `src/ecs.rs` | DNS protocol checks, ECS validation, scope, and response normalization. |
-| `src/cache.rs` | Cache eligibility, semantic keys, TTLs, budgets, eviction, policy matching, inspection, and invalidation. No network IO. |
-| `src/resolver.rs`, `src/flight.rs`, `src/resolver/refresh.rs` | Resolution orchestration, shared upstream work, bounded refresh, and stale fallback. |
-| `src/upstream.rs`, `src/upstreams/`, `src/upstreams.rs` | Upstream protocol exchange, explicit bootstrap, and weighted/parallel scheduling; preserve resolver deadlines and cancellation. |
-| `src/query_log.rs` | Opt-in bounded per-request history, retention, pagination and clear epochs; never an aggregate metrics label store. |
-| `src/server.rs` and listener/transport modules | Listener lifecycle, transport framing, connection limits, and shutdown. |
-| `src/policy.rs`, `src/limits.rs` | Filtering decisions and source resource budgets, respectively. |
-| `src/manage/` | Authenticated management APIs, configuration transactions, persistence, and managed runtime ownership. |
-| `src/update/` | Official release/build contracts and bounded HTTPS reader; the fixed root executor owns its installation journal, never DNS or business data. |
-| `src/filter_subscriptions/` | Process-owned bounded subscription work, private source catalog/index, and immutable policy generations. Manager/file runtime own final configuration, freeze, reload and shutdown gates. |
-| `src/https_reader.rs`, `src/private_files.rs` | Shared pinned HTTPS transport and private-file checks; callers retain source authorization, transactions, and lifecycle ownership. |
+| `src/cache.rs`, `src/cache/` | Eligibility, semantic keys, TTLs, budgets, eviction, policy matching, inspection, invalidation, snapshot codec. No network IO. |
+| `src/cache_persistence.rs` | One-use clean snapshot file lifecycle; only the terminal shutdown owner saves. |
+| `src/resolver.rs`, `src/resolver/`, `src/flight.rs` | Resolution orchestration, one upstream deadline, shared upstream work, bounded refresh, stale fallback. |
+| `src/upstream.rs`, `src/upstreams.rs`, `src/upstreams/` | Upstream exchange, explicit bootstrap, weighted/parallel scheduling, H2/H3 connections, attempt diagnostics; preserve resolver deadlines and cancellation. |
+| `src/server.rs`, `src/transport/` | Listener lifecycle, UDP/TCP framing, local reply addresses, connection limits, shutdown. |
+| `src/ingress.rs` | Shared admission and DNS handling for encrypted transport adapters. |
+| `src/tls.rs`, `src/tls/` | Verified TLS configuration, DoT adapters and pool, the inbound CertificateSet. |
+| `src/doh.rs`, `src/quic.rs`, `src/quic/` | DoH (HTTP/2), DoQ and HTTP/3 listeners, including Quinn driver and socket lifecycle. |
+| `src/policy.rs`, `src/policy/`, `src/limits.rs` | Filtering decisions, rule parsing and the radix index; source budgets keyed by peer subnet. |
+| `src/metrics.rs`, `src/admin.rs` | Fixed-cardinality process metrics; read-only loopback `/metrics` and `/healthz`. |
+| `src/runtime_services.rs`, `src/runtime_health.rs`, `src/runtime_lifecycle.rs` | Metrics and storage across DNS generations, generation-scoped DNS health, startup/terminal boundaries for both modes. |
+| `src/storage/`, `src/query_log.rs` | Private runtime SQLite with one owner worker: statistics and opt-in bounded per-request history with clear epochs; never an aggregate metrics label store. |
+| `src/manage/` | Authenticated management APIs, sessions and accounts, configuration transactions, persistence, managed runtime ownership. |
+| `src/update/`, `src/bin/` | Official release/build contracts and bounded HTTPS reader; the fixed root executor owns its installation journal, never DNS or business data. |
+| `src/filter_subscriptions/` | Bounded subscription work, private source catalog/index, immutable policy generations. Manager/file runtime own final configuration, freeze, reload and shutdown gates. |
+| `src/https_reader.rs`, `src/private_files.rs` | Pinned HTTPS transport and private-file checks; callers keep authorization, transactions and lifecycle. |
 | `web/` | Embedded UI, forms, drafts, and presentation. No independent DNS policy engine or authoritative configuration state. |
 | `scripts/`, `deploy/` | Installation, packaging, and service lifecycle; not DNS business logic. |
 
-Keep checks at the boundary that owns them. UI validation helps users, but Rust
-validation remains authoritative. Reuse protocol and configuration helpers rather
-than implementing different rules for file mode, management APIs, and the browser.
-
+UI validation helps users, but Rust validation is authoritative; reuse protocol and
+configuration helpers across file mode, management APIs, and the browser.
 Console translations and field metadata live in typed modules under `web/src/i18n/`
 and `web/src/model/`. React owns only presentation and one in-memory configuration
-draft; Rust owns parsing, validation, and apply. Language and theme changes must
-preserve controls, drafts, focus and session ownership. Persist only language and
-theme preferences, never credentials, session bindings, PEM, logs or drafts.
-Keep both languages complete; configuration values and raw diagnostics stay intact.
-Incomplete numeric and listener edits remain raw drafts until preview/validation.
+draft. Language and theme changes preserve controls, drafts, focus and session
+ownership; persist only those two preferences, never credentials, session bindings,
+PEM, logs or drafts. Keep both languages complete; configuration values and raw
+diagnostics stay intact. Incomplete numeric and listener edits remain raw drafts
+until preview/validation.
 
 ## DNS and cache invariants
 
-- Preserve complete query semantics when caching or coalescing. ECS address
-  families, subnets, no-ECS traffic, and privacy fallback must not leak answers
-  across incompatible namespaces. Respect response scope when reusing entries.
-- Match DNS names by labels, including escaped labels; presentation-string suffix
-  matching is not a substitute for DNS name semantics.
+- Preserve complete query semantics when caching or coalescing. ECS families,
+  subnets, no-ECS traffic and privacy fallback never share answers; respect response
+  scope. Missing ECS in a response to nonzero outgoing ECS uses only ExactSource reuse.
+- Match DNS names by labels, including escaped labels, never presentation suffixes.
 - Preserve positive and negative eligibility and TTL rules. Fresh lifetime, stale
-  retention, and stale reply TTL are separate concepts; do not silently extend TTLs.
-- Classify responses once for admission and snapshot restoration. Nonempty negative
-  answers require an unambiguous same-class CNAME chain and equivalent covering SOAs
-  for its terminal name; CNAME presence alone is not a negative proof. Preserve the
-  original question and ECS namespace, negative budget and bounded TTL, without
-  granting negative entries stale or prefetch eligibility.
-- Keep stale serving conditional on the supported upstream failures. Do not use
-  negative answers or a different privacy namespace as a stale fallback.
-- Invalidation and cache replacement must prevent older in-flight work from
-  refilling invalidated state. Newer successful answers must not resurrect older
-  overlapping answers merely because the newer answer cannot be cached.
-  Known EDE diagnostics may establish supersession without being admitted for
-  cache replay; client-specific options retain their existing isolation.
-- Inspection and explanation are read-only: no upstream requests, recency changes,
-  or hit-counter updates. Filtering must not contaminate cached upstream answers.
+  retention and stale reply TTL are separate; never silently extend TTLs. Stale
+  serving applies only to supported upstream failures, never from negative answers
+  or another privacy namespace.
+- Classify responses once for admission and snapshot restoration. A nonempty negative
+  answer needs an unambiguous same-class CNAME chain and equivalent covering SOAs for
+  its terminal name; it keeps the question, ECS namespace, negative budget and
+  bounded TTL, and is never stale or prefetch eligible.
+- Invalidation and replacement stop older in-flight work from refilling invalidated
+  state. A newer successful answer, even uncacheable or carrying known EDE
+  diagnostics (not admitted for replay), supersedes older overlapping answers.
+- Padding is stripped from cache and regenerated at the final encrypted hop.
+  Cookie/unknown options stay nonshared. Flight and refresh share one canonical key
+  that ignores Padding bytes but preserves request intent.
+- Inspection and explanation are read-only: no upstream requests, recency or
+  hit-counter changes. Filtering never contaminates cached upstream answers.
+- One aggregate radix policy serves local and subscription rules; Config keeps local
+  rules, not an index. Each request holds its policy generation across cache, CNAME
+  and stale handling. Preserve semantic cache restoration checks.
+- Cache byte accounting is not process RSS. Keep separate positive and negative
+  budgets; document capacity/utilization trade-offs when changing them.
+- Consume a clean cache snapshot durably before serving; publish one only at
+  terminal, quiescent shutdown, never after apply/rollback or abnormal termination.
 
-## Concurrency, configuration, and security
+## Concurrency, listeners and upstreams
 
-- Keep shared locks short. Never hold a cache lock during network IO; reconstruct
-  responses outside shard locks. Bound queues, cache state, and background work.
-- Give spawned tasks an owner and explicit shutdown/cancellation behavior. Refresh
-  and foreground coalescing must share compatible work without crossing generations.
-- QUIC listener ownership includes Quinn drivers and final socket release. Server
-  retains cleanup across adapter cancellation, and a completed shutdown permits
-  immediate rebinding.
-- Only request streams already accepted on a connection can force a stop; unfinished
-  handshakes stop at once.
-  Peer close notification (QUIC close, HTTP/2 GOAWAY acknowledgement) uses at most
-  half the shutdown grace, then the connection is dropped.
-  Any force records its first bounded cause, and a terminal stop that cannot
-  publish a clean snapshot logs that cause.
-- UDP adapters retain each datagram's local destination and interface for replies;
-  address selection never belongs to Resolver or cache. Linux/macOS use packet info;
-  unsupported platforms must reject wildcard binds rather than choose a reply source.
-- Keep cache byte accounting distinct from process RSS. Preserve separate positive
-  and negative budgets; document capacity/utilization trade-offs when changing them.
-- Management mutations must retain authentication, Host/Origin checks, and relevant
-  revision/epoch checks. Preserve atomic persistence and failure recovery.
-- Management sessions use HttpOnly, SameSite=Strict Cookies and an in-memory
-  binding on protected APIs: `parins_session_http` for HTTP, or Secure
-  `__Host-parins_session` for HTTPS. No Bearer compatibility. Logout revokes only
-  its specified server-side session, without clearing the Cookie or relying on
-  Web Locks for cross-tab ordering. Never persist or broadcast the binding.
-  An unknown configuration result is not proof of failure and must not be
-  silently replayed.
-- Account credential changes are separate Store transactions, never DNS configuration
-  apply. Reuse the hash/attempt budget outside Manager locks; recheck the verified
-  username/hash and session at serialized admission. After Store's rename commit,
-  publish saved credentials and revoke all sessions without awaiting, in Manager
-  then Active lock order. Preserve TOML, previous and configuration revision.
-  Session issuance must recheck its credential snapshot; protected manual mutations
-  must recheck session/realm at admission, including special updater paths, without
-  imposing sessions on schedulers or revoking already accepted background work.
-  Success or unknown credential outcomes require explicit login, never replay,
-  Cookie clearing, replacement sessions or broadcasting sensitive inputs.
-- Authentication attempt budgets use the socket peer, never forwarding headers.
-  Bound and reclaim source state separately from global password-hash concurrency;
-  blocking hash work owns its permit until it finishes, even after caller cancellation.
-- Cache-only configuration changes should not restart DNS listeners. Validate and
-  persist before publishing replacement state; do not promise cache retention after
-  arbitrary policy changes. Report restart requirements accurately for other changes.
-- Management defaults to HTTP on its one listener; enabling inbound DoH selects
-  its validated identity for management HTTPS. `[doh].http3` shares the DoH TCP
-  address and actual port over UDP; there is no independent `[doh3]` configuration.
-  Share the active CertificateSet's DoH slot, not DNS TLS routing/ALPN.
-  A failed candidate or TLS fault never silently downgrades HTTPS to HTTP;
-  explicit DoH disablement needs downgrade confirmation. Rust owns validated
-  `[web].public_host`, management origin and protocol transaction state.
-- Preserve configured HTTPS and certificate verification. Never commit credentials, private
-  keys, runtime state, or private configuration. Do not add sensitive logging by
-  default; query/client data needs explicit privacy and retention decisions.
-- Pasted DNS identities must be validated before private persistence; return only
-  file references, never private keys. Management and DNS listeners have separate
-  ports, ALPN and routes even when they reuse one validated inbound DoH identity.
-  Shared inbound identity preparation accepts absent leaf EKU, but an explicit
-  EKU must permit serverAuth before persistence or certificate publication.
-- Pool endpoints share cache semantics: require equivalent policies, explicit
-  hostname bootstrap and authenticated encrypted transports. Parallel losers must
-  cancel with the caller; failed DNS responses must not preempt usable answers.
-- `[upstreams]` is the only upstream configuration. Do not reintroduce retired
-  single-upstream fields, delayed-replica scheduling, compatibility adapters or
-  automatic migrations. DoT pool controls belong to `[upstreams.dot_pool]`.
-- H3 preference applies only to HTTPS endpoints, within the resolver deadline.
-  Preserve verified H2 fallback, bounded cooldown and reusable connection ownership;
-  cancelling a request must release its stream without breaking other requests.
-  The H3 budget covers only obtaining a usable connection and sending the request;
-  a sent request waits for its answer until the resolver deadline, without cooldown
-  or an H2 resend. Connect, transport and protocol faults fall back to H2 and cool
-  down; a definite 4xx (not 408/414/421/425/429/431) stops H3 for that endpoint
-  until the pool generation is replaced. H2 and H3 share one RFC 8484 GET builder.
-  Because a sent H3 request has no budget, its connection uses a 1-second QUIC
-  keep-alive with a 3-second idle timeout, and its driver closes it after 10
-  seconds without requests.
-- Each HTTPS endpoint keeps one reusable H2 connection, opened serially, with a
-  local stream cap under the peer's limit, a PING while busy or just used that
-  retires a silently dead path, and a 10-second idle close owned by its driver.
-  GOAWAY or I/O errors retire it; only a request not yet sent may move to a new
-  connection, so a sent query is never replayed. Attempts record new or reused connections.
-- DoH transports normalize HTTP Age into RR TTLs before handing answers to Resolver;
-  cache code has no HTTP policy. DoQ in-flight requests retain their endpoint owner
-  independently of the current bootstrap-address cache entry.
-- Missing ECS in a response to nonzero outgoing ECS uses only ExactSource reuse;
-  Padding is stripped from cache and regenerated at the final encrypted hop.
-  Cookie/unknown options keep their nonshared boundary. Flight and refresh use
-  one canonical key that ignores Padding bytes while preserving request intent.
-- RuntimeServices owns process metrics and a bounded SQLite worker across DNS
-  generations. Logs, totals and trends have independent durable epochs; status
-  is a cached observation, not a hot-path disk query. Cache/storage-only applies
-  must preserve listeners and may not publish candidate certificate changes.
-- Consume a clean cache snapshot durably before serving. Publish one only at
-  terminal, quiescent shutdown; apply/rollback and abnormal termination never
-  create a restorable cache snapshot. Bound storage work and total shutdown.
-- Manager/Active owns the atomic CertificateSet even when DNS is stopped. API
-  and managed SIGHUP reload current certificates under the existing mutation
-  permit; file-mode SIGHUP also reloads policy. Preparation cannot mutate active
-  material. Reload does not alter config revision, DNS/cache ownership or sessions.
-- Software checks belong to one managed-process scheduler after setup, never a
-  DNS generation or API GET. Updates-only settings preserve listeners, caches,
-  RuntimeServices, certificates and sessions. File mode has no update scheduler.
-  Manager uses one updates-only classification for validation, restart impact and
-  apply. Keep schema validation without reloading unchanged DNS material, and
-  leave a stopped DNS service stopped.
-- Update commit intent is persisted before a freeze and fixed inbox request.
-  Check the freeze under the existing mutation permit; release that permit
-  before root waits for normal SIGTERM. Unknown helper outcomes never unlock by
-  timeout. Only a matching terminal fence and installed identity resolve intent.
-  A new invocation drives existing Abort arbitration for unfinished old work;
-  root fences precommit work without changing an already committed operation.
-  Explicit Stage admission refusals are durable ID/nonce-correlated terminals in
-  the same root journal. Preserve the owning operation, its cooldown anchor and
-  fences; publish both outcomes for reconciliation without replaying Stage.
-- Launch readiness hashes /proc/PID/exe only after a health receipt from that
-  PID/InvocationID, once per process; Type=simple start returns before execve.
-  Installer registration keeps prior terminal operations and fences. Only a
-  reinstallation that proved readiness closes a ManualRequired operation, as
-  Failed/superseded_by_installation with the same ID and phase nonce; a failed
-  or rolled-back installation leaves it ManualRequired. No in-place re-verify.
-- The installer stops an active parins-updater.path right after taking its lock
-  and restores it on rollback or enables it after commit; a failure to enable
-  after commit is reported without rollback.
+- Keep shared locks short; never hold a cache lock during network IO, and
+  reconstruct responses outside shard locks. Bound queues,
+  cache state, background work and total shutdown. Every spawned task has an owner
+  and explicit cancellation; refresh and foreground coalescing never cross generations.
+- Shutdown: only accepted request streams can force a stop; peer close notification
+  uses at most half the grace; a forced stop records its first bounded cause and logs
+  it when no clean snapshot is published. Details: `src/quic.rs`.
+- UDP replies use the datagram's local destination and interface (packet info on
+  Linux/macOS); other platforms reject wildcard binds. Resolver and cache never
+  select addresses.
+- `[upstreams]` is the only upstream configuration; DoT pool controls are under
+  `[upstreams.dot_pool]`. Pool endpoints need equivalent policies, explicit hostname
+  bootstrap and authenticated encrypted transports. Parallel losers cancel with the
+  caller; failed DNS responses never preempt usable answers.
+- H3 preference applies only to HTTPS endpoints within the resolver deadline, with
+  verified H2 fallback and bounded cooldown. A sent query is never resent or
+  replayed; cancelling a request releases only its stream. DoH transports normalize
+  HTTP Age into RR TTLs; cache code has no HTTP policy. Details:
+  `src/upstreams/h3.rs`, `src/upstreams/transport.rs`.
+- DNS terminal health is published once per generation to readiness and storage
+  sampling. Attempt diagnostics use bounded slots and finite typed dimensions;
+  cancellation/shutdown are not upstream faults. Management API 200 is not DNS readiness.
+
+## Management, runtime and security
+
+- Mutations keep authentication, Host/Origin and revision/epoch checks, atomic
+  persistence and failure recovery. Attempt budgets use the socket peer, never
+  forwarding headers. Details: `src/manage/auth_budget.rs`.
+- Sessions are HttpOnly, SameSite=Strict Cookies plus an in-memory binding on
+  protected APIs: `parins_session_http` (HTTP) or Secure `__Host-parins_session`
+  (HTTPS). Logout revokes only its own server-side session, without clearing the
+  Cookie. Never persist or broadcast the binding. An unknown configuration result
+  is not proof of failure and is never silently replayed.
+- Credential changes are separate Store transactions that revoke all sessions and
+  require explicit login. Details: `src/manage/account.rs`.
+- Validate and persist before publishing replacement state. Cache-only, storage-only
+  and updates-only changes preserve listeners; updates-only changes also keep caches,
+  RuntimeServices, certificates and sessions and leave stopped DNS stopped. One
+  updates-only classification drives validation, restart impact and apply, keeping
+  schema validation without reloading unchanged DNS material. Do not promise cache
+  retention after arbitrary policy changes; report restart requirements accurately.
+- RuntimeServices owns process metrics and the bounded SQLite worker across DNS
+  generations. Logs, totals and trends have independent durable epochs; status is a
+  cached observation, not a hot-path disk query. Cache/storage-only applies never
+  publish candidate certificate changes.
+- Management uses HTTP on its one listener until inbound DoH is enabled, which
+  selects the validated DoH identity for HTTPS; `[doh].http3` shares the DoH address
+  and actual port over UDP. Management and DNS keep separate ports, ALPN and routes.
+  A failed candidate or TLS fault never downgrades HTTPS to HTTP; disabling DoH needs
+  downgrade confirmation. Rust owns `[web].public_host`, origin and protocol state.
+- Manager/Active owns the atomic CertificateSet, reloaded by API or SIGHUP without
+  changing revision, DNS/cache ownership or sessions. Pasted identities are validated
+  before private persistence; only file references are returned, never private keys.
+  Details: `src/tls/certificates.rs`.
+- Preserve configured HTTPS and certificate verification. Never commit credentials,
+  keys, runtime state or private configuration. No sensitive logging by default;
+  query/client data needs explicit privacy and retention decisions.
+
+## Updates and subscriptions
+
+- Software checks belong to one managed-process scheduler after setup, never a DNS
+  generation or API GET; file mode has none.
+- Update commit intent is persisted before a freeze and the fixed inbox request. The
+  freeze is checked under the existing mutation permit, released before root waits
+  for normal SIGTERM. Unknown helper outcomes never unlock by timeout. The root
+  journal is the sole installed anchor. Details: `src/update/executor/mod.rs`.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
-  persistence or listeners. Candidate preflight runs as the existing app user;
-  root never executes the candidate. Root journal is the sole installed anchor,
-  with bounded derived status and pending-launch health, not a second database.
-- Subscription validators bind the final exact URL, request representation and
-  accepted content. Source objects precede catalog selection; initialize a durable
-  empty catalog before the first object. Never reconstruct missing/corrupt authority
-  by scanning objects. Post-rename directory-sync uncertainty retains both versions
-  and pauses GC until reconciliation. Preparation cannot refresh an active source
-  or bypass future aggregate compilation, revision, local-basis and UP-freeze gates.
-- One aggregate radix policy serves local and subscription rules. Config retains
-  local source rules, not an index; each request holds its generation across cache/CNAME/stale
-  handling. One worker owns construction and at most one request-held retired
-  generation. Preserve raw cached answers and semantic cache restoration checks.
-- Subscription status GETs do no IO. Background download/compile stays outside Manager and mutation
-  locks, then recheck captured configuration/content/local basis and update freeze.
-  Config candidates use try-admission under Manager; never await the worker there.
-  Persist Config before its infallible policy swap; background content selects
-  catalog before policy publication. Synchronize current/previous GC roots before
-  new collection; do not invent a cross-file atomic transaction or legacy migration.
-- Publish DNS terminal health once per generation to both readiness and storage
-  sampling. Attempt diagnostics use bounded endpoint slots and finite typed
-  dimensions; cancellation/shutdown are not upstream faults. Management API 200
-  alone is not DNS readiness.
-- Do not change host DNS, firewall rules, certificate trust, or system services as
-  a side effect of development tests. Use isolated fixtures for local acceptance.
+  persistence or listeners. Candidate preflight runs as the app user; root never
+  executes the candidate.
+- The installer stops an active `parins-updater.path` right after taking its lock and
+  restores it on rollback or enables it after commit; a post-commit enable failure
+  is reported without rollback.
+- Subscription content is bound to verified validators and selected through a
+  durable catalog, never reconstructed by scanning objects. Status GETs do no IO;
+  download/compile runs outside Manager and mutation locks and is never awaited under
+  Manager. Details: `src/filter_subscriptions/mod.rs`.
 
 ## Verification
 
-Use the toolchain in `rust-toolchain.toml` and locked dependencies. Choose checks
-that cover the changed behavior; `.github/workflows/ci.yml` defines the full CI gate.
-Reuse existing tests and tools. Add tests or verification scripts only for a
-meaningful behavior or regression gap, not duplicate coverage or speculative risks.
-Run the smallest sufficient checks plus required project gates. Stop when acceptance
-criteria pass; expand or repeat verification only for changes, failures, or new evidence.
+Use the toolchain in `rust-toolchain.toml` and locked dependencies;
+`.github/workflows/ci.yml` is the full CI gate. Run the smallest checks covering the
+change plus required gates, and stop when they pass. Add tests or scripts only for a
+meaningful behavior or regression gap.
 
-- Rust: `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
-  and `cargo test --locked --all-targets`.
-- Build/configuration: `cargo build --locked --release`, then
-  `./target/release/parins --config parins.example.toml --check`.
-- Web: from `web/`, run `npm ci --ignore-scripts`, `npm run typecheck`,
-  `npm test`, and `npm run build` before compiling Rust; the binary embeds
-  the exact checked `web/dist/` output. Run `npm audit --registry
-  https://registry.npmjs.org --audit-level=high`. For interaction changes,
-  verify the affected flow in a real browser, including errors, session
-  transitions, keyboard use, and small screens.
-- Installer/bootstrap: `sh scripts/test-install.sh` and
-  `sh scripts/test-bootstrap.sh`. Bootstrap fixtures must use the Cargo release
-  version and exercise the default, unpinned entry point. Stage each actual
-  native release package through that entry point before publication; the public
-  quick-start check must then assert the exact published version.
-  Live success guidance distinguishes setup from initialized state only after the
-  existing identity-preserving preflight succeeds. Never parse private state or
-  infer initialization from a token file, and keep staging/dry-run service-free.
-  Run `scripts/test-systemd.sh --ephemeral-ci`
-  only on a disposable Linux environment, not a developer's host, using native
-  musl binaries for the managed updater's installation contract.
-  Run `sh scripts/test-udp.sh --ephemeral-ci` on a disposable GitHub Linux runner
-  for isolated network-namespace IPv4/IPv6 source-address acceptance.
-  `.github/workflows/filter-acceptance.yml` runs the isolated subscription service
-  and fixed-resource wire fixtures; their `--ephemeral-ci` guards must remain intact.
-  Static trie/radix comparisons do not establish subscription lifecycle or VPS capacity.
-  Manual `filter-lifecycle.yml` uses the real managed service with a verified
-  2 CPU/2 GiB, no-swap cgroup and a separately pinned load generator. Its synthetic
-  HTTPS source branch changes only fixture domains; keep CI read-only and normal
-  public certificate validation. Fix the workload and SLO before running, retain
-  all three rounds, distinguish CDN propagation from the measured refresh window,
-  and prove request-held old-generation release separately from latency samples.
-  Measure restart with derived indexes and rebuild from unchanged selected source
-  objects separately; preserve the catalog and record CPU, RSS and disk IO without
-  claiming that the host page cache was cold.
-  Manual `update-check.yml` installs the actual published first updater-capable
-  release on a disposable runner; never rebuild with a forged official identity.
-  Pin the installed version/source to its tag and independently require latest to
-  equal it. Three fixed idle/check wire rounds must use the authenticated managed
-  check endpoint, honor cooldown, and observe a new success without replaying POST.
-  Same-version checks do not download an update or prove A-to-B replacement.
-  A workflow success proves only the declared fixture, not public-network capacity.
-  `public-dns-acceptance.yml` is manual-only and takes an explicitly selected public
-  endpoint. Keep its one-query deadline and normal certificate verification; never
-  hardcode deployment targets or add production credentials to CI. A successful
-  probe proves only that address family and external path, not capacity.
-  `update-recovery.yml` controls a disposable QEMU guest from a hosted runner.
-  Keep the host guard, pinned image digest, pinned guest SSH identity and private
-  cleanup. Never reboot the runner or fake hosted-runner flags inside a guest.
-  Keep normal reboot, virtual hard reset and bounded journal-volume ENOSPC as
-  separate fresh-guest scenarios. Disk-fault acceptance must observe the real
-  helper's failed journal write and recovery on that same volume after space is
-  freed, preserving the installed binary and managed configuration. Development-build
-  precommit recovery is not official upgrade/rollback, physical power-loss
-  recovery, full update-disk fault coverage or a capacity measurement.
-- Dependency/security changes: use the dependency audit configured in CI.
-- Documentation-only changes: check referenced paths/commands, review the diff, and
-  run `git diff --check`; a full application build is not required.
+| Change | Checks |
+| --- | --- |
+| Rust | `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked --all-targets` |
+| Build/configuration | `cargo build --locked --release`, `./target/release/parins --config parins.example.toml --check` |
+| Web | In `web/`: `npm ci --ignore-scripts`, `npm run typecheck`, `npm test`, `npm run build` before compiling Rust (the binary embeds `web/dist/`); `npm audit --registry https://registry.npmjs.org --audit-level=high`. For interaction changes, test the flow in a real browser, including errors, session transitions, keyboard use and small screens. |
+| Installer/bootstrap | `sh scripts/test-install.sh`, `sh scripts/test-bootstrap.sh`; see [installer contracts](guide/development.md#installer-and-bootstrap-checks) |
+| Service, UDP, subscriptions, updates | `--ephemeral-ci` suites in [Acceptance workflows](guide/development.md#acceptance-workflows), only on disposable runners |
+| Dependencies | The dependency audit configured in CI |
+| Documentation only | Referenced paths, commands and links; review the diff; `git diff --check` |
 
-For performance changes, retain a baseline and repeat the same workload with
-correctness checks. Use `examples/bench_cache.rs` for cache measurements; report
-regressions and variance as well as improvements. Cache operations per second are
-not wire DNS QPS or evidence of capacity on a particular VPS. Do not remove safety
-checks or add complex optimizations solely for a microbenchmark score.
+- Keep every `--ephemeral-ci` guard. Tests never change host DNS, firewall rules,
+  certificate trust or system services; use isolated fixtures for local acceptance.
+- A check proves only its declared fixture and scope. Local, CI, isolated or
+  development-build results do not establish production capacity, public
+  reachability, official upgrade/rollback, or behavior on a particular host.
+- For performance changes, keep a baseline and repeat the same workload with
+  correctness checks; use `examples/bench_cache.rs` for the cache and report
+  regressions and variance. Cache operations per second are not wire DNS QPS. Never
+  remove safety checks or add complex optimizations for a microbenchmark score.
 
 ## Documentation and delivery
 
 - Write focused English commit messages, such as `docs: clarify cache ownership`.
   Report what changed, what was verified, and remaining limitations.
-- Keep `README.md` focused on the overview, features, quick start and license.
-  Detailed public guides live in `guide/`; keep release and compatibility notes
-  in `CHANGELOG.md`. Distinguish unreleased main changes from releases.
-- `docs/` contains intentionally ignored local plans and progress. Do not force-add
-  it; essential contributor rules must remain available in tracked files.
-- Maintain this file in the same change that alters an ownership boundary, durable
-  invariant, or development workflow. Keep it concise and repository-portable:
-  no personal paths, task history, test counts, temporary metrics, or copied defaults.
+- Keep `README.md` to the overview, features, quick start and license. Public guides
+  live in `guide/`; release and compatibility notes in `CHANGELOG.md`. Distinguish
+  unreleased main changes from releases.
+- `docs/` holds intentionally ignored local plans; never force-add it. Essential
+  contributor rules stay in tracked files.
+- Update this file and the affected module documentation in the same change that
+  alters an ownership boundary, durable invariant, or workflow. Keep it concise and
+  repository-portable: no personal paths, task history, test counts, temporary
+  metrics, or copied defaults.
 - When guidance conflicts with code or tests, investigate and explain the mismatch;
   do not silently weaken a contract or preserve an obsolete design by habit.

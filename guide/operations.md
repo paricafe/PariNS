@@ -123,71 +123,47 @@ sudo systemctl disable --now parins-managed.service  # retains state and backups
 
 ## Software updates
 
-Starting with v0.1.5, managed Linux installations can check for software
-updates and use a restricted updater. This is the first updater-capable official
-version. Official same-epoch update, rollback and two-version data round-trip acceptance
-must be verified separately. Isolated development-build recovery checks do not
-prove that official path.
-
-`[updates]` defaults to `auto_check = true` and `check_interval_hours = 6`
-(1–168 hours). Checks begin only after managed setup, contact the official GitHub
-repository without credentials, and never install automatically. File mode does
-not run this scheduler. Changing these settings does not restart DNS or clear its
-cache. `parins --build-info=json` reports the current source/official build identity;
+Managed Linux installations of v0.1.5 or newer can check for software updates and
+install them through a restricted updater. `[updates]` defaults to
+`auto_check = true` and `check_interval_hours = 6` (1–168 hours). Checks begin
+only after managed setup, contact the official GitHub repository without
+credentials, and never install automatically. File mode has no scheduler.
+Changing these settings does not restart DNS, clear its cache or reload unchanged
+DNS certificates and rule files, and a stopped DNS service stays stopped.
+`parins --build-info=json` reports the current source/official build identity;
 `parins --manage --check --state-dir PATH` checks saved materials without starting
 services, opening the runtime database, or consuming a cache snapshot.
 
-Since v0.1.7, validation keeps update-only edits independent of unchanged
-DNS certificates and rule files, including when a rejected on-disk candidate
-has left the previously loaded material active. Schema validation still applies;
-actual DNS or certificate configuration changes require full preparation. A
-stopped DNS service stays stopped and is reported as not requiring a restart.
+One-click installation requires an official Linux managed installation with the
+trusted updater components. An update interrupts DNS briefly and requires signing
+in again. Only matching durable-data contracts use automatic binary rollback; it
+does not restore an old database or discard new query history. Release integrity
+relies on HTTPS and SHA256 (see [Install a Linux release](deployment.md#install-a-linux-release)).
+The release reader requires public GitHub addresses and ignores proxy environment
+variables; DNS interception that returns private or synthetic addresses is rejected.
 
-One-click installation requires an official Linux managed installation and the
-trusted updater components, not just a new console. The initial-development
-v0.1.4 has no updater: first enrollment requires a verified newer installation
-package and an explicit administrator action. A software update interrupts DNS
-briefly and requires signing in again. Only matching durable-data contracts can
-use automatic binary rollback; it does not restore an old database or discard
-new query history. HTTPS and SHA256 establish transport and content integrity,
-not an independent publisher signature.
+Online updates replace only the application binary. When a release changes the
+helper protocol (as v0.1.7 did), update the application and helper together with
+the verified installer. Explicit Stage refusals become durable operation results
+without changing the installed binary or resetting the cooldown; unknown results
+need reconciliation, never automatic retries or timeout-based recovery.
 
-Since v0.1.7, the Stage-refusal fix requires helper protocol 2. Use the verified
-installer to update the application and helper together; online updates replace
-only the application binary and cannot upgrade an older helper. Explicit Stage
-refusals become durable operation results without changing the installed binary
-or resetting the existing cooldown. Unknown results still require reconciliation,
-not automatic retries or timeout-based recovery.
+### Enrolling a v0.1.4 installation
+
+v0.1.4 has no updater. Run `install.sh --enable-updater` from a verified **newer**
+package; it accepts only the exact official v0.1.4 managed unit and fixed
+installation paths. The installer keeps the same state directory and certificate
+access, runs read-only preflight as the service user, and registers the new main
+binary, helper and systemd units together. It does not translate settings or
+migrate the database; custom layouts need a manual installation plan. If
+enrollment fails after the new program ran, the old files can be restored but
+v0.1.4 is not started automatically against possibly changed data.
+
+### Update recovery
 
 If an update and its automatic rollback do not finish, the console shows
-**Update recovery required** and configuration changes stay frozen. Check the
-DNS service first. Do not edit the updater journal or the application's update
-state. Reinstall the current or a newer official version with the verified
-installer. Once that installation passes its readiness check, the unfinished
-update is closed as superseded and configuration changes unfreeze without a
-restart. If the installation fails or rolls back, the state stays unchanged and
-can be retried. The installer refuses when the installed program is not the one
-the updater recorded; that case still needs recovery from a backup.
-
-The installer pauses the update request path while it runs. If it reports that
-the program is installed but the update request path is not enabled, the
-installation is complete; run the printed `systemctl reset-failed` and
-`systemctl enable --now parins-updater.path` commands instead of reinstalling.
-If the installer stops with "Manual recovery required", the request path stays
-paused on purpose; re-enable it with the same commands after the recovery.
-
-The current installer accepts `--enable-updater` only for the exact official
-v0.1.4 managed unit and fixed installation paths. Run it from a verified **newer**
-package; the v0.1.4 download does not implement this option. The installer keeps
-the same state directory and certificate access, performs read-only preflight as
-the service user, and registers the new main binary, helper and systemd units
-together. It does not translate old settings or migrate the database. Unknown or
-custom layouts require a manual installation plan. If the first enrollment fails
-after the new program ran, the old files can be restored but v0.1.4 is not started
-automatically against potentially changed data: it has no verified rollback epoch.
-
-For an interrupted update, inspect the console's operation reason and the
-read-only service status before taking manual action:
+**Update recovery required** and configuration changes stay frozen. Check the DNS
+service first, then inspect the console's operation reason and read-only status:
 
 ```sh
 sudo systemctl status parins-managed.service parins-updater.service parins-update-recovery.service
@@ -195,14 +171,22 @@ sudo journalctl -u parins-managed.service -u parins-updater.service -u parins-up
 sudo cat /var/lib/parins-updater/status.json
 ```
 
-Retain the private updater journal, reported backup, and business state when
-diagnosing a `manual_required` result. Do not delete the journal to force a new
-attempt, reset the database, or blindly start an older binary. Resolve the stated
-cause and verify that the selected binary can read the retained data before a
-manual reinstall. Root's journal is authoritative; the public status is derived.
-The release reader requires public GitHub addresses and does not use proxy
-environment variables. DNS interception that returns private or synthetic
-addresses is rejected rather than silently bypassed.
+Do not edit or delete the updater journal or the application's update state,
+reset the database, or blindly start an older binary; retain the journal, reported
+backup and business state. Root's journal is authoritative; the public status is
+derived. Resolve the stated cause, then reinstall the current or a newer official
+version with the verified installer. Once that installation passes its readiness
+check, the unfinished update is closed as superseded and configuration unfreezes
+without a restart. If the installation fails or rolls back, the state stays
+unchanged and can be retried. The installer refuses when the installed program is
+not the one the updater recorded; that case needs recovery from a backup.
+
+The installer pauses the update request path while it runs. If it reports that the
+program is installed but the request path is not enabled, the installation is
+complete: run the printed `systemctl reset-failed` and
+`systemctl enable --now parins-updater.path` commands instead of reinstalling. After
+"Manual recovery required", the path stays paused on purpose; re-enable it the same
+way once recovered.
 
 ## Certificates
 
@@ -344,23 +328,3 @@ readiness. No administrative writes or query logs are exposed. Snapshots have `e
 No query names, client addresses or unbounded labels are emitted. Existing
 startup/shutdown messages remain plain text; select JSON events when ingesting
 metrics. No OpenTelemetry tracing or alert setup is included.
-
-## Deployment acceptance
-
-Before deployment, choose management/DNS network access rules, provision readable
-external certificates, inspect capacity/backups, and validate independent encrypted
-clients. The installer never changes host DNS, firewall, trust stores or other
-applications. No measured local loopback result proves public DoQ reachability or
-capacity on a 2 vCPU/2 GiB VPS.
-
-For an independent public DoQ check, manually run **Public DNS acceptance** in
-GitHub Actions with your server's public IP, certificate hostname and UDP port.
-It sends one `example.com. A` query, verifies the public CA, hostname, ALPN and DNS
-response, and retains a small JSON result. No server credentials are needed. A
-pass proves that address family and network path at that time, not capacity or
-reachability from every client; ordinary CI does not contact your deployment.
-
-**Update boot recovery** runs a separate, disposable Linux VM controlled by a
-GitHub runner. It checks normal reboot and interrupted precommit recovery using
-a development package. It does not reboot the runner or a deployment, and does
-not establish official-version upgrade/rollback, power-loss recovery or capacity.

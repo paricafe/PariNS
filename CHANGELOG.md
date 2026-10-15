@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.15 — 2026-10-15
+
+### Fixed
+
+- A saved configuration that fails to start, for example because another program
+  took a listener port after a reboot, no longer leaves DNS silently stopped.
+  PariNS logs the failing protocol and address (such as
+  `bind DoH 0.0.0.0:443: Address in use`), shows it on the console overview,
+  and retries the same configuration after 5 seconds, doubling to at most once a
+  minute, until it starts or another configuration is applied. Repeated identical
+  errors are logged at most every ten minutes. All listeners still start together.
+- The startup integrity check of an existing runtime database no longer gives up
+  after 5 seconds. It runs in the background while DNS starts, the storage status
+  shows "checking" meanwhile, and only shutdown interrupts it. Before, a large
+  database on a cold disk cache could leave statistics and query logs unavailable
+  until the next restart.
+
+### Changed
+
+- Monitoring guidance: use `dns_health` from `GET /api/status`; see
+  [Operations](guide/operations.md#runtime-storage-and-diagnostics).
+
 ## v0.1.14 — 2026-10-15
 
 ### Changed

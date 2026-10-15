@@ -27,7 +27,7 @@ The script detects the CPU architecture, downloads the release over HTTPS, check
 the archive and its contents against SHA256 manifests, installs the binary, and
 starts `parins-managed.service`. SHA256 detects corruption; it is not an
 independent signature or a substitute for trusting the release publisher.
-Pin a version with `sudo sh parins-install.sh --version v0.1.14`, or use `--dry-run`
+Pin a version with `sudo sh parins-install.sh --version v0.1.15`, or use `--dry-run`
 to download, verify and inspect targets without installing a service.
 
 For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`

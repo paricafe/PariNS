@@ -1,7 +1,9 @@
+mod common;
+
 use std::{net::SocketAddr, time::Duration};
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Message, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
         rdata::{A, CNAME},
@@ -17,12 +19,8 @@ use tokio::{
 };
 
 fn query() -> Message {
-    let mut query = Message::new(99, MessageType::Query, OpCode::Query);
+    let mut query = common::query(99, "example.test.", RecordType::A);
     query.metadata.recursion_desired = true;
-    query.add_query(Query::query(
-        Name::from_ascii("example.test.").unwrap(),
-        RecordType::A,
-    ));
     query
 }
 

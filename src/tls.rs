@@ -1,7 +1,12 @@
 //! Verified TLS configuration and DNS-over-TLS adapters (RFC 7858 / RFC 8310).
 //! No opportunistic plaintext fallback. The resolver owns upstream deadlines.
 
-use std::{fmt, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    fmt,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, ensure};
 use hickory_proto::op::Message;
@@ -162,6 +167,27 @@ fn checked_identity(
     Ok(Arc::new(key))
 }
 
+/// Verified upstream client configuration: the configured CA file, or the
+/// WebPKI roots when none is set, offering exactly one ALPN protocol.
+pub(crate) fn client_config(ca_file: Option<&Path>, alpn: &[u8]) -> Result<ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    if let Some(path) = ca_file {
+        for cert in CertificateDer::pem_file_iter(path).context("open TLS CA file")? {
+            roots.add(cert?)?;
+        }
+        ensure!(!roots.is_empty(), "TLS CA file has no certificates");
+    } else {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    config.alpn_protocols = vec![alpn.to_vec()];
+    Ok(config)
+}
+
 #[derive(Clone)]
 pub struct Upstream {
     connector: TlsConnector,
@@ -177,21 +203,7 @@ impl Upstream {
     pub fn with_pool(settings: &ClientSettings, pool: &PoolSettings) -> Result<Self> {
         let server_name = ServerName::try_from(settings.server_name.clone())
             .context("invalid TLS upstream server name")?;
-        let mut roots = RootCertStore::empty();
-        if let Some(path) = &settings.ca_file {
-            for cert in CertificateDer::pem_file_iter(path).context("open TLS CA file")? {
-                roots.add(cert?)?;
-            }
-            ensure!(!roots.is_empty(), "TLS CA file has no certificates");
-        } else {
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        }
-        let mut config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        config.alpn_protocols = vec![b"dot".to_vec()];
+        let config = client_config(settings.ca_file.as_deref(), b"dot")?;
         Ok(Self {
             connector: TlsConnector::from(Arc::new(config)),
             server_name,

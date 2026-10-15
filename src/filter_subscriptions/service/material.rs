@@ -45,7 +45,7 @@ fn digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
     }
     hash.finalize().into()
 }
-fn limits(settings: &Settings, _local: &Policy, retained: usize) -> Result<Limits> {
+fn limits(settings: &Settings, retained: usize) -> Result<Limits> {
     Ok(Limits {
         max_rules: settings.max_rules,
         max_memory_bytes: settings.max_memory_bytes,
@@ -200,7 +200,7 @@ pub(super) fn compile(
     let ids: Vec<_> = std::iter::once(String::new())
         .chain(inputs.iter().map(|i| i.id.clone()))
         .collect();
-    let budget = limits(settings, local, retained)?;
+    let budget = limits(settings, retained)?;
     if let Ok(Some(file)) = store.read_index(&name, settings.max_memory_bytes as u64)
         && let Ok(index) = Index::read_from_with_check(file, input_digest, &ids, budget, &mut check)
     {
@@ -224,7 +224,7 @@ pub(super) fn compile(
     let max_bytes = (policy.index_bytes() as u64)
         .checked_add(4096)
         .context(Failure::new("subscription_disk_limit"))?;
-    store.write_index(&name, max_bytes, now(), |out| {
+    store.write_index(&name, max_bytes, |out| {
         policy.write_index(out, input_digest)
     })?;
     let index_pin = Some(store.pin_index(&name)?);
@@ -238,7 +238,6 @@ pub(super) fn compile(
 
 /// Full material preflight, without acquiring a writer or writing any derived data.
 pub fn read_only(path: &Path, settings: &Settings, local: &Policy) -> Result<Material> {
-    settings.validate()?;
     if settings.effective().next().is_none() {
         return local_material(local, settings);
     }
@@ -276,7 +275,7 @@ pub fn read_only(path: &Path, settings: &Settings, local: &Policy) -> Result<Mat
     let ids: Vec<_> = std::iter::once(String::new())
         .chain(inputs.iter().map(|i| i.id.clone()))
         .collect();
-    let budget = limits(settings, local, local.owned_bytes())?;
+    let budget = limits(settings, local.owned_bytes())?;
     if let Ok(Some(file)) = view.read_index(&hex(input_digest), settings.max_memory_bytes as u64)
         && let Ok(index) = Index::read_from(file, input_digest, &ids, budget)
     {

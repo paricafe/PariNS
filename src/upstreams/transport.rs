@@ -1,3 +1,16 @@
+//! Upstream protocol exchange for UDP/TCP, DoT, DoH (HTTP/2) and DoQ endpoints.
+//! Resolver owns the total deadline; hostname endpoints use only explicit bootstrap.
+//!
+//! Each HTTPS endpoint keeps one reusable H2 connection, opened serially, with a
+//! local stream cap under the peer's limit, a PING while busy or just used that
+//! retires a silently dead path, and a 10-second idle close owned by its driver.
+//! GOAWAY or I/O errors retire it; only a request not yet sent may move to a new
+//! connection, so a sent query is never replayed. Attempts record new or reused
+//! connections.
+//!
+//! DoH answers have HTTP Age normalized into RR TTLs here, before Resolver sees
+//! them; cache code has no HTTP policy. DoQ in-flight requests retain their endpoint
+//! owner independently of the current bootstrap-address cache entry.
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -10,10 +23,7 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, Query},
     rr::{Name, RData, RecordType},
 };
-use rustls::{
-    ClientConfig, RootCertStore,
-    pki_types::{CertificateDer, ServerName, pem::PemObject},
-};
+use rustls::{ClientConfig, pki_types::ServerName};
 use tokio::{
     net::TcpStream,
     sync::Mutex,
@@ -27,7 +37,7 @@ use crate::{protocol, transport::tcp};
 
 // RFC 9111 sections 5.1 and 1.2.2: use the first Age member, ignore
 // malformed values, and saturate a valid integer that exceeds our TTL range.
-pub(super) fn http_age(headers: &http::HeaderMap) -> u32 {
+fn http_age(headers: &http::HeaderMap) -> u32 {
     let Some(value) = headers.get(http::header::AGE).and_then(|v| v.to_str().ok()) else {
         return 0;
     };
@@ -47,7 +57,7 @@ pub(super) fn http_age(headers: &http::HeaderMap) -> u32 {
 
 // RFC 8484 section 5.1 applies to downstream answers as well as local DNS
 // caching. Change RR TTLs only, not EDNS metadata or SOA RDATA parameters.
-pub(super) fn apply_http_age(response: &mut Message, age: u32) {
+fn apply_http_age(response: &mut Message, age: u32) {
     for record in response
         .answers
         .iter_mut()
@@ -56,6 +66,66 @@ pub(super) fn apply_http_age(response: &mut Message, age: u32) {
     {
         record.ttl = record.ttl.saturating_sub(age);
     }
+}
+
+/// Validate an RFC 8484 response head shared by HTTP/2 and HTTP/3. Returns
+/// the HTTP Age that `doh_answer` applies once the body is accepted.
+pub(super) fn doh_head(
+    status: http::StatusCode,
+    headers: &http::HeaderMap,
+    attempt: &mut Attempt,
+) -> Result<u32> {
+    if status != http::StatusCode::OK {
+        attempt.http_status(status.as_u16());
+        anyhow::bail!("DoH HTTP status {status}");
+    }
+    attempt.stage(Stage::Validate);
+    ensure!(
+        headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/dns-message")),
+        "invalid DoH content type"
+    );
+    let age = http_age(headers);
+    attempt.stage(Stage::ResponseRead);
+    Ok(age)
+}
+
+/// Append one body chunk within the DNS message size limit.
+pub(super) fn doh_chunk(bytes: &mut Vec<u8>, chunk: &[u8], attempt: &mut Attempt) -> Result<()> {
+    if bytes.len() + chunk.len() > protocol::MAX_MESSAGE {
+        attempt.reason(super::diagnostics::Reason::ProtocolInvalid);
+        anyhow::bail!("DoH response too large");
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Decode and validate a complete DoH body against the sent `outbound`
+/// message, then normalize Age into TTLs and restore the client's ID.
+pub(super) fn doh_answer(
+    bytes: &[u8],
+    outbound: &Message,
+    query: &Message,
+    age: u32,
+    attempt: &mut Attempt,
+) -> Result<Message> {
+    attempt.stage(Stage::Decode);
+    let mut response = protocol::decode(bytes)?;
+    attempt.stage(Stage::Validate);
+    ensure!(
+        protocol::matches_response(outbound, &response) && !response.truncation,
+        "invalid DoH response"
+    );
+    apply_http_age(&mut response, age);
+    response.metadata.id = query.id;
+    Ok(response)
 }
 
 /// RFC 8484 GET, the method every DoH server must support: the query (ID 0)
@@ -166,7 +236,8 @@ pub(super) struct Client {
     pub spec: Endpoint,
     bootstrap: Vec<SocketAddr>,
     addresses: Mutex<Option<(Instant, Vec<SocketAddr>)>>,
-    tls: Arc<ClientConfig>,
+    /// HTTPS and QUIC endpoints only; DoT owns its connector in `dot`.
+    tls: Option<Arc<ClientConfig>>,
     dot: Option<crate::tls::Upstream>,
     listeners: Vec<SocketAddr>,
     quic: Mutex<Option<Arc<QuicConnection>>>,
@@ -186,31 +257,15 @@ impl Drop for QuicConnection {
 }
 
 impl Client {
-    pub fn new(
-        spec: Endpoint,
-        settings: &Settings,
-        listeners: Vec<SocketAddr>,
-        _query_timeout: Duration,
-    ) -> Result<Self> {
-        let mut roots = RootCertStore::empty();
-        if let Some(path) = &settings.ca_file {
-            for certificate in CertificateDer::pem_file_iter(path).context("open upstream CA")? {
-                roots.add(certificate?)?;
-            }
-            ensure!(!roots.is_empty(), "upstream CA has no certificates");
-        } else {
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        }
-        let mut tls =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        tls.alpn_protocols = vec![match spec.protocol {
-            Protocol::Https => b"h2".to_vec(),
-            Protocol::Quic => b"doq".to_vec(),
-            _ => b"dot".to_vec(),
-        }];
+    pub fn new(spec: Endpoint, settings: &Settings, listeners: Vec<SocketAddr>) -> Result<Self> {
+        let alpn: Option<&[u8]> = match spec.protocol {
+            Protocol::Https => Some(b"h2"),
+            Protocol::Quic => Some(b"doq"),
+            Protocol::Udp | Protocol::Tcp | Protocol::Tls => None,
+        };
+        let tls = alpn
+            .map(|alpn| crate::tls::client_config(settings.ca_file.as_deref(), alpn))
+            .transpose()?;
         let dot = (spec.protocol == Protocol::Tls)
             .then(|| {
                 crate::tls::Upstream::with_pool(
@@ -222,13 +277,15 @@ impl Client {
                 )
             })
             .transpose()?;
-        let h3 = (settings.prefer_h3 && spec.protocol == Protocol::Https)
-            .then(|| super::h3::Client::new(tls.clone()));
+        let h3 = tls
+            .as_ref()
+            .filter(|_| settings.prefer_h3 && spec.protocol == Protocol::Https)
+            .map(|tls| super::h3::Client::new(tls.clone()));
         Ok(Self {
             spec,
             bootstrap: settings.bootstrap.clone(),
             addresses: Mutex::new(None),
-            tls: Arc::new(tls),
+            tls: tls.map(Arc::new),
             dot,
             listeners,
             quic: Mutex::new(None),
@@ -443,7 +500,8 @@ impl Client {
         attempt.stage(Stage::Connect);
         let socket = TcpStream::connect(address).await?;
         attempt.stage(Stage::TlsHandshake);
-        let stream = TlsConnector::from(self.tls.clone())
+        let tls = self.tls.clone().expect("HTTPS endpoint TLS configuration");
+        let stream = TlsConnector::from(tls)
             .connect(ServerName::try_from(self.spec.host.clone())?, socket)
             .await?;
         attempt.stage(Stage::Validate);
@@ -558,54 +616,15 @@ impl Client {
             .map_err(|error| anyhow::Error::new(NotSent).context(error))?;
         attempt.stage(Stage::ResponseHeaders);
         let response = response.await?;
-        if response.status() != http::StatusCode::OK {
-            attempt.http_status(response.status().as_u16());
-        }
-        ensure!(
-            response.status() == http::StatusCode::OK,
-            "DoH HTTP status {}",
-            response.status()
-        );
-        attempt.stage(Stage::Validate);
-        ensure!(
-            response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .eq_ignore_ascii_case("application/dns-message")),
-            "invalid DoH content type"
-        );
-        let age = http_age(response.headers());
+        let age = doh_head(response.status(), response.headers(), attempt)?;
         let mut body = response.into_body();
         let mut bytes = Vec::new();
-        attempt.stage(Stage::ResponseRead);
         while let Some(chunk) = body.data().await {
             let chunk = chunk?;
-            if bytes.len() + chunk.len() > protocol::MAX_MESSAGE {
-                attempt.reason(super::diagnostics::Reason::ProtocolInvalid);
-            }
-            ensure!(
-                bytes.len() + chunk.len() <= protocol::MAX_MESSAGE,
-                "DoH response too large"
-            );
-            bytes.extend_from_slice(&chunk);
+            doh_chunk(&mut bytes, &chunk, attempt)?;
             body.flow_control().release_capacity(chunk.len())?;
         }
-        attempt.stage(Stage::Decode);
-        let mut response = protocol::decode(&bytes)?;
-        attempt.stage(Stage::Validate);
-        ensure!(
-            protocol::matches_response(&outbound, &response) && !response.truncation,
-            "invalid DoH response"
-        );
-        apply_http_age(&mut response, age);
-        response.metadata.id = query.id;
-        Ok(response)
+        doh_answer(&bytes, &outbound, query, age, attempt)
     }
 
     async fn quic_connection(
@@ -628,7 +647,9 @@ impl Client {
         };
         attempt.stage(Stage::Connect);
         let mut endpoint = quinn::Endpoint::client(bind.parse()?)?;
-        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*self.tls).clone())?;
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(
+            (**self.tls.as_ref().expect("QUIC endpoint TLS configuration")).clone(),
+        )?;
         let mut config = quinn::ClientConfig::new(Arc::new(crypto));
         let mut transport = quinn::TransportConfig::default();
         transport

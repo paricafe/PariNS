@@ -21,7 +21,7 @@ pub(super) fn parse(text: &str) -> Result<Value> {
     let config = Config::parse(text)?;
     let source: toml::Value = toml::from_str(text)?;
     let mut settings = serde_json::to_value(&config)?;
-    // Policy is a compiled trie, not a document. Project its already-validated
+    // Policy is a compiled radix index, not a document. Project its already-validated
     // source rules without keeping a second rule copy in the DNS runtime.
     let mut filter = json!({
         "enabled": false, "block_exact": [], "block_suffix": [],

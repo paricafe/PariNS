@@ -112,10 +112,10 @@ impl Drop for WorkPin {
     }
 }
 
+/// The single writer. Its read accessors are the selected snapshot's.
 pub(crate) struct Store {
-    dir: PathBuf,
+    selected: ReadOnlyStore,
     _lock: Arc<File>,
-    catalog: Catalog,
     quota: u64,
     uncertain: bool,
     staging: Arc<Mutex<bool>>,
@@ -124,8 +124,9 @@ pub(crate) struct Store {
     fault: Option<&'static str>,
 }
 
-/// A bounded authority snapshot for preflight. This never creates directories,
-/// acquires the writer lock, performs GC, or writes derived files.
+/// The selected catalog and its directory: the preflight snapshot, and the
+/// writer's view of its current selection. Opened on its own, it never creates
+/// directories, acquires the writer lock, performs GC, or writes derived files.
 pub(crate) struct ReadOnlyStore {
     dir: PathBuf,
     catalog: Catalog,
@@ -159,6 +160,18 @@ impl ReadOnlyStore {
     }
 }
 
+impl std::ops::Deref for Store {
+    type Target = ReadOnlyStore;
+    fn deref(&self) -> &ReadOnlyStore {
+        &self.selected
+    }
+}
+impl std::ops::DerefMut for Store {
+    fn deref_mut(&mut self) -> &mut ReadOnlyStore {
+        &mut self.selected
+    }
+}
+
 impl Store {
     pub(crate) fn verified_record(&self, record: &SourceRecord) -> Result<File> {
         validate_record(record)?;
@@ -177,33 +190,7 @@ impl Store {
         })
     }
 
-    pub(crate) fn revision(&self) -> u64 {
-        self.catalog.content_revision
-    }
-
-    pub(crate) fn records(&self) -> &[SourceRecord] {
-        &self.catalog.records
-    }
-
-    pub(crate) fn record(&self, fingerprint: &str) -> Option<&SourceRecord> {
-        self.catalog
-            .records
-            .iter()
-            .find(|r| r.fingerprint == fingerprint)
-    }
-
-    pub(crate) fn verified_content(&self, fingerprint: &str) -> Result<(SourceRecord, File)> {
-        let record = self
-            .record(fingerprint)
-            .context("subscription_material_missing")?;
-        Ok((record.clone(), verified_object(&self.dir, record)?))
-    }
-
-    pub(crate) fn open(path: &Path, max_disk: u64, _now: u64) -> Result<Self> {
-        ensure!(
-            (MAX_CATALOG..=2 * 1024 * 1024 * 1024).contains(&max_disk),
-            "invalid subscription disk budget"
-        );
+    pub(crate) fn open(path: &Path, max_disk: u64) -> Result<Self> {
         private_dir(path)?;
         let dir = path.canonicalize()?;
         ensure!(
@@ -232,9 +219,8 @@ impl Store {
             Catalog::default()
         };
         let mut store = Self {
-            dir,
+            selected: ReadOnlyStore { dir, catalog },
             _lock: Arc::new(lock),
-            catalog,
             quota: max_disk,
             uncertain: false,
             staging: Arc::new(Mutex::new(false)),
@@ -266,8 +252,8 @@ impl Store {
         Ok(store)
     }
 
-    pub(crate) fn begin_staging(&mut self, reserve_bytes: u64, now: u64) -> Result<Staging> {
-        self.begin_reserved(reserve_bytes, MAX_OBJECT, "download", now)
+    pub(crate) fn begin_staging(&mut self, reserve_bytes: u64) -> Result<Staging> {
+        self.begin_reserved(reserve_bytes, MAX_OBJECT, "download")
     }
 
     // Admission holds the publication/UP-freeze gate and has synchronized the
@@ -291,13 +277,7 @@ impl Store {
             .is_some_and(|sum| sum <= self.quota))
     }
 
-    fn begin_reserved(
-        &mut self,
-        reserve_bytes: u64,
-        max: u64,
-        kind: &str,
-        _now: u64,
-    ) -> Result<Staging> {
+    fn begin_reserved(&mut self, reserve_bytes: u64, max: u64, kind: &str) -> Result<Staging> {
         ensure!(
             !self.uncertain,
             "catalog durability requires reconciliation"
@@ -344,13 +324,8 @@ impl Store {
         metadata: PreparedMetadata,
         now: u64,
     ) -> Result<CommitOutcome> {
-        // Complete/release staging even when an active source is rejected.
-        if let Err(error) = self.ensure_preparable(&metadata.fingerprint) {
-            self.discard(stage)?;
-            return Err(error);
-        }
         let record = self.install_object(stage, metadata, now)?;
-        self.commit_records(vec![record], self.revision(), now)
+        self.commit_records(vec![record], self.revision())
     }
 
     /// Install verified bytes without changing the selected version. The caller
@@ -427,19 +402,8 @@ impl Store {
         &mut self,
         records: Vec<SourceRecord>,
         expected_revision: u64,
-        _now: u64,
     ) -> Result<CommitOutcome> {
-        self.commit_batch(records, &[], expected_revision)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn commit_batch(
-        &mut self,
-        records: Vec<SourceRecord>,
-        statuses: &[(String, SourceStatus)],
-        expected_revision: u64,
-    ) -> Result<CommitOutcome> {
-        self.commit_batch_with_check(records, statuses, expected_revision, || Ok(()))
+        self.commit_batch_with_check(records, &[], expected_revision, || Ok(()))
     }
 
     pub(crate) fn commit_batch_with_check(
@@ -492,7 +456,6 @@ impl Store {
         &mut self,
         current: Vec<String>,
         previous: Vec<String>,
-        _now: u64,
     ) -> Result<CommitOutcome> {
         ensure!(
             !self.uncertain,
@@ -566,14 +529,6 @@ impl Store {
         self.commit_catalog_with_check(candidate, check)
     }
 
-    #[cfg(test)]
-    pub(crate) fn ensure_preparable(&self, fingerprint: &str) -> Result<()> {
-        ensure!(valid_hash(fingerprint), "invalid source fingerprint");
-        // Reference roots include disabled configured sources. Only Service's
-        // effective settings can determine whether preparation would refresh.
-        Ok(())
-    }
-
     pub(crate) fn discard(&mut self, mut stage: Staging) -> Result<()> {
         ensure!(
             Arc::ptr_eq(&stage.active, &self.staging),
@@ -634,21 +589,16 @@ impl Store {
         })
     }
 
-    pub(crate) fn read_index(&self, input_digest: &str, max_bytes: u64) -> Result<Option<File>> {
-        read_index(&self.dir, input_digest, max_bytes)
-    }
-
     /// The policy codec owns the single versioned format. Storage only bounds
     /// its stream and recognizes the fixed ownership prefix for GC.
     pub(crate) fn write_index(
         &mut self,
         input_digest: &str,
         max_bytes: u64,
-        now: u64,
         write: impl FnOnce(&mut dyn Write) -> Result<()>,
     ) -> Result<CommitOutcome> {
         ensure!(valid_hash(input_digest), "invalid index digest");
-        let mut stage = self.begin_reserved(max_bytes, MAX_INDEX, "index", now)?;
+        let mut stage = self.begin_reserved(max_bytes, MAX_INDEX, "index")?;
         // This callback is synchronous; no blocking task can outlive the lease.
         stage.completed = true;
         let mut bounded = LimitedWriter {
@@ -855,10 +805,6 @@ impl Store {
     }
 
     pub(crate) fn set_quota(&mut self, max_disk: u64) -> Result<()> {
-        ensure!(
-            (MAX_CATALOG..=2 * 1024 * 1024 * 1024).contains(&max_disk),
-            "invalid subscription disk budget"
-        );
         ensure!(
             self.disk_bytes()? <= max_disk,
             "subscription disk budget exceeded"

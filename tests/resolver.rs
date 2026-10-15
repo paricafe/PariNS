@@ -3,16 +3,15 @@ mod common;
 use std::time::Duration;
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Message, ResponseCode},
     rr::{Name, RData, Record, RecordType, rdata::A},
 };
 use parins::protocol;
 use tokio::net::UdpSocket;
 
 fn query(name: &str) -> Message {
-    let mut query = Message::new(42, MessageType::Query, OpCode::Query);
+    let mut query = common::query(42, name, RecordType::A);
     query.metadata.recursion_desired = true;
-    query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
     query
 }
 

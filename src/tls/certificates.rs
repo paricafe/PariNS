@@ -1,5 +1,14 @@
 //! One prepared identity generation shared by every inbound TLS transport.
 //! Call preparation on a blocking worker; resolution and publication do no IO.
+//!
+//! Manager/Active owns the atomic CertificateSet even when DNS is stopped. The API
+//! and managed SIGHUP reload current certificates under the existing mutation permit;
+//! file-mode SIGHUP also reloads policy. Preparation cannot mutate active material,
+//! and reload does not alter the config revision, DNS/cache ownership or sessions.
+//! Management HTTPS shares the DoH slot, not DNS TLS routing/ALPN.
+//!
+//! Shared inbound identity preparation accepts an absent leaf EKU, but an explicit
+//! EKU must permit serverAuth before persistence or certificate publication.
 
 use std::{
     collections::HashMap,

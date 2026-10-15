@@ -21,8 +21,6 @@ use serde::{Deserialize, Serialize};
 #[serde(try_from = "Rules")]
 pub struct Policy {
     data: Arc<Data>,
-    #[cfg(test)]
-    wire: Option<Arc<wire::Injection>>,
 }
 
 #[derive(Debug)]
@@ -49,8 +47,6 @@ struct Rules {
 #[serde(try_from = "Rules")]
 pub struct LocalRules {
     rules: Arc<Rules>,
-    #[cfg(test)]
-    injected: Option<Policy>,
 }
 impl Default for LocalRules {
     fn default() -> Self {
@@ -79,8 +75,6 @@ impl TryFrom<Rules> for LocalRules {
         }
         Ok(Self {
             rules: Arc::new(rules),
-            #[cfg(test)]
-            injected: None,
         })
     }
 }
@@ -90,10 +84,6 @@ impl LocalRules {
     }
     fn compile(&self, mut limits: Limits, mut check: impl FnMut() -> Result<()>) -> Result<Policy> {
         check()?;
-        #[cfg(test)]
-        if let Some(policy) = &self.injected {
-            return Ok(policy.clone());
-        }
         limits.retained_bytes = limits
             .retained_bytes
             .checked_add(self.owned_bytes())
@@ -127,18 +117,7 @@ impl LocalRules {
                 source_ids,
                 local: Some(self.clone()),
             }),
-            #[cfg(test)]
-            wire: None,
         })
-    }
-}
-#[cfg(test)]
-impl From<Policy> for LocalRules {
-    fn from(policy: Policy) -> Self {
-        Self {
-            injected: Some(policy),
-            ..Self::default()
-        }
     }
 }
 
@@ -267,10 +246,6 @@ impl TryFrom<Rules> for Policy {
 impl Policy {
     /// The effective-rule digest is calculated once during compilation.
     pub fn semantic_digest(&self) -> [u8; 32] {
-        #[cfg(test)]
-        if let Some(injection) = &self.wire {
-            return injection.digest;
-        }
         self.data.index.semantic_digest
     }
     pub(crate) fn from_index(index: radix::Index, source_ids: Vec<String>) -> Self {
@@ -282,8 +257,6 @@ impl Policy {
                 source_ids,
                 local: None,
             }),
-            #[cfg(test)]
-            wire: None,
         }
     }
     /// Stable effective decisions and their actual bounded witnesses, excluding
@@ -385,10 +358,6 @@ impl Policy {
     }
 
     pub fn blocks(&self, name: &Name) -> bool {
-        #[cfg(test)]
-        if let Some(injection) = &self.wire {
-            return injection.blocks(name);
-        }
         self.data
             .index
             .lookup(name)
@@ -402,7 +371,7 @@ impl Policy {
     /// Only follow answer CNAMEs reachable from the original question and class.
     /// A name's allow exception never skips checks on a different chain target.
     pub fn apply_response(&self, query: &Message, response: &mut Message) -> bool {
-        if self.index_rules() == 0 && !self.has_test_injection() {
+        if self.index_rules() == 0 {
             return false;
         }
         let Some(question) = query.queries.first() else {
@@ -432,28 +401,11 @@ impl Policy {
         }
         false
     }
-    fn has_test_injection(&self) -> bool {
-        #[cfg(test)]
-        {
-            self.wire.is_some()
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests;
 
-#[allow(dead_code)]
 pub(crate) mod canonical;
 
 pub(crate) mod radix;
-
-#[cfg(test)]
-mod compact;
-
-#[cfg(test)]
-mod wire;

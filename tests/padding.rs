@@ -1,11 +1,13 @@
+mod common;
+
 use hickory_proto::{
-    op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Edns, Message, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
         rdata::{A, opt::EdnsOption},
     },
 };
-use parins::{config::Config, ecs, ingress::Ingress, protocol, resolver::Resolver, tls::TlsFiles};
+use parins::{config::Config, ecs, ingress::Ingress, protocol, resolver::Resolver};
 use std::{
     sync::{
         Arc,
@@ -21,11 +23,7 @@ use tokio::{
 };
 
 fn query(id: u16, padded: bool) -> Message {
-    let mut query = Message::new(id, MessageType::Query, OpCode::Query);
-    query.add_query(Query::query(
-        Name::from_ascii("cache.fixture.test.").unwrap(),
-        RecordType::A,
-    ));
+    let mut query = common::query(id, "cache.fixture.test.", RecordType::A);
     let mut edns = Edns::new();
     edns.set_max_payload(1232);
     if padded {
@@ -274,14 +272,8 @@ async fn filtered_cname_miss_and_hit_both_receive_final_per_client_padding() {
 
 #[tokio::test]
 async fn encrypted_no_ecs_padded_answer_caches_by_actual_source_and_reencodes_per_client() {
-    let dir = tempfile::tempdir().unwrap();
-    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-    let files = TlsFiles {
-        cert_file: dir.path().join("cert.pem"),
-        key_file: dir.path().join("key.pem"),
-    };
-    std::fs::write(&files.cert_file, cert.cert.pem()).unwrap();
-    std::fs::write(&files.key_file, cert.signing_key.serialize_pem()).unwrap();
+    let identity = common::Identity::new(&["127.0.0.1"]);
+    let files = identity.files.clone();
     let acceptor =
         tokio_rustls::TlsAcceptor::from(parins::tls::server_config(&files, &[b"dot"]).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

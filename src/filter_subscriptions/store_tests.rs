@@ -3,14 +3,14 @@ use super::*;
 
 fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("subscriptions"), 8 * 1024 * 1024, 100).unwrap();
+    let store = Store::open(&dir.path().join("subscriptions"), 8 * 1024 * 1024).unwrap();
     (dir, store)
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn candidate(store: &mut Store, id: &str, text: &[u8], now: u64) -> (Staging, PreparedMetadata) {
-    let mut stage = store.begin_staging(text.len() as u64, now).unwrap();
+fn candidate(store: &mut Store, id: &str, text: &[u8]) -> (Staging, PreparedMetadata) {
+    let mut stage = store.begin_staging(text.len() as u64).unwrap();
     stage.file.write_all(text).unwrap();
     let sha256 = digest(text);
     let metadata = PreparedMetadata {
@@ -29,7 +29,7 @@ fn candidate(store: &mut Store, id: &str, text: &[u8], now: u64) -> (Staging, Pr
     (stage, metadata)
 }
 fn prepare(store: &mut Store, id: &str, text: &[u8], now: u64) -> String {
-    let (stage, metadata) = candidate(store, id, text, now);
+    let (stage, metadata) = candidate(store, id, text);
     let hash = metadata.sha256.clone();
     assert_eq!(
         store.prepare(stage, metadata, now).unwrap(),
@@ -44,10 +44,10 @@ fn empty_catalog_precedes_objects_and_reopen_uses_only_authority() {
     let path = store.dir.clone();
     assert!(path.join(CATALOG).is_file());
     assert!(store.catalog.records.is_empty());
-    assert!(Store::open(&path, store.quota, 100).is_err());
+    assert!(Store::open(&path, store.quota).is_err());
     prepare(&mut store, "one", b".example.com\n", 100);
     drop(store);
-    let reopened = Store::open(&path, 8 * 1024 * 1024, 101).unwrap();
+    let reopened = Store::open(&path, 8 * 1024 * 1024).unwrap();
     let (_, mut file) = reopened
         .read_prepared(&digest(b"one"), 101)
         .unwrap()
@@ -57,7 +57,7 @@ fn empty_catalog_precedes_objects_and_reopen_uses_only_authority() {
     assert_eq!(bytes, ".example.com\n");
     drop(reopened);
     fs::remove_file(path.join(CATALOG)).unwrap();
-    assert!(Store::open(&path, 8 * 1024 * 1024, 102).is_err());
+    assert!(Store::open(&path, 8 * 1024 * 1024).is_err());
     assert_eq!(fs::read_dir(path.join("objects")).unwrap().count(), 1);
     drop(dir);
 }
@@ -69,11 +69,11 @@ fn bad_authority_and_oversize_never_reset_or_scan_objects() {
     let path = store.dir.clone();
     drop(store);
     fs::write(path.join(CATALOG), b"{broken").unwrap();
-    assert!(Store::open(&path, 8 * 1024 * 1024, 100).is_err());
+    assert!(Store::open(&path, 8 * 1024 * 1024).is_err());
     assert_eq!(fs::read(path.join(CATALOG)).unwrap(), b"{broken");
     assert_eq!(fs::read_dir(path.join("objects")).unwrap().count(), 1);
     fs::write(path.join(CATALOG), vec![b' '; MAX_CATALOG as usize + 1]).unwrap();
-    assert!(Store::open(&path, 8 * 1024 * 1024, 100).is_err());
+    assert!(Store::open(&path, 8 * 1024 * 1024).is_err());
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn failed_validation_or_precommit_write_keeps_old_content_and_validators() {
     let (_dir, mut store) = store();
     let old = prepare(&mut store, "one", b"old.test\n", 100);
     for fault in ["write", "rename", "digest", "binding"] {
-        let (stage, mut metadata) = candidate(&mut store, "one", b"new.test\n", 101);
+        let (stage, mut metadata) = candidate(&mut store, "one", b"new.test\n");
         if fault == "digest" {
             metadata.sha256 = digest(b"wrong");
             metadata.validators.content_sha256 = metadata.sha256.clone();
@@ -103,7 +103,7 @@ fn failed_validation_or_precommit_write_keeps_old_content_and_validators() {
 fn postrename_sync_uncertainty_publishes_new_authority_and_holds_both_objects() {
     let (_dir, mut store) = store();
     let old = prepare(&mut store, "one", b"old.test\n", 100);
-    let (stage, metadata) = candidate(&mut store, "one", b"new.test\n", 101);
+    let (stage, metadata) = candidate(&mut store, "one", b"new.test\n");
     let new = metadata.sha256.clone();
     store.fault = Some("directory_sync");
     assert_eq!(
@@ -120,7 +120,7 @@ fn postrename_sync_uncertainty_publishes_new_authority_and_holds_both_objects() 
         new
     );
     assert!(store.object_path(&old).exists() && store.object_path(&new).exists());
-    assert!(store.begin_staging(10, 102).is_err());
+    assert!(store.begin_staging(10).is_err());
     assert!(store.collect(102, true).is_err());
     store.fault = None;
     store.reconcile_sync().unwrap();
@@ -142,7 +142,7 @@ fn current_previous_and_work_pins_survive_expiry_and_pressure() {
     catalog.current = vec![digest(b"current")];
     catalog.previous = vec![digest(b"previous")];
     store.commit_catalog(catalog).unwrap();
-    let stage = store.begin_staging(10, 101).unwrap();
+    let stage = store.begin_staging(10).unwrap();
     let metadata = PreparedMetadata {
         fingerprint: digest(b"current"),
         sha256: current.clone(),
@@ -170,7 +170,7 @@ fn download_admission_stops_on_pressure_catalog_directory_sync_uncertainty() {
     assert!(store.collect_for_download(101, true).is_err());
     assert!(store.catalog.records.is_empty());
     assert!(store.object_path(&hash).exists());
-    assert!(store.begin_staging(MAX_OBJECT, 101).is_err());
+    assert!(store.begin_staging(MAX_OBJECT).is_err());
     assert!(!*store.staging.lock().unwrap());
     store.fault = None;
     store.reconcile_sync().unwrap();
@@ -210,22 +210,22 @@ fn disk_budget_counts_unknown_and_catalog_overlap_and_cancelled_staging() {
     let (_dir, mut store) = store();
     let used = store.disk_bytes().unwrap();
     store.quota = used + MAX_CATALOG + 9;
-    assert!(store.begin_staging(10, 100).is_err());
+    assert!(store.begin_staging(10).is_err());
     store.quota += 1;
-    let mut stage = store.begin_staging(10, 100).unwrap();
+    let mut stage = store.begin_staging(10).unwrap();
     stage.file.write_all(b"partial").unwrap();
     let path = stage.path.clone();
     assert_eq!(store.disk_bytes().unwrap(), used + 7);
     drop(stage);
-    assert!(store.begin_staging(1, 100).is_err());
+    assert!(store.begin_staging(1).is_err());
     assert_eq!(fs::read(path).unwrap(), b"partial");
     let dir = store.dir.clone();
     drop(store);
-    let mut reopened = Store::open(&dir, 8 * 1024 * 1024, 100).unwrap();
+    let mut reopened = Store::open(&dir, 8 * 1024 * 1024).unwrap();
     assert_eq!(fs::read_dir(dir.join("staging")).unwrap().count(), 0);
     fs::write(dir.join("unrelated.bin"), vec![0; 100]).unwrap();
     assert_eq!(reopened.disk_bytes().unwrap(), used + 100);
-    let stage = reopened.begin_staging(1, 100).unwrap();
+    let stage = reopened.begin_staging(1).unwrap();
     reopened.discard(stage).unwrap();
     assert!(dir.join("unrelated.bin").exists());
 }
@@ -262,7 +262,7 @@ fn private_files_and_directory_links_are_rejected_without_external_mutation() {
     drop(store);
     let link = path.parent().unwrap().join("linked");
     symlink(&path, &link).unwrap();
-    assert!(Store::open(&link, 8 * 1024 * 1024, 100).is_err());
+    assert!(Store::open(&link, 8 * 1024 * 1024).is_err());
 }
 
 #[test]
@@ -319,7 +319,7 @@ fn all_prepared_slots_pinned_reject_extra_without_evicting_existing() {
         );
         pins.push(store.pin(&hash).unwrap());
     }
-    let (stage, metadata) = candidate(&mut store, "overflow", b"overflow.test\n", 101);
+    let (stage, metadata) = candidate(&mut store, "overflow", b"overflow.test\n");
     assert!(store.prepare(stage, metadata, 101).is_err());
     assert_eq!(store.catalog.records.len(), 16);
     for i in 0..16 {
@@ -346,7 +346,7 @@ fn selected_corrupt_object_can_be_repaired_but_unknown_hash_name_cannot() {
         .unwrap()
         .write_all(b"unowned")
         .unwrap();
-    let (stage, metadata) = candidate(&mut store, "other", b"other.test\n", 102);
+    let (stage, metadata) = candidate(&mut store, "other", b"other.test\n");
     assert!(store.prepare(stage, metadata, 102).is_err());
     assert_eq!(fs::read(unknown).unwrap(), b"unowned");
 }
@@ -357,13 +357,13 @@ fn maintenance_uncertainty_blocks_new_staging_until_reconciled() {
     let hash = prepare(&mut store, "one", b"one.test\n", 100);
     store.fault = Some("directory_sync");
     store.collect(100 + PREPARED_TTL, false).unwrap();
-    assert!(store.begin_staging(1, 100 + PREPARED_TTL).is_err());
+    assert!(store.begin_staging(1).is_err());
     assert!(store.uncertain);
     assert!(store.object_path(&hash).exists());
     assert_eq!(fs::read_dir(store.dir.join("staging")).unwrap().count(), 0);
     store.fault = None;
     store.reconcile_sync().unwrap();
-    let stage = store.begin_staging(1, 100 + PREPARED_TTL).unwrap();
+    let stage = store.begin_staging(1).unwrap();
     store.discard(stage).unwrap();
     assert!(!store.object_path(&hash).exists());
 }
@@ -374,30 +374,28 @@ fn staging_and_work_pins_hold_exclusive_directory_lease() {
     let path = store.dir.clone();
     let hash = prepare(&mut store, "one", b"one.test\n", 100);
     let pin = store.pin(&hash).unwrap();
-    let stage = store.begin_staging(1, 101).unwrap();
+    let stage = store.begin_staging(1).unwrap();
     let writer_lease = stage.lease.clone();
     drop(store);
-    assert!(Store::open(&path, 8 * 1024 * 1024, 101).is_err());
+    assert!(Store::open(&path, 8 * 1024 * 1024).is_err());
     drop(stage);
-    assert!(Store::open(&path, 8 * 1024 * 1024, 101).is_err());
+    assert!(Store::open(&path, 8 * 1024 * 1024).is_err());
     drop(pin);
-    assert!(Store::open(&path, 8 * 1024 * 1024, 101).is_err());
+    assert!(Store::open(&path, 8 * 1024 * 1024).is_err());
     drop(writer_lease);
-    assert!(Store::open(&path, 8 * 1024 * 1024, 101).is_ok());
+    assert!(Store::open(&path, 8 * 1024 * 1024).is_ok());
 }
 
 #[test]
 fn installed_candidates_are_unselected_and_pins_protect_batched_compile() {
     let (_dir, mut store) = store();
     let old = prepare(&mut store, "one", b"old.test\n", 100);
-    store
-        .set_references(vec![digest(b"one")], vec![], 100)
-        .unwrap();
+    store.set_references(vec![digest(b"one")], vec![]).unwrap();
     let revision = store.revision();
-    let (stage, metadata) = candidate(&mut store, "one", b"new.test\n", 101);
+    let (stage, metadata) = candidate(&mut store, "one", b"new.test\n");
     let new = store.install_object(stage, metadata, 101).unwrap();
     let pin = store.pin(&new.sha256).unwrap();
-    let (stage, metadata) = candidate(&mut store, "two", b"two.test\n", 101);
+    let (stage, metadata) = candidate(&mut store, "two", b"two.test\n");
     let second = store.install_object(stage, metadata, 101).unwrap();
     let second_pin = store.pin(&second.sha256).unwrap();
     assert_eq!(store.record(&digest(b"one")).unwrap().sha256, old);
@@ -407,12 +405,12 @@ fn installed_candidates_are_unselected_and_pins_protect_batched_compile() {
     assert!(store.object_path(&second.sha256).exists());
     assert!(
         store
-            .commit_records(vec![new.clone(), second.clone()], revision + 1, 102)
+            .commit_records(vec![new.clone(), second.clone()], revision + 1)
             .is_err()
     );
     assert_eq!(store.record(&digest(b"one")).unwrap().sha256, old);
     store
-        .commit_records(vec![new.clone(), second], revision, 102)
+        .commit_records(vec![new.clone(), second], revision)
         .unwrap();
     assert_eq!(store.revision(), revision + 1);
     assert_eq!(store.verified_content(&digest(b"one")).unwrap().0, new);
@@ -424,20 +422,18 @@ fn batch_commit_failures_have_exact_rename_semantics() {
     for fault in ["write", "rename", "directory_sync"] {
         let (_dir, mut store) = store();
         let old = prepare(&mut store, "one", b"old.test\n", 100);
-        store
-            .set_references(vec![digest(b"one")], vec![], 100)
-            .unwrap();
+        store.set_references(vec![digest(b"one")], vec![]).unwrap();
         let revision = store.revision();
-        let (stage, metadata) = candidate(&mut store, "one", b"new.test\n", 101);
+        let (stage, metadata) = candidate(&mut store, "one", b"new.test\n");
         let new = store.install_object(stage, metadata, 101).unwrap();
         let pin = store.pin(&new.sha256).unwrap();
         store.fault = Some(fault);
-        let result = store.commit_records(vec![new.clone()], revision, 101);
+        let result = store.commit_records(vec![new.clone()], revision);
         if fault == "directory_sync" {
             assert_eq!(result.unwrap(), CommitOutcome::CommittedUncertain);
             assert_eq!(store.record(&digest(b"one")).unwrap().sha256, new.sha256);
             assert_eq!(store.revision(), revision + 1);
-            assert!(store.set_references(vec![], vec![], 102).is_err());
+            assert!(store.set_references(vec![], vec![]).is_err());
         } else {
             assert!(result.is_err());
             assert_eq!(store.record(&digest(b"one")).unwrap().sha256, old);
@@ -455,20 +451,20 @@ fn metadata_and_reference_updates_do_not_advance_content_revision() {
     prepare(&mut store, "one", b"one.test\n", 100);
     let revision = store.revision();
     store
-        .set_references(vec![digest(b"one"), digest(b"disabled")], vec![], 101)
+        .set_references(vec![digest(b"one"), digest(b"disabled")], vec![])
         .unwrap();
     assert_eq!(store.revision(), revision);
     let mut record = store.record(&digest(b"one")).unwrap().clone();
     record.prepared_at = 102;
     record.validators.etag = Some("\"new-metadata\"".into());
     store
-        .commit_records(vec![record.clone()], revision, 102)
+        .commit_records(vec![record.clone()], revision)
         .unwrap();
     assert_eq!(store.revision(), revision);
     assert_eq!(store.record(&digest(b"one")).unwrap(), &record);
     let path = store.dir.clone();
     drop(store);
-    let reopened = Store::open(&path, 8 * 1024 * 1024, 102 + PREPARED_TTL).unwrap();
+    let reopened = Store::open(&path, 8 * 1024 * 1024).unwrap();
     assert_eq!(reopened.revision(), revision);
     assert_eq!(
         reopened.verified_content(&digest(b"one")).unwrap().0,
@@ -485,9 +481,9 @@ fn reopen_waits_for_authoritative_config_roots_before_expiring_preparations() {
     // without the follow-up catalog GC-root synchronization.
     drop(store);
     let now = 100 + PREPARED_TTL;
-    let mut reopened = Store::open(&path, 8 * 1024 * 1024, now).unwrap();
+    let mut reopened = Store::open(&path, 8 * 1024 * 1024).unwrap();
     reopened
-        .set_references(vec![digest(b"new-config-source")], vec![], now)
+        .set_references(vec![digest(b"new-config-source")], vec![])
         .unwrap();
     reopened.collect(now, true).unwrap();
     assert!(reopened.object_path(&hash).exists());
@@ -524,9 +520,7 @@ fn read_only_does_not_create_lock_or_change_authority_even_with_writer_present()
 fn active_corrupt_and_missing_objects_repair_without_changing_selected_revision() {
     let (_dir, mut store) = store();
     let hash = prepare(&mut store, "one", b"one.test\n", 100);
-    store
-        .set_references(vec![digest(b"one")], vec![], 100)
-        .unwrap();
+    store.set_references(vec![digest(b"one")], vec![]).unwrap();
     let revision = store.revision();
     for missing in [false, true] {
         if missing {
@@ -535,14 +529,14 @@ fn active_corrupt_and_missing_objects_repair_without_changing_selected_revision(
             fs::write(store.object_path(&hash), b"broken").unwrap();
         }
         assert!(store.verified_content(&digest(b"one")).is_err());
-        let (stage, metadata) = candidate(&mut store, "one", b"one.test\n", 101);
+        let (stage, metadata) = candidate(&mut store, "one", b"one.test\n");
         let repaired = store.install_object(stage, metadata, 101).unwrap();
         assert_eq!(store.revision(), revision);
         assert_eq!(
             store.verified_content(&digest(b"one")).unwrap().0.sha256,
             hash
         );
-        store.commit_records(vec![repaired], revision, 101).unwrap();
+        store.commit_records(vec![repaired], revision).unwrap();
         assert_eq!(store.revision(), revision);
     }
 }
@@ -588,7 +582,7 @@ fn derived_index_stream_is_bounded_atomic_and_repairable_without_catalog_mutatio
     let first = index_fixture(&input, b"codec-owned body");
     let before = fs::read(store.dir.join(CATALOG)).unwrap();
     store
-        .write_index(&input, first.len() as u64, 100, |out| {
+        .write_index(&input, first.len() as u64, |out| {
             out.write_all(&first)?;
             Ok(())
         })
@@ -598,7 +592,7 @@ fn derived_index_stream_is_bounded_atomic_and_repairable_without_catalog_mutatio
     let index_pin = store.pin_index(&input).unwrap();
     assert!(
         store
-            .write_index(&input, first.len() as u64 - 1, 101, |out| {
+            .write_index(&input, first.len() as u64 - 1, |out| {
                 out.write_all(&first)?;
                 Ok(())
             })
@@ -609,7 +603,7 @@ fn derived_index_stream_is_bounded_atomic_and_repairable_without_catalog_mutatio
     fs::write(&path, b"damaged derived index").unwrap();
     assert!(store.read_index(&input, 1024).is_err());
     store
-        .write_index(&input, first.len() as u64, 102, |out| {
+        .write_index(&input, first.len() as u64, |out| {
             out.write_all(&first)?;
             Ok(())
         })
@@ -632,7 +626,7 @@ fn derived_index_gc_and_disk_quota_respect_work_pins_and_unknown_files() {
     let input = digest(b"input");
     let bytes = index_fixture(&input, &[0; 100]);
     store
-        .write_index(&input, bytes.len() as u64, 100, |out| {
+        .write_index(&input, bytes.len() as u64, |out| {
             out.write_all(&bytes)?;
             Ok(())
         })
@@ -648,11 +642,11 @@ fn derived_index_gc_and_disk_quota_respect_work_pins_and_unknown_files() {
         .unwrap();
     let used = store.disk_bytes().unwrap();
     store.quota = used + MAX_CATALOG + 9;
-    assert!(store.begin_staging(10, 101).is_err());
+    assert!(store.begin_staging(10).is_err());
     assert!(store.read_index(&input, 1024).unwrap().is_some());
     assert_eq!(fs::read(&unknown_path).unwrap(), b"unowned");
     drop(pin);
-    let stage = store.begin_staging(10, 102).unwrap();
+    let stage = store.begin_staging(10).unwrap();
     store.discard(stage).unwrap();
     assert!(store.read_index(&input, 1024).unwrap().is_none());
     assert_eq!(fs::read(unknown_path).unwrap(), b"unowned");
@@ -665,7 +659,7 @@ fn tiny_derived_generations_are_collected_without_byte_pressure() {
         let input = digest(format!("input-{i}").as_bytes());
         let bytes = index_fixture(&input, b"small body");
         store
-            .write_index(&input, bytes.len() as u64, 100, |out| {
+            .write_index(&input, bytes.len() as u64, |out| {
                 out.write_all(&bytes)?;
                 Ok(())
             })
@@ -692,7 +686,7 @@ fn expired_pre_rename_check_preserves_catalog_selection_and_revision() {
     let old = prepare(&mut store, "one", b"old.test\n", 100);
     let revision = store.revision();
     let before = fs::read(store.dir.join(CATALOG)).unwrap();
-    let (stage, metadata) = candidate(&mut store, "one", b"new.test\n", 101);
+    let (stage, metadata) = candidate(&mut store, "one", b"new.test\n");
     let replacement = store.install_object(stage, metadata, 101).unwrap();
     let called = std::cell::Cell::new(false);
     let result = store.commit_batch_with_check(vec![replacement], &[], revision, || {

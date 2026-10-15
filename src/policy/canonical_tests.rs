@@ -34,28 +34,15 @@ fn source_and_aggregate_counts_preserve_pre_dedup_inputs() {
         )
         .unwrap();
     assert_eq!((second.input_rules, second.duplicates), (2, 0));
-    let before = builder.memory();
-    assert_eq!(before.retained_bytes, 7);
+    let live = builder.budget.live;
     assert_eq!(
-        before.live_bytes,
-        7 + before.arena_bytes + before.record_bytes
+        live,
+        7 + builder.arena.capacity() + builder.records.capacity() * size_of::<Record>()
     );
-    assert!(before.peak_bytes >= before.live_bytes);
+    assert!(builder.budget.peak >= live);
     let canonical = builder.prepare().unwrap();
-    assert_eq!(
-        (
-            canonical.input_rules,
-            canonical.duplicates,
-            canonical.covered_rules,
-            canonical.canonical_rules
-        ),
-        (6, 2, 3, 1)
-    );
-    assert_eq!(
-        canonical.decoded_bytes,
-        first.decoded_bytes + second.decoded_bytes
-    );
-    assert_eq!(canonical.memory(), before); // truncate does not release capacity
+    assert_eq!((canonical.input_rules, canonical.records.len()), (6, 1));
+    assert_eq!(canonical.budget.live, live); // truncate does not release capacity
     let mut one = Builder::new(Limits::default()).unwrap();
     one.parse_source(b".example.test\n".as_slice(), Format::DomainList, 9)
         .unwrap();
@@ -122,7 +109,7 @@ fn formats_are_explicit_and_hard_limits_fail_before_allocation() {
         .parse_source(b"a\n".as_slice(), Format::DomainList, 0)
         .unwrap_err();
     assert_eq!(failure.kind, ErrorKind::MemoryLimit);
-    assert_eq!(builder.memory().arena_bytes, 0);
+    assert_eq!(builder.arena.capacity(), 0);
     assert_eq!(builder.prepare().err(), Some(failure));
 }
 
@@ -235,70 +222,148 @@ fn decoded_source_and_aggregate_limits_are_measured_while_streaming() {
     );
 }
 
+// Parser and builder contracts below were previously exercised through the
+// deleted compact index; they now build the production radix index.
+fn parse_radix(text: &[u8], format: Format) -> Result<super::super::radix::Index, Error> {
+    let mut builder = Builder::new(Limits::default()).unwrap();
+    builder.parse_source(BufReader::with_capacity(3, Cursor::new(text)), format, 0)?;
+    builder.prepare()?.finish_radix()
+}
+
+fn lookup(index: &super::super::radix::Index, name: &str) -> bool {
+    index.lookup(&Name::from_ascii(name).unwrap()).is_some()
+}
+
 #[test]
-#[ignore = "requires external fixed corpus, never downloads or bundles third-party lists"]
-fn fixed_corpus_full_parse_and_legacy_rejection() {
-    let directory = std::path::PathBuf::from(std::env::var("PARINS_FS_CORPUS_DIR").unwrap());
-    for (filename, expected_sha, format) in [
-        (
-            "natsuki-list.list",
-            "d68e37b2a861e6e8ef85568db4237bb3e18d1a9f2476323b3dba977fe850af09",
-            Format::DomainList,
-        ),
-        (
-            "hosts.txt",
-            "0d8f9daf4bd0a3c8d600a8407982466902afea1112d1c73394ec4415ee6ac770",
-            Format::HostsBlocklist,
-        ),
+fn streaming_bom_comments_crlf_and_sinkhole_aliases() {
+    let index = parse_radix(
+        b"\xef\xbb\xbf! first\r\n# second\r\n\r\n.EXAMPLE.com. # comment\r\nexact.test\n",
+        Format::DomainList,
+    )
+    .unwrap();
+    assert_eq!(index.input_rules, 2);
+    assert!(lookup(&index, "a.example.com"));
+    assert!(!lookup(&index, "a.exact.test"));
+    let index = parse_radix(
+        b"0.0.0.0 a.test B.test. # aliases\r\n127.0.0.1 c.test\n:: d.test\n0:0:0:0:0:0:0:1 e.test",
+        Format::HostsBlocklist,
+    )
+    .unwrap();
+    assert_eq!(index.input_rules, 5);
+    for name in ["a.test", "b.test", "c.test", "d.test", "e.test"] {
+        assert!(lookup(&index, name), "{name}");
+    }
+    assert!(!lookup(&index, "x.a.test"));
+}
+
+#[test]
+fn rejects_entire_source_with_stable_line_and_no_remote_text() {
+    for text in [
+        "||example.com^",
+        "*.example.com",
+        "/example/",
+        "<html>",
+        "https://example.com",
+        "é.test",
+        "..example.com",
+        "a..com",
+        "a\\.b.com",
+        "a b",
+        "a#comment",
     ] {
-        let path = directory.join(filename);
-        let mut file = std::fs::File::open(&path).unwrap();
-        let mut hash = Sha256::new();
-        let mut bytes = [0u8; 4096];
-        loop {
-            let count = file.read(&mut bytes).unwrap();
-            if count == 0 {
-                break;
-            }
-            hash.update(&bytes[..count]);
-        }
-        assert_eq!(format!("{:x}", hash.finalize()), expected_sha);
-        let reader = BufReader::with_capacity(4096, std::fs::File::open(path).unwrap());
+        let mut builder = Builder::new(Limits::default()).unwrap();
+        let input = format!("safe.test\n{text}\n");
+        let failure = builder
+            .parse_source(input.as_bytes(), Format::DomainList, 0)
+            .unwrap_err();
+        assert_eq!(failure.line, 2, "{text}");
+        assert_eq!(builder.prepare().err(), Some(failure));
+    }
+    let kind = |text: &[u8], format| parse_radix(text, format).err().unwrap().kind;
+    assert_eq!(
+        kind(b"# comment\n! comment\n", Format::DomainList),
+        ErrorKind::EmptySource
+    );
+    assert_eq!(
+        kind(b"a.test\n\xff", Format::DomainList),
+        ErrorKind::InvalidUtf8
+    );
+    assert_eq!(
+        kind(b"192.0.2.1 a.test", Format::HostsBlocklist),
+        ErrorKind::HostsRewrite
+    );
+    assert_eq!(
+        kind(b"127.0.0.2 a.test", Format::HostsBlocklist),
+        ErrorKind::HostsRewrite
+    );
+    for input in [
+        b"||example.com^".as_slice(),
+        b"0.0.0.0 .example.com",
+        b"0.0.0.0",
+    ] {
+        assert!(parse_radix(input, Format::HostsBlocklist).is_err());
+    }
+    assert_eq!(
+        kind(&vec![b'a'; 4097], Format::DomainList),
+        ErrorKind::LineLimit
+    );
+}
+
+#[test]
+fn growth_rejects_transient_peak_before_allocating_new_record_buffer() {
+    let mut builder = Builder::new(Limits {
+        max_memory_bytes: 40,
+        ..Limits::default()
+    })
+    .unwrap();
+    builder.add("a", Group::BlockExact, 0).unwrap();
+    // Record growth needs the old 16 B and new 32 B simultaneously, in addition
+    // to 4 arena bytes, although the final two-entry data would fit.
+    let failure = builder.add("b", Group::BlockExact, 0).unwrap_err();
+    assert_eq!(failure.kind, ErrorKind::MemoryLimit);
+    assert_eq!(builder.records.capacity(), 1);
+    assert_eq!(builder.budget.peak, 22);
+    assert_eq!(builder.prepare().err(), Some(failure));
+}
+
+#[test]
+fn duplicate_and_alias_limits_are_before_deduplication() {
+    for (text, format) in [
+        ("a.test\na.test\na.test", Format::DomainList),
+        ("0.0.0.0 a.test a.test a.test", Format::HostsBlocklist),
+    ] {
         let mut builder = Builder::new(Limits {
-            retained_bytes: reader.capacity(),
+            max_rules: 2,
             ..Limits::default()
         })
         .unwrap();
-        if format == Format::DomainList {
-            let stats = builder.parse_source(reader, format, 1).unwrap();
-            assert_eq!(
-                (
-                    stats.lines,
-                    stats.input_rules,
-                    stats.duplicates,
-                    stats.decoded_bytes
-                ),
-                (201337, 201337, 0, 4392582)
-            );
-            let canonical = builder.prepare().unwrap();
-            assert_eq!(canonical.input_rules, 201337);
-            println!(
-                "canonical_rules={} duplicates={} covered={} memory={:?}",
-                canonical.canonical_rules,
-                canonical.duplicates,
-                canonical.covered_rules,
-                canonical.memory()
-            );
-        } else {
-            let error = builder.parse_source(reader, format, 1).unwrap_err();
-            assert_eq!(
-                error,
-                Error {
-                    line: 9,
-                    kind: ErrorKind::UnsupportedSyntax
-                }
-            );
-            assert_eq!(builder.prepare().err(), Some(error));
-        }
+        assert_eq!(
+            builder
+                .parse_source(text.as_bytes(), format, 0)
+                .unwrap_err()
+                .kind,
+            ErrorKind::RuleLimit
+        );
     }
+}
+
+#[test]
+fn digest_is_independent_of_source_order_witness_duplicates_and_pruned_rules() {
+    let mut a = Builder::new(Limits::default()).unwrap();
+    let mut b = Builder::new(Limits::default()).unwrap();
+    a.add("example.com", Group::BlockSuffix, 1).unwrap();
+    a.add("safe.example.com", Group::AllowExact, 0).unwrap();
+    b.add("SAFE.EXAMPLE.COM.", Group::AllowExact, 4).unwrap();
+    b.add("example.com.", Group::BlockSuffix, 2).unwrap();
+    b.add("a.example.com", Group::BlockSuffix, 1).unwrap();
+    b.add("a.example.com", Group::BlockExact, 0).unwrap();
+    b.add("example.com", Group::BlockSuffix, 6).unwrap();
+    let a = a.prepare().unwrap().finish_radix().unwrap();
+    let b = b.prepare().unwrap().finish_radix().unwrap();
+    assert_eq!(a.semantic_digest, b.semantic_digest);
+    let name = Name::from_ascii("example.com").unwrap();
+    assert_ne!(
+        a.lookup(&name).unwrap().source_slot,
+        b.lookup(&name).unwrap().source_slot
+    );
 }

@@ -1,8 +1,10 @@
+mod common;
+
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RecordType},
+    op::{Message, ResponseCode},
+    rr::RecordType,
 };
 use parins::{manage, protocol};
 use rustls::{
@@ -332,9 +334,8 @@ fn configuration() -> String {
 }
 
 fn query(name: &str) -> Message {
-    let mut message = Message::new(731, MessageType::Query, OpCode::Query);
+    let mut message = common::query(731, name, RecordType::A);
     message.metadata.recursion_desired = true;
-    message.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
     message
 }
 

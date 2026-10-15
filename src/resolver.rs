@@ -568,7 +568,8 @@ impl Exchange {
         let mut retried = false;
         let mut endpoint = None;
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let result = tokio::time::timeout_at(deadline, async {
+        // Each pool exchange enforces this deadline; Elapsed identifies a timeout.
+        let result = async {
             let exchange = self
                 .upstream
                 .exchange_observed(&self.outbound, deadline, &operation)
@@ -600,15 +601,11 @@ impl Exchange {
                 response = exchange.message;
             }
             Ok::<_, anyhow::Error>(response)
-        })
+        }
         .await;
         let failed = match &result {
-            Ok(Ok(response)) => response.response_code == ResponseCode::ServFail,
-            Err(_) => {
-                self.metrics.inc(Counter::UpstreamTimeouts);
-                true
-            }
-            Ok(Err(error)) => {
+            Ok(response) => response.response_code == ResponseCode::ServFail,
+            Err(error) => {
                 if error.is::<tokio::time::error::Elapsed>() {
                     self.metrics.inc(Counter::UpstreamTimeouts);
                 }
@@ -622,7 +619,8 @@ impl Exchange {
         // A valid DNS SERVFAIL is not a fabricated transport failure. Retain
         // actual operation failures even when a foreground caller serves stale.
         let failure =
-            (!matches!(&result, Ok(Ok(_))))
+            result
+                .is_err()
                 .then(|| {
                     upstream_trace
                         .as_ref()
@@ -635,7 +633,7 @@ impl Exchange {
                 })
                 .flatten();
         match result {
-            Ok(Ok(response)) => {
+            Ok(response) => {
                 let decision = self.context.response_scope(&response);
                 let store = (!retried).then(|| {
                     let store = decision.cache.map_or_else(
@@ -674,7 +672,7 @@ impl Exchange {
                     prefetch: refreshing,
                 }
             }
-            _ => Answer {
+            Err(_) => Answer {
                 response: Err(()),
                 admitted: false,
                 stale_eligible: failed && !retried,

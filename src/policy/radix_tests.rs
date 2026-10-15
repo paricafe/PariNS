@@ -3,16 +3,12 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 fn compare(rules: &[(String, Group, u16)], queries: &[Name]) {
-    let mut a = Builder::new(Limits::default()).unwrap();
     let mut b = Builder::new(Limits::default()).unwrap();
     for (name, group, slot) in rules {
-        a.add(name, *group, *slot).unwrap();
         b.add(name, *group, *slot).unwrap();
     }
-    let a = a.finish().unwrap();
     let input = b.prepare().unwrap();
-    let mut count = 0;
-    input.visit_rules(|_, _, _| count += 1);
+    let count = input.records.len();
     let b = input.finish_radix().unwrap();
     let slots = rules
         .iter()
@@ -24,20 +20,12 @@ fn compare(rules: &[(String, Group, u16)], queries: &[Name]) {
     let mut encoded = Vec::new();
     b.write_to(&mut encoded, [9; 32], &ids).unwrap();
     let restored = Index::read_from(encoded.as_slice(), [9; 32], &ids, Limits::default()).unwrap();
-    assert_eq!(a.semantic_digest, b.semantic_digest);
-    assert_eq!(a.input_rules, b.input_rules);
     assert_eq!(count, b.index_rules);
     assert!(b.index_bytes() >= b.node_count() * 20);
     assert!(b.peak_bytes >= b.index_bytes());
     for name in queries {
-        let expected = a
-            .lookup(name)
-            .map(|m| (m.group, m.entry.source_slot, m.entry.len));
-        let actual = b
-            .lookup(name)
-            .map(|m| (m.group, m.source_slot, m.matched_key_len));
+        let actual = b.lookup(name).map(|m| m.group);
         assert_eq!(restored.lookup(name), b.lookup(name), "disk {name}");
-        assert_eq!(expected, actual, "{name}");
         let query: Vec<_> = name
             .iter()
             .map(|label| label.to_ascii_lowercase())
@@ -64,7 +52,7 @@ fn compare(rules: &[(String, Group, u16)], queries: &[Name]) {
             }
         }
         assert_eq!(
-            actual.map(|m| m.0 as usize >= 2),
+            actual.map(|group| group as usize >= 2),
             if allowed {
                 Some(false)
             } else if blocked {

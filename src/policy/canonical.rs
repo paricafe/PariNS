@@ -88,28 +88,9 @@ pub(super) struct Budget {
     pub(super) live: usize,
     pub(super) peak: usize,
     pub(super) limit: usize,
-    retained: usize,
 }
 
-/// Owned buffer capacities plus the caller's live objects, not process RSS.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoryStats {
-    pub retained_bytes: usize,
-    pub arena_bytes: usize,
-    pub record_bytes: usize,
-    pub live_bytes: usize,
-    pub peak_bytes: usize,
-}
 impl Budget {
-    fn stats(&self, arena: &Vec<u8>, records: &Vec<Record>) -> MemoryStats {
-        MemoryStats {
-            retained_bytes: self.retained,
-            arena_bytes: arena.capacity(),
-            record_bytes: records.capacity() * size_of::<Record>(),
-            live_bytes: self.live,
-            peak_bytes: self.peak,
-        }
-    }
     pub(super) fn reserve(&mut self, bytes: usize) -> Result<(), Error> {
         let next = self
             .live
@@ -277,7 +258,6 @@ impl Builder {
             live: 0,
             peak: 0,
             limit: limits.max_memory_bytes,
-            retained: limits.retained_bytes,
         };
         budget.reserve(limits.retained_bytes)?;
         Ok(Self {
@@ -288,9 +268,6 @@ impl Builder {
             decoded_bytes: 0,
             failed: None,
         })
-    }
-    pub fn memory(&self) -> MemoryStats {
-        self.budget.stats(&self.arena, &self.records)
     }
     /// Slots are assigned by the caller: local first, then stable source-ID order.
     pub fn add(&mut self, domain: &str, group: Group, source_slot: u16) -> Result<(), Error> {
@@ -333,6 +310,7 @@ impl Builder {
         });
         Ok(())
     }
+    #[cfg(test)]
     pub fn prepare(self) -> Result<Canonical, Error> {
         self.prepare_with_check(|| Ok(()))
     }
@@ -355,7 +333,6 @@ impl Builder {
         // Sorting is non-preemptible; its owner retains the memory lease until
         // this worker really exits, including when its caller is cancelled.
         check()?;
-        let duplicates = duplicate_count(&self.records, arena);
         let mut ranges = [0..0, 0..0, 0..0, 0..0];
         let mut read = 0;
         let mut write = 0;
@@ -410,10 +387,6 @@ impl Builder {
             budget: self.budget,
             semantic_digest: hash.finalize().into(),
             input_rules,
-            canonical_rules: write,
-            duplicates,
-            covered_rules: input_rules - duplicates - write,
-            decoded_bytes: self.decoded_bytes,
         })
     }
 
@@ -600,14 +573,9 @@ pub struct Canonical {
     pub(super) budget: Budget,
     pub semantic_digest: [u8; 32],
     pub input_rules: usize,
-    pub canonical_rules: usize,
-    /// Identical rules across all sources, before coverage pruning.
-    pub duplicates: usize,
-    /// Non-duplicate rules removed by a same-action parent suffix.
-    pub covered_rules: usize,
-    pub decoded_bytes: usize,
 }
 impl Canonical {
+    #[cfg(test)]
     pub fn finish_radix(self) -> Result<super::radix::Index, Error> {
         super::radix::Index::build(self)
     }
@@ -616,18 +584,6 @@ impl Canonical {
         check: impl FnMut() -> Result<(), Error>,
     ) -> Result<super::radix::Index, Error> {
         super::radix::Index::build_with_check(self, check)
-    }
-    pub fn memory(&self) -> MemoryStats {
-        self.budget.stats(&self.arena, &self.records)
-    }
-    pub fn visit_rules(&self, mut visit: impl FnMut(&[u8], Group, u16)) {
-        for record in &self.records {
-            visit(
-                key(&self.arena, record.entry),
-                record.group,
-                record.entry.source_slot,
-            );
-        }
     }
 }
 

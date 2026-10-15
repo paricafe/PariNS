@@ -2,14 +2,15 @@ mod common;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use common::Identity;
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RecordType},
+    op::{Message, OpCode, ResponseCode},
+    rr::RecordType,
 };
 use parins::{
     ingress::Ingress,
     protocol,
-    tls::{self, ClientSettings, TlsFiles, Upstream},
+    tls::{self, ClientSettings, TlsFiles},
 };
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use tokio::{
@@ -19,7 +20,7 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsConnector;
 
 // Independent framing in the client fixture; transport helpers remain private.
 mod tcp {
@@ -42,137 +43,24 @@ mod tcp {
 }
 
 fn query() -> Message {
-    let mut query = Message::new(99, MessageType::Query, OpCode::Query);
-    query.add_query(Query::query(
-        Name::from_ascii("example.test.").unwrap(),
-        RecordType::A,
-    ));
-    query
+    common::query(99, "example.test.", RecordType::A)
 }
 
-struct Certificate {
-    _directory: tempfile::TempDir,
-    files: TlsFiles,
-    der: rustls::pki_types::CertificateDer<'static>,
-}
-
-impl Certificate {
-    fn new() -> Self {
-        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let files = TlsFiles {
-            cert_file: directory.path().join("cert.pem"),
-            key_file: directory.path().join("key.pem"),
-        };
-        std::fs::write(&files.cert_file, generated.cert.pem()).unwrap();
-        std::fs::write(&files.key_file, generated.signing_key.serialize_pem()).unwrap();
-        Self {
-            _directory: directory,
-            files,
-            der: generated.cert.der().clone(),
-        }
-    }
-
-    fn settings(&self) -> ClientSettings {
-        ClientSettings {
-            server_name: "localhost".into(),
-            ca_file: Some(self.files.cert_file.clone()),
-        }
-    }
-
-    fn connector(&self) -> TlsConnector {
-        let mut roots = RootCertStore::empty();
-        roots.add(self.der.clone()).unwrap();
-        let mut config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        config.alpn_protocols = vec![b"dot".to_vec()];
-        TlsConnector::from(Arc::new(config))
-    }
-}
-
-async fn upstream_mock(
-    cert: &Certificate,
-    invalid_id: bool,
-    alpn: &[&[u8]],
-) -> (SocketAddr, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let acceptor = TlsAcceptor::from(tls::server_config(&cert.files, alpn).unwrap());
-    let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        // Certificate rejection is an expected outcome in authentication tests.
-        let Ok(mut stream) = acceptor.accept(stream).await else {
-            return;
-        };
-        let Ok(bytes) = tcp::read_frame(&mut stream).await else {
-            return;
-        };
-        let query = protocol::decode(&bytes).unwrap();
-        let mut response = protocol::error_response(&query, ResponseCode::NoError);
-        if invalid_id {
-            response.metadata.id = query.id.wrapping_add(1);
-        }
-        tcp::write_frame(&mut stream, &response.to_vec().unwrap())
-            .await
-            .unwrap();
-        stream.flush().await.unwrap();
-    });
-    (address, task)
-}
-
-#[tokio::test]
-async fn authenticated_dot_upstream_restores_id_and_accepts_legacy_no_alpn() {
-    let cert = Certificate::new();
-    for alpn in [&[&b"dot"[..]][..], &[][..]] {
-        let (address, task) = upstream_mock(&cert, false, alpn).await;
-        let response = timeout(
-            Duration::from_secs(2),
-            Upstream::new(&cert.settings())
-                .unwrap()
-                .exchange(&query(), address),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(response.id, query().id);
-        assert_eq!(response.queries, query().queries);
-        task.await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn dot_upstream_rejects_wrong_identity_unknown_ca_and_unrelated_dns() {
-    let cert = Certificate::new();
-    for mode in 0..3 {
-        let mut settings = cert.settings();
-        if mode == 0 {
-            settings.server_name = "different.test".into();
-        }
-        if mode == 1 {
-            settings.ca_file = None;
-        }
-        let (address, task) = upstream_mock(&cert, mode == 2, &[b"dot"]).await;
-        assert!(
-            timeout(
-                Duration::from_secs(2),
-                Upstream::new(&settings)
-                    .unwrap()
-                    .exchange(&query(), address)
-            )
-            .await
+fn connector(cert: &Identity) -> TlsConnector {
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der.clone()).unwrap();
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
             .unwrap()
-            .is_err()
-        );
-        task.await.unwrap();
-    }
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    config.alpn_protocols = vec![b"dot".to_vec()];
+    TlsConnector::from(Arc::new(config))
 }
 
 async fn listener(
-    cert: &Certificate,
+    cert: &Identity,
     slots: usize,
 ) -> (
     SocketAddr,
@@ -207,11 +95,10 @@ async fn listener(
 
 #[tokio::test]
 async fn dot_listener_reuses_connection_rejects_short_frame_and_shuts_down() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let (address, stop, task, connections) = listener(&cert, 2).await;
     let stream = TcpStream::connect(address).await.unwrap();
-    let mut client = cert
-        .connector()
+    let mut client = connector(&cert)
         .connect(ServerName::try_from("localhost").unwrap(), stream)
         .await
         .unwrap();
@@ -253,7 +140,7 @@ async fn dot_listener_reuses_connection_rejects_short_frame_and_shuts_down() {
 
 #[tokio::test]
 async fn unfinished_handshakes_hold_connection_budget_and_shutdown_is_bounded() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let (address, stop, task, connections) = listener(&cert, 1).await;
     let _idle = TcpStream::connect(address).await.unwrap();
     timeout(Duration::from_secs(1), async {

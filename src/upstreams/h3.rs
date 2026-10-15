@@ -1,5 +1,18 @@
 //! Optional HTTP/3 preference for an authenticated HTTPS endpoint.
 //! One multiplexed connection and one bounded cooldown per configured endpoint.
+//!
+//! H3 preference applies only to HTTPS endpoints and stays within the resolver
+//! deadline. The H3 budget covers only obtaining a usable connection and sending the
+//! request; a sent request waits for its answer until the resolver deadline, without
+//! cooldown or an H2 resend. Connect, transport and protocol faults fall back to the
+//! verified H2 path and start the cooldown. A definite 4xx (not 408/414/421/425/429/431)
+//! stops H3 for that endpoint until the pool generation is replaced. H2 and H3 share
+//! one RFC 8484 GET builder. Cancelling a request releases its stream without breaking
+//! other requests on the connection.
+//!
+//! Because a sent H3 request has no separate budget, its connection uses a 1-second
+//! QUIC keep-alive with a 3-second idle timeout, and its driver closes it after 10
+//! seconds without requests.
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -13,8 +26,7 @@ use tokio::time::{Instant, timeout};
 
 use super::Endpoint;
 use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, Reason, Stage};
-use super::transport::{InFlight, Usage};
-use crate::protocol;
+use super::transport::{InFlight, Usage, doh_answer, doh_chunk, doh_head};
 
 type Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 type Stream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
@@ -262,54 +274,16 @@ impl Client {
     ) -> Result<Message> {
         attempt.stage(Stage::ResponseHeaders);
         let response = stream.0.recv_response().await?;
-        if response.status() != http::StatusCode::OK {
-            attempt.http_status(response.status().as_u16());
-            if definite_refusal(response.status()) {
-                self.state.lock().unwrap_or_else(|e| e.into_inner()).refused =
-                    Some(response.status().as_u16());
-            }
+        if definite_refusal(response.status()) {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).refused =
+                Some(response.status().as_u16());
         }
-        ensure!(
-            response.status() == http::StatusCode::OK,
-            "DoH HTTP status {}",
-            response.status()
-        );
-        attempt.stage(Stage::Validate);
-        ensure!(
-            response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .eq_ignore_ascii_case("application/dns-message")),
-            "invalid DoH content type"
-        );
-        let age = super::transport::http_age(response.headers());
+        let age = doh_head(response.status(), response.headers(), attempt)?;
         let mut bytes = Vec::new();
-        attempt.stage(Stage::ResponseRead);
         while let Some(mut chunk) = stream.0.recv_data().await? {
-            if bytes.len() + chunk.remaining() > protocol::MAX_MESSAGE {
-                attempt.reason(Reason::ProtocolInvalid);
-            }
-            ensure!(
-                bytes.len() + chunk.remaining() <= protocol::MAX_MESSAGE,
-                "DoH response too large"
-            );
-            bytes.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+            doh_chunk(&mut bytes, &chunk.copy_to_bytes(chunk.remaining()), attempt)?;
         }
-        attempt.stage(Stage::Decode);
-        let mut response = protocol::decode(&bytes)?;
-        attempt.stage(Stage::Validate);
-        ensure!(
-            protocol::matches_response(outbound, &response) && !response.truncation,
-            "invalid DoH response"
-        );
-        super::transport::apply_http_age(&mut response, age);
-        response.metadata.id = query.id;
+        let response = doh_answer(&bytes, outbound, query, age, attempt)?;
         stream.1 = true;
         Ok(response)
     }

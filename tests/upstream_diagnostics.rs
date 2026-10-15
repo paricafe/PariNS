@@ -1,6 +1,8 @@
+mod common;
+
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RecordType},
+    op::{Message, MessageType, ResponseCode},
+    rr::RecordType,
 };
 use parins::{
     config::Config,
@@ -23,12 +25,7 @@ use tokio::{
 };
 
 fn query() -> Message {
-    let mut message = Message::new(321, MessageType::Query, OpCode::Query);
-    message.add_query(Query::query(
-        Name::from_ascii("diagnostics.test.").unwrap(),
-        RecordType::A,
-    ));
-    message
+    common::query(321, "diagnostics.test.", RecordType::A)
 }
 fn pool(servers: Vec<String>, mode: Mode, bootstrap: Vec<std::net::SocketAddr>) -> Pool {
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();

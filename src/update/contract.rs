@@ -9,8 +9,8 @@ pub const REPOSITORY: &str = "paricafe/PariNS";
 pub const UPDATE_PROTOCOL: u32 = 1;
 pub const HELPER_PROTOCOL: u32 = 2;
 pub const INSTALL_CONTRACT: &str = "linux-managed-updater-v1";
-// This is the complete bidirectional state/TOML/database/payload contract, not
-// merely a database schema version. Pre-updater 0.1.4 has no epoch or helper.
+// The complete bidirectional state/TOML/database/payload contract, not merely
+// a database schema version.
 pub const DURABLE_CONTRACT_EPOCH: u32 = 1;
 pub const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 pub const SUPPORTED_TARGETS: [&str; 2] =

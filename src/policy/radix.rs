@@ -1,5 +1,4 @@
 //! Immutable, bounded compressed byte-radix filtering index.
-//! Development integration does not imply performance release acceptance.
 use super::canonical::{Canonical, Error, Group, Key, grow, key};
 use hickory_proto::rr::Name;
 use std::mem::size_of;
@@ -72,6 +71,7 @@ pub struct Match {
 }
 
 impl Index {
+    #[cfg(test)]
     pub(super) fn build(input: Canonical) -> Result<Self, Error> {
         Self::build_with_check(input, || Ok(()))
     }

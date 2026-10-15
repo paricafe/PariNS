@@ -160,7 +160,7 @@ impl Service {
             let mut locked = self.store.lock().unwrap();
             if locked.is_none() {
                 let quota = self.state.lock().unwrap().settings.max_disk_bytes;
-                *locked = Some(Store::open(&self.path, quota, now())?);
+                *locked = Some(Store::open(&self.path, quota)?);
             }
             let store = locked
                 .as_mut()
@@ -367,7 +367,7 @@ impl Service {
                 .ok()
                 .map(|(r, _)| r);
             let stage = store
-                .begin_staging(MAX_BYTES, now())
+                .begin_staging(MAX_BYTES)
                 .map_err(|_| Failure::new("subscription_disk_limit"))?;
             Ok(Ok((stage, old)))
         })

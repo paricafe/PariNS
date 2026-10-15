@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     net::SocketAddr,
     sync::{
@@ -43,19 +45,8 @@ struct Fixture {
 
 #[tokio::test]
 async fn already_stopped_listener_releases_port_before_returning() {
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
-    let tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![certified.cert.der().clone()], key.into())
-        .unwrap();
-    let endpoint = quic::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        Arc::new(tls),
-        2,
-        Protocol::Doq,
-    )
-    .unwrap();
+    let tls = common::Identity::new(&["localhost"]).server_config(&[]);
+    let endpoint = quic::bind("127.0.0.1:0".parse().unwrap(), tls, 2, Protocol::Doq).unwrap();
     let address = endpoint.local_addr().unwrap();
     let config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     let (_stop, receiver) = watch::channel(true);
@@ -89,20 +80,13 @@ impl Fixture {
         settings: parins::limits::Settings,
         connection_capacity: usize,
     ) -> Self {
-        let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert = certified.cert.der().clone();
-        let key =
-            rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
-        let mut tls = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.clone()], key.into())
-            .unwrap();
-        tls.alpn_protocols = vec![match protocol {
-            Protocol::Doq => b"doq".to_vec(),
-            Protocol::H3 => b"h3".to_vec(),
-        }];
-        let endpoint =
-            quic::bind("127.0.0.1:0".parse().unwrap(), Arc::new(tls), 2, protocol).unwrap();
+        let identity = common::Identity::new(&["localhost"]);
+        let cert = identity.der.clone();
+        let tls = identity.server_config(&[match protocol {
+            Protocol::Doq => b"doq",
+            Protocol::H3 => b"h3",
+        }]);
+        let endpoint = quic::bind("127.0.0.1:0".parse().unwrap(), tls, 2, protocol).unwrap();
         let address = endpoint.local_addr().unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert).unwrap();

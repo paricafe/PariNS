@@ -22,7 +22,7 @@ fn source(id: &str) -> SourceSettings {
     }
 }
 fn install(store: &mut Store, settings: &SourceSettings, text: &[u8]) {
-    let mut stage = store.begin_staging(text.len() as u64, now()).unwrap();
+    let mut stage = store.begin_staging(text.len() as u64).unwrap();
     stage.file.write_all(text).unwrap();
     let sha256 = format!("{:x}", Sha256::digest(text));
     store
@@ -48,7 +48,7 @@ fn install(store: &mut Store, settings: &SourceSettings, text: &[u8]) {
 async fn fixture(sources: Vec<SourceSettings>) -> (tempfile::TempDir, Arc<Service>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sources");
-    let mut store = Store::open(&path, 256 * 1024 * 1024, now()).unwrap();
+    let mut store = Store::open(&path, 256 * 1024 * 1024).unwrap();
     for source in &sources {
         install(
             &mut store,

@@ -207,7 +207,6 @@ impl Service {
         previous: Vec<String>,
         frozen: bool,
     ) -> Result<Arc<Self>> {
-        settings.validate()?;
         let current = settings.fingerprints()?;
         let quota = settings.max_disk_bytes;
         let previous_open = previous.clone();
@@ -216,8 +215,8 @@ impl Service {
             if frozen {
                 return Ok(None);
             }
-            let mut store = Store::open(&store_path, quota, now())?;
-            store.set_references(current, previous_open, now())?;
+            let mut store = Store::open(&store_path, quota)?;
+            store.set_references(current, previous_open)?;
             Ok::<_, anyhow::Error>(Some(store))
         })
         .await?;
@@ -410,7 +409,6 @@ impl Service {
         local: Policy,
         expected_revision: u64,
     ) -> Result<ConfigCandidate> {
-        settings.validate()?;
         let lease = self.acquire()?;
         self.check_revision(expected_revision)?;
         self.prepare_config_owned(settings, local, expected_revision, lease)
@@ -425,7 +423,6 @@ impl Service {
         source: crate::policy::LocalPolicySource,
         expected_revision: u64,
     ) -> Result<ConfigCandidate> {
-        settings.validate()?;
         let lease = self.acquire()?;
         self.check_revision(expected_revision)?;
         let owner = self.clone();
@@ -640,7 +637,7 @@ impl Service {
             )
         };
         store.reconcile_sync()?;
-        store.set_references(current, previous, now())?;
+        store.set_references(current, previous)?;
         store.set_quota(quota)?;
         // Failed pre-publication work and schedule-only config changes update
         // cached status immediately, but persist only inside the next gate.

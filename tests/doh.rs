@@ -9,7 +9,7 @@ use hickory_proto::{
     rr::{Name, RecordType},
 };
 use parins::{config::Config, doh, ecs, ingress::Ingress, protocol, resolver::Resolver};
-use rustls::{ClientConfig, RootCertStore, ServerConfig, pki_types::PrivatePkcs8KeyDer};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{Semaphore, watch},
@@ -72,27 +72,17 @@ fn shared_http_contract_rejects_ambiguous_or_oversized_requests() {
 }
 
 fn certificates() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut server = ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![certified.cert.der().clone()],
-            PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()).into(),
-        )
-        .unwrap();
-    server.alpn_protocols = vec![b"h2".to_vec()];
+    let identity = common::Identity::new(&["localhost"]);
     let mut roots = RootCertStore::empty();
-    roots.add(certified.cert.der().clone()).unwrap();
-    let mut client = ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    roots.add(identity.der.clone()).unwrap();
+    let mut client =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     client.alpn_protocols = vec![b"h2".to_vec()];
-    (Arc::new(server), Arc::new(client))
+    (identity.server_config(&[b"h2"]), Arc::new(client))
 }
 
 #[tokio::test]

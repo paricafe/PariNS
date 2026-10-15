@@ -1,5 +1,4 @@
 //! Validated equivalent upstream pool. The resolver owns the total deadline.
-//! No system DNS, detached races, plaintext fallback, or implicit trust bypass.
 use std::{
     net::{IpAddr, SocketAddr},
     path::PathBuf,
@@ -56,7 +55,9 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn validate(&self) -> Result<()> {
+    /// `config` is the configuration that owns these settings; numeric
+    /// endpoints and bootstrap addresses must not target its own listeners.
+    pub fn validate(&self, config: &crate::config::Config) -> Result<()> {
         self.dot_pool.validate()?;
         ensure!(
             (1..=32).contains(&self.servers.len()),
@@ -80,6 +81,7 @@ impl Settings {
         );
         for address in &self.bootstrap {
             valid_address(*address)?;
+            not_self(*address, &[config.listen])?;
         }
         let mut endpoints = std::collections::HashSet::new();
         for line in &self.servers {
@@ -97,32 +99,18 @@ impl Settings {
                 spec.host.parse::<IpAddr>().is_ok() || !self.bootstrap.is_empty(),
                 "hostname upstreams require explicit bootstrap IP:port addresses"
             );
-        }
-        Ok(())
-    }
-
-    pub fn validate_listeners(&self, config: &crate::config::Config) -> Result<()> {
-        for line in &self.servers {
-            let spec = Endpoint::parse(line)?;
             if let Ok(ip) = spec.host.parse::<IpAddr>() {
                 not_self(
                     SocketAddr::new(ip, spec.port),
-                    &listeners(config, spec.protocol, self.prefer_h3),
+                    &listeners(config, spec.protocol),
                 )?;
             }
-        }
-        for address in &self.bootstrap {
-            not_self(*address, &[config.listen])?;
         }
         Ok(())
     }
 }
 
-fn listeners(
-    config: &crate::config::Config,
-    protocol: Protocol,
-    _prefer_h3: bool,
-) -> Vec<SocketAddr> {
+fn listeners(config: &crate::config::Config, protocol: Protocol) -> Vec<SocketAddr> {
     match protocol {
         Protocol::Udp | Protocol::Tcp => vec![config.listen],
         Protocol::Tls => config.dot.as_ref().map(|v| v.listen).into_iter().collect(),
@@ -274,18 +262,17 @@ pub struct Pool {
 impl Pool {
     /// `config` has passed `Config::validate`, which owns upstream and listener checks.
     pub fn new(settings: &Settings, config: &crate::config::Config) -> Result<Self> {
+        // A configured CA must load even when only plaintext endpoints use it.
+        if let Some(path) = &settings.ca_file {
+            crate::tls::client_config(Some(path), b"dot")?;
+        }
         let endpoints = settings
             .servers
             .iter()
             .map(|line| {
                 let spec = Endpoint::parse(line)?;
-                let bound = listeners(config, spec.protocol, settings.prefer_h3);
-                transport::Client::new(
-                    spec,
-                    settings,
-                    bound,
-                    std::time::Duration::from_millis(config.query_timeout_ms),
-                )
+                let bound = listeners(config, spec.protocol);
+                transport::Client::new(spec, settings, bound)
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
@@ -435,12 +422,17 @@ mod tests {
         ] {
             assert!(Endpoint::parse(line).is_err(), "{line}");
         }
-        let mut settings = Settings {
+        let mut config =
+            crate::config::Config::parse(include_str!("../parins.example.toml")).unwrap();
+        config.upstreams = Settings {
             servers: vec!["https://dns.example/dns-query".into()],
             ..Settings::default()
         };
-        assert!(settings.validate().is_err());
-        settings.bootstrap.push("1.1.1.1:53".parse().unwrap());
-        settings.validate().unwrap();
+        assert!(config.upstreams.validate(&config).is_err());
+        config
+            .upstreams
+            .bootstrap
+            .push("1.1.1.1:53".parse().unwrap());
+        config.upstreams.validate(&config).unwrap();
     }
 }

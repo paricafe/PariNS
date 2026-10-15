@@ -1,5 +1,9 @@
 //! Authentication attempts are charged to socket peers, independently of the
 //! global CPU budget for password hashing. No forwarding headers are identities.
+//!
+//! Source state is bounded and reclaimed separately from the global hash
+//! concurrency. Blocking hash work owns its permit until it finishes, even after
+//! the caller is cancelled.
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,

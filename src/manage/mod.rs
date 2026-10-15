@@ -1347,20 +1347,25 @@ pub async fn serve(
     result
 }
 
+const UPDATE_CONFLICTS: [&str; 10] = [
+    "plan_conflict",
+    "plan_expired",
+    "config_changed",
+    "update_in_progress",
+    "readiness_failed",
+    "unsupported_installation",
+    "helper_unavailable",
+    "manual_recovery_required",
+    "installation_pending",
+    "manual_upgrade_required",
+];
+
 fn update_apply_error(err: anyhow::Error) -> ApiError {
-    let code = match err.to_string().as_str() {
-        "plan_conflict" => "plan_conflict",
-        "plan_expired" => "plan_expired",
-        "config_changed" => "config_changed",
-        "update_in_progress" => "update_in_progress",
-        "readiness_failed" => "readiness_failed",
-        "unsupported_installation" => "unsupported_installation",
-        "helper_unavailable" => "helper_unavailable",
-        "manual_recovery_required" => "manual_recovery_required",
-        "installation_pending" => "installation_pending",
-        "manual_upgrade_required" => "manual_upgrade_required",
-        _ => "update_state_unavailable",
-    };
+    let message = err.to_string();
+    let code = UPDATE_CONFLICTS
+        .into_iter()
+        .find(|code| *code == message)
+        .unwrap_or("update_state_unavailable");
     // A renamed acceptance followed by fsync failure has an unknown outcome.
     // 5xx keeps the UI reconciling with GET instead of claiming rejection.
     error(

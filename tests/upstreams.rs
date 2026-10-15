@@ -1,3 +1,5 @@
+mod common;
+
 use hickory_proto::{
     op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
     rr::{
@@ -28,13 +30,9 @@ fn config(servers: Vec<String>, mode: Mode) -> Config {
 }
 
 fn query() -> Message {
-    let mut query = Message::new(123, MessageType::Query, OpCode::Query);
+    let mut query = common::query(123, "FoRwArD.TeSt.", RecordType::AAAA);
     query.metadata.recursion_desired = true;
     query.metadata.checking_disabled = true;
-    query.add_query(Query::query(
-        Name::from_ascii("FoRwArD.TeSt.").unwrap(),
-        RecordType::AAAA,
-    ));
     let mut edns = Edns::new();
     edns.set_dnssec_ok(true).set_max_payload(1400);
     edns.options_mut()
@@ -184,25 +182,87 @@ fn identity(
     std::path::PathBuf,
     Arc<rustls::ServerConfig>,
 ) {
-    let generated =
-        rcgen::generate_simple_self_signed(vec!["127.0.0.1".into(), "resolver.test".into()])
-            .unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let ca = directory.path().join("ca.pem");
-    std::fs::write(&ca, generated.cert.pem()).unwrap();
-    let mut server = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![generated.cert.der().clone()],
-        rustls::pki_types::PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()).into(),
-    )
-    .unwrap();
-    server.alpn_protocols = vec![alpn.to_vec()];
-    (directory, ca, Arc::new(server))
+    let identity = common::Identity::new(&["127.0.0.1", "resolver.test"]);
+    let tls = identity.server_config(&[alpn]);
+    (identity.directory, identity.files.cert_file, tls)
+}
+
+/// A single-exchange DoT peer for `tls::Upstream`; `invalid_id` answers with
+/// an unrelated transaction ID.
+async fn dot_peer(
+    tls: Arc<rustls::ServerConfig>,
+    invalid_id: bool,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        // Certificate rejection is an expected outcome in authentication tests.
+        let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(tls).accept(stream).await else {
+            return;
+        };
+        let Ok(size) = stream.read_u16().await else {
+            return;
+        };
+        let mut bytes = vec![0; usize::from(size)];
+        stream.read_exact(&mut bytes).await.unwrap();
+        let query = Message::from_vec(&bytes).unwrap();
+        let mut response = parins::protocol::error_response(&query, ResponseCode::NoError);
+        if invalid_id {
+            response.metadata.id = query.id.wrapping_add(1);
+        }
+        write(&mut stream, &response.to_vec().unwrap()).await;
+    });
+    (address, task)
+}
+
+#[tokio::test]
+async fn dot_client_restores_id_and_accepts_legacy_no_alpn() {
+    let identity = common::Identity::new(&["resolver.test"]);
+    let query = common::query(99, "example.test.", RecordType::A);
+    for alpn in [&[&b"dot"[..]][..], &[][..]] {
+        let (address, task) = dot_peer(identity.server_config(alpn), false).await;
+        let response = timeout(
+            Duration::from_secs(2),
+            parins::tls::Upstream::new(&identity.client_settings("resolver.test"))
+                .unwrap()
+                .exchange(&query, address),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.id, query.id);
+        assert_eq!(response.queries, query.queries);
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn dot_client_rejects_wrong_identity_unknown_ca_and_unrelated_dns() {
+    let identity = common::Identity::new(&["resolver.test"]);
+    let query = common::query(99, "example.test.", RecordType::A);
+    for mode in 0..3 {
+        let mut settings = identity.client_settings("resolver.test");
+        if mode == 0 {
+            settings.server_name = "different.test".into();
+        }
+        if mode == 1 {
+            settings.ca_file = None;
+        }
+        let (address, task) = dot_peer(identity.server_config(&[b"dot"]), mode == 2).await;
+        assert!(
+            timeout(
+                Duration::from_secs(2),
+                parins::tls::Upstream::new(&settings)
+                    .unwrap()
+                    .exchange(&query, address)
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        task.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1207,9 +1267,9 @@ fn unified_doh_listener_self_loop_is_rejected_for_either_upstream_preference() {
     });
     let settings = &mut config.upstreams;
     assert!(!settings.prefer_h3);
-    assert!(config.upstreams.validate_listeners(&config).is_err());
+    assert!(config.upstreams.validate(&config).is_err());
     config.upstreams.prefer_h3 = true;
-    assert!(config.upstreams.validate_listeners(&config).is_err());
+    assert!(config.upstreams.validate(&config).is_err());
 }
 
 fn age_answer(mut message: Message, negative: bool) -> Message {

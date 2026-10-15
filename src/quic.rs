@@ -1,4 +1,14 @@
 //! Bounded DoQ and HTTP/3 adapters. DNS semantics stay in the shared ingress.
+//!
+//! QUIC listener ownership includes Quinn's drivers and the final socket release
+//! (see `quic::lifecycle`). Server retains this cleanup across adapter cancellation,
+//! and a completed shutdown permits immediate rebinding of the same address.
+//!
+//! Shutdown: only request streams already accepted on a connection can force a stop;
+//! unfinished handshakes stop at once. Peer close notification (QUIC close, like the
+//! HTTP/2 GOAWAY acknowledgement in `doh`) uses at most half the shutdown grace, then
+//! the connection is dropped. Any force records its first bounded cause, and a
+//! terminal stop that cannot publish a clean cache snapshot logs that cause.
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Result, ensure};

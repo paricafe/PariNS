@@ -1,6 +1,26 @@
 //! Fixed-purpose root update executor. No command, path, URL or service selector
 //! is accepted from the application. It never opens business state or executes a
 //! candidate as root.
+//!
+//! The root journal is the sole installed-identity anchor; public status and
+//! pending-launch health are bounded derivations of it, not a second database.
+//!
+//! - The application persists commit intent before its freeze and the fixed inbox
+//!   request. Unknown helper outcomes never unlock by timeout; only a matching
+//!   terminal fence and installed identity resolve that intent.
+//! - A new invocation drives the existing Abort arbitration for unfinished old work.
+//!   Root fences precommit work without changing an already committed operation.
+//! - Explicit Stage admission refusals are durable terminals in the same journal,
+//!   correlated by operation ID and phase nonce. They preserve the owning operation,
+//!   its cooldown anchor and fences, and publish both outcomes for reconciliation
+//!   without replaying Stage.
+//! - Launch readiness hashes `/proc/PID/exe` only after a health receipt from that
+//!   PID/InvocationID, once per process; `Type=simple` start returns before execve.
+//! - Installer registration keeps prior terminal operations and fences. Only a
+//!   reinstallation that proved readiness closes a ManualRequired operation, as
+//!   Failed/`superseded_by_installation` with the same ID and phase nonce; a failed
+//!   or rolled-back installation leaves it ManualRequired. There is no in-place
+//!   re-verify.
 mod fs;
 mod journal;
 
@@ -8,7 +28,7 @@ use crate::update::{
     build_info::BuildInfo,
     contract::{HELPER_PROTOCOL, MAX_BINARY_BYTES},
     ipc::*,
-    reader::GithubReader,
+    reader::{DownloadTuple, GithubReader},
 };
 use anyhow::{Context, Result, bail, ensure};
 use fs::Dir;
@@ -358,7 +378,10 @@ impl Executor {
             );
         }
         match request.request.clone() {
-            Request::Stage { .. } => self.stage(&mut journal, &request).await,
+            Request::Stage { .. } => {
+                self.stage(&mut journal, &StageRequest::parse(&request)?)
+                    .await
+            }
             Request::Commit {
                 invocation_id,
                 config_revision,
@@ -420,34 +443,27 @@ impl Executor {
 
     // Only explicit admission decisions become terminal. Failures to read the
     // journal, installed binary or service state remain unknown outcomes.
-    fn reject_stage(&self, journal: &mut Journal, inbox: &Inbox, reason: &str) -> Result<()> {
-        let Request::Stage { download, .. } = &inbox.request else {
-            bail!("not a stage request")
-        };
+    fn reject_stage(
+        &self,
+        journal: &mut Journal,
+        request: &StageRequest,
+        reason: &str,
+    ) -> Result<()> {
         journal.last_operation = Some(OperationStatus {
-            operation_id: inbox.operation_id.clone(),
-            phase_nonce: inbox.phase_nonce.clone(),
+            operation_id: request.inbox.operation_id.clone(),
+            phase_nonce: request.inbox.phase_nonce.clone(),
             phase: Phase::Failed,
-            version: crate::update::contract::Version::parse_tag(&download.tag)?.to_string(),
+            version: request.version.clone(),
             reason: Some(reason.into()),
             updated_at_ms: now_ms(),
             downloaded_bytes: 0,
-            total_bytes: download.size,
+            total_bytes: request.download.size,
         });
         self.persist(journal)
     }
 
-    fn stage_gate(&self, journal: &mut Journal, inbox: &Inbox, at: u64) -> Result<bool> {
-        let Request::Stage {
-            download,
-            current_sha256,
-            invocation_id,
-            config_revision,
-        } = &inbox.request
-        else {
-            bail!("not a stage request")
-        };
-        crate::update::contract::Version::parse_tag(&download.tag)?;
+    fn stage_gate(&self, journal: &mut Journal, request: &StageRequest, at: u64) -> Result<bool> {
+        let (inbox, download) = (request.inbox, request.download);
         ensure!(
             crate::update::contract::valid_sha256(&download.sha256),
             "invalid candidate digest"
@@ -457,9 +473,9 @@ impl Executor {
         {
             ensure!(
                 op.status.phase_nonce == inbox.phase_nonce
-                    && op.invocation_id == *invocation_id
-                    && op.config_revision == *config_revision
-                    && op.old.sha256 == *current_sha256
+                    && op.invocation_id == request.invocation_id
+                    && op.config_revision == request.config_revision
+                    && op.old.sha256 == request.current_sha256
                     && op.candidate.sha256 == download.sha256,
                 "phase parameters mismatch"
             );
@@ -484,27 +500,18 @@ impl Executor {
             None
         };
         if let Some(reason) = reason {
-            self.reject_stage(journal, inbox, reason)?;
+            self.reject_stage(journal, request, reason)?;
             return Ok(false);
         }
         Ok(true)
     }
 
-    fn begin_stage(&self, journal: &mut Journal, inbox: &Inbox, at: u64) -> Result<()> {
-        let Request::Stage {
-            download,
-            invocation_id,
-            config_revision,
-            ..
-        } = &inbox.request
-        else {
-            bail!("not a stage request")
-        };
-        let version = crate::update::contract::Version::parse_tag(&download.tag)?.to_string();
+    fn begin_stage(&self, journal: &mut Journal, request: &StageRequest, at: u64) -> Result<()> {
+        let (inbox, download) = (request.inbox, request.download);
         // Record accepted before the first network request. ExecStopPost can
         // then close metadata/download interruption as a real terminal.
         let mut candidate = journal.installed.clone();
-        candidate.build.version = version;
+        candidate.build.version = request.version.clone();
         candidate.sha256 = download.sha256.clone();
         journal.last_operation = journal.operation.as_ref().map(|op| op.status.clone());
         journal.operation = Some(Operation {
@@ -520,8 +527,8 @@ impl Executor {
             },
             old: journal.installed.clone(),
             candidate,
-            invocation_id: invocation_id.clone(),
-            config_revision: *config_revision,
+            invocation_id: request.invocation_id.to_owned(),
+            config_revision: request.config_revision,
             started_at_ms: at,
             rollback_attempted: false,
             rollback_started: false,
@@ -530,19 +537,12 @@ impl Executor {
         self.persist(journal)
     }
 
-    async fn stage(&mut self, journal: &mut Journal, inbox: &Inbox) -> Result<()> {
-        if !self.stage_gate(journal, inbox, now_ms())? {
+    async fn stage(&mut self, journal: &mut Journal, request: &StageRequest<'_>) -> Result<()> {
+        if !self.stage_gate(journal, request, now_ms())? {
             return Ok(());
         }
-        let Request::Stage {
-            download,
-            current_sha256,
-            invocation_id,
-            ..
-        } = &inbox.request
-        else {
-            bail!("not a stage request")
-        };
+        let (inbox, download, current_sha256) =
+            (request.inbox, request.download, request.current_sha256);
         if let Some(op) = &journal.operation
             && let Ok(dir) = self.staging.child(&op.status.operation_id)
         {
@@ -551,13 +551,13 @@ impl Executor {
             }
             self.staging.remove_dir(&op.status.operation_id)?;
         }
-        if &journal.installed.sha256 != current_sha256 || self.actual_hash()? != *current_sha256 {
-            return self.reject_stage(journal, inbox, "config_changed");
+        if journal.installed.sha256 != current_sha256 || self.actual_hash()? != current_sha256 {
+            return self.reject_stage(journal, request, "config_changed");
         }
-        if service().await?.get("InvocationID") != Some(invocation_id) {
-            return self.reject_stage(journal, inbox, "config_changed");
+        if service().await?.get("InvocationID").map(String::as_str) != Some(request.invocation_id) {
+            return self.reject_stage(journal, request, "config_changed");
         }
-        self.begin_stage(journal, inbox, now_ms())?;
+        self.begin_stage(journal, request, now_ms())?;
         let outcome: Result<()> = async {
             let reader = GithubReader::new();
             let manifest = reader.manifest(&download.tag).await?;
@@ -920,6 +920,37 @@ impl Executor {
     }
 }
 
+/// One Stage inbox, unpacked once with its release tag parsed.
+struct StageRequest<'a> {
+    inbox: &'a Inbox,
+    download: &'a DownloadTuple,
+    current_sha256: &'a str,
+    invocation_id: &'a str,
+    config_revision: u64,
+    version: String,
+}
+impl<'a> StageRequest<'a> {
+    fn parse(inbox: &'a Inbox) -> Result<Self> {
+        let Request::Stage {
+            download,
+            current_sha256,
+            invocation_id,
+            config_revision,
+        } = &inbox.request
+        else {
+            bail!("not a stage request")
+        };
+        Ok(Self {
+            inbox,
+            download,
+            current_sha256,
+            invocation_id,
+            config_revision: *config_revision,
+            version: crate::update::contract::Version::parse_tag(&download.tag)?.to_string(),
+        })
+    }
+}
+
 fn terminal_fence(journal: &Journal, inbox: &Inbox) -> Result<bool> {
     let status = journal
         .operation
@@ -1242,8 +1273,9 @@ pub(crate) fn consume_stage_failure_fixture(
     let bytes = executor.root.read(INBOX_NAME, INBOX_LIMIT, false);
     executor.root.remove(INBOX_NAME)?;
     let request = Inbox::parse(&bytes?)?;
-    if executor.stage_gate(&mut journal, &request, at)? {
-        executor.begin_stage(&mut journal, &request, at)?;
+    let stage = StageRequest::parse(&request)?;
+    if executor.stage_gate(&mut journal, &stage, at)? {
+        executor.begin_stage(&mut journal, &stage, at)?;
         executor.finish(&mut journal, Phase::Failed, Some("verification_failed"))?;
     }
     let saved: Journal = serde_json::from_slice(&std::fs::read(path.join("journal.json"))?)?;
@@ -1380,7 +1412,10 @@ mod tests {
         let owner = serde_json::to_value(&journal.operation).unwrap();
         let installed = journal.installed.clone();
         let request = stage_request();
-        executor.stage(&mut journal, &request).await.unwrap();
+        executor
+            .stage(&mut journal, &StageRequest::parse(&request).unwrap())
+            .await
+            .unwrap();
         let saved: Journal =
             serde_json::from_slice(&std::fs::read(dir.path().join("journal.json")).unwrap())
                 .unwrap();
@@ -1400,13 +1435,21 @@ mod tests {
         let started = journal.operation.as_ref().unwrap().started_at_ms;
         assert!(
             !executor
-                .stage_gate(&mut journal, &request, started + 5_000)
+                .stage_gate(
+                    &mut journal,
+                    &StageRequest::parse(&request).unwrap(),
+                    started + 5_000
+                )
                 .unwrap()
         );
         let rejected = serde_json::to_value(&journal.last_operation).unwrap();
         assert!(
             !executor
-                .stage_gate(&mut journal, &request, started + 65_000)
+                .stage_gate(
+                    &mut journal,
+                    &StageRequest::parse(&request).unwrap(),
+                    started + 65_000
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -1419,7 +1462,11 @@ mod tests {
         wrong_nonce.phase_nonce = "0".repeat(32);
         assert!(
             executor
-                .stage_gate(&mut journal, &wrong_nonce, started + 65_000)
+                .stage_gate(
+                    &mut journal,
+                    &StageRequest::parse(&wrong_nonce).unwrap(),
+                    started + 65_000
+                )
                 .is_err()
         );
         for mut late in [request.clone(), wrong_nonce] {
@@ -1450,7 +1497,11 @@ mod tests {
         blocked.operation_id = "1".repeat(32);
         assert!(
             !executor
-                .stage_gate(&mut journal, &blocked, started + 65_000)
+                .stage_gate(
+                    &mut journal,
+                    &StageRequest::parse(&blocked).unwrap(),
+                    started + 65_000
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -1491,7 +1542,11 @@ mod tests {
         }
         assert!(
             executor
-                .stage_gate(&mut journal, &malformed, now_ms())
+                .stage_gate(
+                    &mut journal,
+                    &StageRequest::parse(&malformed).unwrap(),
+                    now_ms()
+                )
                 .is_err()
         );
         assert_eq!(serde_json::to_value(&journal).unwrap(), before);
@@ -1499,18 +1554,30 @@ mod tests {
         let rejected = stage_request();
         assert!(
             !executor
-                .stage_gate(&mut journal, &rejected, started + 5_000)
+                .stage_gate(
+                    &mut journal,
+                    &StageRequest::parse(&rejected).unwrap(),
+                    started + 5_000
+                )
                 .unwrap()
         );
         let mut next = stage_request();
         next.operation_id = "0".repeat(32);
         assert!(
             executor
-                .stage_gate(&mut journal, &next, started + 60_000)
+                .stage_gate(
+                    &mut journal,
+                    &StageRequest::parse(&next).unwrap(),
+                    started + 60_000
+                )
                 .unwrap()
         );
         executor
-            .begin_stage(&mut journal, &next, started + 60_000)
+            .begin_stage(
+                &mut journal,
+                &StageRequest::parse(&next).unwrap(),
+                started + 60_000,
+            )
             .unwrap();
         assert_eq!(
             journal.operation.as_ref().unwrap().status.operation_id,
@@ -1543,7 +1610,12 @@ mod tests {
         let before = std::fs::read(dir.path().join("journal.json")).unwrap();
         // The fixture intentionally has no installed binary. Failed IO must not
         // be rewritten into a known negative outcome.
-        assert!(executor.stage(&mut journal, &request).await.is_err());
+        assert!(
+            executor
+                .stage(&mut journal, &StageRequest::parse(&request).unwrap())
+                .await
+                .is_err()
+        );
         assert_eq!(
             std::fs::read(dir.path().join("journal.json")).unwrap(),
             before
@@ -1556,7 +1628,10 @@ mod tests {
         );
 
         journal.installed.sha256 = "0".repeat(64);
-        executor.stage(&mut journal, &request).await.unwrap();
+        executor
+            .stage(&mut journal, &StageRequest::parse(&request).unwrap())
+            .await
+            .unwrap();
         assert_eq!(
             journal
                 .status()
@@ -1585,7 +1660,10 @@ mod tests {
         });
         let pending = serde_json::to_value(&journal.installation_pending).unwrap();
         executor
-            .stage(&mut journal, &pending_request)
+            .stage(
+                &mut journal,
+                &StageRequest::parse(&pending_request).unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(

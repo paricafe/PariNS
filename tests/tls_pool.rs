@@ -1,4 +1,6 @@
 //! Local TLS peers exercise pool ownership; no Internet or checked-in private keys.
+mod common;
+
 use std::{
     net::SocketAddr,
     sync::{
@@ -8,15 +10,16 @@ use std::{
     time::Duration,
 };
 
+use common::Identity;
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RecordType},
+    op::{Message, ResponseCode},
+    rr::RecordType,
 };
 use parins::{
     config::Config,
     protocol,
     resolver::Resolver,
-    tls::{self, ClientSettings, PoolSettings, TlsFiles, Upstream},
+    tls::{self, PoolSettings, Upstream},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -29,39 +32,12 @@ use tokio_rustls::TlsAcceptor;
 
 const DEADLINE: Duration = Duration::from_secs(3);
 
-struct Certificate {
-    _directory: tempfile::TempDir,
-    files: TlsFiles,
+fn certificate() -> Identity {
+    Identity::new(&["localhost", "127.0.0.1"])
 }
 
-impl Certificate {
-    fn new() -> Self {
-        let generated =
-            rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
-                .unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let files = TlsFiles {
-            cert_file: directory.path().join("cert.pem"),
-            key_file: directory.path().join("key.pem"),
-        };
-        std::fs::write(&files.cert_file, generated.cert.pem()).unwrap();
-        std::fs::write(&files.key_file, generated.signing_key.serialize_pem()).unwrap();
-        Self {
-            _directory: directory,
-            files,
-        }
-    }
-
-    fn settings(&self) -> ClientSettings {
-        ClientSettings {
-            server_name: "localhost".into(),
-            ca_file: Some(self.files.cert_file.clone()),
-        }
-    }
-
-    fn upstream(&self, max_connections: usize) -> Upstream {
-        Upstream::with_pool(&self.settings(), &pool(max_connections)).unwrap()
-    }
+fn upstream(cert: &Identity, max_connections: usize) -> Upstream {
+    Upstream::with_pool(&cert.client_settings("localhost"), &pool(max_connections)).unwrap()
 }
 
 fn pool(max_connections: usize) -> PoolSettings {
@@ -73,12 +49,7 @@ fn pool(max_connections: usize) -> PoolSettings {
 }
 
 fn query(id: u16) -> Message {
-    let mut query = Message::new(id, MessageType::Query, OpCode::Query);
-    query.add_query(Query::query(
-        Name::from_ascii(format!("q{id}.example.test.")).unwrap(),
-        RecordType::A,
-    ));
-    query
+    common::query(id, &format!("q{id}.example.test."), RecordType::A)
 }
 
 enum Action {
@@ -112,7 +83,7 @@ impl Drop for Peer {
 }
 
 impl Peer {
-    async fn new(cert: &Certificate) -> Self {
+    async fn new(cert: &Identity) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let acceptor = TlsAcceptor::from(tls::server_config(&cert.files, &[b"dot"]).unwrap());
@@ -226,9 +197,9 @@ async fn success(task: JoinHandle<anyhow::Result<Message>>, id: u16) {
 
 #[tokio::test]
 async fn sequential_clones_reuse_authenticated_connection_and_restore_each_id() {
-    let cert = Certificate::new();
+    let cert = certificate();
     let mut peer = Peer::new(&cert).await;
-    let upstream = cert.upstream(1);
+    let upstream = upstream(&cert, 1);
     for id in [10, 11, 12] {
         let task = exchange(&upstream.clone(), peer.address, id);
         assert_eq!(peer.reply(Action::Reply).await, 1);
@@ -239,10 +210,10 @@ async fn sequential_clones_reuse_authenticated_connection_and_restore_each_id() 
 
 #[tokio::test]
 async fn disabled_pool_and_default_constructor_always_open_fresh_connections() {
-    let cert = Certificate::new();
+    let cert = certificate();
     for upstream in [
-        Upstream::new(&cert.settings()).unwrap(),
-        Upstream::with_pool(&cert.settings(), &PoolSettings::default()).unwrap(),
+        Upstream::new(&cert.client_settings("localhost")).unwrap(),
+        Upstream::with_pool(&cert.client_settings("localhost"), &PoolSettings::default()).unwrap(),
     ] {
         let mut peer = Peer::new(&cert).await;
         for id in [20, 21] {
@@ -256,10 +227,10 @@ async fn disabled_pool_and_default_constructor_always_open_fresh_connections() {
 
 #[tokio::test]
 async fn clone_concurrency_is_bounded_and_canceled_waiters_do_not_consume_slots() {
-    let cert = Certificate::new();
+    let cert = certificate();
     for cap in [1, 2] {
         let mut peer = Peer::new(&cert).await;
-        let upstream = cert.upstream(cap);
+        let upstream = upstream(&cert, cap);
         let mut running = Vec::new();
         let mut blocked = Vec::new();
         for n in 0..cap {
@@ -295,9 +266,9 @@ async fn clone_concurrency_is_bounded_and_canceled_waiters_do_not_consume_slots(
 
 #[tokio::test]
 async fn queued_query_uses_whichever_connection_becomes_available_first() {
-    let cert = Certificate::new();
+    let cert = certificate();
     let mut peer = Peer::new(&cert).await;
-    let upstream = cert.upstream(2);
+    let upstream = upstream(&cert, 2);
     let first = exchange(&upstream, peer.address, 41);
     let held_first = peer.request().await;
     let second = exchange(&upstream, peer.address, 42);
@@ -341,13 +312,13 @@ async fn queued_query_uses_whichever_connection_becomes_available_first() {
 
 #[tokio::test]
 async fn expired_idle_connections_are_replaced_on_next_borrow() {
-    let cert = Certificate::new();
+    let cert = certificate();
     let mut peer = Peer::new(&cert).await;
     let settings = PoolSettings {
         idle_timeout_ms: 25,
         ..pool(1)
     };
-    let upstream = Upstream::with_pool(&cert.settings(), &settings).unwrap();
+    let upstream = Upstream::with_pool(&cert.client_settings("localhost"), &settings).unwrap();
     let first = exchange(&upstream, peer.address, 50);
     peer.reply(Action::Reply).await;
     success(first, 50).await;
@@ -360,10 +331,10 @@ async fn expired_idle_connections_are_replaced_on_next_borrow() {
 
 #[tokio::test]
 async fn cancellation_discards_borrowed_connection_including_partial_response() {
-    let cert = Certificate::new();
+    let cert = certificate();
     for partial in [false, true] {
         let mut peer = Peer::new(&cert).await;
-        let upstream = cert.upstream(1);
+        let upstream = upstream(&cert, 1);
         let warm = exchange(&upstream, peer.address, 60);
         peer.reply(Action::Reply).await;
         success(warm, 60).await;
@@ -397,9 +368,9 @@ async fn cancellation_discards_borrowed_connection_including_partial_response() 
 
 #[tokio::test]
 async fn idle_peer_close_reconnects_once_but_invalid_dns_never_retries() {
-    let cert = Certificate::new();
+    let cert = certificate();
     let mut peer = Peer::new(&cert).await;
-    let upstream = cert.upstream(1);
+    let upstream = upstream(&cert, 1);
     let first = exchange(&upstream, peer.address, 70);
     let (closed, received) = oneshot::channel();
     peer.reply(Action::CloseAfterReply(closed)).await;
@@ -424,10 +395,10 @@ async fn idle_peer_close_reconnects_once_but_invalid_dns_never_retries() {
 
 #[tokio::test]
 async fn pooled_connections_are_not_reused_for_a_different_endpoint() {
-    let cert = Certificate::new();
+    let cert = certificate();
     let mut first = Peer::new(&cert).await;
     let mut second = Peer::new(&cert).await;
-    let upstream = cert.upstream(1);
+    let upstream = upstream(&cert, 1);
     for id in [80, 81, 82] {
         let peer = if id == 81 { &mut second } else { &mut first };
         let task = exchange(&upstream, peer.address, id);
@@ -440,10 +411,10 @@ async fn pooled_connections_are_not_reused_for_a_different_endpoint() {
 
 #[tokio::test]
 async fn pooling_preserves_certificate_authentication_without_retries() {
-    let cert = Certificate::new();
+    let cert = certificate();
     for wrong_name in [false, true] {
         let mut peer = Peer::new(&cert).await;
-        let mut settings = cert.settings();
+        let mut settings = cert.client_settings("localhost");
         if wrong_name {
             settings.server_name = "wrong.example.test".into();
         } else {
@@ -459,7 +430,7 @@ async fn pooling_preserves_certificate_authentication_without_retries() {
 
 #[tokio::test]
 async fn resolver_query_deadline_includes_pool_wait_without_opening_an_extra_connection() {
-    let cert = Certificate::new();
+    let cert = certificate();
     let mut peer = Peer::new(&cert).await;
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     config.upstreams.servers = vec![format!("tls://{}", peer.address)];
@@ -513,9 +484,9 @@ async fn resolver_query_deadline_includes_pool_wait_without_opening_an_extra_con
 async fn silently_dropped_idle_connection_costs_one_query_deadline_then_recovers() {
     // Documents current behaviour: unlike a peer close (reconnected at once),
     // a silent peer is only detected when the caller's deadline expires.
-    let cert = Certificate::new();
+    let cert = certificate();
     let mut peer = Peer::new(&cert).await;
-    let upstream = cert.upstream(1);
+    let upstream = upstream(&cert, 1);
     let first = exchange(&upstream, peer.address, 80);
     let (silent, ready) = oneshot::channel();
     peer.reply(Action::SilentAfterReply(silent)).await;

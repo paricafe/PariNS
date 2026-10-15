@@ -33,10 +33,10 @@ fn seed_subscription(path: &std::path::Path) {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     let config = Config::parse(&subscription_config(true)).unwrap();
-    let mut sources = Sources::open(path, config.filter_subscriptions.max_disk_bytes, 1).unwrap();
+    let mut sources = Sources::open(path, config.filter_subscriptions.max_disk_bytes).unwrap();
     let bytes = b".blocked.test\n";
     let hash = format!("{:x}", Sha256::digest(bytes));
-    let mut stage = sources.begin_staging(bytes.len() as u64, 1).unwrap();
+    let mut stage = sources.begin_staging(bytes.len() as u64).unwrap();
     stage.file.write_all(bytes).unwrap();
     sources
         .prepare(
@@ -62,11 +62,7 @@ fn seed_subscription(path: &std::path::Path) {
         )
         .unwrap();
     sources
-        .set_references(
-            config.filter_subscriptions.fingerprints().unwrap(),
-            vec![],
-            1,
-        )
+        .set_references(config.filter_subscriptions.fingerprints().unwrap(), vec![])
         .unwrap();
 }
 
@@ -172,7 +168,7 @@ async fn local_policy_retirement_is_checked_before_managed_config_and_certificat
         std::fs::write(&key, first.signing_key.serialize_pem()).unwrap();
         let store = Store::open(&temp.path().join("state")).unwrap();
         let sources = store.dir.join("filter-subscriptions");
-        drop(Sources::open(&sources, 32 * 1024 * 1024, 1).unwrap());
+        drop(Sources::open(&sources, 32 * 1024 * 1024).unwrap());
         if corrupt_catalog {
             std::fs::write(sources.join("catalog.json"), b"invalid catalog").unwrap();
             assert!(Sources::read_only(&sources).is_err());

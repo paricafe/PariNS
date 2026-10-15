@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     net::{IpAddr, SocketAddr},
     sync::{
@@ -7,7 +9,7 @@ use std::{
 };
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Message, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
         rdata::{A, CNAME, NS, SOA},
@@ -67,11 +69,7 @@ impl Upstream {
 }
 
 fn query(subnet: Option<&str>, id: u16) -> Message {
-    let mut q = Message::new(id, MessageType::Query, OpCode::Query);
-    q.add_query(Query::query(
-        Name::from_ascii("example.test.").unwrap(),
-        RecordType::A,
-    ));
+    let mut q = common::query(id, "example.test.", RecordType::A);
     ecs::set_subnet(&mut q, subnet.map(|s| s.parse().unwrap()));
     q
 }

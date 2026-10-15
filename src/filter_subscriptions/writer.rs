@@ -107,9 +107,8 @@ mod tests {
     #[tokio::test]
     async fn writes_are_bounded_and_finished_before_releasing_staging() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store =
-            Store::open(&dir.path().join("subscriptions"), 64 * 1024 * 1024, 1).unwrap();
-        let stage = store.begin_staging(100_000, 1).unwrap();
+        let mut store = Store::open(&dir.path().join("subscriptions"), 64 * 1024 * 1024).unwrap();
+        let stage = store.begin_staging(100_000).unwrap();
         let mut writer = StagingWriter::new(&stage).unwrap();
         let bytes = vec![b'x'; 50_000];
         assert_eq!(writer.write(&bytes).await.unwrap(), WRITE_BUFFER);
@@ -126,8 +125,8 @@ mod tests {
     async fn cancelled_write_keeps_directory_locked_after_store_drop() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("subscriptions");
-        let mut store = Store::open(&path, 64 * 1024 * 1024, 1).unwrap();
-        let stage = store.begin_staging(100_000, 1).unwrap();
+        let mut store = Store::open(&path, 64 * 1024 * 1024).unwrap();
+        let stage = store.begin_staging(100_000).unwrap();
         let mut writer = StagingWriter::new(&stage).unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -144,10 +143,10 @@ mod tests {
         drop(writer);
         drop(stage);
         drop(store);
-        assert!(Store::open(&path, 64 * 1024 * 1024, 2).is_err());
+        assert!(Store::open(&path, 64 * 1024 * 1024).is_err());
         release_tx.send(()).unwrap();
         let _ = job.await.unwrap();
-        let _reopened = Store::open(&path, 64 * 1024 * 1024, 2).unwrap();
+        let _reopened = Store::open(&path, 64 * 1024 * 1024).unwrap();
         assert_eq!(std::fs::read_dir(path.join("staging")).unwrap().count(), 0);
     }
 }

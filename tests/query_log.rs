@@ -1,7 +1,9 @@
+mod common;
+
 use hickory_proto::{
-    op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Edns, Message, ResponseCode},
     rr::{
-        Name, RData, Record, RecordType,
+        RData, Record, RecordType,
         rdata::{A, TXT},
     },
 };
@@ -30,8 +32,7 @@ fn with_log(config: &Config) -> (Resolver, Arc<RuntimeServices>) {
 }
 
 fn query(name: &str) -> Message {
-    let mut q = Message::new(7, MessageType::Query, OpCode::Query);
-    q.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
+    let mut q = common::query(7, name, RecordType::A);
     q.metadata.recursion_desired = true;
     q.metadata.checking_disabled = true;
     let mut edns = Edns::new();

@@ -361,8 +361,7 @@ impl Config {
             (1024 * 1024..=512 * 1024 * 1024).contains(&self.cache.persistence.max_bytes),
             "cache.persistence.max_bytes must be 1..=512 MiB"
         );
-        self.upstreams.validate()?;
-        self.upstreams.validate_listeners(self)?;
+        self.upstreams.validate(self)?;
         self.source_limits.validate()?;
         if let Some(address) = self.admin_listen {
             ensure!(address.ip().is_loopback(), "admin_listen must be loopback");

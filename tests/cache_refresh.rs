@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     net::SocketAddr,
     sync::{
@@ -8,7 +10,7 @@ use std::{
 };
 
 use hickory_proto::{
-    op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Edns, Message, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
         rdata::opt::EdnsOption,
@@ -109,9 +111,7 @@ impl Upstream {
 }
 
 fn query(name: &str) -> Message {
-    let mut query = Message::new(1, MessageType::Query, OpCode::Query);
-    query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
-    query
+    common::query(1, name, RecordType::A)
 }
 
 fn positive(query: &Message, ttl: u32, value: u8) -> Message {

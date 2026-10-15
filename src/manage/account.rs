@@ -1,4 +1,16 @@
 //! Credentials share Store's commit point, independently of DNS configuration.
+//!
+//! - A credential change is its own Store transaction, never a DNS configuration
+//!   apply. It preserves the current/previous TOML and the configuration revision.
+//! - The hash and attempt budget run outside Manager locks; serialized admission
+//!   rechecks the verified username/hash and the caller's session.
+//! - After Store's rename commit, saved credentials are published and all sessions
+//!   revoked without awaiting, in Manager then Active lock order.
+//! - Session issuance rechecks its credential snapshot. Protected manual mutations,
+//!   including special updater paths, recheck session/realm at admission; schedulers
+//!   need no session and already accepted background work is not revoked.
+//! - A success or unknown outcome requires explicit login: never replay, clear the
+//!   Cookie, issue a replacement session, or broadcast sensitive inputs.
 use super::{ApiError, Shared, Snapshot, Stored, decode, error, internal, invalid, store};
 use axum::http::{HeaderMap, StatusCode};
 use serde::Deserialize;

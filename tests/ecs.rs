@@ -1,9 +1,11 @@
+mod common;
+
 use std::time::Duration;
 
 use hickory_proto::{
-    op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
+    op::{Edns, Message, ResponseCode},
     rr::{
-        Name, RecordType,
+        RecordType,
         rdata::opt::{ClientSubnet, EdnsOption},
     },
 };
@@ -16,11 +18,7 @@ use parins::{
 use tokio::net::UdpSocket;
 
 fn query(subnet: Option<&str>) -> Message {
-    let mut query = Message::new(7, MessageType::Query, OpCode::Query);
-    query.add_query(Query::query(
-        Name::from_ascii("example.test.").unwrap(),
-        RecordType::A,
-    ));
+    let mut query = common::query(7, "example.test.", RecordType::A);
     ecs::set_subnet(&mut query, subnet.map(|s| s.parse().unwrap()));
     query
 }

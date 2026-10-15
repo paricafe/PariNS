@@ -1,13 +1,11 @@
 //! Keep immediate socket-release acceptance in its own test process.
 //! Concurrent subprocess fixtures can briefly inherit CLOEXEC sockets before exec,
 //! so do not add subprocess-spawning tests to this integration-test target.
+mod common;
+
 use std::{sync::Arc, time::Duration};
 
-use parins::{
-    config::Config,
-    server::Server,
-    tls::{ListenerConfig, TlsFiles},
-};
+use parins::{config::Config, server::Server, tls::ListenerConfig};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 
@@ -38,16 +36,8 @@ async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
         Ok(None)
     }
 
-    let params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
-    let key = rcgen::KeyPair::generate().unwrap();
-    let certificate = params.self_signed(&key).unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let files = TlsFiles {
-        cert_file: directory.path().join("cert.pem"),
-        key_file: directory.path().join("key.pem"),
-    };
-    std::fs::write(&files.cert_file, certificate.pem()).unwrap();
-    std::fs::write(&files.key_file, key.serialize_pem()).unwrap();
+    let identity = common::Identity::new(&["localhost"]);
+    let files = identity.files.clone();
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     config.listen.set_port(0);
@@ -69,7 +59,7 @@ async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
         let _ = stopped.await;
     }));
     let mut roots = RootCertStore::empty();
-    roots.add(certificate.der().clone()).unwrap();
+    roots.add(identity.der.clone()).unwrap();
     let mut tls = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();

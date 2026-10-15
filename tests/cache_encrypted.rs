@@ -1,5 +1,7 @@
 //! Production-contract fixtures: verified encrypted upstream, missing ECS,
 //! Padding, real UDP ingress, and a consumed clean-snapshot restart.
+mod common;
+
 use bytes::Bytes;
 use hickory_proto::{
     op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
@@ -15,7 +17,6 @@ use parins::{
     cache::persistence::semantic_fingerprint, cache_persistence::CachePersistence, config::Config,
     ecs, protocol, server::Server,
 };
-use rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer};
 use std::{
     net::SocketAddr,
     sync::{
@@ -64,26 +65,8 @@ fn answer(query: &Message) -> Message {
 }
 
 async fn mock(http: bool) -> Mock {
-    let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let ca = directory.path().join("ca.pem");
-    std::fs::write(&ca, certificate.cert.pem()).unwrap();
-    let mut tls =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![certificate.cert.der().clone()],
-                PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into(),
-            )
-            .unwrap();
-    tls.alpn_protocols = vec![if http {
-        b"h2".to_vec()
-    } else {
-        b"dot".to_vec()
-    }];
-    let acceptor = TlsAcceptor::from(Arc::new(tls));
+    let identity = common::Identity::new(&["127.0.0.1"]);
+    let acceptor = TlsAcceptor::from(identity.server_config(&[if http { b"h2" } else { b"dot" }]));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -129,8 +112,8 @@ async fn mock(http: bool) -> Mock {
     Mock {
         address,
         count,
-        ca,
-        _directory: directory,
+        ca: identity.files.cert_file.clone(),
+        _directory: identity.directory,
         task,
     }
 }

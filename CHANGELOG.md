@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.14 — 2026-10-15
+
+### Changed
+
+- Internal simplification with no intended change to DNS, cache, filtering or
+  management behavior: the unused filter-index prototypes and benchmarks were
+  removed (the radix index remains the only filter engine), HTTP/2 and HTTP/3
+  share one DoH answer check, and duplicated validation and test helpers were
+  consolidated.
+- TLS client settings are built only for HTTPS and QUIC upstreams. An unreadable
+  `[upstreams].ca_file` is still rejected for every upstream type; the error now
+  reads "open TLS CA file".
+- The guides were reorganized and shortened: first setup is one section in
+  [Deployment](guide/deployment.md), and acceptance workflows moved to
+  [Development](guide/development.md#acceptance-workflows).
+
 ## v0.1.13 — 2026-10-15
 
 ### Changed

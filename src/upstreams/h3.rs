@@ -7,13 +7,13 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use base64::Engine;
 use bytes::{Buf, Bytes};
 use hickory_proto::op::Message;
 use tokio::time::{Instant, timeout};
 
 use super::Endpoint;
 use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, Reason, Stage};
+use super::transport::{InFlight, Usage};
 use crate::protocol;
 
 type Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
@@ -34,9 +34,10 @@ struct State {
     refused: Option<u16>,
 }
 
-/// Client errors that a retry cannot fix. 408, 421, 425 and 429 invite a retry.
+/// Client errors that a retry cannot fix. 408, 421, 425 and 429 invite a retry;
+/// 414 and 431 concern one oversized query, not the endpoint.
 fn definite_refusal(status: http::StatusCode) -> bool {
-    status.is_client_error() && !matches!(status.as_u16(), 408 | 421 | 425 | 429)
+    status.is_client_error() && !matches!(status.as_u16(), 408 | 414 | 421 | 425 | 429 | 431)
 }
 
 // Own the endpoint even during a cancelled handshake, before a driver exists.
@@ -51,6 +52,7 @@ struct Connection {
     _endpoint: EndpointGuard,
     quic: quinn::Connection,
     sender: Sender,
+    usage: Arc<Usage>,
     driver: tokio::task::JoinHandle<()>,
 }
 impl Drop for Connection {
@@ -101,15 +103,26 @@ impl Client {
             attempt.skipped();
             anyhow::bail!("HTTP/3 cooling down");
         }
+        // The budget covers only obtaining a usable connection and sending the
+        // request, so a dead or slow H3 path still leaves time for H2. Once sent,
+        // a slow upstream answer is waited for until the resolver deadline: it
+        // is not an H3 fault, causes no cooldown and is not re-sent over H2.
         let budget =
             Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now()) / 2);
         ensure!(!budget.is_zero(), "HTTP/3 deadline exhausted");
-        let result = match timeout(budget, self.request(spec, query, address, &mut attempt)).await {
-            Ok(result) => result,
+        let sent = match timeout(budget, self.send(spec, query, address, &mut attempt)).await {
+            Ok(sent) => sent,
             Err(error) => {
                 attempt.reason(Reason::Deadline);
                 Err(error.into())
             }
+        };
+        let result = match sent {
+            Ok((stream, outbound, in_flight)) => {
+                self.receive(stream, in_flight, &outbound, query, &mut attempt)
+                    .await
+            }
+            Err(error) => Err(error),
         };
         attempt.finish(&result);
         if result.is_err() {
@@ -182,7 +195,11 @@ impl Client {
             .max_concurrent_uni_streams(3u32.into())
             .stream_receive_window(131072u32.into())
             .receive_window((1024u32 * 1024).into())
-            .max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
+            // A sent request waits for its answer without a budget, so a silently
+            // dead path must close the connection quickly: PING every second and
+            // give up after 3 seconds without any packet from the peer.
+            .keep_alive_interval(Some(Duration::from_secs(1)))
+            .max_idle_timeout(Some(Duration::from_secs(3).try_into()?));
         config.transport_config(Arc::new(transport));
         endpoint.0.set_default_client_config(config);
         attempt.stage(Stage::QuicHandshake);
@@ -192,13 +209,22 @@ impl Client {
             .max_field_section_size(16 * 1024)
             .build(h3_quinn::Connection::new(quic.clone()))
             .await?;
+        // Keep-alive would hold an unused connection open forever; close it after
+        // 10 seconds without requests, as for HTTP/2.
+        let usage = Arc::new(Usage::default());
+        let idle = super::transport::idle(usage.clone(), Duration::from_secs(10));
+        let closing = quic.clone();
         let driver = tokio::spawn(async move {
-            let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+            tokio::select! {
+                _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)) => {}
+                () = idle => closing.close(0u32.into(), b"idle"),
+            }
         });
         let connection = Arc::new(Connection {
             _endpoint: endpoint,
             quic,
             sender,
+            usage,
             driver,
         });
         self.state
@@ -208,40 +234,32 @@ impl Client {
         Ok(connection)
     }
 
-    async fn request(
+    async fn send(
         &self,
         spec: &Endpoint,
         query: &Message,
         address: SocketAddr,
         attempt: &mut Attempt,
-    ) -> Result<Message> {
+    ) -> Result<(RequestGuard, Message, InFlight)> {
         let connection = self.connection(spec, address, attempt).await?;
         let mut sender = connection.sender.clone();
-        let host = if spec.host.contains(':') {
-            format!("[{}]", spec.host)
-        } else {
-            spec.host.clone()
-        };
-        let mut outbound = query.clone();
-        outbound.metadata.id = 0;
-        // RFC 8484 GET: the message travels base64url-encoded (unpadded) in the
-        // `dns` parameter, inside the encrypted stream. Production HTTP/3 POSTs
-        // were answered 405 while HTTP/2 POST worked; servers must accept GET.
-        let separator = if spec.path.contains('?') { '&' } else { '?' };
-        let request = http::Request::builder()
-            .method("GET")
-            .uri(format!(
-                "https://{host}:{}{}{separator}dns={}",
-                spec.port,
-                spec.path,
-                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(protocol::encode_upstream(&outbound, true)?)
-            ))
-            .header("accept", "application/dns-message")
-            .body(())?;
+        let in_flight = InFlight::new(&connection.usage);
+        let (request, outbound) = super::transport::doh_get(spec, query)?;
         attempt.stage(Stage::RequestWrite);
         let mut stream = RequestGuard(sender.send_request(request).await?, false);
         stream.0.finish().await?;
+        Ok((stream, outbound, in_flight))
+    }
+
+    async fn receive(
+        &self,
+        mut stream: RequestGuard,
+        // Held until the answer is read: the connection is busy, not idle.
+        _in_flight: InFlight,
+        outbound: &Message,
+        query: &Message,
+        attempt: &mut Attempt,
+    ) -> Result<Message> {
         attempt.stage(Stage::ResponseHeaders);
         let response = stream.0.recv_response().await?;
         if response.status() != http::StatusCode::OK {
@@ -287,7 +305,7 @@ impl Client {
         let mut response = protocol::decode(&bytes)?;
         attempt.stage(Stage::Validate);
         ensure!(
-            protocol::matches_response(&outbound, &response) && !response.truncation,
+            protocol::matches_response(outbound, &response) && !response.truncation,
             "invalid DoH response"
         );
         super::transport::apply_http_age(&mut response, age);

@@ -157,13 +157,19 @@ Incomplete numeric and listener edits remain raw drafts until preview/validation
 - H3 preference applies only to HTTPS endpoints, within the resolver deadline.
   Preserve verified H2 fallback, bounded cooldown and reusable connection ownership;
   cancelling a request must release its stream without breaking other requests.
-  H3 sends RFC 8484 GET; a definite 4xx (not 408/421/425/429) stops H3 for that endpoint
-  until the pool generation is replaced, while network faults keep the cooldown.
+  The H3 budget covers only obtaining a usable connection and sending the request;
+  a sent request waits for its answer until the resolver deadline, without cooldown
+  or an H2 resend. Connect, transport and protocol faults fall back to H2 and cool
+  down; a definite 4xx (not 408/414/421/425/429/431) stops H3 for that endpoint
+  until the pool generation is replaced. H2 and H3 share one RFC 8484 GET builder.
+  Because a sent H3 request has no budget, its connection uses a 1-second QUIC
+  keep-alive with a 3-second idle timeout, and its driver closes it after 10
+  seconds without requests.
 - Each HTTPS endpoint keeps one reusable H2 connection, opened serially, with a
   local stream cap under the peer's limit, a PING while busy or just used that
   retires a silently dead path, and a 10-second idle close owned by its driver.
   GOAWAY or I/O errors retire it; only a request not yet sent may move to a new
-  connection, so POST is never replayed. Attempts record new or reused connections.
+  connection, so a sent query is never replayed. Attempts record new or reused connections.
 - DoH transports normalize HTTP Age into RR TTLs before handing answers to Resolver;
   cache code has no HTTP policy. DoQ in-flight requests retain their endpoint owner
   independently of the current bootstrap-address cache entry.

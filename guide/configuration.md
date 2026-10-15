@@ -43,13 +43,19 @@ max_extra_inflight = 128
 The example addresses are documentation-only: replace them with your actual
 resolvers. Hostnames require explicit bootstrap servers; system DNS is never
 used for bootstrap. Encrypted transports validate certificate identity and never
-downgrade to plaintext. DoH uses POST over HTTP/2 by default. Enable **Prefer
+downgrade to plaintext. DoH sends RFC 8484 GET requests over HTTP/2 by default. Enable **Prefer
 HTTP/3 for HTTPS upstreams** (`prefer_h3 = true`) to try QUIC on the same host,
-port and path first, then fall back to verified HTTP/2 on failure or timeout.
-The H3 attempt has a budget of at most 250 ms (half the configured query timeout
-if shorter), inside the original query deadline. HTTP/3 connections are reused
-per endpoint; HTTP/2 currently opens a new TCP, TLS and HTTP/2 connection for each
-query. Failed H3 attempts trigger a 30-second per-endpoint cooldown before retrying H3. Normal
+port and path first, then fall back to verified HTTP/2 on failure.
+Connecting and sending over H3 has a budget of at most 250 ms (half the remaining
+query time if shorter); once the query is sent, PariNS waits for the upstream's
+answer until the query deadline and does not resend it over HTTP/2. HTTP/3 and
+HTTP/2 each reuse one connection per endpoint. Failed H3 connections, transport
+or protocol errors trigger a 30-second per-endpoint cooldown before retrying H3;
+a slow answer does not. A definite client error such as 405 stops H3 for that
+endpoint until the upstream configuration is next applied. Because queries
+travel in the URL, an unusually large query (several KB of EDNS options) can
+exceed an upstream's header limits and fail with 414 or 431; that affects only
+that query. Normal
 DNS error replies still follow the selected upstream scheduling policy. This
 does not discover alternate ports through Alt-Svc or HTTPS/SVCB records. Direct
 HTTPS-origin probing and TCP fallback follow [RFC 9114 §3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-3.1).

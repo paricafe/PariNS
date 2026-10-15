@@ -259,17 +259,10 @@ async fn doh_authenticated_and_edns_preserved() {
             .unwrap();
         let mut connection = h2::server::handshake(stream).await.unwrap();
         let (request, mut respond) = connection.accept().await.unwrap().unwrap();
-        assert_eq!(request.method(), "POST");
+        assert_eq!(request.method(), "GET");
         assert_eq!(request.uri().path(), "/dns-query");
         let handler = async move {
-            let mut body = request.into_body();
-            let mut bytes = Vec::new();
-            while let Some(data) = body.data().await {
-                let data = data.unwrap();
-                bytes.extend_from_slice(&data);
-                body.flow_control().release_capacity(data.len()).unwrap();
-            }
-            let response = verify_forwarded(Message::from_vec(&bytes).unwrap(), &query());
+            let response = verify_forwarded(doh_get_query(request.uri()), &query());
             let headers = http::Response::builder()
                 .header("content-type", "application/dns-message")
                 .body(())
@@ -695,7 +688,7 @@ async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
     count
 }
 
-/// Serves `requests` DoH POSTs, handling concurrent streams on each connection.
+/// Serves `requests` DoH GETs, handling concurrent streams on each connection.
 /// After `per_connection` requests the connection is closed gracefully (GOAWAY).
 /// With `stall_first`, the very first request is held open and never answered.
 /// Returns the number of TCP connections the client opened.
@@ -749,15 +742,12 @@ async fn answer_h2(
     request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<bytes::Bytes>,
 ) {
-    assert_eq!(request.method(), "POST");
-    let mut bytes = Vec::new();
-    let mut body = request.into_body();
-    while let Some(data) = body.data().await {
-        let data = data.unwrap();
-        bytes.extend_from_slice(&data);
-        body.flow_control().release_capacity(data.len()).unwrap();
-    }
-    let response = verify_forwarded(Message::from_vec(&bytes).unwrap(), &query());
+    assert_eq!(request.method(), "GET");
+    assert!(request.headers().get("content-type").is_none());
+    assert!(request.body().is_end_stream(), "GET has no body");
+    let received = doh_get_query(request.uri());
+    assert_eq!(received.id, 0);
+    let response = verify_forwarded(received, &query());
     respond
         .send_response(
             http::Response::builder()
@@ -1028,7 +1018,8 @@ async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
 #[tokio::test]
 async fn h3_invalid_response_falls_back_to_verified_h2() {
     use parins::upstreams::diagnostics::{Operation, Outcome, Reason};
-    for case in 1..=9 {
+    // Case 8 (a slow answer) stays on H3; see h3_slow_answer_completes_on_h3.
+    for case in (1..=9).filter(|case| *case != 8) {
         let (_dir, ca, tls) = identity(b"h3");
         let (endpoint, listener) = dual_endpoint(&tls).await;
         let address = endpoint.local_addr().unwrap();
@@ -1072,7 +1063,6 @@ async fn h3_invalid_response_falls_back_to_verified_h2() {
                 Some(Reason::ProtocolInvalid),
                 "case {case}"
             ),
-            8 => assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline)),
             _ => {}
         }
         drop(client);
@@ -1324,15 +1314,8 @@ async fn age_upstream(
                 while let Some(Ok((request, mut respond))) = connection.accept().await {
                     let count = count.clone();
                     tokio::spawn(async move {
-                        let mut bytes = Vec::new();
-                        let mut body = request.into_body();
-                        while let Some(chunk) = body.data().await {
-                            let chunk = chunk.unwrap();
-                            bytes.extend_from_slice(&chunk);
-                            body.flow_control().release_capacity(chunk.len()).unwrap();
-                        }
                         count.fetch_add(1, Ordering::SeqCst);
-                        let answer = age_answer(Message::from_vec(&bytes).unwrap(), negative);
+                        let answer = age_answer(doh_get_query(request.uri()), negative);
                         respond
                             .send_response(headers(), false)
                             .unwrap()
@@ -1862,4 +1845,154 @@ async fn h2_silently_dead_connection_is_retired_by_keepalive() {
     );
     server.abort();
     relay.abort();
+}
+
+#[tokio::test]
+async fn h3_slow_answer_completes_on_h3_without_cooldown_or_h2() {
+    use parins::upstreams::diagnostics::{Operation, Outcome, Reason, Stage};
+    let (_dir, ca, tls) = identity(b"h3");
+    let (endpoint, listener) = dual_endpoint(&tls).await;
+    let address = endpoint.local_addr().unwrap();
+    // Case 8 answers after 350 ms: beyond the 250 ms H3 budget, inside the deadline.
+    let quic_server = tokio::spawn(serve_h3(endpoint, 8));
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.prefer_h3 = true;
+    let client = client(&config).unwrap();
+    for _ in 0..2 {
+        let operation = Operation::new(true, None);
+        let started = tokio::time::Instant::now();
+        let response = client
+            .exchange_observed(&query(), started + Duration::from_secs(1), &operation)
+            .await
+            .unwrap();
+        assert_eq!(response.message.id, 123);
+        assert!(started.elapsed() >= Duration::from_millis(350));
+        let trace = operation.trace().unwrap();
+        assert_eq!(trace.attempts.len(), 1, "no H2 resend of a sent H3 query");
+        assert_eq!(trace.attempts[0].outcome, Outcome::Succeeded);
+    }
+    // An answer slower than the whole deadline ends while waiting for it,
+    // distinguishable from a connect timeout by stage, with no H2 attempt.
+    let operation = Operation::new(true, None);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    assert!(
+        timeout(
+            Duration::from_secs(2),
+            client.exchange_observed(&query(), deadline, &operation)
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 1);
+    assert_eq!(trace.attempts[0].stage, Stage::ResponseHeaders);
+    assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
+    // Every query used H3, so slow answers set no cooldown.
+    drop(client);
+    assert_eq!(
+        timeout(Duration::from_secs(2), quic_server)
+            .await
+            .unwrap()
+            .unwrap(),
+        3
+    );
+    assert!(
+        timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "H2 was never contacted"
+    );
+}
+
+#[tokio::test]
+async fn h3_silently_dead_path_closes_within_the_idle_timeout() {
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation, Reason, Stage};
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let (_dir, ca, tls) = identity(b"h3");
+    let endpoint = h3_endpoint(&tls);
+    let upstream = endpoint.local_addr().unwrap();
+    // Each task serves one QUIC connection; the second proves a reconnect.
+    let first = tokio::spawn(serve_h3(endpoint.clone(), 0));
+    let second = tokio::spawn(serve_h3(endpoint.clone(), 0));
+    // A UDP relay that can silently drop both directions, like a dead path.
+    let relay = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let relay_address = relay.local_addr().unwrap();
+    let dead = Arc::new(AtomicBool::new(false));
+    let blackhole = dead.clone();
+    let relay_task = tokio::spawn(async move {
+        let mut peers = std::collections::HashMap::<SocketAddr, Arc<UdpSocket>>::new();
+        let mut buffer = vec![0u8; 65535];
+        loop {
+            let (length, client) = relay.recv_from(&mut buffer).await.unwrap();
+            let outbound = peers.entry(client).or_insert_with(|| {
+                let socket = Arc::new(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+                socket.set_nonblocking(true).unwrap();
+                let socket =
+                    Arc::new(UdpSocket::from_std(Arc::try_unwrap(socket).unwrap()).unwrap());
+                let (back, relay, dead) = (socket.clone(), relay.clone(), blackhole.clone());
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 65535];
+                    while let Ok(length) = back.recv(&mut buffer).await {
+                        if !dead.load(SeqCst) {
+                            let _ = relay.send_to(&buffer[..length], client).await;
+                        }
+                    }
+                });
+                socket
+            });
+            if !blackhole.load(SeqCst) {
+                let _ = outbound.send_to(&buffer[..length], upstream).await;
+            }
+        }
+    });
+    let mut config = config(vec![format!("https://{relay_address}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.prefer_h3 = true;
+    let client = client(&config).unwrap();
+    let exchange = |deadline: Duration| {
+        let client = client.clone();
+        async move {
+            let operation = Operation::new(true, None);
+            let result = client
+                .exchange_observed(&query(), tokio::time::Instant::now() + deadline, &operation)
+                .await;
+            (result, operation.trace().unwrap())
+        }
+    };
+    let (result, _) = exchange(Duration::from_secs(2)).await;
+    assert_eq!(result.unwrap().message.id, 123);
+    dead.store(true, SeqCst);
+    // The request is sent on the dead connection and waits until the deadline.
+    let (result, trace) = exchange(Duration::from_millis(600)).await;
+    assert!(result.is_err());
+    assert_eq!(trace.attempts.len(), 1);
+    assert_eq!(trace.attempts[0].stage, Stage::ResponseHeaders);
+    assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
+    // Unanswered keep-alives close it within the 3-second idle timeout.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    // Restore the path: had the old connection survived, it would be reused here.
+    dead.store(false, SeqCst);
+    let (result, trace) = exchange(Duration::from_secs(2)).await;
+    assert_eq!(result.unwrap().message.id, 123);
+    assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+    assert_eq!(trace.attempts.len(), 1, "{trace:?}");
+    drop(client);
+    // The blackholed request never reached the server.
+    assert_eq!(
+        timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
+    relay_task.abort();
 }

@@ -102,9 +102,9 @@ async fn mock(http: bool) -> Mock {
                         if http {
                             let mut connection=h2::server::handshake(stream).await.unwrap();
                             while let Some(Ok((request,mut respond)))=connection.accept().await {
-                                let mut body=request.into_body();
-                                let mut bytes=Vec::new();
-                                while let Some(data)=body.data().await { let data=data.unwrap(); bytes.extend_from_slice(&data); body.flow_control().release_capacity(data.len()).unwrap(); }
+                                // RFC 8484 GET: the query is the unpadded base64url `dns` parameter.
+                                let query=request.uri().query().and_then(|q| q.split('&').find_map(|p| p.strip_prefix("dns="))).unwrap();
+                                let bytes=base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD,query).unwrap();
                                 count.fetch_add(1,Ordering::SeqCst);
                                 let answer=answer(&protocol::decode(&bytes).unwrap()).to_vec().unwrap();
                                 respond.send_response(http::Response::builder().status(200).header("content-type","application/dns-message").body(()).unwrap(),false).unwrap()

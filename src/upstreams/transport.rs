@@ -58,6 +58,34 @@ pub(super) fn apply_http_age(response: &mut Message, age: u32) {
     }
 }
 
+/// RFC 8484 GET, the method every DoH server must support: the query (ID 0)
+/// travels base64url-encoded without padding in the `dns` parameter. Production
+/// servers answered some POSTs with 405. Returns the request and the message
+/// that answers are validated against.
+pub(super) fn doh_get(spec: &Endpoint, query: &Message) -> Result<(http::Request<()>, Message)> {
+    use base64::Engine;
+    let mut outbound = query.clone();
+    outbound.metadata.id = 0;
+    let host = if spec.host.contains(':') {
+        format!("[{}]", spec.host)
+    } else {
+        spec.host.clone()
+    };
+    let separator = if spec.path.contains('?') { '&' } else { '?' };
+    let request = http::Request::builder()
+        .method("GET")
+        .uri(format!(
+            "https://{host}:{}{}{separator}dns={}",
+            spec.port,
+            spec.path,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(protocol::encode_upstream(&outbound, true)?)
+        ))
+        .header("accept", "application/dns-message")
+        .body(())?;
+    Ok((request, outbound))
+}
+
 /// One reusable HTTP/2 connection per configured HTTPS endpoint (like H3).
 /// The driver task owns the socket; dropping the last handle aborts it.
 struct H2Connection {
@@ -66,7 +94,7 @@ struct H2Connection {
     /// Local stream cap. h2 itself queues streams above the peer's SETTINGS
     /// limit; both waits stay inside the caller's deadline.
     streams: Arc<tokio::sync::Semaphore>,
-    usage: Arc<H2Usage>,
+    usage: Arc<Usage>,
     driver: tokio::task::JoinHandle<()>,
 }
 impl Drop for H2Connection {
@@ -83,28 +111,44 @@ const H2_IDLE: Duration = Duration::from_secs(10);
 const H2_PING_INTERVAL: Duration = Duration::from_secs(1);
 const H2_PING_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// In-flight requests and last use of one reusable HTTP/2 or HTTP/3 connection.
 #[derive(Default)]
-struct H2Usage {
+pub(super) struct Usage {
     active: std::sync::atomic::AtomicUsize,
     last_used: std::sync::Mutex<Option<Instant>>,
 }
 
 /// Counts one in-flight request; the idle clock starts when the last one ends.
-struct H2Stream(Arc<H2Usage>);
-impl H2Stream {
-    fn new(usage: &Arc<H2Usage>) -> Self {
+pub(super) struct InFlight(Arc<Usage>);
+impl InFlight {
+    pub(super) fn new(usage: &Arc<Usage>) -> Self {
         usage
             .active
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Self(usage.clone())
     }
 }
-impl Drop for H2Stream {
+impl Drop for InFlight {
     fn drop(&mut self) {
         *self.0.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         self.0
             .active
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Completes once no request has used the connection for `after`.
+pub(super) async fn idle(usage: Arc<Usage>, after: Duration) {
+    loop {
+        let last = *usage.last_used.lock().unwrap_or_else(|e| e.into_inner());
+        let busy = usage.active.load(std::sync::atomic::Ordering::Acquire) > 0;
+        let wait = last.map_or(after, |last| {
+            (last + after).saturating_duration_since(Instant::now())
+        });
+        if !busy && wait.is_zero() {
+            return;
+        }
+        tokio::time::sleep(if wait.is_zero() { after } else { wait }).await;
     }
 }
 
@@ -413,7 +457,7 @@ impl Client {
             .max_header_list_size(16 * 1024)
             .handshake(stream)
             .await?;
-        let usage = Arc::new(H2Usage::default());
+        let usage = Arc::new(Usage::default());
         let mut ping_pong = connection
             .ping_pong()
             .context("HTTP/2 keepalive unavailable")?;
@@ -439,22 +483,7 @@ impl Client {
                 }
             }
         };
-        let idle = {
-            let usage = usage.clone();
-            async move {
-                loop {
-                    let last = *usage.last_used.lock().unwrap_or_else(|e| e.into_inner());
-                    let busy = usage.active.load(std::sync::atomic::Ordering::Acquire) > 0;
-                    let wait = last.map_or(H2_IDLE, |last| {
-                        (last + H2_IDLE).saturating_duration_since(Instant::now())
-                    });
-                    if !busy && wait.is_zero() {
-                        return;
-                    }
-                    tokio::time::sleep(if wait.is_zero() { H2_IDLE } else { wait }).await;
-                }
-            }
-        };
+        let idle = idle(usage.clone(), H2_IDLE);
         // GOAWAY, a connection error, a missed PING or idleness ends the driver;
         // dropping the connection closes its socket without delaying shutdown.
         let driver = tokio::spawn(async move {
@@ -514,38 +543,19 @@ impl Client {
         attempt.stage(Stage::Wait);
         // Both waits count against the caller's deadline, which encloses this call.
         let _permit = connection.streams.acquire().await?;
-        let _stream = H2Stream::new(&connection.usage);
+        let _stream = InFlight::new(&connection.usage);
         let mut sender = connection
             .sender
             .clone()
             .ready()
             .await
             .map_err(|error| anyhow::Error::new(NotSent).context(error))?;
-        let host = if self.spec.host.contains(':') {
-            format!("[{}]", self.spec.host)
-        } else {
-            self.spec.host.clone()
-        };
-        let request = http::Request::builder()
-            .method("POST")
-            .uri(format!(
-                "https://{host}:{}{}",
-                self.spec.port, self.spec.path
-            ))
-            .header("content-type", "application/dns-message")
-            .header("accept", "application/dns-message")
-            .body(())?;
-        let mut outbound = query.clone();
-        outbound.metadata.id = 0;
+        let (request, outbound) = doh_get(&self.spec, query)?;
         attempt.stage(Stage::RequestWrite);
-        // Dropping these on cancellation resets only this stream (RST_STREAM).
-        let (response, mut body) = sender
-            .send_request(request, false)
+        // Dropping this on cancellation resets only this stream (RST_STREAM).
+        let (response, _) = sender
+            .send_request(request, true)
             .map_err(|error| anyhow::Error::new(NotSent).context(error))?;
-        body.send_data(
-            Bytes::from(protocol::encode_upstream(&outbound, true)?),
-            true,
-        )?;
         attempt.stage(Stage::ResponseHeaders);
         let response = response.await?;
         if response.status() != http::StatusCode::OK {

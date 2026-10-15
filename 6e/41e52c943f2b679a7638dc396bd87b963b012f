@@ -1,0 +1,41 @@
+guide/configuration.md
+  s_0cc083ef6e9aa3::t_d7bdd729da0f0c 46,48-54
+  s_0cc083ef6e9aa3::t_bcefdd5629e602 55-58
+tests/cache_encrypted.rs
+  s_0cc083ef6e9aa3::t_c6e4d3ee67e093 105-107
+src/upstreams/h3.rs
+  s_0cc083ef6e9aa3::t_1657899486623a 106-109,113-114,120,125-126,237,247,252-256,259-262,308
+  s_0cc083ef6e9aa3::t_c25042ea3679ae 16,121-124,243,251,257-258
+  s_0cc083ef6e9aa3::t_2146842484089a 55,198-202,212-216,218-221,227,246
+  s_0cc083ef6e9aa3::t_bcefdd5629e602 37-38,40
+src/upstreams/transport.rs
+  s_0cc083ef6e9aa3::t_3c58b97795fbc2 61-88,553,555-557
+  s_0cc083ef6e9aa3::t_2146842484089a 97,114,116,122-124,131,140-154,460,486,546
+AGENTS.md
+  s_0cc083ef6e9aa3::t_0d98a0418d5a39 163-164
+  s_0cc083ef6e9aa3::t_a674da6e160e68 165-167
+  s_0cc083ef6e9aa3::t_d7bdd729da0f0c 160-162,172
+tests/upstreams.rs
+  s_0cc083ef6e9aa3::t_a23483c0c9d7d0 1907-1931,1934-1981,1997-1998
+  s_0cc083ef6e9aa3::t_456d18e916e629 1932-1933,1982-1996
+  s_0cc083ef6e9aa3::t_02b074c152d6af 691,745-750
+  s_0cc083ef6e9aa3::t_bf0584c0ce282c 1880-1886,1894-1900,1902-1904
+  s_0cc083ef6e9aa3::t_c1d5d56efaf611 1852,1875-1879,1887-1892
+  s_0cc083ef6e9aa3::t_3db080b84205bf 262,265,1021-1022,1318,1849-1851,1853-1874,1893,1901,1905-1906
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6e41e52c943f2b679a7638dc396bd87b963b012f",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

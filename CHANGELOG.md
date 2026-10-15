@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.13 — 2026-10-15
+
+### Changed
+
+- DoH over HTTP/2 now also sends RFC 8484 GET requests; POST is no longer used.
+- The storage status shows when a query log entry was last dropped, next to the
+  dropped count.
+
+### Fixed
+
+- With HTTP/3 preferred, a slow upstream answer no longer counts as an HTTP/3
+  failure. The 250 ms HTTP/3 budget now covers only connecting and sending;
+  after that PariNS waits for the answer until the query deadline instead of
+  giving up, cooling HTTP/3 down for 30 seconds and asking again over HTTP/2.
+  Connection, transport and protocol failures still fall back and cool down.
+  An HTTP/3 connection now sends a keep-alive every second and closes after
+  3 seconds without a reply, so a silently dead path stops costing queries
+  quickly; an unused connection still closes after 10 seconds.
+- A 414 or 431 answer to one oversized query no longer stops HTTP/3 for the
+  whole upstream.
+- Some servers answered HTTP/2 POST queries with 405; GET avoids this.
+
 ## v0.1.12 — 2026-10-12
 
 ### Changed

@@ -270,6 +270,9 @@ pub(super) struct LogItem {
     charge: u64,
     enqueued_at: Instant,
 }
+/// Log epoch handed to producers before the stored epoch is known. Stored
+/// epochs never exceed `i64::MAX`.
+const PENDING_LOG_EPOCH: u64 = u64::MAX;
 type Reply<T> = oneshot::Sender<Result<T>>;
 #[cfg(test)]
 type Inspection = Box<dyn FnOnce(&mut rusqlite::Connection) -> Result<()> + Send>;
@@ -321,7 +324,7 @@ impl Handle {
     ) -> anyhow::Result<Self> {
         let shared = Arc::new(Shared {
             enabled: AtomicBool::new(settings.query_log.enabled),
-            log_epoch: AtomicU64::new(0),
+            log_epoch: AtomicU64::new(PENDING_LOG_EPOCH),
             limit_entries: AtomicUsize::new(settings.storage.queue_max_entries),
             limit_bytes: AtomicU64::new(settings.storage.queue_max_bytes),
             desired: Mutex::new(Desired { settings, revision }),

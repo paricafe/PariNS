@@ -483,7 +483,7 @@ meter { width: 100%; }
 .row-action:hover:not(:disabled) { background: var(--hover); }
 .row-action:disabled { color: var(--faint); cursor: not-allowed; }
 .health-badge { font-size: 13px; padding: 2px 10px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
-.storage-status[data-health="degraded"] .health-badge, .storage-status[data-health="cleaning"] .health-badge { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.storage-status[data-health="degraded"] .health-badge, .storage-status[data-health="cleaning"] .health-badge, .storage-status[data-health="checking"] .health-badge { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
 .storage-status[data-health="unavailable"] .health-badge { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .endpoint-grid { display: flex; gap: 8px; width: min(360px, 100%); }
 .endpoint-grid input { flex: 1; min-width: 0; text-align: right; }

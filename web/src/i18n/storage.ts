@@ -5,6 +5,7 @@ export const storageMessages = {
   ready: ['正常', 'Healthy'],
   starting: ['正在准备', 'Starting'],
   cleaning: ['正在清理', 'Cleaning up'],
+  checking: ['正在检查数据库', 'Checking the database'],
   degraded: ['部分写入受限', 'Some writes limited'],
   unavailable: ['不可用', 'Unavailable'],
   pending: ['正在调整容量', 'Adjusting capacity'],

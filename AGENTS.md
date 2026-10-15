@@ -140,7 +140,9 @@ until preview/validation.
 - RuntimeServices owns process metrics and the bounded SQLite worker across DNS
   generations. Logs, totals and trends have independent durable epochs; status is a
   cached observation, not a hot-path disk query. Cache/storage-only applies never
-  publish candidate certificate changes.
+  publish candidate certificate changes. The worker opens and integrity-checks an
+  existing database in the background (`checking`), so DNS startup never waits for
+  it; only shutdown interrupts the check, and writes meanwhile use the bounded queue.
 - Management uses HTTP on its one listener until inbound DoH is enabled, which
   selects the validated DoH identity for HTTPS; `[doh].http3` shares the DoH address
   and actual port over UDP. Management and DNS keep separate ports, ALPN and routes.

@@ -53,6 +53,98 @@ async fn pause(handle: &Handle) -> (mpsc::Sender<()>, tokio::task::JoinHandle<Re
     (release, task)
 }
 
+/// Waits for the asynchronous existing-database open and check to finish.
+async fn checked(runtime: &RuntimeServices) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while runtime.status().health == "checking" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+fn delay_check(dir: &Path, delay: Duration) {
+    database::CHECK_DELAYS
+        .lock()
+        .unwrap()
+        .push((dir.canonicalize().unwrap(), delay));
+}
+
+#[tokio::test]
+async fn slow_existing_check_is_not_interrupted_and_keeps_queued_writes() {
+    let dir = private_dir();
+    let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
+    runtime.storage.record_log(0, entry("fresh"));
+    runtime.flush().await.unwrap();
+    // A nonzero stored epoch proves records queued during the check adopt it.
+    runtime.clear_logs(0).await.unwrap();
+    runtime.storage.record_log(1, entry("fresh"));
+    runtime.metrics.inc(Counter::Requests);
+    runtime.flush().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+
+    delay_check(dir.path(), Duration::from_millis(5500));
+    let started = Instant::now();
+    let runtime = RuntimeServices::open(dir.path(), settings(), 2).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(runtime.status().health, "checking");
+    let Err(Error::StorageUnavailable(message)) = runtime.list_logs(ListOptions::default()).await
+    else {
+        panic!("controls are answered while checking");
+    };
+    assert!(message.contains("check in progress"), "{message}");
+    let epoch = runtime.storage.begin_log().unwrap();
+    runtime.storage.record_log(epoch, entry("upstream"));
+    runtime.metrics.inc(Counter::Requests);
+    runtime.set_dns_state(true, 1);
+    assert_eq!(runtime.status().pending_entries, 1);
+    checked(&runtime).await;
+    assert!(started.elapsed() >= Duration::from_millis(5500));
+    assert_eq!(runtime.status().health, "healthy");
+    runtime.flush().await.unwrap();
+    let page = runtime.list_logs(ListOptions::default()).await.unwrap();
+    assert_eq!(page.log_epoch, 1);
+    assert_eq!(page.total, 2);
+    assert_eq!(page.entries[0].cache, "upstream");
+    let statistics = runtime.statistics(HistoryOptions::default()).await.unwrap();
+    assert_eq!(statistics.totals.metrics.counters["requests"], 2);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_cancels_a_running_check_and_retains_the_database() {
+    let dir = private_dir();
+    let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
+    runtime.storage.record_log(0, entry("fresh"));
+    runtime.flush().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+
+    delay_check(dir.path(), Duration::from_secs(60));
+    let runtime = RuntimeServices::open(dir.path(), settings(), 2).unwrap();
+    assert_eq!(runtime.status().health, "checking");
+    let started = Instant::now();
+    assert!(runtime.shutdown().await.is_err());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let status = runtime.status();
+    assert_eq!(status.health, "unavailable");
+    assert!(status.error.unwrap().contains("cancelled by shutdown"));
+    drop(runtime);
+
+    let path = dir.path().canonicalize().unwrap();
+    database::CHECK_DELAYS
+        .lock()
+        .unwrap()
+        .retain(|(delayed, _)| *delayed != path);
+    let reopened = RuntimeServices::open(dir.path(), settings(), 3).unwrap();
+    checked(&reopened).await;
+    assert_eq!(reopened.status().health, "healthy");
+    let page = reopened.list_logs(ListOptions::default()).await.unwrap();
+    assert_eq!(page.total, 1);
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn committed_logs_totals_and_points_survive_reopen_without_double_counting() {
     let dir = private_dir();
@@ -74,6 +166,7 @@ async fn committed_logs_totals_and_points_survive_reopen_without_double_counting
     runtime.shutdown().await.unwrap();
     drop(runtime);
     let runtime = RuntimeServices::open(dir.path(), settings(), 2).unwrap();
+    checked(&runtime).await;
     assert_eq!(
         runtime
             .list_logs(ListOptions::default())
@@ -101,6 +194,7 @@ async fn committed_logs_totals_and_points_survive_reopen_without_double_counting
     );
     runtime.shutdown().await.unwrap();
     let runtime = RuntimeServices::open(dir.path(), settings(), 3).unwrap();
+    checked(&runtime).await;
     assert_eq!(
         runtime
             .statistics(HistoryOptions::default())
@@ -390,6 +484,7 @@ async fn corrupt_database_is_preserved_unavailable_and_keeps_single_writer_lock(
     file.write_all(b"not a SQLite database").unwrap();
     drop(file);
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
+    checked(&runtime).await;
     assert_eq!(runtime.status().health, "unavailable");
     assert!(matches!(
         runtime.list_logs(ListOptions::default()).await,
@@ -566,6 +661,7 @@ async fn abrupt_process_exit_keeps_committed_data_and_rolls_back_partial_transac
         String::from_utf8_lossy(&child.stderr)
     );
     let runtime = RuntimeServices::open(directory.path(), settings(), 2).unwrap();
+    checked(&runtime).await;
     let page = runtime.list_logs(ListOptions::default()).await.unwrap();
     assert_eq!(page.log_epoch, 0);
     assert_eq!(page.entries.len(), 1);
@@ -700,6 +796,7 @@ async fn unknown_format_is_not_migrated_or_erased() {
     .unwrap();
     runtime.shutdown().await.unwrap();
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
+    checked(&runtime).await;
     assert_eq!(runtime.status().health, "unavailable");
     assert!(
         runtime
@@ -736,6 +833,7 @@ async fn clock_rollback_keeps_new_log_and_minute_points_with_monotonic_retention
     .unwrap();
     drop(conn);
     let runtime = RuntimeServices::open(directory.path(), settings(), 2).unwrap();
+    checked(&runtime).await;
     assert!(runtime.status().clock_rollback);
     assert_eq!(
         runtime
@@ -822,6 +920,7 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     .unwrap();
     drop(conn);
     let runtime = RuntimeServices::open(directory.path(), settings.clone(), 2).unwrap();
+    checked(&runtime).await;
     tokio::time::timeout(Duration::from_secs(2), async {
         while runtime.status().totals_epoch == 0 {
             tokio::task::yield_now().await;
@@ -844,6 +943,7 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     }
     runtime.shutdown().await.unwrap();
     let reopened = RuntimeServices::open(directory.path(), settings, 3).unwrap();
+    checked(&reopened).await;
     reopened.metrics.inc(Counter::Requests);
     reopened.flush().await.unwrap();
     let totals = reopened
@@ -873,6 +973,7 @@ async fn shutdown_releases_directory_lock_even_with_a_duplicated_descriptor() {
     assert!(RuntimeServices::open(directory.path(), settings(), 2).is_err());
     handle.shutdown().await.unwrap();
     let reopened = RuntimeServices::open(directory.path(), settings(), 2).unwrap();
+    checked(&reopened).await;
     reopened.shutdown().await.unwrap();
     drop(duplicate);
 }

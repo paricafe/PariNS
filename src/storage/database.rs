@@ -33,6 +33,24 @@ struct Database {
     run_id: String,
     settings_pending: bool,
     reset_clock_ms: u64,
+    /// Records queued before the asynchronous open learned the stored epoch
+    /// belong to it until the first clear after open.
+    opened_log_epoch: u64,
+}
+
+/// SQLite VM operations between cancellation checks of the existing-file check.
+const CHECK_PROGRESS_OPS: std::ffi::c_int = if cfg!(test) { 1 } else { 1000 };
+#[cfg(test)]
+pub(super) static CHECK_DELAYS: Mutex<Vec<(PathBuf, Duration)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+fn test_check_delay(directory: Option<&Path>) -> Option<Duration> {
+    let directory = directory?;
+    CHECK_DELAYS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(path, _)| path == directory)
+        .map(|(_, delay)| *delay)
 }
 
 pub(super) fn run(
@@ -46,14 +64,26 @@ pub(super) fn run(
         Some((dir, lock)) => (Some(dir), Some(lock)),
         None => (None, None),
     };
-    let mut database = match Database::open(directory.clone(), &shared) {
-        Ok(database) => Some(database),
-        Err(error) => {
-            let mut s = shared.status.lock().expect("storage status");
-            s.health = "unavailable".into();
-            s.error = Some(error.to_string());
+    // An existing database is opened and checked off the worker loop, so
+    // startup never waits for it and controls are answered meanwhile.
+    let mut checking = None;
+    let mut database = match prepare(directory.as_deref()) {
+        Ok(true) => opened(&shared, Database::open(directory.clone(), true, &shared)),
+        Ok(false) => {
+            shared.status.lock().expect("storage status").health = "checking".into();
+            let (check_directory, check_shared) = (directory.clone(), shared.clone());
+            match thread::Builder::new()
+                .name("parins-storage-check".into())
+                .spawn(move || Database::open(check_directory, false, &check_shared))
+            {
+                Ok(join) => checking = Some(join),
+                Err(error) => {
+                    opened(&shared, Err(Error::StorageUnavailable(error.to_string())));
+                }
+            }
             None
         }
+        Err(error) => opened(&shared, Err(error)),
     };
     sample_filesystem(&shared, directory.as_deref());
     let _ = ready.send(());
@@ -61,11 +91,18 @@ pub(super) fn run(
     let mut last_status = Instant::now();
     let mut last_filesystem = Instant::now();
     loop {
+        if let Some(join) = checking.take_if(|join| join.is_finished()) {
+            database = finish_check(&shared, join);
+        }
         // One bounded control operation between batches prevents log floods
         // from starving management, without allowing controls to starve writes.
         if let Ok(command) = commands.try_recv() {
             if let Command::Shutdown(reply) = command {
                 shared.stop.store(true, Ordering::Release);
+                // Stop cancels an unfinished check at its next progress callback.
+                if let Some(join) = checking.take() {
+                    database = finish_check(&shared, join);
+                }
                 let result = if let Some(db) = database.as_mut() {
                     shared
                         .stats
@@ -140,7 +177,7 @@ pub(super) fn run(
                 db.update_status(&shared);
                 last_status = Instant::now();
             }
-        } else {
+        } else if checking.is_none() {
             for _ in 0..256 {
                 let Ok(item) = logs.try_recv() else {
                     break;
@@ -154,6 +191,56 @@ pub(super) fn run(
             last_filesystem = Instant::now();
         }
         thread::park_timeout(Duration::from_millis(20));
+    }
+    if let Some(join) = checking {
+        let _ = join.join();
+    }
+}
+
+/// Publishes the outcome on the worker, once it owns the database: an earlier
+/// "healthy" from the checking thread would admit commands it cannot yet serve.
+fn opened(shared: &Shared, result: Result<Database>) -> Option<Database> {
+    match result {
+        Ok(database) => {
+            let mut s = shared.status.lock().expect("storage status");
+            if matches!(s.health.as_str(), "starting" | "checking") {
+                s.health = "healthy".into();
+            }
+            Some(database)
+        }
+        Err(error) => {
+            let mut s = shared.status.lock().expect("storage status");
+            s.health = "unavailable".into();
+            s.error = Some(error.to_string());
+            None
+        }
+    }
+}
+fn finish_check(shared: &Shared, join: thread::JoinHandle<Result<Database>>) -> Option<Database> {
+    let result = join.join().unwrap_or_else(|_| {
+        Err(Error::StorageUnavailable(
+            "runtime database check panicked".into(),
+        ))
+    });
+    opened(shared, result)
+}
+/// Creates a missing database file; returns whether it is new and empty.
+fn prepare(directory: Option<&Path>) -> Result<bool> {
+    let Some(dir) = directory else {
+        return Ok(true);
+    };
+    let path = dir.join("observability.sqlite3");
+    match crate::manage::store::create_private(&path) {
+        Ok(file) => {
+            file.sync_all()
+                .map_err(|e| Error::StorageUnavailable(e.to_string()))?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(std::fs::metadata(&path)
+            .map_err(|e| Error::StorageUnavailable(e.to_string()))?
+            .len()
+            == 0),
+        Err(e) => Err(Error::StorageUnavailable(e.to_string())),
     }
 }
 
@@ -188,15 +275,16 @@ fn record_cleanup(conn: &Connection, reason: CleanupReason, removed: u64, at: u6
 }
 
 fn reject(command: Command, shared: &Shared) {
-    let error = Error::StorageUnavailable(
-        shared
-            .status
-            .lock()
-            .expect("storage status")
-            .error
-            .clone()
-            .unwrap_or_else(|| "database unavailable".into()),
-    );
+    let error = {
+        let status = shared.status.lock().expect("storage status");
+        Error::StorageUnavailable(status.error.clone().unwrap_or_else(|| {
+            if status.health == "checking" {
+                "runtime database check in progress".into()
+            } else {
+                "database unavailable".into()
+            }
+        }))
+    };
     match command {
         Command::List(_, r) => {
             let _ = r.send(Err(error));
@@ -241,26 +329,10 @@ fn check_epoch(conn: &Connection, name: &str, expected: u64) -> Result<u64> {
 }
 
 impl Database {
-    fn open(directory: Option<PathBuf>, shared: &Shared) -> Result<Self> {
-        let (conn, directory, fresh) = if let Some(dir) = directory {
-            let path = dir.join("observability.sqlite3");
-            let fresh = match crate::manage::store::create_private(&path) {
-                Ok(file) => {
-                    file.sync_all()
-                        .map_err(|e| Error::StorageUnavailable(e.to_string()))?;
-                    true
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    std::fs::metadata(&path)
-                        .map_err(|e| Error::StorageUnavailable(e.to_string()))?
-                        .len()
-                        == 0
-                }
-                Err(e) => return Err(Error::StorageUnavailable(e.to_string())),
-            };
-            (Connection::open(&path)?, Some(dir), fresh)
-        } else {
-            (Connection::open_in_memory()?, None, true)
+    fn open(directory: Option<PathBuf>, fresh: bool, shared: &Arc<Shared>) -> Result<Self> {
+        let conn = match &directory {
+            Some(dir) => Connection::open(dir.join("observability.sqlite3"))?,
+            None => Connection::open_in_memory()?,
         };
         conn.busy_timeout(Duration::from_millis(250))?;
         use rusqlite::limits::Limit;
@@ -270,19 +342,43 @@ impl Database {
         conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 64)?;
         conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
         if !fresh {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            conn.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
-            if epoch(&conn, "format")? != u64::from(DATABASE_FORMAT) {
+            // No deadline: a large file on a cold page cache may take long.
+            // Only process shutdown interrupts the check.
+            let cancel = shared.clone();
+            #[cfg(test)]
+            let hold = test_check_delay(directory.as_deref()).map(|d| Instant::now() + d);
+            conn.progress_handler(
+                CHECK_PROGRESS_OPS,
+                Some(move || {
+                    #[cfg(test)]
+                    while hold.is_some_and(|until| Instant::now() < until)
+                        && !cancel.stop.load(Ordering::Acquire)
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    cancel.stop.load(Ordering::Acquire)
+                }),
+            )?;
+            let checked = (|| {
+                if epoch(&conn, "format")? != u64::from(DATABASE_FORMAT) {
+                    return Err(Error::StorageUnavailable(
+                        "unsupported runtime database format; file retained".into(),
+                    ));
+                }
+                let check: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+                if check != "ok" {
+                    return Err(Error::StorageUnavailable(
+                        "runtime database integrity check failed; file retained".into(),
+                    ));
+                }
+                Ok(())
+            })();
+            if checked.is_err() && shared.stop.load(Ordering::Acquire) {
                 return Err(Error::StorageUnavailable(
-                    "unsupported runtime database format; file retained".into(),
+                    "runtime database check cancelled by shutdown".into(),
                 ));
             }
-            let check: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
-            if check != "ok" {
-                return Err(Error::StorageUnavailable(
-                    "runtime database integrity check failed; file retained".into(),
-                ));
-            }
+            checked?;
             conn.progress_handler(0, None::<fn() -> bool>)?;
         }
         conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-2048;")?;
@@ -306,6 +402,7 @@ impl Database {
             run_id: String::new(),
             settings_pending: true,
             reset_clock_ms: 0,
+            opened_log_epoch: 0,
         };
         drop(desired);
         let lower = epoch(&database.conn, "clock_lower_ms")?;
@@ -315,11 +412,18 @@ impl Database {
         status.log_epoch = epoch(&database.conn, "log_epoch")?;
         status.totals_epoch = epoch(&database.conn, "totals_epoch")?;
         status.history_epoch = epoch(&database.conn, "history_epoch")?;
-        status.health = "healthy".into();
+        database.opened_log_epoch = status.log_epoch;
         shared.log_epoch.store(status.log_epoch, Ordering::Release);
         let mut owner = shared.stats.lock().expect("statistics owner");
         owner.totals_epoch = status.totals_epoch;
         owner.history_epoch = status.history_epoch;
+        // Points sampled while checking belong to the stored epochs. A
+        // checkpoint taken before the stored base was loaded must not persist.
+        for point in &mut owner.points {
+            point.history_epoch = status.history_epoch;
+            point.totals_epoch = status.totals_epoch;
+        }
+        owner.latest = None;
         let stored: Option<(Vec<u8>, u64)> = database
             .conn
             .query_row(
@@ -510,14 +614,16 @@ impl Database {
         let log_epoch = epoch(&tx, "log_epoch")?;
         let history_epoch = epoch(&tx, "history_epoch")?;
         for item in batch {
-            if item.epoch != log_epoch {
+            if item.epoch != log_epoch
+                && !(item.epoch == PENDING_LOG_EPOCH && log_epoch == self.opened_log_epoch)
+            {
                 continue;
             }
             let e: Entry = serde_json::from_slice(&item.payload)?;
             let retention_ms = retention_now
                 .saturating_sub(item.enqueued_at.elapsed().as_millis().min(u64::MAX as u128) as u64)
                 .saturating_sub(e.duration_ms.max(0.0) as u64);
-            tx.execute("INSERT INTO query_log(epoch,time_ms,retention_ms,name,client,qtype,upstream,status,cache,charge,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![item.epoch,e.time_ms,retention_ms,e.name,e.client,e.qtype,e.upstream,e.status,e.cache,item.payload.len(),item.payload])?;
+            tx.execute("INSERT INTO query_log(epoch,time_ms,retention_ms,name,client,qtype,upstream,status,cache,charge,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![log_epoch,e.time_ms,retention_ms,e.name,e.client,e.qtype,e.upstream,e.status,e.cache,item.payload.len(),item.payload])?;
         }
         if let Some(cp) = latest
             && cp.run_id == self.run_id

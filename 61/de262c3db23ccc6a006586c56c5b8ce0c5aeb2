@@ -1,0 +1,39 @@
+src/storage/tests.rs
+  s_0cc083ef6e9aa3::t_a940e52b46ebc1 644,649
+  s_0cc083ef6e9aa3::t_f2dc66c0d160ec 265-266,274-275
+web/src/pages/observability/__tests__/diagnostics.test.tsx
+  s_0cc083ef6e9aa3::t_bcefdd5629e602 29,37
+  s_0cc083ef6e9aa3::t_7b12ce074e28ae 26,28,36
+src/storage/observation.rs
+  s_0cc083ef6e9aa3::t_c6aebdb68f0728 85-91
+  s_0cc083ef6e9aa3::t_4dc16beb58272e 80-81,84,92-95
+src/storage/database.rs
+  s_0cc083ef6e9aa3::t_4dc16beb58272e 149
+  s_0cc083ef6e9aa3::t_c6aebdb68f0728 484
+web/src/pages/observability/__tests__/fixtures.ts
+  s_0cc083ef6e9aa3::t_7b12ce074e28ae 5
+web/src/i18n/storage.ts
+  s_0cc083ef6e9aa3::t_bcefdd5629e602 75
+src/storage/mod.rs
+  s_0cc083ef6e9aa3::t_4dc16beb58272e 197,228,406,412,416,425,436,452,522
+web/src/pages/observability/StorageStatusPanel.tsx
+  s_0cc083ef6e9aa3::t_1b5ad7bb4b5d1d 19-23,45
+web/src/pages/observability/storage.ts
+  s_0cc083ef6e9aa3::t_1b5ad7bb4b5d1d 24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "61de262c3db23ccc6a006586c56c5b8ce0c5aeb2",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

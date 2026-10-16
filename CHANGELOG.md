@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.17 — 2026-10-16
+
+### Changed
+
+- The query log page can refresh itself every 1, 3, 5 or 10 seconds over a new
+  authenticated WebSocket, `/api/query-log/live`, instead of only manually. New
+  records arrive in batches once storage commits them (about
+  `storage.flush_interval_ms`, 1 s by default). Each browser session may hold 2
+  live connections and the process 16; they close on logout, credential change,
+  a management address change, 30 s without client messages, or shutdown.
+- Query log: new records are inserted in batches and pause while you read a row,
+  page back or filter (a pill shows how many are waiting); details now open inline
+  under the hovered or focused row instead of in a side sheet, with a plain-language
+  note beside each raw cache scope code.
+- The overview trend chart shows each point's values on hover, tap or arrow keys,
+  and marks periods when the service was not running.
+- One theme button cycles system, light and dark. The background is a neutral
+  solid color by default, with color presets, patterns and an optional custom
+  image that is resized in the browser and kept only there (IndexedDB), with an
+  overlay strength setting. Glass panels are clearer, brighter on HDR screens and
+  have larger, continuous corners. The browser saves only language and appearance.
+
 ## v0.1.16 — 2026-10-16
 
 ### Changed

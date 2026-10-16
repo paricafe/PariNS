@@ -1,0 +1,19 @@
+web/src/appearance/appearance.test.tsx
+  s_0cc083ef6e9aa3::t_d7ba09326458f5 163-165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "30049dca30d99357d008257302c848efc112886d",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -160,13 +160,24 @@ async fn run() -> Result<()> {
     let report =
         parins::runtime_lifecycle::restore(snapshot, resolver.cache(), fingerprint).await?;
     eprintln!("PariNS cache restore: {}", serde_json::to_string(&report)?);
-    services.set_dns_state(true, 1);
-    eprintln!("PariNS listening on {} (UDP/TCP)", server.local_addr()?);
-    for (protocol, address) in server.encrypted_addrs()? {
-        eprintln!("PariNS listening on {address} ({protocol})");
+    // The server publishes ready/degraded health (generation 1) as it runs.
+    // Listeners that could not bind were already logged and are being retried.
+    if server.serving(parins::server::ListenerKind::Dns) {
+        eprintln!("PariNS listening on {} (UDP/TCP)", server.local_addr()?);
     }
-    if let Some(address) = server.admin_addr()? {
-        eprintln!("PariNS local metrics on {address}");
+    for listener in server.listeners().snapshot() {
+        use parins::server::{ListenerKind, ListenerState};
+        let protocol = match listener.kind {
+            ListenerKind::Dns => continue,
+            ListenerKind::Admin => "local metrics",
+            ListenerKind::Dot => "dot",
+            ListenerKind::Doh => "doh",
+            ListenerKind::Doh3 => "doh3",
+            ListenerKind::Doq => "doq",
+        };
+        if listener.state == ListenerState::Running {
+            eprintln!("PariNS listening on {} ({protocol})", listener.address);
+        }
     }
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

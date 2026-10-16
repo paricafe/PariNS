@@ -419,9 +419,13 @@ pub async fn serve(
     .await
     .is_err()
     {
-        ingress
-            .resolver
-            .force_shutdown(crate::resolver::ForcedShutdown::DotDrain);
+        // Only a generation stop forces it (and its upstream pool) down; after an
+        // error exit the supervisor rebinds this listener while others serve.
+        if *ingress.stop.borrow() {
+            ingress
+                .resolver
+                .force_shutdown(crate::resolver::ForcedShutdown::DotDrain);
+        }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
     }

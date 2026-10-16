@@ -604,7 +604,7 @@ async fn successful_login_creates_an_independent_session_and_failed_login_preser
 }
 
 #[tokio::test]
-async fn updates_only_validate_and_apply_keep_dns_stopped() {
+async fn updates_only_validate_and_apply_keep_the_running_generation() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
     let server = Management::start(&directory).await;
@@ -616,7 +616,7 @@ async fn updates_only_validate_and_apply_keep_dns_stopped() {
     server.setup(&directory, &source).await;
     server.finish().await;
 
-    // A listener conflict leaves management running while DNS is stopped.
+    // A listener conflict leaves that listener retrying in a running generation.
     let occupied = TcpListener::bind(dns_address).await.unwrap();
     let server = Management::start(&directory).await;
     let login = server
@@ -633,8 +633,8 @@ async fn updates_only_validate_and_apply_keep_dns_stopped() {
         .request("GET", "/api/status", Some(&auth), None)
         .await
         .expect(200);
-    assert_eq!(before["running"], false);
-    // Once released, an incorrect full apply would be able to start DNS.
+    assert_eq!(before["dns_health"]["state"], "degraded");
+    // Once released, an incorrect full apply would restart the generation.
     drop(occupied);
     let next = format!("{source}\n[updates]\nauto_check=false\ncheck_interval_hours=168\n");
     for (method, path, body) in [
@@ -655,14 +655,14 @@ async fn updates_only_validate_and_apply_keep_dns_stopped() {
         .request("GET", "/api/status", Some(&auth), None)
         .await
         .expect(200);
-    assert_eq!(after["running"], false);
     assert_eq!(after["generation"], before["generation"]);
-    assert_eq!(after["dns_health"], before["dns_health"]);
+    assert_eq!(
+        after["dns_health"]["generation"],
+        before["dns_health"]["generation"]
+    );
     assert_eq!(after["certificates"], before["certificates"]);
     assert_eq!(after["revision"], 2);
-    let available = TcpListener::bind(dns_address).await.unwrap();
     server.finish().await;
-    drop(available);
 }
 
 #[tokio::test]

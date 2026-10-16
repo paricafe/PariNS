@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "../../session/client";
 import { formatDate, formatNumber, translate, type Language } from "../../i18n";
 import { TrendChart } from "./TrendChart";
-import { averageLatencyMillis, cacheHitRate, coalescedShare, histogramRows, type StatsView, type StatusView } from "./metrics";
+import { averageLatencyMillis, cacheHitRate, coalescedShare, histogramRows, type ListenerStatus, type StatsView, type StatusView } from "./metrics";
 import "./observability.css";
 import { Tabs } from '../../components/beui';
 import { Odometer } from '../../components/Odometer';
@@ -163,12 +163,14 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
   const health = status?.dns_health.state;
   const [headline, tone]: [string, Tone] = status === null ? [t('shell.headlineLoading'), 'idle']
     : health === 'failed' ? [t('shell.headlineFailed'), 'bad']
+      : health === 'degraded' ? [t('shell.headlineDegraded'), 'warn']
       : health === 'unconfigured' ? [t('shell.headlineUnconfigured'), 'idle']
         : !running || health === 'stopped' ? [t('shell.headlineStopped'), 'idle']
           : health === 'starting' || !status.dns_health.ready ? [t('shell.headlineStarting'), 'warn']
             : troubled ? [t('shell.headlineUpstream'), 'warn'] : troubled === null ? [t('shell.headlineRunning'), 'ok'] : [t('shell.headlineHealthy'), 'ok'];
   const summary = status === null ? null
     : health === 'failed' ? t('shell.summaryFailed')
+      : health === 'degraded' ? t('shell.summaryDegraded')
       : !running || health === 'stopped' || health === 'unconfigured' ? t('shell.summaryStopped')
         : health === 'starting' || !status.dns_health.ready ? t('shell.summaryStarting')
           : troubled ? t('shell.summaryUpstream')
@@ -205,7 +207,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
       <span className="pulse" aria-hidden="true" />
       <div className="status-strip-main">
         {status === null ? <strong>{t("ui.loadingStatus")}</strong> : !(running && status.dns_health.ready) && <strong>{t(`reliability.${health === 'failed' ? status.dns_health.code === 'startup_failed' ? 'startupFailed' : 'runtimeFailed' : health}`)}</strong>}
-        <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
+        <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen && !status.listeners?.some((l) => l.kind === 'dns' && l.state === 'retrying') ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
       </div>
       <dl className="status-strip-facts">
         <div><dt>{t('shell.stripInflight')}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>
@@ -214,6 +216,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
       </dl>
     </section>
     {statusFailed && <p role="alert" className="notice error">{t("app.statusUnavailable")}{updated !== null && <> {t('shell.lastUpdated', { time: formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</>}</p>}
+    {status?.listeners?.some((l) => l.state === 'retrying') && <ListenerFailures listeners={status.listeners.filter((l) => l.state === 'retrying')} t={t} />}
     {status?.last_error && (status.dns_health.code === 'startup_failed'
       ? <StartupFailure error={status.last_error} t={t} />
       : <p role="alert" className="notice error">{status.last_error}</p>)}
@@ -280,7 +283,23 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
   </div>;
 }
 
-/** A saved configuration that cannot start (for example a port held by another program); Rust retries it automatically. */
+const LISTENER_LABELS: Record<ListenerStatus['kind'], string> = { dns: 'DNS', admin: 'admin', dot: 'DoT', doh: 'DoH', doh3: 'DoH HTTP/3', doq: 'DoQ' };
+
+/** Listeners of a running generation that are being rebound on their own; the rest keep serving. */
+function ListenerFailures({ listeners, t }: { listeners: ListenerStatus[]; t: (key: string, params?: Record<string, string | number>) => string }) {
+  return <div role="alert" className="notice error startup-failure">
+    <strong>{t('shell.listenerDownTitle')}</strong>
+    {listeners.map((listener) => {
+      const protocol = LISTENER_LABELS[listener.kind];
+      const conflict = listener.error !== null && /address (?:already )?in use/i.test(listener.error);
+      return <p key={`${listener.kind}-${listener.address}`}>{conflict ? t('shell.startupPortInUse', { protocol, address: listener.address }) : t('shell.listenerDown', { protocol, address: listener.address })}
+        {listener.error && <><br /><code>{listener.error}</code></>}</p>;
+    })}
+    <p>{t('shell.listenerRetrying')}</p>
+  </div>;
+}
+
+/** A saved configuration that cannot start (for example unreadable certificate material); Rust retries it automatically. */
 function StartupFailure({ error, t }: { error: string; t: (key: string, params?: Record<string, string | number>) => string }) {
   const conflict = /bind (.+?) (\S+:\d+): address (?:already )?in use/i.exec(error);
   return <div role="alert" className="notice error startup-failure">

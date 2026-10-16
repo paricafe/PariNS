@@ -1,6 +1,7 @@
-//! Restarts a saved DNS configuration whose generation failed to start, such as
-//! a listener port held by another program after a reboot. One task belongs to
-//! the management process; Manager decides when a retry is due (bounded backoff)
+//! Restarts a saved DNS configuration whose generation failed to start for a
+//! reason other than a listener bind (Server rebinds those listeners itself), such
+//! as unreadable certificate material. One task belongs to the management
+//! process; Manager decides when a retry is due (bounded backoff)
 //! and the task stops with management shutdown.
 use super::Shared;
 use std::{sync::Arc, time::Duration};
@@ -47,16 +48,14 @@ mod tests {
     use tokio::{sync::Semaphore, task::JoinSet};
 
     #[tokio::test]
-    async fn retries_after_the_conflict_ends_yields_to_mutations_and_stops_on_shutdown() {
+    async fn retries_a_failed_start_yields_to_mutations_ignores_freezes_and_stops_on_shutdown() {
         let temp = tempfile::tempdir().unwrap();
         let state = Store::open(&temp.path().join("state")).unwrap();
-        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = holder.local_addr().unwrap().port();
         state
             .save(&store::Stored {
                 username: "admin".into(),
                 password_hash: store::hash_password("local-test-password").unwrap(),
-                toml: format!("listen='127.0.0.1:{port}'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=100\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n"),
+                toml: "listen='127.0.0.1:0'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=100\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n".into(),
                 previous: None,
                 revision: 1,
             })
@@ -66,8 +65,15 @@ mod tests {
             snapshot: Arc::new(Snapshot::initial()),
             sessions: Vec::new(),
         }));
-        let manager = Manager::open(state, address, active.clone()).await.unwrap();
+        let mut manager = Manager::open(state, address, active.clone()).await.unwrap();
+        manager.simulate_startup_failure().await;
         assert!(manager.resolver().is_none());
+        // An update freeze (e.g. a freshly updated process awaiting launch
+        // readiness) must not block restarting the saved revision.
+        manager
+            .updates
+            .frozen
+            .store(true, std::sync::atomic::Ordering::Release);
         let shared = Arc::new(Shared {
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
             manager: Arc::new(tokio::sync::Mutex::new(manager)),
@@ -76,21 +82,11 @@ mod tests {
             mutation: Arc::new(Semaphore::new(1)),
             address,
         });
-        // An update freeze (e.g. a freshly updated process awaiting launch
-        // readiness) must not block restarting the saved revision.
-        shared
-            .manager
-            .lock()
-            .await
-            .updates
-            .frozen
-            .store(true, std::sync::atomic::Ordering::Release);
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(run(shared.clone(), stopping));
         // A configuration change holds the permit past the first due time:
         // the retry waits for it instead of starting DNS underneath it.
         let change = shared.mutation.clone().acquire_owned().await.unwrap();
-        drop(holder);
         tokio::time::sleep(Duration::from_millis(6000)).await;
         assert!(shared.manager.lock().await.resolver().is_none());
         drop(change);
@@ -100,7 +96,7 @@ mod tests {
             }
         })
         .await;
-        assert!(started.is_ok(), "DNS restarted once the port was free");
+        assert!(started.is_ok(), "DNS restarted once the permit was free");
         stop.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await

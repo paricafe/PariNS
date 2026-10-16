@@ -100,9 +100,10 @@ until preview/validation.
   reconstruct responses outside shard locks. Bound queues,
   cache state, background work and total shutdown. Every spawned task has an owner
   and explicit cancellation; refresh and foreground coalescing never cross generations.
-- Shutdown: only accepted request streams can force a stop; peer close notification
-  uses at most half the grace; a forced stop records its first bounded cause and logs
-  it when no clean snapshot is published. Details: `src/quic.rs`.
+- Shutdown: only streams with a complete query can force a stop; others are
+  cancelled at once. Peer close notification uses at most half the grace; a forced
+  stop records its first bounded cause and logs it when no clean snapshot is
+  published. Details: `src/quic.rs`, `src/doh.rs`.
 - UDP replies use the datagram's local destination and interface (packet info on
   Linux/macOS); other platforms reject wildcard binds. Resolver and cache never
   select addresses.
@@ -118,11 +119,17 @@ until preview/validation.
 - DNS terminal health is published once per generation to readiness and storage
   sampling. Attempt diagnostics use bounded slots and finite typed dimensions;
   cancellation/shutdown are not upstream faults. Management API 200 is not DNS readiness.
-- A managed generation starts all listeners or none. A failed start is logged with
-  the failing listener and retried by one process-owned task with bounded backoff
-  (5 s doubling to 60 s, rate-limited logs) that yields to mutations, restarts only
-  the saved revision (also during an update freeze) and stops with management shutdown. Listener exits after start are not
-  restarted automatically. Details: `src/manage/dns_retry.rs`.
+- Server supervises each listener separately in both modes: a bind failure or an
+  adapter exit rebinds only that listener (5 s doubling to 60 s, rate-limited logs)
+  while the others, the cache and the upstream pool keep serving. Health is ready
+  only with every listener up, otherwise degraded and not ready; an adapter's drain
+  forces a stop (and the upstream pool down) only when the generation is stopping.
+  Supervisors belong to the generation and stop with it. An applied configuration
+  must bind every listener before it is persisted; only (re)starts of the saved
+  configuration run degraded. A generation that fails
+  to start for another reason is retried by one process-owned managed task that
+  yields to mutations and restarts only the saved revision. Details:
+  `src/server.rs`, `src/manage/dns_retry.rs`.
 
 ## Management, runtime and security
 

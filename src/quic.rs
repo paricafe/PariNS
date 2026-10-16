@@ -4,11 +4,15 @@
 //! (see `quic::lifecycle`). Server retains this cleanup across adapter cancellation,
 //! and a completed shutdown permits immediate rebinding of the same address.
 //!
-//! Shutdown: only request streams already accepted on a connection can force a stop;
-//! unfinished handshakes stop at once. Peer close notification (QUIC close, like the
+//! Shutdown: only request streams with a complete query (a DoQ stream whose FIN
+//! arrived, an HTTP/3 request whose body ended) can force a stop. Unfinished
+//! handshakes and streams still receiving their query are cancelled at once and
+//! recorded as `stream_shutdown`. Peer close notification (QUIC close, like the
 //! HTTP/2 GOAWAY acknowledgement in `doh`) uses at most half the shutdown grace, then
 //! the connection is dropped. Any force records its first bounded cause, and a
-//! terminal stop that cannot publish a clean cache snapshot logs that cause.
+//! terminal stop that cannot publish a clean cache snapshot logs that cause. An
+//! error exit outside a stop drains within the same grace without forcing, so the
+//! shared upstream pool keeps serving while the listener is restarted.
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Result, ensure};
@@ -19,8 +23,10 @@ use tokio::{
     time::{Instant, timeout, timeout_at},
 };
 
-use crate::ingress::Ingress;
+use crate::{ingress::Ingress, resolver::ForcedShutdown};
 pub mod diagnostics;
+/// RFC 9250 transaction cancellation code.
+const DOQ_REQUEST_CANCELLED: VarInt = VarInt::from_u32(3);
 mod lifecycle;
 use diagnostics::{Event, Guard};
 pub(crate) use lifecycle::ListenerRuntime;
@@ -153,22 +159,13 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
     // drain took longer): an unresponsive peer must not hold the listener until
     // the server-wide grace forces the stop.
     let close_by = Instant::now() + ingress.shutdown_grace / 2;
-    drain(&mut connections, ingress.shutdown_grace, &ingress.resolver).await;
+    ingress
+        .drain(&mut connections, ForcedShutdown::QuicDrain)
+        .await;
     endpoint.close(VarInt::from_u32(0), b"shutdown");
     // Owned drivers are joined afterwards by the endpoint owner.
     let _ = timeout_at(close_by, endpoint.wait_idle()).await;
     Ok(())
-}
-
-async fn drain(tasks: &mut JoinSet<()>, grace: Duration, resolver: &crate::resolver::Resolver) {
-    if timeout(grace, async { while tasks.join_next().await.is_some() {} })
-        .await
-        .is_err()
-    {
-        resolver.force_shutdown(crate::resolver::ForcedShutdown::QuicDrain);
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-    }
 }
 
 async fn doq_connection(connection: Connection, ingress: Ingress) {
@@ -200,7 +197,7 @@ async fn doq_connection(connection: Connection, ingress: Ingress) {
             }
         }
     }
-    drain(&mut streams, ingress.shutdown_grace, &ingress.resolver).await;
+    ingress.drain(&mut streams, ForcedShutdown::QuicDrain).await;
     connection.close(VarInt::from_u32(0), b"closed");
 }
 
@@ -213,7 +210,20 @@ async fn doq_request(
     stage: &mut u8,
 ) -> Result<()> {
     // read_to_end waits for FIN and rejects a second frame or oversized body.
-    let frame = match recv.read_to_end(65537).await {
+    // Biased: a frame whose FIN arrived before the stop is still answered.
+    let read = tokio::select! {
+        biased;
+        read = recv.read_to_end(65537) => read,
+        () = ingress.stopped() => {
+            // No resolver work yet. Reset explicitly: dropping a SendStream would
+            // finish it, which a client reads as an empty response. The guard
+            // records StreamShutdown on drop.
+            let _ = recv.stop(DOQ_REQUEST_CANCELLED);
+            let _ = send.reset(DOQ_REQUEST_CANCELLED);
+            return Ok(());
+        }
+    };
+    let frame = match read {
         Ok(frame) => frame,
         Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(_))) => {
             guard.finish(Event::StreamPeerCancelled);
@@ -292,15 +302,14 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
                 let connection = connection.clone();
                 streams.spawn(async move {
                     let mut guard = Guard::new(context.resolver.metrics().clone(),Protocol::H3,context.stop.clone(),true);
-                    match timeout(context.io_timeout, async {
-                        let (request, stream) = request.resolve_request().await?;
-                        h3_request(request, stream, &context, peer, &connection, local_port).await
-                    }).await {
-                        Ok(Ok(Some(status))) => {
+                    match timeout(context.io_timeout, h3_request(request, &context, peer, &connection, local_port)).await {
+                        Ok(Ok(H3Outcome::Status(status))) => {
                             guard.event(match status { 200..=299=>Event::HttpResponse2xx,400..=499=>Event::HttpResponse4xx,_=>Event::HttpResponse5xx });
                             guard.finish(Event::StreamResponseHandedToTransport);
                         }
-                        Ok(Ok(None)) => guard.finish(Event::StreamConnectionLost),
+                        Ok(Ok(H3Outcome::ConnectionLost)) => guard.finish(Event::StreamConnectionLost),
+                        // The guard records StreamShutdown on drop.
+                        Ok(Ok(H3Outcome::Shutdown)) => {},
                         Ok(Err(_)) => guard.finish(Event::HttpRequestFailed),
                         Err(_) => guard.finish(Event::HttpRequestDeadline),
                     }
@@ -308,37 +317,56 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
             }
         }
     }
-    drain(&mut streams, ingress.shutdown_grace, &ingress.resolver).await;
+    ingress.drain(&mut streams, ForcedShutdown::QuicDrain).await;
     connection.close(VarInt::from_u32(0x100), b"closed");
 }
 
+enum H3Outcome {
+    Status(u16),
+    ConnectionLost,
+    /// Cancelled at shutdown before the request (headers and body) was complete.
+    Shutdown,
+}
+
+type H3Stream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
 async fn h3_request(
-    request: http::Request<()>,
-    mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    resolver: h3::server::RequestResolver<h3_quinn::Connection, Bytes>,
     ingress: &Ingress,
     peer: std::net::IpAddr,
     connection: &Connection,
     local_port: u16,
-) -> Result<Option<u16>> {
-    let mut body = Vec::new();
-    while let Some(mut data) = stream.recv_data().await? {
-        if body.len() + data.remaining() > 65535 {
-            stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
-            stream
-                .send_response(
-                    http::Response::builder()
-                        .status(413)
-                        .header("cache-control", "no-store")
-                        .header("alt-svc", crate::doh::alt_svc(Some(local_port)))
-                        .body(())?,
-                )
-                .await?;
-            stream.finish().await?;
-            return Ok(Some(413));
+) -> Result<H3Outcome> {
+    // Biased: a request received in full before the stop is still answered.
+    // Dropping an unresolved request leaves its stream to the connection close.
+    let (request, mut stream) = tokio::select! {
+        biased;
+        resolved = resolver.resolve_request() => resolved?,
+        () = ingress.stopped() => return Ok(H3Outcome::Shutdown),
+    };
+    let body = tokio::select! {
+        biased;
+        body = h3_body(&mut stream) => body?,
+        () = ingress.stopped() => {
+            // No resolver work yet: the peer may retry this request elsewhere.
+            stream.stop_sending(h3::error::Code::H3_REQUEST_REJECTED);
+            stream.stop_stream(h3::error::Code::H3_REQUEST_REJECTED);
+            return Ok(H3Outcome::Shutdown);
         }
-        let count = data.remaining();
-        body.extend_from_slice(&data.copy_to_bytes(count));
-    }
+    };
+    let Some(body) = body else {
+        stream
+            .send_response(
+                http::Response::builder()
+                    .status(413)
+                    .header("cache-control", "no-store")
+                    .header("alt-svc", crate::doh::alt_svc(Some(local_port)))
+                    .body(())?,
+            )
+            .await?;
+        stream.finish().await?;
+        return Ok(H3Outcome::Status(413));
+    };
     let parsed = crate::doh::request_bytes(
         request.method().as_str(),
         request.uri().path_and_query().map_or("/", |p| p.as_str()),
@@ -354,7 +382,7 @@ async fn h3_request(
         // stream is observed at response write or the enclosing I/O deadline.
         Ok(query) => match tokio::select! {
             response = ingress.handle_with_transport(&query, peer, "doh3") => response,
-            _ = connection.closed() => return Ok(None),
+            _ = connection.closed() => return Ok(H3Outcome::ConnectionLost),
         } {
             Some(response) => (200, response),
             None => (400, Vec::new()),
@@ -373,5 +401,19 @@ async fn h3_request(
         stream.send_data(Bytes::from(response)).await?;
     }
     stream.finish().await?;
-    Ok(Some(status))
+    Ok(H3Outcome::Status(status))
+}
+
+/// Reads the body until FIN; `None` stops reading at the DNS message size limit.
+async fn h3_body(stream: &mut H3Stream) -> Result<Option<Vec<u8>>> {
+    let mut body = Vec::new();
+    while let Some(mut data) = stream.recv_data().await? {
+        if body.len() + data.remaining() > 65535 {
+            stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+            return Ok(None);
+        }
+        let count = data.remaining();
+        body.extend_from_slice(&data.copy_to_bytes(count));
+    }
+    Ok(Some(body))
 }

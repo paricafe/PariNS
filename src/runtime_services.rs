@@ -65,7 +65,9 @@ impl RuntimeServices {
         // short, IO-free lock prevents an accepted older publisher from updating
         // the sampler after a newer generation has already published its health.
         let _transition = self.dns_transition.lock().expect("DNS health transition");
-        let running = matches!(state, crate::runtime_health::State::Running);
+        use crate::runtime_health::State;
+        // Statistics count a degraded generation as running: its other listeners serve.
+        let running = matches!(state, State::Running | State::Degraded);
         if self.health.publish(state, generation, code) {
             self.storage.set_dns_state(running, generation);
         }

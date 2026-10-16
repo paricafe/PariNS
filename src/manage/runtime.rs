@@ -54,12 +54,13 @@ struct Running {
     resolver: Arc<crate::resolver::Resolver>,
     listen: SocketAddr,
     doh_listen: Option<SocketAddr>,
+    listeners: Arc<crate::server::Listeners>,
     started: Instant,
 }
 
 impl Running {
     fn start(
-        server: Server,
+        mut server: Server,
         config: Config,
         listen: SocketAddr,
         services: Arc<RuntimeServices>,
@@ -74,7 +75,11 @@ impl Running {
                 .map(|(_, address)| address)
         });
         let (stop, stopped) = oneshot::channel();
-        services.set_dns_health(HealthState::Running, generation, None);
+        // The server publishes ready or degraded for this generation as its
+        // listeners come and go; this owner publishes only the terminal state.
+        server.set_generation(generation);
+        server.publish_health();
+        let listeners = server.listeners();
         let completion = RuntimeCompletion {
             services,
             resolver: resolver.clone(),
@@ -124,6 +129,7 @@ impl Running {
             resolver,
             listen,
             doh_listen,
+            listeners,
             started: Instant::now(),
         }
     }
@@ -302,10 +308,10 @@ impl Manager {
 
     pub fn status(&self) -> serde_json::Value {
         let health = self.services.health.snapshot();
-        let running = self
-            .running
-            .as_ref()
-            .filter(|r| health.ready && !r.task.is_finished());
+        // A degraded generation is running: its other listeners serve.
+        let running = self.running.as_ref().filter(|r| {
+            (health.ready || health.state == HealthState::Degraded) && !r.task.is_finished()
+        });
         serde_json::json!({
             "running": running.is_some(),
             "last_error": if self.running.is_some() && running.is_none() {
@@ -319,9 +325,16 @@ impl Manager {
             "certificates": self.certificate_status(),
             "storage": self.services.status(),
             "cache_persistence": self.cache_report,
-            "listen": running.map(|r| r.listen.to_string()),
-            "doh_listen": running.and_then(|r| r.doh_listen).map(|a| a.to_string()),
-            "doh_http3": running.is_some_and(|r| r.config.doh.as_ref().is_some_and(|d| d.http3)),
+            // Addresses are reported only for listeners that are serving.
+            "listen": running
+                .filter(|r| r.listeners.serving(crate::server::ListenerKind::Dns))
+                .map(|r| r.listen.to_string()),
+            "listeners": running.map(|r| r.listeners.snapshot()),
+            "doh_listen": running
+                .filter(|r| r.listeners.serving(crate::server::ListenerKind::Doh))
+                .and_then(|r| r.doh_listen)
+                .map(|a| a.to_string()),
+            "doh_http3": running.is_some_and(|r| r.listeners.serving(crate::server::ListenerKind::Doh3)),
             "uptime_seconds": running.map(|r| r.started.elapsed().as_secs()),
             "generation": self.generation,
             "cache": running.map(|r| r.resolver.cache().snapshot()),
@@ -599,6 +612,13 @@ impl Manager {
         Some(failure.failed_at + delay)
     }
 
+    /// Stops DNS and records a startup failure, as a non-bind start error would.
+    #[cfg(test)]
+    pub(super) async fn simulate_startup_failure(&mut self) {
+        self.stop().await;
+        self.startup_failed("simulated certificate material unavailable".into());
+    }
+
     /// Restarts the saved configuration; the caller holds the mutation permit.
     pub async fn retry_startup(&mut self) {
         if let Some(saved) = self.saved.clone()
@@ -669,6 +689,12 @@ impl Manager {
                 self.filters.handle(),
             )
             .await?;
+            // An administrator's change is all or nothing: a candidate whose
+            // listeners cannot all bind is rejected before persistence, and the
+            // previous configuration is restored. Only restarts retry listeners.
+            if let Some(errors) = server.unbound() {
+                anyhow::bail!(errors);
+            }
             let listen = server.local_addr()?;
             let store = self.store.clone();
             let saved = next.clone();

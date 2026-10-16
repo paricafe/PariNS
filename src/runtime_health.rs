@@ -8,6 +8,8 @@ pub enum State {
     Unconfigured,
     Starting,
     Running,
+    /// Serving, but at least one listener is missing and being rebound. Not ready.
+    Degraded,
     Stopped,
     Failed,
 }

@@ -32,7 +32,7 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     let encrypted = server.encrypted_addrs().unwrap();
     assert_eq!(
         encrypted.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-        ["dot", "doh3", "doh", "doq"]
+        ["dot", "doh", "doh3", "doq"]
     );
     assert_eq!(encrypted[1].1, encrypted[2].1);
     let dot = encrypted[0].1;
@@ -273,5 +273,257 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     );
     assert_eq!(metrics.quic.snapshot()["doq"]["handshake_shutdown"], 1);
     drop(connecting);
+    client.close(0u32.into(), b"done");
+}
+
+/// A server whose grace is long enough that waiting on it would be visible:
+/// the stop must finish well before it, and without forcing.
+async fn incomplete_query_server(
+    cert: &Certificate,
+    upstream: &UdpSocket,
+    doh: bool,
+    doq: bool,
+) -> Server {
+    let mut config = config(upstream.local_addr().unwrap());
+    config.tcp_io_timeout_ms = 5000;
+    config.shutdown_grace_ms = 2000;
+    if doh {
+        config.doh = Some(parins::config::DohConfig {
+            listen: cert.listener().listen,
+            files: cert.listener().files,
+            http3: true,
+        });
+    }
+    if doq {
+        config.doq = Some(cert.listener());
+    }
+    Server::bind(config).await.unwrap()
+}
+
+const GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+
+fn encrypted(server: &Server, name: &str) -> std::net::SocketAddr {
+    server
+        .encrypted_addrs()
+        .unwrap()
+        .into_iter()
+        .find(|(listener, _)| *listener == name)
+        .unwrap()
+        .1
+}
+
+fn quic_client(cert: &Certificate, alpn: &[u8]) -> quinn::Endpoint {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.der.clone()).unwrap();
+    let mut tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(quinn::ClientConfig::new(std::sync::Arc::new(crypto)));
+    client
+}
+
+async fn wait_for_stream(server_metrics: &parins::metrics::Metrics, protocol: &str) {
+    timeout(WAIT, async {
+        while server_metrics.quic.snapshot()[protocol]["stream_started"] == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Let the adapter reach its query read before the stop.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+}
+
+/// A DoH POST whose body has not fully arrived owns no resolver work: the stop
+/// refuses it at once instead of waiting for the grace and forcing.
+#[tokio::test]
+async fn doh_post_with_partial_body_is_cancelled_at_stop() {
+    let cert = Certificate::new();
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server = incomplete_query_server(&cert, &upstream, true, false).await;
+    let resolver = server.resolver().clone();
+    let doh = encrypted(&server, "doh");
+    let (stop, task) = run(server);
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.der.clone()).unwrap();
+    let mut client = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    client.alpn_protocols = vec![b"h2".to_vec()];
+    let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client))
+        .connect(
+            "localhost".try_into().unwrap(),
+            TcpStream::connect(doh).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let (mut sender, connection) = h2::client::handshake(tls).await.unwrap();
+    let driver = tokio::spawn(connection);
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("https://localhost/dns-query")
+        .header("content-type", "application/dns-message")
+        .body(())
+        .unwrap();
+    let (response, mut body) = sender.send_request(request, false).unwrap();
+    body.send_data(bytes::Bytes::from_static(&[0, 1]), false)
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let started = std::time::Instant::now();
+    finish(stop, task).await;
+    let elapsed = started.elapsed();
+    let reset = timeout(WAIT, response).await.unwrap().unwrap_err();
+    assert_eq!(reset.reason(), Some(h2::Reason::REFUSED_STREAM));
+    assert!(resolver.is_quiescent(), "partial DoH body forced shutdown");
+    assert!(
+        elapsed < GRACE,
+        "partial DoH body held the stop for {elapsed:?}"
+    );
+    drop((sender, body));
+    let _ = timeout(WAIT, driver).await.unwrap();
+}
+
+/// A DoQ stream without FIN has no complete query and is cancelled at the stop.
+#[tokio::test]
+async fn doq_stream_without_fin_is_cancelled_at_stop() {
+    let cert = Certificate::new();
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server = incomplete_query_server(&cert, &upstream, false, true).await;
+    let resolver = server.resolver().clone();
+    let metrics = server.metrics().clone();
+    let doq = encrypted(&server, "doq");
+    let (stop, task) = run(server);
+    let client = quic_client(&cert, b"doq");
+    let connection = client.connect(doq, "localhost").unwrap().await.unwrap();
+    let (mut send, _recv) = connection.open_bi().await.unwrap();
+    let frame = query(9).to_vec().unwrap();
+    send.write_all(&(frame.len() as u16).to_be_bytes())
+        .await
+        .unwrap();
+    send.write_all(&frame).await.unwrap();
+    wait_for_stream(&metrics, "doq").await;
+    let started = std::time::Instant::now();
+    finish(stop, task).await;
+    let elapsed = started.elapsed();
+    assert!(
+        resolver.is_quiescent(),
+        "DoQ stream without FIN forced shutdown"
+    );
+    assert!(
+        elapsed < GRACE,
+        "DoQ stream without FIN held the stop for {elapsed:?}"
+    );
+    assert_eq!(metrics.quic.snapshot()["doq"]["stream_shutdown"], 1);
+    client.close(0u32.into(), b"done");
+}
+
+/// An HTTP/3 POST whose body has not ended is cancelled at the stop.
+#[tokio::test]
+async fn h3_post_with_partial_body_is_cancelled_at_stop() {
+    let cert = Certificate::new();
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server = incomplete_query_server(&cert, &upstream, true, false).await;
+    let resolver = server.resolver().clone();
+    let metrics = server.metrics().clone();
+    let h3_address = encrypted(&server, "doh3");
+    let (stop, task) = run(server);
+    let client = quic_client(&cert, b"h3");
+    let connection = client
+        .connect(h3_address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(connection))
+        .await
+        .unwrap();
+    let drive =
+        tokio::spawn(
+            async move { futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await },
+        );
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("https://localhost/dns-query")
+        .header("content-type", "application/dns-message")
+        .body(())
+        .unwrap();
+    let mut stream = sender.send_request(request).await.unwrap();
+    stream
+        .send_data(bytes::Bytes::from_static(&[0, 1]))
+        .await
+        .unwrap();
+    wait_for_stream(&metrics, "doh3").await;
+    let started = std::time::Instant::now();
+    finish(stop, task).await;
+    let elapsed = started.elapsed();
+    assert!(resolver.is_quiescent(), "partial H3 body forced shutdown");
+    assert!(
+        elapsed < GRACE,
+        "partial H3 body held the stop for {elapsed:?}"
+    );
+    assert_eq!(metrics.quic.snapshot()["doh3"]["stream_shutdown"], 1);
+    drop((stream, sender));
+    let _ = timeout(WAIT, drive).await.unwrap();
+    client.close(0u32.into(), b"done");
+}
+
+/// A DoQ query received in full before the stop still completes within the
+/// grace, and the stop stays quiescent.
+#[tokio::test]
+async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
+    let cert = Certificate::new();
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server = incomplete_query_server(&cert, &upstream, false, true).await;
+    let resolver = server.resolver().clone();
+    let metrics = server.metrics().clone();
+    let doq = encrypted(&server, "doq");
+    let (stop, task) = run(server);
+    let client = quic_client(&cert, b"doq");
+    let connection = client.connect(doq, "localhost").unwrap().await.unwrap();
+    let (mut send, mut recv) = connection.open_bi().await.unwrap();
+    let mut frame = query(0).to_vec().unwrap();
+    frame.splice(0..0, (frame.len() as u16).to_be_bytes());
+    send.write_all(&frame).await.unwrap();
+    send.finish().unwrap();
+    let mut buffer = [0; 512];
+    let (length, peer) = timeout(WAIT, upstream.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    let forwarded = protocol::decode(&buffer[..length]).unwrap();
+    // The query is resolving at the stop; the upstream answers within the grace.
+    let answering = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        upstream
+            .send_to(&answer(&forwarded).to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    });
+    stop.send(()).unwrap();
+    let response = timeout(WAIT, recv.read_to_end(65537))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(protocol::decode(&response[2..]).unwrap().answers.len(), 1);
+    timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    answering.await.unwrap();
+    assert!(
+        resolver.is_quiescent(),
+        "complete DoQ query forced shutdown"
+    );
+    assert_eq!(
+        metrics.quic.snapshot()["doq"]["stream_response_handed_to_transport"],
+        1
+    );
     client.close(0u32.into(), b"done");
 }

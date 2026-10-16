@@ -16,6 +16,14 @@ export interface MetricsSnapshot {
   request_inflight: number;
   request_latency: RequestLatency;
 }
+export interface ListenerStatus {
+  kind: 'dns' | 'admin' | 'dot' | 'doh' | 'doh3' | 'doq';
+  address: string;
+  state: 'running' | 'retrying';
+  error: string | null;
+  failures: number;
+}
+
 export interface StatusView {
   running: boolean;
   revision: number;
@@ -27,6 +35,8 @@ export interface StatusView {
   storage?: StorageStatus;
   cache_persistence?: SnapshotReport;
   dns_health: DnsHealth;
+  /** Per-listener state of the running generation; absent while DNS is stopped. */
+  listeners?: ListenerStatus[] | null;
   diagnostics: { cache: CacheDiagnostics | null; upstreams: UpstreamDiagnostics | null; quic: QuicDiagnostics };
 }
 

@@ -608,17 +608,18 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
 }
 
 #[tokio::test]
-async fn startup_failure_names_the_listener_backs_off_and_recovers_when_the_port_is_free() {
+async fn occupied_listener_degrades_only_itself_and_recovers_when_the_port_is_free() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("state")).unwrap();
-    // Another program holds the DNS TCP port, as after the production reboot.
+    // Another program holds the admin port, as the third-party service did with
+    // 443 after the production reboot. Plain DNS must keep serving meanwhile.
     let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = holder.local_addr().unwrap().port();
     store
         .save(&Stored {
             username: "admin".into(),
             password_hash: super::super::store::hash_password("local-test-password").unwrap(),
-            toml: config().replace("127.0.0.1:0", &format!("127.0.0.1:{port}")),
+            toml: format!("admin_listen='127.0.0.1:{port}'\n{}", config()),
             previous: None,
             revision: 1,
         })
@@ -630,23 +631,81 @@ async fn startup_failure_names_the_listener_backs_off_and_recovers_when_the_port
     let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active)
         .await
         .unwrap();
-    assert!(manager.resolver().is_none());
-    let error = manager.last_error.clone().unwrap();
+    let resolver = manager.resolver().expect("generation runs").clone();
     assert!(
-        error.contains(&format!("bind DNS TCP 127.0.0.1:{port}")),
+        manager.startup.is_none(),
+        "a bind failure is not a startup failure"
+    );
+    let health = manager.services.health.snapshot();
+    assert_eq!(health.state, HealthState::Degraded);
+    assert_eq!(health.code, Some("listener_unavailable"));
+    assert!(!health.ready);
+    let status = manager.status();
+    assert_eq!(status["running"], true);
+    let listeners = status["listeners"].as_array().unwrap();
+    let admin = listeners.iter().find(|l| l["kind"] == "admin").unwrap();
+    assert_eq!(admin["state"], "retrying");
+    let error = admin["error"].as_str().unwrap();
+    assert!(
+        error.contains(&format!("bind admin 127.0.0.1:{port}")),
         "{error}"
     );
-    assert_eq!(
-        manager.services.health.snapshot().code,
-        Some("startup_failed")
+    let dns = listeners.iter().find(|l| l["kind"] == "dns").unwrap();
+    assert_eq!(dns["state"], "running");
+    // The conflict ends: only that listener is rebound, in the same generation.
+    drop(holder);
+    let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+        while !manager.services.health.snapshot().ready {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        recovered.is_ok(),
+        "admin listener rebound after its backoff"
     );
+    assert!(Arc::ptr_eq(manager.resolver().unwrap(), &resolver));
+    assert_eq!(
+        manager.services.health.snapshot().state,
+        HealthState::Running
+    );
+    assert!(
+        manager.status()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["state"] == "running")
+    );
+    manager.terminal_shutdown().await;
+}
+
+#[tokio::test]
+async fn startup_retry_backs_off_to_sixty_seconds_and_clears_on_success() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+            toml: config(),
+            previous: None,
+            revision: 1,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: vec![],
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active)
+        .await
+        .unwrap();
+    manager.simulate_startup_failure().await;
     let first = manager.startup.as_ref().unwrap().failed_at;
     assert_eq!(
         manager.startup_retry_at(),
         Some(first + Duration::from_secs(5))
     );
-    // A failed retry doubles the delay; it stays bounded at 60 seconds.
-    manager.retry_startup().await;
+    manager.simulate_startup_failure().await;
     let failure = manager.startup.as_ref().unwrap();
     assert_eq!(failure.attempts, 2);
     assert_eq!(
@@ -659,13 +718,9 @@ async fn startup_failure_names_the_listener_backs_off_and_recovers_when_the_port
         manager.startup_retry_at(),
         Some(failed_at + Duration::from_secs(60))
     );
-    // The conflict ends: the next retry starts the same saved configuration.
-    drop(holder);
     manager.retry_startup().await;
     assert!(manager.resolver().is_some());
-    assert!(manager.last_error.is_none());
     assert!(manager.startup.is_none());
     assert_eq!(manager.startup_retry_at(), None);
-    assert!(manager.services.health.snapshot().ready);
     manager.terminal_shutdown().await;
 }

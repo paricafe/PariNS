@@ -289,19 +289,25 @@ Monitor DNS with the `dns_health` field of authenticated `GET /api/status`
 not proof that DNS is running. PariNS does not send alerts itself, so connect this
 check to your own monitoring.
 
-If the saved configuration cannot start, for example because another program
-holds a listener port after a reboot, `code` is `startup_failed`, the journal and
-`last_error` name the listener (such as `bind DoH 0.0.0.0:443: Address in use`),
-and the console overview says so. The manager retries the same configuration
-after 5 seconds, doubling to at most once a minute, until it starts, another
-configuration is applied, or PariNS stops. The journal repeats an unchanged error
-at most every ten minutes and records the recovery. All listeners start together:
-one failed listener keeps the whole generation stopped.
+Each listener (plain DNS over UDP/TCP, DoT, DoH, DoH over HTTP/3, DoQ and the
+local metrics endpoint) is supervised on its own, in both file and managed mode.
+If one cannot bind, for example because another program holds its port after a
+reboot, or stops while running, the others keep serving and only that listener is
+rebound after 5 seconds, doubling to at most once a minute, until it succeeds or
+DNS stops. Meanwhile `state` is `degraded` with `code` `listener_unavailable`
+and `ready` false; the `listeners` array of `/api/status` gives each listener's
+state, address and last error (such as `bind DoH 0.0.0.0:443: Address in use`),
+and the console overview lists them. The journal names the listener, repeats an
+unchanged error at most every ten minutes and records the recovery. Cache and
+upstream state are kept. An online update requires every listener to be up, so a
+degraded new version is rolled back. Saving a configuration is stricter: if any of
+its listeners cannot bind, nothing is saved and the previous configuration keeps
+running, so the error appears immediately.
 
-Listeners that exit unexpectedly after starting
-publish a generation-scoped failure also used by statistics sampling. Reapply
-configuration after diagnosing the failure; those exits are not restarted
-automatically. Process-local typed cache/upstream/QUIC counters remain usable
+If the generation cannot start for another reason, for example unreadable
+certificate material, `code` is `startup_failed` and the manager retries the same
+saved configuration with the same backoff until it starts, another configuration
+is applied, or PariNS stops. Process-local typed cache/upstream/QUIC counters remain usable
 with query logging disabled. Upstream endpoint slots belong to their displayed
 pool generation, and bounded query traces contain at most eight attempts, keeping
 the winning or final failure result. Caller cancellation, parallel race losers and

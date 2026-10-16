@@ -137,6 +137,19 @@ describe("OverviewPage", () => {
     expect(screen.queryByText(/被其他程序占用/)).toBeNull();
     expect(screen.getByText(/正在自动重试/)).toBeTruthy();
   });
+  it('lists listeners that are being rebound while the others keep serving', async () => {
+    const degraded = { ...status, dns_health: { ...status.dns_health, state: 'degraded', ready: false, code: 'listener_unavailable' }, listeners: [
+      { kind: 'dns', address: '0.0.0.0:53', state: 'running', error: null, failures: 0 },
+      { kind: 'doh', address: '0.0.0.0:443', state: 'retrying', error: 'bind DoH 0.0.0.0:443: Address in use (os error 98)', failures: 3 },
+    ] } as StatusView;
+    render(<OverviewPage api={fakeApi((path) => path === 'status' ? degraded : stats)} language="en" onOpenDns={() => {}} />);
+    await waitFor(() => expect(screen.getAllByText('Some listeners are unavailable').length).toBeGreaterThan(0));
+    expect(screen.getByText('These listeners are unavailable')).toBeTruthy();
+    expect(screen.getByText(/0.0.0.0:443 for DoH is used by another program./)).toBeTruthy();
+    expect(screen.getByText('bind DoH 0.0.0.0:443: Address in use (os error 98)')).toBeTruthy();
+    expect(screen.queryByText(/0.0.0.0:53 for DNS/)).toBeNull();
+    expect(screen.getByText('Some listeners unavailable')).toBeTruthy();
+  });
   it('reports coalesced followers beside the unchanged hit rate', async () => {
     const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, flight_joined: 9 } } } };
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? status : totals)} language="en" onOpenDns={() => {}} />);

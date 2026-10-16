@@ -1,4 +1,10 @@
 //! DNS-over-HTTPS (HTTP/2), with socket-derived identity and bounded request work.
+//!
+//! Shutdown: only request streams with a complete query (END_STREAM received, so
+//! a GET whose query is in the URL is complete once its headers arrive) can force
+//! a stop. Streams still receiving a body are refused at once, like unfinished
+//! handshakes. Peer close notification (the two-phase GOAWAY) uses at most half
+//! the shutdown grace. An error exit outside a stop drains without forcing.
 use std::{net::IpAddr, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -113,16 +119,9 @@ pub async fn serve(
         }
     };
     drop(listener);
-    if timeout(ingress.shutdown_grace, async {
-        while connections.join_next().await.is_some() {}
-    })
-    .await
-    .is_err()
-    {
-        ingress.resolver.force_shutdown(ForcedShutdown::DohDrain);
-        connections.abort_all();
-        while connections.join_next().await.is_some() {}
-    }
+    ingress
+        .drain(&mut connections, ForcedShutdown::DohDrain)
+        .await;
     outcome
 }
 
@@ -156,8 +155,9 @@ async fn connection(
         if let Some(close_by) = close_by {
             while requests.try_join_next().is_some() {}
             if requests.is_empty() {
-                // Only admitted requests hold a stopping connection. A responsive
-                // peer completes the two-phase GOAWAY; a silent one is dropped.
+                // Only requests with a complete query hold a stopping connection.
+                // A responsive peer completes the two-phase GOAWAY; a silent one
+                // is dropped.
                 let _ = tokio::time::timeout_at(close_by, async {
                     while let Some(Ok((_, mut respond))) = connection.accept().await {
                         respond.send_reset(Reason::REFUSED_STREAM);
@@ -192,7 +192,7 @@ async fn connection(
         }
     }
     if *stop.borrow() {
-        // During a stop, admitted requests finish even if the peer has gone;
+        // During a stop, complete queries finish even if the peer has gone;
         // the listener grace bounds this wait and forces the stop on expiry.
         while requests.join_next().await.is_some() {}
     }
@@ -210,17 +210,16 @@ async fn request_task(
     h3_port: Option<u16>,
 ) -> anyhow::Result<()> {
     let (parts, mut stream) = request.into_parts();
-    let mut body = Vec::new();
-    let mut status = None;
-    while let Some(chunk) = stream.data().await {
-        let chunk = chunk?;
-        if body.len() + chunk.len() > MAX_DNS {
-            status = Some(413);
-            break;
+    // Biased: a query received in full before the stop is still answered.
+    let (body, status) = tokio::select! {
+        biased;
+        collected = collect(&mut stream) => collected?,
+        () = ingress.stopped() => {
+            // No resolver work yet: the peer may retry this stream elsewhere.
+            respond.send_reset(Reason::REFUSED_STREAM);
+            return Ok(());
         }
-        body.extend_from_slice(&chunk);
-        stream.flow_control().release_capacity(chunk.len())?;
-    }
+    };
     let path = parts.uri.path_and_query().map_or("", |path| path.as_str());
     let content_type = parts
         .headers
@@ -241,6 +240,20 @@ async fn request_task(
         Some(bytes) => send(&mut respond, 200, bytes, h3_port).await,
         None => send(&mut respond, 400, Vec::new(), h3_port).await,
     }
+}
+
+/// Reads the body until END_STREAM; `Some(413)` stops early at the size limit.
+async fn collect(stream: &mut h2::RecvStream) -> anyhow::Result<(Vec<u8>, Option<u16>)> {
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.data().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > MAX_DNS {
+            return Ok((body, Some(413)));
+        }
+        body.extend_from_slice(&chunk);
+        stream.flow_control().release_capacity(chunk.len())?;
+    }
+    Ok((body, None))
 }
 
 async fn send(

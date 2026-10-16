@@ -1,0 +1,89 @@
+web/src/pages/observability/OverviewPage.tsx
+  s_0cc083ef6e9aa3::t_60b7ab33d2d1a1 5
+  s_0cc083ef6e9aa3::t_e994d798a6044a 210
+  s_0cc083ef6e9aa3::t_d79ead16c0b8ea 302
+  s_0cc083ef6e9aa3::t_61470316952e60 166,173,219,286-301
+src/runtime_services.rs
+  s_0cc083ef6e9aa3::t_b3efec923b8af4 68-70
+src/manage/runtime.rs
+  s_0cc083ef6e9aa3::t_aea0e9a92d2ce2 615-621
+  s_0cc083ef6e9aa3::t_277b48cfbbcd92 57,63,78-82,132,311-314,332
+  s_0cc083ef6e9aa3::t_a291022d44dba9 692-697
+  s_0cc083ef6e9aa3::t_d79ead16c0b8ea 328-331,333-337
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_5374f0d05b7397 140-152
+web/src/i18n/reliability.ts
+  s_0cc083ef6e9aa3::t_61470316952e60 18
+src/server.rs
+  s_0cc083ef6e9aa3::t_190c9e57bef0a5 971-989
+  s_0cc083ef6e9aa3::t_d79ead16c0b8ea 178-179,195-201,209-210,214-219,225,235,253,373-375,377,392-393,405,410-413,420,561,615-619,677-687
+  s_0cc083ef6e9aa3::t_277b48cfbbcd92 674-675
+  s_0cc083ef6e9aa3::t_2520545631d903 2-10
+  s_0cc083ef6e9aa3::t_0771e5dfa0e4ff 620,672,868,922-957,962-963,968-970,990-999
+  s_0cc083ef6e9aa3::t_a291022d44dba9 622-633
+  s_0cc083ef6e9aa3::t_f2f1b74ffa408f 958-961,964-967
+  s_0cc083ef6e9aa3::t_284195a8443c53 38-42,137-177,180-194,202-208,211-213,220-224,226-234,236-252,254-372,376,378-391,394-404,406-409,414-419,421-422,480-503,505-512,515-560,562-568,570-577,579-581,595-602,608-614,634,636,652,656-657,659-669,671,676,688-696,699-700,711-712,715,719-731,737-740,744,754,766-768,783-867
+  s_0cc083ef6e9aa3::t_6ab34052aef1b3 621,673,869
+src/manage/runtime_tests.rs
+  s_0cc083ef6e9aa3::t_aea0e9a92d2ce2 611,614-615,622,634,639-648,653-662,667,679-702,708
+  s_0cc083ef6e9aa3::t_f2f1b74ffa408f 636-638,649-650,663-666,669-670,672-678
+src/tls.rs
+  s_0cc083ef6e9aa3::t_246c1d14f9117b 422-428
+AGENTS.md
+  s_0cc083ef6e9aa3::t_d79ead16c0b8ea 103
+  s_0cc083ef6e9aa3::t_190c9e57bef0a5 104-106
+  s_0cc083ef6e9aa3::t_2520545631d903 122-126,130-132
+  s_0cc083ef6e9aa3::t_6e9dea10ee4a3d 127-129
+src/doh.rs
+  s_0cc083ef6e9aa3::t_7935207741463c 2-7,122-124,195,213-220,222,245-256
+  s_0cc083ef6e9aa3::t_53424e1ee9df29 158-160
+  s_0cc083ef6e9aa3::t_443b62975744ff 257-258
+src/manage/dns_retry.rs
+  s_0cc083ef6e9aa3::t_2520545631d903 1-4
+  s_0cc083ef6e9aa3::t_aea0e9a92d2ce2 51,58,68-69,71-76,99
+tests/listener_shutdown.rs
+  s_0cc083ef6e9aa3::t_93e3d14d085312 35
+  s_0cc083ef6e9aa3::t_ca4cd974a6bec6 278-529
+tests/manage.rs
+  s_0cc083ef6e9aa3::t_8821d249f3cd30 659-662
+  s_0cc083ef6e9aa3::t_a291022d44dba9 619,636-637
+  s_0cc083ef6e9aa3::t_d79ead16c0b8ea 607
+src/quic.rs
+  s_0cc083ef6e9aa3::t_2eebcab2315cc5 7-10,13-15,26,28-29,162-164,200,213-226,320
+  s_0cc083ef6e9aa3::t_ff9ae689336c1f 334
+  s_0cc083ef6e9aa3::t_b3efec923b8af4 305-306,310-312,324-332,339-354,356-369,385,404-418
+web/src/i18n/shell.ts
+  s_0cc083ef6e9aa3::t_61470316952e60 22-26
+web/src/pages/observability/diagnostics.ts
+  s_0cc083ef6e9aa3::t_61470316952e60 3
+src/main.rs
+  s_0cc083ef6e9aa3::t_ff9ae689336c1f 163
+  s_0cc083ef6e9aa3::t_d79ead16c0b8ea 164-166,168-180
+web/src/pages/observability/metrics.ts
+  s_0cc083ef6e9aa3::t_61470316952e60 19-26,38-39
+guide/operations.md
+  s_0cc083ef6e9aa3::t_6e9dea10ee4a3d 303-305
+  s_0cc083ef6e9aa3::t_2520545631d903 292-302,307-310
+  s_0cc083ef6e9aa3::t_aeecb5b210c662 306
+src/runtime_health.rs
+  s_0cc083ef6e9aa3::t_b3efec923b8af4 11-12
+src/ingress.rs
+  s_0cc083ef6e9aa3::t_2ea0fe7dcdb4f8 3-7,9-13,46-72,130-165
+  s_0cc083ef6e9aa3::t_b8c79faac69070 166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ce8ec4559a2bce1dba1f97611f70e70b327ce33a",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

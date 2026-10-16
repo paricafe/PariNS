@@ -1,0 +1,70 @@
+AGENTS.md
+  s_0cc083ef6e9aa3::t_780bd4d58c84a9 146-149
+  s_0cc083ef6e9aa3::t_3169233640641a 150-152
+src/manage/live.rs
+  s_0cc083ef6e9aa3::t_46ff9a20d767eb 1-187,192-218,220-245,248-395,397-421,423-486,495-497,500-502,508-512,514-530,536-584,658-669
+  s_0cc083ef6e9aa3::t_202c77c3a3b97d 188-191,585-657
+  s_0cc083ef6e9aa3::t_3995afaa9b45f8 487-489
+  s_0cc083ef6e9aa3::t_5312a44b6ef5cd 246-247,396,422,531-535
+  s_0cc083ef6e9aa3::t_dc8525993c9a42 490-494,513
+  s_0cc083ef6e9aa3::t_e29a8ec958e83c 498-499,503-507
+  s_0cc083ef6e9aa3::t_2868e1a49f179a 219
+guide/operations.md
+  s_0cc083ef6e9aa3::t_780bd4d58c84a9 229,256-260
+  s_0cc083ef6e9aa3::t_e3c18fc85193cd 261-264
+  s_0cc083ef6e9aa3::t_b26174c3a60f41 265
+src/storage/tests.rs
+  s_0cc083ef6e9aa3::t_7fb1036b3cf15b 323-377
+  s_0cc083ef6e9aa3::t_bb4079569c1f2e 314-322,378-381
+Cargo.toml
+  s_0cc083ef6e9aa3::t_3f0f28aa4cb139 21
+  s_0cc083ef6e9aa3::t_ba3c2420920b63 47
+src/manage/account_tests.rs
+  s_0cc083ef6e9aa3::t_7261f4a3e4da66 30
+tests/manage/live.rs
+  s_0cc083ef6e9aa3::t_76bc0186d4e6b6 153-156
+  s_0cc083ef6e9aa3::t_9ed00a99055aa7 1-152,157-197,199-357
+  s_0cc083ef6e9aa3::t_d9318549c400fb 198
+src/manage/filters.rs
+  s_0cc083ef6e9aa3::t_7261f4a3e4da66 195
+src/storage/database.rs
+  s_0cc083ef6e9aa3::t_3995afaa9b45f8 812-816
+  s_0cc083ef6e9aa3::t_980bb3940f407d 292-294,675-679,743-744,748-760,768-787,791-792,807-811,827-832,834-835
+  s_0cc083ef6e9aa3::t_dc8525993c9a42 817-826,833
+  s_0cc083ef6e9aa3::t_496771cfd6f332 761-767
+src/storage/mod.rs
+  s_0cc083ef6e9aa3::t_496771cfd6f332 11,281,494-502
+tests/manage.rs
+  s_0cc083ef6e9aa3::t_ead8553ae002a2 31-32
+src/manage/dns_retry.rs
+  s_0cc083ef6e9aa3::t_7261f4a3e4da66 79
+src/manage/mod.rs
+  s_0cc083ef6e9aa3::t_3756c74500c74e 1090-1092
+  s_0cc083ef6e9aa3::t_09d7a892447c54 1075-1081,1171,1332
+  s_0cc083ef6e9aa3::t_7261f4a3e4da66 1270,1471,1544,1642,1683
+  s_0cc083ef6e9aa3::t_1b82d81e8dec2a 11,54-68,76,329,1133-1134,1169-1170,1336,1338,1345-1346,1359,1625-1629
+  s_0cc083ef6e9aa3::t_896cb9deed007c 2-3
+src/query_log.rs
+  s_0cc083ef6e9aa3::t_dc8525993c9a42 138-140
+  s_0cc083ef6e9aa3::t_496771cfd6f332 130-137,141
+src/manage/updates/operation.rs
+  s_0cc083ef6e9aa3::t_7261f4a3e4da66 1267
+Cargo.lock
+  s_0cc083ef6e9aa3::t_a423791420d668 167,179-187,243-248,283-291,324-325,329-339,668-676,1111,1491-1501,1510,1745-1756,1862-1877
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4b9b804c332b2a6c7da187ed756c5212f4be50ac",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

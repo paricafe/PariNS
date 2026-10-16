@@ -289,6 +289,9 @@ fn reject(command: Command, shared: &Shared) {
         Command::List(_, r) => {
             let _ = r.send(Err(error));
         }
+        Command::Newer(_, _, r) => {
+            let _ = r.send(Err(error));
+        }
         Command::ClearLogs(_, r) | Command::ClearHistory(_, r) | Command::ResetTotals(_, r) => {
             let _ = r.send(Err(error));
         }
@@ -669,6 +672,11 @@ impl Database {
                 self.report_error(shared, &result);
                 let _ = reply.send(result);
             }
+            Command::Newer(after_id, filter, reply) => {
+                let result = self.newer(after_id, filter);
+                self.report_error(shared, &result);
+                let _ = reply.send(result);
+            }
             Command::ClearLogs(epoch, reply) => {
                 let result = self.clear_logs(shared, epoch);
                 self.report_error(shared, &result);
@@ -732,31 +740,56 @@ impl Database {
         }
         Ok(())
     }
-    fn list(&self, shared: &Shared, options: ListOptions) -> Result<Page> {
+    /// Every query-log read shares one deadline and the same filter semantics.
+    fn bounded<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
         let deadline = Instant::now() + Duration::from_secs(2);
         self.conn
             .progress_handler(1000, Some(move || Instant::now() >= deadline))?;
-        let result = (|| {
+        let result = read();
+        self.conn.progress_handler(0, None::<fn() -> bool>)?;
+        result
+    }
+    /// Newest first; returns at most `limit` entries plus one to detect more.
+    fn select(
+        &self,
+        before_id: Option<u64>,
+        after_id: Option<u64>,
+        filter: ListOptions,
+        limit: usize,
+    ) -> Result<Vec<Entry>> {
+        let search = filter.search.unwrap_or_default().to_ascii_lowercase();
+        // A plain lower bound lets SQLite scan only rows newer than a live cursor.
+        let after = if after_id.is_some() {
+            "id>?6"
+        } else {
+            "?6 IS NULL"
+        };
+        let mut statement = self.conn.prepare(&format!("SELECT id,payload FROM query_log WHERE (?1 IS NULL OR id<?1) AND {after} AND (?2 IS NULL OR status=?2) AND (?3 IS NULL OR (?3='cached' AND cache IN ('fresh','stale')) OR (?3='non_cached' AND cache NOT IN ('fresh','stale')) OR cache=?3) AND (?4='' OR instr(lower(name),?4)>0 OR instr(client,?4)>0 OR instr(lower(coalesce(upstream,'')),?4)>0 OR instr(lower(qtype),?4)>0) ORDER BY id DESC LIMIT ?5"))?;
+        let mut rows = statement.query(params![
+            before_id,
+            filter.status,
+            filter.cache,
+            search,
+            limit + 1,
+            after_id
+        ])?;
+        let mut entries = Vec::with_capacity(limit + 1);
+        while let Some(row) = rows.next()? {
+            let id = row.get(0)?;
+            let bytes: Vec<u8> = row.get(1)?;
+            let mut entry: Entry = serde_json::from_slice(&bytes)?;
+            entry.id = id;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+    fn list(&self, shared: &Shared, options: ListOptions) -> Result<Page> {
+        self.bounded(|| {
             let total = epoch(&self.conn, "log_count")? as usize;
             let log_epoch = epoch(&self.conn, "log_epoch")?;
             let limit = options.limit.unwrap_or(50);
-            let search = options.search.unwrap_or_default().to_ascii_lowercase();
-            let mut statement = self.conn.prepare("SELECT id,payload FROM query_log WHERE (?1 IS NULL OR id<?1) AND (?2 IS NULL OR status=?2) AND (?3 IS NULL OR (?3='cached' AND cache IN ('fresh','stale')) OR (?3='non_cached' AND cache NOT IN ('fresh','stale')) OR cache=?3) AND (?4='' OR instr(lower(name),?4)>0 OR instr(client,?4)>0 OR instr(lower(coalesce(upstream,'')),?4)>0 OR instr(lower(qtype),?4)>0) ORDER BY id DESC LIMIT ?5")?;
-            let mut rows = statement.query(params![
-                options.before_id,
-                options.status,
-                options.cache,
-                search,
-                limit + 1
-            ])?;
-            let mut entries = Vec::with_capacity(limit + 1);
-            while let Some(row) = rows.next()? {
-                let id = row.get(0)?;
-                let bytes: Vec<u8> = row.get(1)?;
-                let mut entry: Entry = serde_json::from_slice(&bytes)?;
-                entry.id = id;
-                entries.push(entry);
-            }
+            let before_id = options.before_id;
+            let mut entries = self.select(before_id, None, options, limit)?;
             let next_cursor = if entries.len() > limit {
                 entries.truncate(limit);
                 entries.last().map(|e| e.id)
@@ -771,9 +804,35 @@ impl Database {
                 log_epoch,
                 storage: status(shared),
             })
-        })();
-        self.conn.progress_handler(0, None::<fn() -> bool>)?;
-        result
+        })
+    }
+    fn newer(&self, after_id: Option<u64>, filter: ListOptions) -> Result<Newer> {
+        self.bounded(|| {
+            let log_epoch = epoch(&self.conn, "log_epoch")?;
+            let scanned_to: u64 =
+                self.conn
+                    .query_row("SELECT COALESCE(MAX(id),0) FROM query_log", [], |r| {
+                        r.get::<_, i64>(0)
+                    })? as u64;
+            // Without a cursor the page already holds history: start from now.
+            let Some(after_id) = after_id else {
+                return Ok(Newer {
+                    entries: Vec::new(),
+                    more: false,
+                    log_epoch,
+                    scanned_to,
+                });
+            };
+            let mut entries = self.select(None, Some(after_id), filter, NEWER_LIMIT)?;
+            let more = entries.len() > NEWER_LIMIT;
+            entries.truncate(NEWER_LIMIT);
+            Ok(Newer {
+                entries,
+                more,
+                log_epoch,
+                scanned_to,
+            })
+        })
     }
     fn clear_logs(&mut self, shared: &Shared, expected: u64) -> Result<ClearResult> {
         let tx = self.conn.transaction()?;

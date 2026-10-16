@@ -76,6 +76,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         let shared = Arc::new(Shared {
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+            live: Default::default(),
             manager: Arc::new(tokio::sync::Mutex::new(manager)),
             active,
             auth: auth_budget::Budget::new(),

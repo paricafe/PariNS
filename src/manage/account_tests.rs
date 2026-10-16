@@ -27,6 +27,7 @@ async fn fixture() -> (tempfile::TempDir, Arc<Shared>, HeaderMap) {
     ));
     let shared = Arc::new(Shared {
         filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+        live: Default::default(),
         manager,
         active,
         auth: auth_budget::Budget::new(),

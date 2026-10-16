@@ -1,4 +1,6 @@
 //! Authenticated management plane. DNS forwarding remains in Server/Resolver.
+//! Connections serve one request each; only a live query log WebSocket (`live`)
+//! outlives its request, under that module's own limits and shutdown drain.
 mod account;
 mod auth_budget;
 mod cache;
@@ -6,6 +8,7 @@ mod certificates;
 pub mod check;
 mod dns_retry;
 mod filters;
+mod live;
 mod runtime;
 mod settings;
 pub(crate) mod store;
@@ -48,6 +51,21 @@ struct Session {
     token: String,
     binding: String,
     created: Instant,
+    /// Dropped with the last stored copy: logout, credential change, realm
+    /// change, capacity eviction or expiry closes this session's live sockets.
+    revoked: Arc<tokio::sync::watch::Sender<()>>,
+    live: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl Session {
+    fn new(token: String, binding: String, created: Instant) -> Self {
+        Self {
+            token,
+            binding,
+            created,
+            revoked: Arc::new(tokio::sync::watch::Sender::new(())),
+            live: Default::default(),
+        }
+    }
 }
 struct Active {
     snapshot: Arc<Snapshot>,
@@ -55,6 +73,7 @@ struct Active {
 }
 struct Shared {
     filter_tasks: tokio::sync::Mutex<JoinSet<()>>,
+    live: live::Hub,
     manager: Arc<tokio::sync::Mutex<Manager>>,
     active: Arc<Mutex<Active>>,
     auth: auth_budget::Budget,
@@ -307,11 +326,7 @@ impl Shared {
         if active.sessions.len() >= 16 {
             active.sessions.remove(0);
         }
-        let session = Session {
-            token: store::secret(),
-            binding: store::secret(),
-            created: Instant::now(),
-        };
+        let session = Session::new(store::secret(), store::secret(), Instant::now());
         active.sessions.push(session.clone());
         Ok(session)
     }
@@ -1057,6 +1072,13 @@ async fn handle(
     let mut response = handle_inner(shared, transport, peer, request)
         .await
         .unwrap_or_else(IntoResponse::into_response);
+    // One request per connection. hyper's own keep-alive switch would also
+    // replace `Connection: upgrade` on a live query log 101 with `close`.
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
     let headers = response.headers_mut();
     for (name, value) in [
         ("cache-control", "no-store"),
@@ -1065,7 +1087,9 @@ async fn handle(
         ("referrer-policy", "no-referrer"),
         (
             "content-security-policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            // blob: images are only the browser-local custom background, created by
+            // the console's own script from a file the administrator chose.
+            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         ),
     ] {
         headers.insert(
@@ -1106,7 +1130,8 @@ async fn handle_inner(
             "Unexpected Host or Origin",
         ));
     }
-    let path = parts.uri.path();
+    let path = parts.uri.path().to_owned();
+    let path = path.as_str();
     if parts.method == "GET" {
         let asset = match path {
             "/" => Some((
@@ -1140,6 +1165,9 @@ async fn handle_inner(
             "UNAUTHORIZED",
             "Sign in required",
         ));
+    }
+    if parts.method == "GET" && path == live::PATH {
+        return live::upgrade(&shared, &transport, parts).await;
     }
     if unsafe_method
         && !parts
@@ -1239,6 +1267,7 @@ pub async fn serve(
     let filter_service = manager.lock().await.filters.clone();
     let shared = Arc::new(Shared {
         filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+        live: Default::default(),
         manager: manager.clone(),
         active: active.clone(),
         auth: auth_budget::Budget::new(),
@@ -1300,19 +1329,21 @@ pub async fn serve(
                 tasks.spawn(async move {
                     let _permit = permit;
                     let mut builder = hyper::server::conn::http1::Builder::new();
-                    builder.keep_alive(false).max_headers(32).timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(5));
+                    builder.max_headers(32).timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(5));
                     if let Some(tls) = &snapshot.tls {
                         let acceptor = tokio_rustls::TlsAcceptor::from(tls.clone());
                         let Ok(Ok(stream)) = timeout(Duration::from_secs(5), acceptor.accept(stream)).await else { return; };
-                        let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service)).await;
+                        let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service).with_upgrades()).await;
                     } else {
-                        let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service)).await;
+                        let _ = timeout(Duration::from_secs(90),builder.serve_connection(TokioIo::new(stream),service).with_upgrades()).await;
                     }
                 });
             }
         }
     };
     drop(listener);
+    // Live sockets close with 1001 in parallel with the remaining drain.
+    let mut live_tasks = shared.live.close();
     let _ = update_stop.send(true);
     filter_service.request_close();
     // Every accepted transaction owns this permit before detaching. Wait for it
@@ -1325,6 +1356,7 @@ pub async fn serve(
         let _ = tokio::task::spawn_blocking(move || filter_service.close()).await;
         // A submitted mutation owns its transaction independently of HTTP.
         tasks.shutdown().await;
+        while live_tasks.join_next().await.is_some() {}
         let _ = update_task.await;
         let _ = filter_task.await;
         let _ = retry_task.await;
@@ -1436,6 +1468,7 @@ mod tests {
         ));
         let shared = Arc::new(Shared {
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+            live: Default::default(),
             manager: manager.clone(),
             active: active.clone(),
             auth: auth_budget::Budget::new(),
@@ -1508,6 +1541,7 @@ mod tests {
         ));
         let shared = super::Shared {
             filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+            live: Default::default(),
             manager,
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
@@ -1588,11 +1622,11 @@ mod tests {
         let address = "127.0.0.1:3000".parse().unwrap();
         let active = Arc::new(Mutex::new(super::Active {
             snapshot: Arc::new(super::Snapshot::initial()),
-            sessions: vec![super::Session {
-                token: "expired".into(),
-                binding: "old-binding".into(),
-                created: Instant::now() - Duration::from_secs(8 * 3600 + 1),
-            }],
+            sessions: vec![super::Session::new(
+                "expired".into(),
+                "old-binding".into(),
+                Instant::now() - Duration::from_secs(8 * 3600 + 1),
+            )],
         }));
         let manager = Arc::new(tokio::sync::Mutex::new(
             super::Manager::open(
@@ -1605,6 +1639,7 @@ mod tests {
         ));
         let shared = super::Shared {
             filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+            live: Default::default(),
             manager,
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
@@ -1645,6 +1680,7 @@ mod tests {
         ));
         let shared = Arc::new(super::Shared {
             filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+            live: Default::default(),
             manager: manager.clone(),
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),

@@ -192,6 +192,7 @@ mod tests {
             mutation: Arc::new(Semaphore::new(1)),
             address,
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+            live: Default::default(),
         });
         let transport = active.lock().unwrap().snapshot.clone();
         let mut headers = HeaderMap::new();

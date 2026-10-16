@@ -312,6 +312,74 @@ async fn classifications_are_anded_before_pagination_and_disabled_history_remain
 }
 
 #[tokio::test]
+async fn newer_logs_are_filtered_above_the_cursor_newest_first_and_capped() {
+    let runtime = RuntimeServices::ephemeral(settings());
+    for index in 0..(crate::query_log::NEWER_LIMIT + 5) {
+        runtime
+            .storage
+            .record_log(0, entry(if index % 2 == 0 { "blocked" } else { "fresh" }));
+    }
+    runtime.flush().await.unwrap();
+    // Without a cursor the client already holds history: start from the newest id.
+    let start = runtime
+        .storage
+        .newer_logs(None, ListOptions::default())
+        .await
+        .unwrap();
+    assert!(start.entries.is_empty() && !start.more);
+    assert_eq!(start.scanned_to, crate::query_log::NEWER_LIMIT as u64 + 5);
+    let all = runtime
+        .storage
+        .newer_logs(Some(0), ListOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(all.entries.len(), crate::query_log::NEWER_LIMIT);
+    assert!(all.more);
+    assert_eq!(all.entries[0].id, crate::query_log::NEWER_LIMIT as u64 + 5);
+    assert!(all.entries.windows(2).all(|pair| pair[0].id > pair[1].id));
+    let cursor = 195;
+    let blocked = runtime
+        .storage
+        .newer_logs(
+            Some(cursor),
+            ListOptions {
+                status: Some("blocked".into()),
+                search: Some("EXAMPLE".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!blocked.more);
+    assert_eq!(
+        blocked.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+        [205, 203, 201, 199, 197]
+    );
+    let none = runtime
+        .storage
+        .newer_logs(Some(205), ListOptions::default())
+        .await
+        .unwrap();
+    assert!(none.entries.is_empty() && !none.more);
+    // A filter that matches nothing still reports how far it scanned.
+    let unmatched = runtime
+        .storage
+        .newer_logs(
+            Some(0),
+            ListOptions {
+                search: Some("absent.invalid".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(unmatched.entries.is_empty());
+    assert_eq!(unmatched.scanned_to, 205);
+    assert_eq!(none.log_epoch, 0);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn queue_limits_drop_new_logs_without_losing_independent_totals() {
     let mut config = settings();
     config.storage.queue_max_entries = 128;

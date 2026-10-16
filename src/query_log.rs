@@ -127,6 +127,18 @@ pub struct Page {
     pub log_epoch: u64,
     pub storage: crate::storage::Status,
 }
+/// At most this many entries answer one live poll; `more` reports the cap.
+pub const NEWER_LIMIT: usize = 200;
+/// Entries newer than a live cursor, newest first, from one storage read.
+#[derive(Debug)]
+pub struct Newer {
+    pub entries: Vec<Entry>,
+    pub more: bool,
+    pub log_epoch: u64,
+    /// Highest id stored when the query ran, matching or not: the next poll
+    /// starts here, so a rarely matching filter never rescans older rows.
+    pub scanned_to: u64,
+}
 pub struct QueryLog {
     storage: crate::storage::Handle,
 }

@@ -143,6 +143,13 @@ until preview/validation.
   is not proof of failure and is never silently replayed.
 - Credential changes are separate Store transactions that revoke all sessions and
   require explicit login. Details: `src/manage/account.rs`.
+- The live query log WebSocket (`/api/query-log/live`) belongs to the management
+  process: Host/Origin (Origin required) and session Cookie are checked before the
+  upgrade; the binding arrives only as the first message. Sockets leave the 90 s
+  HTTP lifetime but stay bounded (2 per session, 16 total, 4 KiB inbound messages,
+  30 s idle). Removing the session from memory closes them (4403), and shutdown
+  closes them (1001) within its drain. Polls run on the storage worker; Manager
+  is never held across socket IO. Details: `src/manage/live.rs`.
 - Validate and persist before publishing replacement state. Cache-only, storage-only
   and updates-only changes preserve listeners; updates-only changes also keep caches,
   RuntimeServices, certificates and sessions and leave stopped DNS stopped. One

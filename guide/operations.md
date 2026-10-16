@@ -226,7 +226,7 @@ does not chown or relocate them. No private key is returned by status.
 
 ## Query logs
 
-The **Query log** page provides manual refresh, search, status filtering,
+The **Query log** page provides manual or timed refresh, search, status filtering,
 newest-first cursor pagination, and explicit clearing. Enable it under Runtime
 settings (disabled by default):
 
@@ -252,6 +252,16 @@ that never reach the DNS resolver are not DNS query entries. Background prefetch
 is not counted as a client request. Clearing rejects old in-flight log writes;
 future requests can create new entries. No query data is emitted to metrics or
 stderr. Treat logs as private browsing metadata, not a durable audit database.
+
+Timed refresh (1, 3, 5 or 10 seconds) uses an authenticated WebSocket on the
+management port (`/api/query-log/live`) that sends new records in batches of at
+most 200. It shows records only after storage commits them, so they may arrive
+up to `storage.flush_interval_ms` (default 1 s) late. A browser session holds at
+most 2 such connections and the process at most 16; they close after 30 seconds
+without client messages, on logout, credential change or a management address
+change, when the session expires, and when management stops. A third tab of the
+same session, or a session that has expired, keeps retrying quietly; reload the
+page or use manual refresh.
 
 ## Runtime storage and diagnostics
 

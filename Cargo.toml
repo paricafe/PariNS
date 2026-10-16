@@ -18,7 +18,7 @@ hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 base64 = "0.22"
 bytes = "1"
-futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await", "sink"] }
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 h2 = "0.4"
 h3 = "0.0.8"
@@ -44,6 +44,7 @@ toml = "0.9"
 url = "2"
 webpki-roots = "1"
 x509-parser = "0.18"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["net", "uio"] }

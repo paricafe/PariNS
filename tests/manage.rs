@@ -28,6 +28,8 @@ const DEADLINE: Duration = Duration::from_secs(10);
 mod certificate_reload;
 #[path = "manage/credentials.rs"]
 mod credentials;
+#[path = "manage/live.rs"]
+mod live;
 
 struct Response {
     status: u16,

@@ -8,7 +8,7 @@ mod tests;
 
 use crate::{
     metrics::Metrics,
-    query_log::{Entry, ListOptions, Page},
+    query_log::{Entry, ListOptions, NEWER_LIMIT, Newer, Page},
 };
 pub use observation::{Cleanup, CleanupReason, Coverage, DropCounts, Filesystem};
 use serde::{Deserialize, Serialize};
@@ -278,6 +278,7 @@ type Reply<T> = oneshot::Sender<Result<T>>;
 type Inspection = Box<dyn FnOnce(&mut rusqlite::Connection) -> Result<()> + Send>;
 enum Command {
     List(ListOptions, Reply<Page>),
+    Newer(Option<u64>, ListOptions, Reply<Newer>),
     ClearLogs(u64, Reply<ClearResult>),
     Statistics(HistoryOptions, Reply<StatisticsView>),
     ResetTotals(u64, Reply<ClearResult>),
@@ -489,6 +490,15 @@ impl Handle {
             .validate()
             .map_err(|e| Error::Invalid(e.to_string()))?;
         self.request(|reply| Command::List(options, reply)).await
+    }
+    /// Entries with id above `after_id` matching the list filter, newest first.
+    /// Callers validate `filter` and the cursor at their trust boundary.
+    pub async fn newer_logs(&self, after_id: Option<u64>, filter: ListOptions) -> Result<Newer> {
+        self.request(|reply| Command::Newer(after_id, filter, reply))
+            .await
+    }
+    pub fn log_enabled(&self) -> bool {
+        self.0.shared.enabled.load(Ordering::Acquire)
     }
     pub async fn clear_logs(&self, epoch: u64) -> Result<ClearResult> {
         self.request(|r| Command::ClearLogs(epoch, r)).await

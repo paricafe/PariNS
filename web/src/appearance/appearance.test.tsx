@@ -160,7 +160,9 @@ describe('custom image storage', () => {
     render(<Harness />);
     await waitFor(() => expect(appearance.image?.url).toBe('blob:background'));
     expect(appearance.background).toBe('custom');
-    expect(document.documentElement.dataset.backdrop).toBe('image');
+    // The backdrop kind is published by an effect after the render that loads the
+    // image, so wait for it rather than asserting in the same tick.
+    await waitFor(() => expect(document.documentElement.dataset.backdrop).toBe('image'));
     expect(document.querySelector('.backdrop .photo')).toBeTruthy();
     await act(() => appearance.removeImage());
     expect(appearance.image).toBeNull();

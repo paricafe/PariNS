@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.16 — 2026-10-16
+
+### Changed
+
+- Listeners are supervised one by one, in file and managed mode. If one cannot
+  bind (for example a port taken by another program after a reboot) or stops while
+  running, the other protocols keep serving and only that listener is rebound after
+  5 seconds, doubling to at most once a minute. DNS health is then `degraded` (not
+  ready), `/api/status` lists each listener's state and last error, and the console
+  overview names the missing listeners. Before, one failed listener stopped every
+  protocol. Saving a configuration still requires all of its listeners to bind.
+- When DNS stops, a DoH, DoH over HTTP/3 or DoQ stream that has not delivered a
+  complete query yet is cancelled at once instead of holding the shutdown until
+  the grace period ends. A slow client no longer prevents the clean cache snapshot.
+- A clean shutdown logs the cache snapshot it wrote: entries saved and skipped,
+  bytes and time taken.
+- The cache page notes that its entry count includes expired entries not yet
+  removed.
+
 ## v0.1.15 — 2026-10-15
 
 ### Fixed

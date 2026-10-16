@@ -22,3 +22,65 @@
   background: linear-gradient(90deg, var(--primary), var(--primary-2));
   border-radius: 999px;
 }
+
+/* Trend chart hover: reference line, snapped markers and a glass tooltip kept inside the chart. */
+.trend-chart { position: relative; border-radius: var(--radius-sm); }
+.trend-chart:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.trend-cursor line { stroke: currentColor; stroke-opacity: .35; stroke-dasharray: 3 3; }
+.trend-cursor circle { stroke: var(--surface-strong); stroke-width: 2; }
+.trend-gap[data-active] { fill: var(--hover); }
+.trend-tip {
+  position: absolute; top: 0; left: 0; z-index: 2; pointer-events: none;
+  min-width: 10rem; max-width: 100%; padding: 8px 12px;
+  border-radius: var(--radius-sm); font-size: 12px; color: var(--text);
+  animation: fade-in .16s var(--ease-out) both;
+}
+.trend-tip p { margin: 0; }
+.trend-tip-time { font-weight: 600; margin-bottom: 4px !important; font-variant-numeric: tabular-nums; }
+.trend-tip dl { margin: 0; display: grid; gap: 2px; }
+.trend-tip dl > div { display: flex; align-items: center; gap: 12px; }
+.trend-tip dt { flex: 1; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.trend-tip dt::before { content: ""; width: 12px; border-top: 2.5px solid var(--primary); }
+.trend-tip [data-series="1"] dt::before { border-top: 2.5px dashed var(--primary-2); }
+.trend-tip [data-series="2"] dt::before { border-top: 2.5px dotted var(--danger); }
+.trend-tip dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* Query log: refresh interval, new-entry pill, batch insertion and inline details. */
+.log-live-controls { align-items: center; }
+.log-live-note { margin: 0; }
+.log-list-top { scroll-margin-top: 80px; }
+.log-new-wrap { position: sticky; top: 76px; z-index: 3; display: flex; justify-content: center; height: 0; overflow: visible; }
+.log-new-pill {
+  border: 1px solid var(--edge-soft); border-radius: 999px; padding: 6px 14px; min-height: 32px;
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  color: var(--on-primary); background: var(--primary); box-shadow: var(--shadow-lift);
+  animation: fade-in .2s var(--ease-out) both;
+}
+.log-new-pill:hover { filter: brightness(1.08); }
+.log-table, .log-cards { overflow-anchor: none; }
+.log-cell > span { display: block; }
+.log-cell > .badge { display: inline-flex; margin-bottom: 2px; }
+.log-expand {
+  display: block; width: 100%; padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer; border-radius: 6px;
+}
+.log-card-head .log-expand > span { display: block; }
+/* Collapsed table borders cannot round cells, so the rounded surface is the inner block. */
+.log-row[data-open] > td { border-bottom-color: transparent; }
+.log-expansion-row > td { padding-top: 0; }
+.log-expansion {
+  padding: 14px 16px; border-radius: var(--radius-sm); background: var(--raised);
+  animation: log-expand .22s var(--ease-out) both;
+}
+.log-expansion .log-detail { grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr)); gap: 16px 24px; }
+.log-card .log-expansion { margin-top: 12px; padding: 12px; }
+.log-row[data-enter] > td { animation: log-insert-cell .36s var(--ease-out) backwards; }
+.log-row[data-enter] .log-cell { overflow: hidden; animation: log-insert .36s var(--ease-out) backwards; }
+.log-card[data-enter] { overflow: hidden; animation: log-insert-card .36s var(--ease-out) backwards; }
+@keyframes log-insert-cell { from { padding-block: 0; border-bottom-color: transparent; } }
+@keyframes log-insert { from { max-height: 0; opacity: 0; transform: translateY(-6px); } to { max-height: 6rem; opacity: 1; transform: none; } }
+@keyframes log-insert-card { from { max-height: 0; padding-block: 0; opacity: 0; transform: translateY(-6px); } to { max-height: 12rem; opacity: 1; transform: none; } }
+@keyframes log-expand { from { opacity: 0; transform: translateY(-4px); } }
+@media (prefers-reduced-motion: reduce) {
+  .trend-tip, .log-new-pill, .log-expansion, .log-row[data-enter] > td, .log-row[data-enter] .log-cell, .log-card[data-enter] { animation: none; }
+}

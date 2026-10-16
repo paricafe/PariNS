@@ -58,9 +58,9 @@ UI validation helps users, but Rust validation is authoritative; reuse protocol 
 configuration helpers across file mode, management APIs, and the browser.
 Console translations and field metadata live in typed modules under `web/src/i18n/`
 and `web/src/model/`. React owns only presentation and one in-memory configuration
-draft. Language and theme changes preserve controls, drafts, focus and session
-ownership; persist only those two preferences, never credentials, session bindings,
-PEM, logs or drafts. Keep both languages complete; configuration values and raw
+draft. Language and appearance changes preserve controls, drafts, focus and session
+ownership; persist only language and appearance (theme, background) in the browser,
+never credentials, session bindings, PEM, logs or drafts. Keep both languages complete; configuration values and raw
 diagnostics stay intact. Incomplete numeric and listener edits remain raw drafts
 until preview/validation.
 

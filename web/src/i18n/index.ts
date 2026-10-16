@@ -7,6 +7,7 @@ import { updatesMessages } from './updates';
 import { subscriptionMessages } from './subscriptions';
 import { accountMessages } from './account';
 import { shellMessages } from './shell';
+import { appearanceMessages } from './appearance';
 import { ModelError } from "../model/errors";
 import { ApiError } from "../session/client";
 
@@ -16,6 +17,7 @@ type MessagePair = readonly [string, string];
 
 const catalog: Record<string, MessagePair> = {
   ...Object.fromEntries(Object.entries(shellMessages).map(([key, value]) => [`shell.${key}`, value])),
+  ...Object.fromEntries(Object.entries(appearanceMessages).map(([key, value]) => [`appearance.${key}`, value])),
   ...Object.fromEntries(Object.entries(accountMessages).map(([key, value]) => [`account.${key}`, value])),
   ...Object.fromEntries(Object.entries(subscriptionMessages).map(([key, value]) => [`subscriptions.${key}`, value])),
   ...Object.fromEntries(Object.entries(apiMessages).map(([key, value]) => [`api.${key}`, value])),

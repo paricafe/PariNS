@@ -4,7 +4,8 @@ import { DURATION, SPRING_IOS, SPRING_IOS_FAST } from './components/beui/motion'
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { Activity, BookOpenText, CircleArrowUp, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
-import { translate, chooseLanguage, presentIssue, type Language } from './i18n';
+import { translate, presentIssue, type Language } from './i18n';
+import { useAppearance, type Appearance } from './appearance/useAppearance';
 import { ConfigProvider, toConfigIssue, useConfig, type ConfigIssue } from './config/context';
 import { SettingsPage } from './pages/config/SettingsPage';
 import { OverviewPage, LogsPage } from './pages/observability';
@@ -14,14 +15,15 @@ import { ConfirmProvider, useConfirm } from './components/ConfirmProvider';
 import { TransportHint, transportChangeText } from './components/TransportHint';
 import { BannerProvider, useBanner } from './components/Banner';
 import { Select } from './components/Popover';
-import { Segmented } from './components/Segmented';
+import { ThemeButton } from './components/ThemeButton';
+import { AppearanceSheet } from './components/AppearanceSheet';
+import { Backdrop } from './components/Backdrop';
 import { lineDiff } from './pages/config/lineDiff';
 import { UpdatesProvider } from './features/updates/context';
 import { UpdateHint } from './features/updates/UpdatePanel';
 import { AccountControls } from './features/account/AccountControls';
 import { getPath } from './model/config';
 
-type Theme = 'system' | 'light' | 'dark';
 const navigation = [
   { path: '/overview', key: 'overview', icon: Activity, group: 'observe' },
   { path: '/logs', key: 'logs', icon: BookOpenText, group: 'observe' },
@@ -40,44 +42,15 @@ function upstreamServers(settings: unknown): number | null {
   return Array.isArray(servers) ? servers.length : null;
 }
 
-function storedLanguage(): Language {
-  try { return chooseLanguage(localStorage.getItem('parins-language'), navigator.languages); }
-  catch { return chooseLanguage(null, navigator.languages); }
-}
-function storedTheme(): Theme {
-  try { const stored = localStorage.getItem('parins-theme'); return stored === 'light' || stored === 'dark' ? stored : 'system'; }
-  catch { return 'system'; }
-}
-
-function useAppearance() {
-  const [language, setLanguage] = useState<Language>(storedLanguage);
-  const [theme, setTheme] = useState<Theme>(storedTheme);
-  useEffect(() => {
-    const media = matchMedia('(prefers-color-scheme: dark)');
-    const update = () => {
-      const dark = theme === 'dark' || theme === 'system' && media.matches;
-      document.documentElement.classList.toggle('dark', dark);
-    };
-    update(); media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, [theme]);
-  useEffect(() => { document.documentElement.lang = language; }, [language]);
-  const changeLanguage = (next: Language) => { setLanguage(next); try { localStorage.setItem('parins-language', next); } catch { /* presentation preference only */ } };
-  const changeTheme = (next: Theme) => { setTheme(next); try { if (next === 'system') localStorage.removeItem('parins-theme'); else localStorage.setItem('parins-theme', next); } catch { /* presentation preference only */ } };
-  return { language, theme, changeLanguage, changeTheme };
-}
-
-/** Fixed, pointer-free ambient background shared by every screen. */
-function Ambient() { return <div className="ambient" aria-hidden="true"><i /><i /><i /></div>; }
-
-/** One delegated, rAF-throttled listener lights the card under the pointer. */
+/** One delegated, rAF-throttled listener lights the glass surface under the pointer (low intensity on large panels). */
+const LIT_SURFACES = '.panel, .kpi-card, .grouped, .auth-card, .state-card';
 function useCardLight() {
   const reduced = useReducedMotion();
   useEffect(() => {
     if (reduced || !matchMedia('(hover: hover)').matches) return;
     let frame = 0; let lit: HTMLElement | null = null; let x = 0; let y = 0;
     const move = (event: PointerEvent) => {
-      const card = (event.target as Element | null)?.closest?.('.panel, .kpi-card') as HTMLElement | null;
+      const card = (event.target as Element | null)?.closest?.(LIT_SURFACES) as HTMLElement | null;
       if (card !== lit) { lit?.removeAttribute('data-lit'); lit = card; lit?.setAttribute('data-lit', ''); }
       if (!card) return;
       const box = card.getBoundingClientRect(); x = event.clientX - box.left; y = event.clientY - box.top;
@@ -90,14 +63,12 @@ function useCardLight() {
   }, [reduced]);
 }
 
-function Preferences({ language, theme, changeLanguage, changeTheme }: ReturnType<typeof useAppearance>) {
-  const t = (key: string) => translate(`ui.${key}`, language);
-  const themes = [{ value: 'system', label: t('themeAuto') }, { value: 'light', label: t('themeLight') }, { value: 'dark', label: t('themeDark') }];
+function Preferences({ appearance }: { appearance: Appearance }) {
+  const { language } = appearance;
   return <div className="preferences">
-    <Select label={t('language')} value={language} onChange={(next) => changeLanguage(next as Language)} options={[{ value: 'zh-CN', label: '简体中文' }, { value: 'en', label: 'English' }]} />
-    {/* Segmented on wide screens, a popup menu on phones; CSS shows exactly one. */}
-    <Segmented className="theme-switch" label={t('theme')} value={theme} onChange={(next) => changeTheme(next as Theme)} options={themes} />
-    <Select className="theme-select" label={t('theme')} value={theme} onChange={(next) => changeTheme(next as Theme)} options={themes} />
+    <Select label={translate('ui.language', language)} value={language} onChange={(next) => appearance.changeLanguage(next as Language)} options={[{ value: 'zh-CN', label: '简体中文' }, { value: 'en', label: 'English' }]} />
+    <ThemeButton theme={appearance.theme} language={language} onChange={appearance.changeTheme} />
+    <AppearanceSheet appearance={appearance} />
   </div>;
 }
 
@@ -155,7 +126,7 @@ function SaveBar({ language }: { language: Language }) {
   </motion.div>;
 }
 
-function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppearance> }) {
+function ReadyConsole({ appearance }: { appearance: Appearance }) {
   const { language } = appearance;
   const { api, logout } = useSession();
   const config = useConfig();
@@ -225,7 +196,7 @@ function ReadyConsole({ appearance }: { appearance: ReturnType<typeof useAppeara
     <div className="shell-main"><header className="topbar"><motion.span className="topbar-material" aria-hidden="true" style={{ opacity: barMaterial }} />
       <button type="button" className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label={t('showNavigation')}><Menu size={20} /></button>
       <motion.span className="topbar-title" style={{ opacity: titleOpacity }}>{current ? t(current.key) : t('overview')}</motion.span><span className="spacer" />
-      <Preferences {...appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
+      <Preferences appearance={appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
     </header><main id="main-content" tabIndex={-1} className="main-content">
       <a className="skip-target sr-only" id="main-content-start" href="#main-content">{t('skip')}</a>
       {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
@@ -246,9 +217,9 @@ function RootView() {
   const { state, recheck, retryLogout, api } = useSession();
   const t = (key: string) => translate(key, appearance.language);
   return <>
-    <Ambient />
+    <Backdrop background={appearance.background} image={appearance.image} overlay={appearance.overlay} dark={appearance.dark} />
     <a href="#main-content" className="skip-link" onClick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>{t('ui.skip')}</a>
-    {state.phase !== 'ready' && <header className="auth-topbar"><a href="/#/overview" className="brand-link"><span className="brand-mark" aria-hidden="true">P</span>PariNS</a><Preferences {...appearance} /></header>}
+    {state.phase !== 'ready' && <header className="auth-topbar"><a href="/#/overview" className="brand-link"><span className="brand-mark" aria-hidden="true">P</span>PariNS</a><Preferences appearance={appearance} /></header>}
     <ConfigProvider api={api} active={state.phase === 'ready'} refreshSession={recheck}><UpdatesProvider active={state.phase === 'ready'}>{state.phase === 'ready' ? <ConfirmProvider language={appearance.language}><ReadyConsole appearance={appearance} /></ConfirmProvider>
       : state.phase === 'setup' ? <main id="main-content" tabIndex={-1}><SetupPage language={appearance.language} /></main>
         : state.phase === 'login' ? <main id="main-content" tabIndex={-1}><LoginPage language={appearance.language} /></main>

@@ -205,15 +205,16 @@ describe("LogsPage", () => {
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: 'stale', before_id: null, limit: 50 });
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });
     expect(screen.queryByText('late.test')).toBeNull();
-    fireEvent.click(screen.getAllByRole('button', { name: /Details · stale.test/ })[0]);
-    expect(screen.getByText('exact_ecs:192.0.2.0/24')).toBeTruthy();
-    expect(screen.getByText('Only the exact same ECS network')).toBeTruthy();
+    fireEvent.click(screen.getAllByRole('button', { name: /stale.test/ })[0]);
+    expect(screen.getAllByText('exact_ecs:192.0.2.0/24').length).toBeGreaterThan(0);
+    // The raw scope code stays verbatim, with a plain-language note beside it.
+    expect(screen.getAllByText('Only for requests from exactly 192.0.2.0/24').length).toBeGreaterThan(0);
     view.unmount();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByText('192.0.2.0/24')).toBeNull();
   });
 
-  it("uses server filters/cursor, keeps a detail snapshot, and clears with the listed revision", async () => {
+  it("uses server filters/cursor, expands details inline, and clears with the listed revision", async () => {
     const requests: { path: string; body: unknown }[] = [];
     let entries = [entry];
     const api = fakeApi((path, body) => {
@@ -233,10 +234,13 @@ describe("LogsPage", () => {
       && (request.body as { status: string }).status === "success")).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: /Older queries/ }));
     await waitFor(() => expect(requests.some((request) => (request.body as { before_id: number })?.before_id === 20)).toBe(true));
-    fireEvent.click(screen.getAllByRole("button", { name: /Details · example.test/ })[0]);
-    expect(screen.getByText(/example.test 60 A 192.0.2.1/)).toBeTruthy();
-    expect(screen.getByText("192.0.2.0/24")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Close details" }));
+    const control = screen.getAllByRole("button", { name: /example.test/ })[0];
+    fireEvent.click(control);
+    expect(control.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getAllByText(/example.test 60 A 192.0.2.1/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("192.0.2.0/24").length).toBeGreaterThan(0);
+    fireEvent.click(control);
+    expect(control.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(screen.getByRole("button", { name: /Clear log/ }));
     fireEvent.click(screen.getByRole("button", { name: "Clear log" }));
     await waitFor(() => expect(requests.some((request) => request.path === "query-log/clear"

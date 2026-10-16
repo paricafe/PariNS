@@ -83,6 +83,7 @@ pub async fn terminal(
             report.reason = Some(format!("shutdown_not_quiescent: {cause}"));
         }
         if let Some((resolver, config, true)) = stopped {
+            let started = Instant::now();
             let prepared = semantic_fingerprint(&config, &resolver.policy_digest());
             let result = match prepared {
                 Ok(fingerprint) => {
@@ -104,7 +105,22 @@ pub async fn terminal(
                 Err(error) => Err(error),
             };
             match result {
-                Ok(saved) => report = saved,
+                Ok(saved) => {
+                    // Skipped entries were expired or over the per-entry or
+                    // total byte limits when the snapshot was written.
+                    eprintln!(
+                        "cache snapshot saved: {} entries, {} skipped, {} bytes in {} ms{}",
+                        saved.saved,
+                        saved.skipped,
+                        saved.bytes,
+                        started.elapsed().as_millis(),
+                        saved
+                            .reason
+                            .as_deref()
+                            .map_or(String::new(), |reason| format!(" ({reason})"))
+                    );
+                    report = saved;
+                }
                 Err(error) => {
                     eprintln!("cache save incomplete: {error:#}");
                     report.reason = Some(format!("cache save incomplete: {error:#}"));

@@ -38,7 +38,7 @@ export const viewsMessages = {
   removeRule: ["删除规则", "Delete rule"],
   addRule: ["添加规则", "Add rule"],
   statsUnavailable: ["启动 DNS 后可以查看缓存情况。", "Start DNS to see cache usage."],
-  entryBudget: ["条数用量", "Entries used"],
+  entryBudget: ["条数用量（含已过期、尚未清理的条目）", "Entries used (includes expired entries not yet removed)"],
   byteBudget: ["容量用量", "Space used"],
   usage: ["{label} {percent}%", "{label}: {percent}%"],
   entriesLimit: ["已缓存条数 / 上限", "Cached entries / limit"],

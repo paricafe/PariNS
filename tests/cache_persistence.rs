@@ -667,6 +667,14 @@ mod process {
             directory.path().join("data").join(CLEAN_FILE).is_file(),
             "{stderr}"
         );
+        // The terminal report reaches the journal, not only the exiting process.
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.starts_with("cache snapshot saved: ")
+                    && line.contains(" skipped, ")),
+            "{stderr}"
+        );
         drop(peer);
         let (mut second, endpoint) = start(directory.path(), &config, 2).await;
         assert_eq!(address(&request(endpoint).await), 1);

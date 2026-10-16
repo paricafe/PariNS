@@ -1,0 +1,89 @@
+web/src/pages/observability/LogsPage.tsx
+  s_0cc083ef6e9aa3::t_e7df02399e0ea2 1,136-137,147-148,178,314,323-324,330
+  s_0cc083ef6e9aa3::t_66c5a983be85e5 35-43,60,70
+  s_0cc083ef6e9aa3::t_1a65458709a045 2,6-7,14,44,51,55,64,78,84
+  s_0cc083ef6e9aa3::t_c03e62c924b6ed 91-104,111,120-135,138-146,149-152,159,161-167,174-177,179-252,254-255,258-263,272-313,315-322,325-329,331-336,347-360,365,370-371,377,384-389,407,410,417-420,425,430-433,439-448,452-466
+web/src/pages/observability/observability.css
+  s_0cc083ef6e9aa3::t_aad9f58f2ea8cd 25-86
+web/src/pages/observability/TrendChart.tsx
+  s_0cc083ef6e9aa3::t_7f845cbfb20221 1,3,54-75,78-81,83,101-104,109,111-112,126-128,130-153,155-160,173,181-187,191-199
+  s_0cc083ef6e9aa3::t_7b4aa9df363385 84-91,105-108,110,129
+AGENTS.md
+  s_0cc083ef6e9aa3::t_c8fe17506731f5 61-63
+web/src/i18n/appearance.ts
+  s_0cc083ef6e9aa3::t_29d233d2833f5a 1-35
+web/src/i18n/__tests__/i18n.test.ts
+  s_0cc083ef6e9aa3::t_eb7a81c64aa7d0 12,17
+web/src/i18n/index.ts
+  s_0cc083ef6e9aa3::t_eb7a81c64aa7d0 10,20
+web/src/appearance/appearance.test.tsx
+  s_0cc083ef6e9aa3::t_4d50358c82ea7a 12,220-238
+  s_0cc083ef6e9aa3::t_5a2a6e11406cde 1-11,13-219,239-240
+web/src/App.tsx
+  s_0cc083ef6e9aa3::t_c418f8921a55b0 7-8,18-20,45-46,53,66-67,69-71,129,199,220,222
+web/src/pages/observability/live.ts
+  s_0cc083ef6e9aa3::t_fa62e5fe003dd6 1-36,38-55,57-58,69-94,97-110,112-116,118-146
+  s_0cc083ef6e9aa3::t_349ca132c2e755 56,59-68,95-96,111,117
+  s_0cc083ef6e9aa3::t_6713450fa4ce61 37
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_49bde45091f0d8 208-211,217,237-243
+web/src/i18n/views.ts
+  s_0cc083ef6e9aa3::t_66c5a983be85e5 26,133-146
+web/src/pages/observability/__tests__/trend.test.tsx
+  s_0cc083ef6e9aa3::t_89fd90f4b0cbf7 29
+  s_0cc083ef6e9aa3::t_849b1160ac9892 1-28,30-73
+web/src/i18n/reliability.ts
+  s_0cc083ef6e9aa3::t_5838aa754fe8a9 29
+  s_0cc083ef6e9aa3::t_66c5a983be85e5 30-34
+web/public/theme-init.js
+  s_0cc083ef6e9aa3::t_b154e57673b78e 1-10
+web/src/appearance/useAppearance.ts
+  s_0cc083ef6e9aa3::t_d37ef833923afa 1-98
+web/src/components/Backdrop.tsx
+  s_0cc083ef6e9aa3::t_b2311cd1d75fa8 1-32
+web/src/components/AppearanceSheet.tsx
+  s_0cc083ef6e9aa3::t_e2ec32e30c463b 1-2,4-81
+  s_0cc083ef6e9aa3::t_1e9d99e4a1772e 3
+web/src/style.css
+  s_0cc083ef6e9aa3::t_bdba361d1abaac 8,22,24,50,52,68-71
+  s_0cc083ef6e9aa3::t_0b2031a8567b06 111,115,124,180,184,207,214,218,222-225,242,250,252-254,268,278,285-286,289-290,298,315,351,401,446-448,460-468,506,529,593-594
+  s_0cc083ef6e9aa3::t_9422d3a5c0c5b6 5-7,9-17,20-21,23,25,27,29,33-37,39,41,48-49,51,53,55,57,61-63,65,67,72-102
+  s_0cc083ef6e9aa3::t_0279f9d6341b5e 177-178
+  s_0cc083ef6e9aa3::t_28510153464dea 368,370,373,552,576-580,611,613,623,628,644,692
+  s_0cc083ef6e9aa3::t_c007d5531f34ee 128-138,140-151,153-154,156-158,163,165-169,171-176
+  s_0cc083ef6e9aa3::t_2f91dcb7edbafb 663-664
+  s_0cc083ef6e9aa3::t_e388f281cd1143 709-731
+web/src/pages/observability/__tests__/live.test.tsx
+  s_0cc083ef6e9aa3::t_c716f5b8633e92 24-31,34-37
+  s_0cc083ef6e9aa3::t_0de458584dcd6a 92-110,125-126
+  s_0cc083ef6e9aa3::t_0092314511297c 1-23,32-33,38-91,111-124,127-323
+web/src/components/AppearanceSheet.test.tsx
+  s_0cc083ef6e9aa3::t_55e6edc3129ac9 1-42
+web/src/components/beui/style.css
+  s_0cc083ef6e9aa3::t_2f91dcb7edbafb 26,54,66,81,139-141,159,175,183,191
+web/src/components/ThemeButton.tsx
+  s_0cc083ef6e9aa3::t_b765cc296c5f98 1-32
+web/src/appearance/imageStore.ts
+  s_0cc083ef6e9aa3::t_23fe99c5b61d82 1-47
+web/src/appearance/image.ts
+  s_0cc083ef6e9aa3::t_65277ca71347df 9-10,50-83,87-89,91-98
+  s_0cc083ef6e9aa3::t_3e635ef63ab6be 1-8,11-49,84-86,90,99-115
+web/src/appearance/preferences.ts
+  s_0cc083ef6e9aa3::t_ef3a5c1be0f084 1-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b26df9cc22f7c881f368747d0c1a86cf1931031d",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

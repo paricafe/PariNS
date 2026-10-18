@@ -26,8 +26,8 @@ async fn source_budget_is_shared_by_udp_tcp_dot_and_charges_cache_hits() {
     config.source_limits.rate_per_sec = 1;
     config.source_limits.burst = 2;
     let server = Server::bind(config).await.unwrap();
-    let address = server.local_addr().unwrap();
-    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let address = server.local_addr();
+    let dot = server.encrypted_addrs()[0].1;
     let metrics = server.metrics().clone();
     let (stop, task) = run(server);
     let mock = tokio::spawn(async move {
@@ -78,7 +78,7 @@ async fn source_inflight_rejection_does_not_cancel_admitted_udp_query() {
     config.source_limits.max_inflight = 1;
     config.max_inflight = 8;
     let server = Server::bind(config).await.unwrap();
-    let address = server.local_addr().unwrap();
+    let address = server.local_addr();
     let metrics = server.metrics().clone();
     let (stop, task) = run(server);
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -157,7 +157,7 @@ async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext()
         config.upstreams.bootstrap = vec![bootstrap_address];
         config.upstreams.ca_file = Some(cert.files.cert_file.clone());
         let server = Server::bind(config).await.unwrap();
-        let address = server.local_addr().unwrap();
+        let address = server.local_addr();
         let (stop, task) = run(server);
         assert_eq!(udp(address, 88).await.response_code, expected);
         finish(stop, task).await;
@@ -276,8 +276,8 @@ async fn reload_prepares_all_rule_and_certificate_candidates_before_publication(
     config.dot = Some(cert.listener());
     config.filter_file = Some(rules.clone());
     let server = Server::bind(config).await.unwrap();
-    let address = server.local_addr().unwrap();
-    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let address = server.local_addr();
+    let dot = server.encrypted_addrs()[0].1;
     let reload = server.reload_handle();
     let (stop, task) = run(server);
     assert!(udp(address, 1).await.answers.is_empty());
@@ -325,8 +325,8 @@ async fn client_auth_only_reload_keeps_old_tls_fingerprint_and_dns_policy() {
     config.dot = Some(cert.listener());
     config.filter_file = Some(rules.clone());
     let server = Server::bind(config).await.unwrap();
-    let dns = server.local_addr().unwrap();
-    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let dns = server.local_addr();
+    let dot = server.encrypted_addrs()[0].1;
     let reload = server.reload_handle();
     let (stop, task) = run(server);
     let blocked = udp(dns, 100).await;
@@ -380,7 +380,7 @@ async fn reload_busy_generation_keeps_candidate_certificates_unpublished() {
         .replace_policy(parins::policy::Policy::load(&rules).unwrap())
         .unwrap();
     let reload = server.reload_handle();
-    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let dot = server.encrypted_addrs()[0].1;
     let (stop, task) = run(server);
     std::fs::copy(&replacement.files.cert_file, &cert.files.cert_file).unwrap();
     std::fs::copy(&replacement.files.key_file, &cert.files.key_file).unwrap();
@@ -530,7 +530,7 @@ async fn corrupt_subscription_catalog_keeps_busy_file_reload_policy_and_certific
         .await
         .unwrap();
     let reload = server.reload_handle();
-    let dot = server.encrypted_addrs().unwrap()[0].1;
+    let dot = server.encrypted_addrs()[0].1;
     let (stop, task) = run(server);
     let old_request = filters.handle().snapshot();
     std::fs::write(&rules, "enabled=true\nblock_exact=['two.test']").unwrap();

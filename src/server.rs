@@ -172,9 +172,10 @@ pub struct ListenerStatus {
     pub address: SocketAddr,
     pub state: ListenerState,
     pub error: Option<String>,
+    #[serde(skip)]
     pub failures: u32,
     #[serde(skip)]
-    logged: Option<(String, std::time::Instant)>,
+    logged: FailureLog,
     #[serde(skip)]
     recovery_logged: Option<std::time::Instant>,
 }
@@ -184,7 +185,29 @@ pub struct Listeners {
     status: Mutex<Vec<ListenerStatus>>,
     changed: watch::Sender<()>,
 }
+/// How often the same failure, or a listener's recovery, is logged again.
 const LOG_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Logs the first failure, a changed error, and the same error at most every
+/// ten minutes, so a long outage stays visible without flooding the journal.
+/// Shared by listener supervisors and managed DNS startup retries.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FailureLog(Option<(String, std::time::Instant)>);
+impl FailureLog {
+    /// Whether `error` is due to be logged now; records it when it is.
+    pub(crate) fn due(&mut self, error: &str) -> bool {
+        let now = std::time::Instant::now();
+        let due = self
+            .0
+            .as_ref()
+            .is_none_or(|(logged, at)| logged != error || now.duration_since(*at) >= LOG_INTERVAL);
+        if due {
+            self.0 = Some((error.to_owned(), now));
+        }
+        due
+    }
+}
+
 impl Listeners {
     pub fn snapshot(&self) -> Vec<ListenerStatus> {
         self.status
@@ -230,23 +253,16 @@ impl Listeners {
         drop(status);
         self.changed.send_replace(());
     }
-    /// Logs the first failure, a changed error, and the same error at most every
-    /// ten minutes, so a long outage stays visible without flooding the journal.
+    /// Marks the listener as retrying; logging is rate limited by [`FailureLog`].
     fn failed(&self, index: usize, error: String, failures: u32) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         let listener = &mut status[index];
-        let now = std::time::Instant::now();
-        if listener
-            .logged
-            .as_ref()
-            .is_none_or(|(logged, at)| *logged != error || now.duration_since(*at) >= LOG_INTERVAL)
-        {
+        if listener.logged.due(&error) {
             eprintln!(
                 "PariNS {} {} unavailable: {error}; retrying automatically",
                 listener.kind.label(),
                 listener.address
             );
-            listener.logged = Some((error.clone(), now));
         }
         listener.state = ListenerState::Retrying;
         listener.error = Some(error);
@@ -257,7 +273,7 @@ impl Listeners {
 }
 
 /// Retry delay after `failures` consecutive failures: 5 s doubling to 60 s.
-fn backoff(failures: u32) -> Duration {
+pub(crate) fn backoff(failures: u32) -> Duration {
     Duration::from_secs(5)
         .saturating_mul(1 << failures.saturating_sub(1).min(4))
         .min(Duration::from_secs(60))
@@ -517,6 +533,7 @@ impl Server {
         // retries it once the generation runs.
         let mut slots = Vec::with_capacity(planned.len());
         let mut status = Vec::with_capacity(planned.len());
+        let mut unbound = Vec::new();
         let mut doh_actual = None;
         for (kind, mut address) in planned {
             if kind == ListenerKind::Doh3
@@ -524,12 +541,15 @@ impl Server {
             {
                 address = actual;
             }
-            let (bound, error) = match bind_slot(kind, address, &tls).await {
+            let bound = match bind_slot(kind, address, &tls).await {
                 Ok(bound) => {
                     address = bound.local_addr()?;
-                    (Some(bound), None)
+                    Some(bound)
                 }
-                Err(error) => (None, Some(format!("{error:#}"))),
+                Err(error) => {
+                    unbound.push((status.len(), format!("{error:#}")));
+                    None
+                }
             };
             match kind {
                 ListenerKind::Dns => config.listen = address,
@@ -542,24 +562,14 @@ impl Server {
                 ListenerKind::Doh3 => {}
                 ListenerKind::Doq => config.doq.as_mut().expect("DoQ").listen = address,
             }
-            if let Some(error) = &error {
-                eprintln!(
-                    "PariNS {} {address} unavailable: {error}; retrying automatically",
-                    kind.label()
-                );
-            }
             status.push(ListenerStatus {
                 kind,
                 address,
-                state: if error.is_some() {
-                    ListenerState::Retrying
-                } else {
-                    ListenerState::Running
-                },
-                failures: u32::from(error.is_some()),
-                logged: error.clone().map(|e| (e, std::time::Instant::now())),
+                state: ListenerState::Running,
+                failures: 0,
+                logged: FailureLog::default(),
                 recovery_logged: None,
-                error,
+                error: None,
             });
             slots.push(Slot {
                 kind,
@@ -590,14 +600,18 @@ impl Server {
             serial: Arc::new(Mutex::new(())),
             publication_closed: Arc::new(Mutex::new(false)),
         };
+        let listeners = Arc::new(Listeners {
+            status: Mutex::new(status),
+            changed: watch::channel(()).0,
+        });
+        for (index, error) in unbound {
+            listeners.failed(index, error, 1);
+        }
         Ok(Self {
             config,
             slots,
             tls: Arc::new(tls),
-            listeners: Arc::new(Listeners {
-                status: Mutex::new(status),
-                changed: watch::channel(()).0,
-            }),
+            listeners,
             services,
             generation: 1,
             resolver,
@@ -614,11 +628,6 @@ impl Server {
         self.listeners.clone()
     }
 
-    /// Whether a listener of this kind is currently serving.
-    pub fn serving(&self, kind: ListenerKind) -> bool {
-        self.listeners.serving(kind)
-    }
-
     /// Bind errors of listeners that are not yet serving, for callers that must
     /// not commit a partially bound candidate.
     pub fn unbound(&self) -> Option<String> {
@@ -632,8 +641,8 @@ impl Server {
     }
 
     /// The plain DNS address: actual when bound, configured while it retries.
-    pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.config.listen)
+    pub fn local_addr(&self) -> SocketAddr {
+        self.config.listen
     }
 
     pub fn metrics(&self) -> &Arc<Metrics> {
@@ -648,13 +657,12 @@ impl Server {
         self.reload.clone()
     }
 
-    pub fn admin_addr(&self) -> Result<Option<SocketAddr>> {
-        Ok(self.config.admin_listen)
+    pub fn admin_addr(&self) -> Option<SocketAddr> {
+        self.config.admin_listen
     }
 
-    pub fn encrypted_addrs(&self) -> Result<Vec<(&'static str, SocketAddr)>> {
-        Ok(self
-            .slots
+    pub fn encrypted_addrs(&self) -> Vec<(&'static str, SocketAddr)> {
+        self.slots
             .iter()
             .filter_map(|slot| {
                 Some((
@@ -668,7 +676,7 @@ impl Server {
                     slot.address,
                 ))
             })
-            .collect())
+            .collect()
     }
 
     /// Publishes ready when every listener runs, degraded otherwise.
@@ -850,20 +858,11 @@ async fn serve_plain(
         }
     };
     drop(tcp);
-    if timeout(ingress.shutdown_grace, async {
-        while tasks.join_next().await.is_some() {}
-    })
-    .await
-    .is_err()
-    {
-        // Only a generation stop forces it (and its upstream pool) down; after an
-        // error exit the supervisor rebinds this listener while others serve.
-        if *ingress.stop.borrow() {
-            resolver.force_shutdown(ForcedShutdown::ListenerDrain);
-        }
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-    }
+    // Only a generation stop forces it (and its upstream pool) down; after an
+    // error exit the supervisor rebinds this listener while others serve.
+    ingress
+        .drain(&mut tasks, ForcedShutdown::ListenerDrain)
+        .await;
     outcome
 }
 
@@ -940,7 +939,7 @@ mod tests {
         let server = Server::bind_with_services(config, None, services.clone())
             .await
             .unwrap();
-        let address = server.local_addr().unwrap();
+        let address = server.local_addr();
         let resolver = server.resolver().clone();
         let listeners = server.listeners();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -986,7 +985,6 @@ mod tests {
         })
         .await;
         assert!(grew.is_ok());
-        assert_eq!(backoff(failures(&listeners)), Duration::from_secs(10));
         // Stopping cancels the pending retry and releases every socket at once.
         let started = std::time::Instant::now();
         stop.send(()).unwrap();

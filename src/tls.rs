@@ -413,22 +413,11 @@ pub async fn serve(
         }
     };
     drop(listener);
-    if timeout(ingress.shutdown_grace, async {
-        while tasks.join_next().await.is_some() {}
-    })
-    .await
-    .is_err()
-    {
-        // Only a generation stop forces it (and its upstream pool) down; after an
-        // error exit the supervisor rebinds this listener while others serve.
-        if *ingress.stop.borrow() {
-            ingress
-                .resolver
-                .force_shutdown(crate::resolver::ForcedShutdown::DotDrain);
-        }
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-    }
+    // Only a generation stop forces it (and its upstream pool) down; after an
+    // error exit the supervisor rebinds this listener while others serve.
+    ingress
+        .drain(&mut tasks, crate::resolver::ForcedShutdown::DotDrain)
+        .await;
     outcome
 }
 

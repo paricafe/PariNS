@@ -162,8 +162,11 @@ async fn run() -> Result<()> {
     eprintln!("PariNS cache restore: {}", serde_json::to_string(&report)?);
     // The server publishes ready/degraded health (generation 1) as it runs.
     // Listeners that could not bind were already logged and are being retried.
-    if server.serving(parins::server::ListenerKind::Dns) {
-        eprintln!("PariNS listening on {} (UDP/TCP)", server.local_addr()?);
+    if server
+        .listeners()
+        .serving(parins::server::ListenerKind::Dns)
+    {
+        eprintln!("PariNS listening on {} (UDP/TCP)", server.local_addr());
     }
     for listener in server.listeners().snapshot() {
         use parins::server::{ListenerKind, ListenerState};

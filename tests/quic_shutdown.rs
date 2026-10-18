@@ -50,7 +50,7 @@ async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
     });
     config.shutdown_grace_ms = 1;
     let server = Server::bind(config).await.unwrap();
-    let address = server.encrypted_addrs().unwrap()[0].1;
+    let address = server.encrypted_addrs()[0].1;
     #[cfg(target_os = "linux")]
     let listener_inode = udp_inode(address);
     let metrics = server.metrics().clone();

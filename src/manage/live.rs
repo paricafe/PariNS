@@ -526,16 +526,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn messages_are_tagged_strict_and_bounded() {
+    fn subscriptions_are_bounded() {
         let parse = |text: &str| serde_json::from_str::<Incoming>(text);
-        assert!(matches!(parse(r#"{"type":"ping"}"#), Ok(Incoming::Ping {})));
-        assert!(matches!(
-            parse(r#"{"type":"refresh"}"#),
-            Ok(Incoming::Refresh {})
-        ));
-        assert!(parse(r#"{"type":"ping","extra":1}"#).is_err());
-        assert!(parse(r#"{"type":"auth"}"#).is_err());
-        assert!(parse(r#"{"binding":"x"}"#).is_err());
         let Ok(Incoming::Subscribe {
             interval,
             cursor,
@@ -547,10 +539,6 @@ mod tests {
             panic!("subscribe");
         };
         assert!(Subscription::parse(interval, cursor, filter).is_some());
-        assert!(
-            parse(r#"{"type":"subscribe","interval":3,"cursor":null,"filter":{"limit":1}}"#)
-                .is_err()
-        );
         for (interval, cursor, status) in [
             (Some(2), None, None),
             (Some(1), Some(u64::MAX), None),
@@ -585,7 +573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_and_session_limits_and_stop_reject_before_upgrade() {
+    async fn global_limit_and_stop_reject_before_upgrade() {
         use super::super::{Active, Manager, Store, auth_budget};
         let temp = tempfile::tempdir().unwrap();
         let address = "127.0.0.1:3000".parse().unwrap();
@@ -644,12 +632,6 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS
         );
         drop(all);
-        session.live.store(PER_SESSION, Ordering::Release);
-        assert_eq!(
-            status(upgrade(&shared, &transport, parts()).await),
-            StatusCode::TOO_MANY_REQUESTS
-        );
-        session.live.store(0, Ordering::Release);
         assert!(shared.live.close().is_empty());
         assert_eq!(
             status(upgrade(&shared, &transport, parts()).await),

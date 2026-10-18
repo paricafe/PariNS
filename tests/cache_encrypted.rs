@@ -179,7 +179,7 @@ async fn verified_dot_and_https_missing_ecs_padding_cache_and_clean_restart() {
             .unwrap();
         let server = Server::bind(config.clone()).await.unwrap();
         let resolver = server.resolver().clone();
-        let address = server.local_addr().unwrap();
+        let address = server.local_addr();
         let (stop, stopping) = oneshot::channel();
         let task = tokio::spawn(server.run(async {
             let _ = stopping.await;
@@ -225,7 +225,7 @@ async fn verified_dot_and_https_missing_ecs_padding_cache_and_clean_restart() {
             &flag,
         );
         assert_eq!(report.restored, 1, "{report:?}");
-        let address = server.local_addr().unwrap();
+        let address = server.local_addr();
         let (stop, stopping) = oneshot::channel();
         let task = tokio::spawn(server.run(async {
             let _ = stopping.await;

@@ -28,15 +28,15 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     config.doq = Some(cert.listener());
     config.admin_listen = Some("127.0.0.1:0".parse().unwrap());
     let server = Server::bind(config).await.unwrap();
-    let address = server.local_addr().unwrap();
-    let encrypted = server.encrypted_addrs().unwrap();
+    let address = server.local_addr();
+    let encrypted = server.encrypted_addrs();
     assert_eq!(
         encrypted.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
         ["dot", "doh", "doh3", "doq"]
     );
     assert_eq!(encrypted[1].1, encrypted[2].1);
     let dot = encrypted[0].1;
-    let admin = server.admin_addr().unwrap().unwrap();
+    let admin = server.admin_addr().unwrap();
     let mock = tokio::spawn(async move {
         let mut buffer = [0; 4096];
         let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
@@ -105,7 +105,7 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
     });
     let server = Server::bind(config).await.unwrap();
     let resolver = server.resolver().clone();
-    let doh = server.encrypted_addrs().unwrap()[0].1;
+    let doh = server.encrypted_addrs()[0].1;
     let (stop, task) = run(server);
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.der.clone()).unwrap();
@@ -233,7 +233,7 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     let server = Server::bind(config).await.unwrap();
     let resolver = server.resolver().clone();
     let metrics = server.metrics().clone();
-    let doq = server.encrypted_addrs().unwrap()[0].1;
+    let doq = server.encrypted_addrs()[0].1;
     let (stop, task) = run(server);
     // Relay only the client's first datagram (its Initial), then drop all traffic.
     let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -305,7 +305,6 @@ const GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 fn encrypted(server: &Server, name: &str) -> std::net::SocketAddr {
     server
         .encrypted_addrs()
-        .unwrap()
         .into_iter()
         .find(|(listener, _)| *listener == name)
         .unwrap()

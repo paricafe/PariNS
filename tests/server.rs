@@ -89,7 +89,7 @@ async fn start(
     JoinHandle<anyhow::Result<()>>,
 ) {
     let server = Server::bind(config).await.unwrap();
-    let address = server.local_addr().unwrap();
+    let address = server.local_addr();
     let (stop, stopped) = oneshot::channel();
     let task = tokio::spawn(server.run(async {
         let _ = stopped.await;
@@ -350,7 +350,7 @@ async fn metrics_count_entry_budgets_filtering_and_shutdown_cancellation() {
     cfg.filter = toml::from_str("enabled=true\nblock_exact=['blocked.test']").unwrap();
     let server = Server::bind(cfg).await.unwrap();
     let metrics = server.metrics().clone();
-    let address = server.local_addr().unwrap();
+    let address = server.local_addr();
     let (stop, stopped) = oneshot::channel();
     let task = tokio::spawn(server.run(async {
         let _ = stopped.await;

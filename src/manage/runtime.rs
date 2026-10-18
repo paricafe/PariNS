@@ -68,12 +68,11 @@ impl Running {
     ) -> Self {
         let grace = config.shutdown_grace_ms;
         let resolver = server.resolver().clone();
-        let doh_listen = server.encrypted_addrs().ok().and_then(|addresses| {
-            addresses
-                .into_iter()
-                .find(|(name, _)| *name == "doh")
-                .map(|(_, address)| address)
-        });
+        let doh_listen = server
+            .encrypted_addrs()
+            .into_iter()
+            .find(|(name, _)| *name == "doh")
+            .map(|(_, address)| address);
         let (stop, stopped) = oneshot::channel();
         // The server publishes ready or degraded for this generation as its
         // listeners come and go; this owner publishes only the terminal state.
@@ -172,13 +171,10 @@ pub(super) struct Manager {
 /// program). `dns_retry` restarts it with bounded backoff until it succeeds, a
 /// new configuration is applied, or management shuts down.
 struct StartupFailure {
-    error: String,
     attempts: u32,
     failed_at: Instant,
-    logged_at: Instant,
+    log: crate::server::FailureLog,
 }
-
-const STARTUP_LOG_INTERVAL: Duration = Duration::from_secs(600);
 
 impl Manager {
     pub async fn open(
@@ -532,7 +528,7 @@ impl Manager {
                 self.cache_report =
                     crate::runtime_lifecycle::restore(snapshot, cache, fingerprint).await?;
             }
-            let listen = server.local_addr()?;
+            let listen = server.local_addr();
             self.generation = self.generation.saturating_add(1);
             Ok::<_, anyhow::Error>(Running::start(
                 server,
@@ -564,30 +560,19 @@ impl Manager {
         }
     }
 
-    /// Logs the first failure, a changed error, and the same error at most every
-    /// ten minutes, so a long outage stays visible without flooding the journal.
+    /// Counts the failure; logging is rate limited by [`crate::server::FailureLog`].
     fn startup_failed(&mut self, error: String) {
         let now = Instant::now();
-        let attempts = self
-            .startup
-            .as_ref()
-            .map_or(1, |s| s.attempts.saturating_add(1));
-        let log = self.startup.as_ref().is_none_or(|s| {
-            s.error != error || now.duration_since(s.logged_at) >= STARTUP_LOG_INTERVAL
+        let failure = self.startup.get_or_insert_with(|| StartupFailure {
+            attempts: 0,
+            failed_at: now,
+            log: Default::default(),
         });
-        if log {
+        failure.attempts = failure.attempts.saturating_add(1);
+        failure.failed_at = now;
+        if failure.log.due(&error) {
             eprintln!("PariNS DNS failed to start: {error}; retrying automatically");
         }
-        let logged_at = match &self.startup {
-            Some(s) if !log => s.logged_at,
-            _ => now,
-        };
-        self.startup = Some(StartupFailure {
-            error,
-            attempts,
-            failed_at: now,
-            logged_at,
-        });
     }
 
     fn startup_recovered(&mut self) {
@@ -606,10 +591,7 @@ impl Manager {
         if self.running.is_some() || self.saved.is_none() {
             return None;
         }
-        let delay = Duration::from_secs(5)
-            .saturating_mul(1 << failure.attempts.saturating_sub(1).min(4))
-            .min(Duration::from_secs(60));
-        Some(failure.failed_at + delay)
+        Some(failure.failed_at + crate::server::backoff(failure.attempts))
     }
 
     /// Stops DNS and records a startup failure, as a non-bind start error would.
@@ -619,13 +601,17 @@ impl Manager {
         self.startup_failed("simulated certificate material unavailable".into());
     }
 
-    /// Restarts the saved configuration; the caller holds the mutation permit.
+    /// Restarts the saved configuration. The caller holds the mutation permit
+    /// and has seen [`Self::startup_retry_at`] due under the Manager lock, which
+    /// guarantees a saved configuration and no running generation.
     pub async fn retry_startup(&mut self) {
-        if let Some(saved) = self.saved.clone()
-            && self.running.is_none()
-        {
-            self.restore(&saved.toml, None).await;
-        }
+        let toml = self
+            .saved
+            .as_ref()
+            .expect("a due startup retry has a saved configuration")
+            .toml
+            .clone();
+        self.restore(&toml, None).await;
     }
 
     /// Returns whether listener restart was necessary.
@@ -695,7 +681,7 @@ impl Manager {
             if let Some(errors) = server.unbound() {
                 anyhow::bail!(errors);
             }
-            let listen = server.local_addr()?;
+            let listen = server.local_addr();
             let store = self.store.clone();
             let saved = next.clone();
             // Persist only after all candidate sockets and material are prepared.

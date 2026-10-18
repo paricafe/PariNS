@@ -509,7 +509,7 @@ async fn aborted_dns_task_publishes_failed_sampler_state_and_never_clean_shutdow
     let server = Server::bind_with_services(config.clone(), None, services.clone())
         .await
         .unwrap();
-    let address = server.local_addr().unwrap();
+    let address = server.local_addr();
     let running = Running::start(server, config, address, services.clone(), 1);
     assert!(services.health.snapshot().ready);
     running.task.abort();

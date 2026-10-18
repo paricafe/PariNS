@@ -2,8 +2,11 @@
 
 ## Scope and workflow
 
-PariNS is a self-hosted DNS forwarding, filtering, caching, and management service.
-Do not expand it into a full recursive resolver without an explicit design decision.
+PariNS is a self-hosted DNS forwarding, filtering, caching, and management service
+with optional validating recursive resolution (`[resolution] mode = "recursive"`).
+Recursion builds on the pinned hickory recursor fork; do not grow it into a general
+recursive server (RPZ, DNS64, local zones, forward/recursive mixing) without an
+explicit design decision.
 
 - Read the relevant implementation, tests and module `//!` documentation before
   changing behavior. Trace the request flow and identify each affected contract's owner.
@@ -39,6 +42,7 @@ Do not expand it into a full recursive resolver without an explicit design decis
 | `src/cache_persistence.rs` | One-use clean snapshot file lifecycle; only the terminal shutdown owner saves. |
 | `src/resolver.rs`, `src/resolver/`, `src/flight.rs` | Resolution orchestration, one upstream deadline, shared upstream work, bounded refresh, stale fallback. |
 | `src/upstream.rs`, `src/upstreams.rs`, `src/upstreams/` | Upstream exchange, explicit bootstrap, weighted/parallel scheduling, H2/H3 connections, attempt diagnostics; preserve resolver deadlines and cancellation. |
+| `src/recursion.rs`, `src/recursion/` | Recursive source: the pinned hickory recursor (DNSSEC validation, relaxed QNAME minimisation, infrastructure caches), result mapping (Bogus to SERVFAIL + EDE 6, AD, authority ECS scope), global outbound rate and concurrency bounds. The Resolver keeps the deadline, cache, filtering and stale fallback. |
 | `src/server.rs`, `src/transport/` | Listener lifecycle, UDP/TCP framing, local reply addresses, connection limits, shutdown. |
 | `src/ingress.rs` | Shared admission and DNS handling for encrypted transport adapters. |
 | `src/tls.rs`, `src/tls/` | Verified TLS configuration, DoT adapters and pool, the inbound CertificateSet. |
@@ -74,6 +78,14 @@ until preview/validation.
   `[cache.ecs_sharing]` learn sharing within that ECS family; any different answer or
   explicit nonzero scope revokes it at once, with a cooldown. No-ECS, privacy
   fallback and the other family never share. Details: `src/cache/sharing.rs`.
+  These rules describe upstream recursive resolvers. In recursive mode the scope
+  comes from authoritative servers: an answer without an ECS option does not depend
+  on the client network and is shared within its family (echoed as scope 0); learned
+  sharing never applies. Forwarded and recursive answers never share a cache or
+  snapshot.
+- AD is answered only for Secure data from the validating recursor, only to clients
+  that set DO or AD, and never after filtering rewrote the answer. The cache keeps
+  the source's AD bit with the entry and never replays it as stored.
 - Match DNS names by labels, including escaped labels, never presentation suffixes.
 - Preserve positive and negative eligibility and TTL rules. Fresh lifetime, stale
   retention and stale reply TTL are separate; never silently extend TTLs. Stale
@@ -116,6 +128,13 @@ until preview/validation.
   `[upstreams.dot_pool]`. Pool endpoints need equivalent policies, explicit hostname
   bootstrap and authenticated encrypted transports. Parallel losers cancel with the
   caller; failed DNS responses never preempt usable answers.
+- Recursion admits every authoritative query attempt through one global rate bucket
+  and concurrency limit before the server's attempt timeout starts, so queueing never
+  counts against or penalizes a server; a token is taken only when it is used, and
+  shutdown closes them so waiting queries fail. Each resolution stays within the
+  Resolver deadline.
+  Recursion failures are upstream failures for stale fallback, except DNSSEC Bogus,
+  which is always answered as SERVFAIL with EDE 6.
 - H3 preference applies only to HTTPS endpoints within the resolver deadline, with
   verified H2 fallback and bounded cooldown. A sent query is never resent or
   replayed; cancelling a request releases only its stream. DoH transports normalize

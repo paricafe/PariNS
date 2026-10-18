@@ -7,13 +7,36 @@ import {
 
 describe("configuration form model", () => {
   it("describes the settings paths and one DoH listener with an HTTP/3 switch", () => {
-    expect(settingPages.dns.groups[0].fields[0].path).toBe("upstreams.servers");
+    expect(settingPages.dns.groups.find((group) => group.id === "upstreams")?.fields[0].path).toBe("upstreams.servers");
     expect(settingPages.cache.groups.flatMap((group) => group.fields)
       .find((field) => field.path === "cache.negative_percent")).toMatchObject({ min: 0, max: 90 });
     expect(settingPages.security.groups.map((group) => group.optional)).toEqual([undefined, "dot", "doh", "doq"]);
     expect(settingPages.security.groups[2].fields.at(-1)?.path).toBe('doh.http3');
     expect(settingPages.security.groups[0].fields[0].path).toBe("web.public_host");
     expect(settingPages.security.groups.slice(1).every((group) => group.fields[0].type === "endpoint")).toBe(true);
+  });
+
+  it("offers the resolution mode before upstreams and shows recursion limits only in recursive mode", () => {
+    const ids = settingPages.dns.groups.map((group) => group.id);
+    expect(ids.indexOf("resolution")).toBeLessThan(ids.indexOf("upstreams"));
+    expect(ids.indexOf("recursion")).toBeLessThan(ids.indexOf("upstreams"));
+    const mode = settingPages.dns.groups.find((group) => group.id === "resolution")!.fields[0];
+    expect(mode).toMatchObject({ path: "resolution.mode", type: "select", options: [["forward", "settings.resolution.mode.forward"], ["recursive", "settings.resolution.mode.recursive"]] });
+    expect(convertFieldValue(mode, "recursive")).toBe("recursive");
+    expect(() => convertFieldValue(mode, "iterative")).toThrow(ModelError);
+    const recursion = settingPages.dns.groups.find((group) => group.id === "recursion")!;
+    expect(recursion.when).toEqual({ path: "resolution.mode", value: "recursive" });
+    expect(recursion.fields.map(({ path, type, min, max, advanced }) => ({ path, type, min, max, advanced: advanced ?? false }))).toEqual([
+      { path: "recursion.ipv6", type: "checkbox", min: undefined, max: undefined, advanced: false },
+      { path: "recursion.max_outbound_per_second", type: "number", min: 1, max: 10000, advanced: false },
+      { path: "recursion.max_outbound_inflight", type: "number", min: 1, max: 4096, advanced: true },
+      { path: "recursion.max_queries_per_request", type: "number", min: 1, max: 1000, advanced: true },
+      { path: "recursion.max_depth", type: "number", min: 4, max: 64, advanced: true },
+      { path: "recursion.cache_entries", type: "number", min: 1024, max: 1048576, advanced: true },
+    ]);
+    const depth = recursion.fields.find((field) => field.path === "recursion.max_depth")!;
+    for (const raw of ["", "3", "65", "2e1"]) expect(() => convertFieldValue(depth, raw)).toThrow(ModelError);
+    expect(convertFieldValue(depth, " 24 ")).toBe(24);
   });
 
   it("writes a touched nested path immutably and emits a sparse patch", () => {
@@ -40,7 +63,7 @@ describe("configuration form model", () => {
   });
 
   it("keeps numeric edits raw until conversion, then rejects partial or out-of-range input", () => {
-    const field = settingPages.dns.groups[1].fields[1];
+    const field = settingPages.dns.groups.find((group) => group.id === "listeners")!.fields[1];
     expect(fieldDisplayValue(1000, field)).toBe("1000");
     for (const raw of ["", "-", "1e", "1e3", "1.5", "0", "60001"]) {
       expect(() => convertFieldValue(field, raw)).toThrow(ModelError);

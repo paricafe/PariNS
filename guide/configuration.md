@@ -8,7 +8,7 @@ required; obsolete single-upstream fields and unknown keys are rejected. The exa
 uses a loopback test upstream on port 5354: replace it before sending real queries.
 See [Deployment](deployment.md#file-configured-mode) for validation and startup commands.
 
-- [Upstreams](#upstream-dns-settings) and [DoT connection reuse](#optional-dot-upstream-reuse)
+- [Upstreams](#upstream-dns-settings), [recursive resolution](#recursive-resolution) and [DoT connection reuse](#optional-dot-upstream-reuse)
 - [Encrypted listeners](#encrypted-listeners)
 - [Cache and ECS](#cache-policy) and [request coalescing](#request-coalescing)
 - [Filtering and subscriptions](#local-filtering)
@@ -75,7 +75,7 @@ requires ID zero and removes TCP keepalive. ECS is policy-controlled, not blindl
 copied: disabled ECS removes the client subnet; enabled ECS validates it against
 the socket peer and caps the prefix (explicit /0 remains private). Invalid or
 spoofed subnets are rejected. ECS privacy retry and response normalization remain
-in effect; AD is cleared because PariNS does not validate DNSSEC. Requests with
+in effect; AD is cleared because PariNS does not validate forwarded answers. Requests with
 Cookie/unknown EDNS options bypass shared cache and request coalescing. Padding is
 regenerated only for encrypted hops: 128-byte upstream request blocks and 468-byte
 client response blocks when requested, bounded by the advertised payload limit.
@@ -84,6 +84,57 @@ follow [RFC 6891](https://www.rfc-editor.org/rfc/rfc6891),
 [RFC 7871](https://www.rfc-editor.org/rfc/rfc7871) and
 [RFC 9250](https://www.rfc-editor.org/rfc/rfc9250); forwarding is not byte-for-byte
 packet replay.
+
+## Recursive resolution
+
+`[resolution] mode = "recursive"` resolves cache misses from the root servers
+instead of `[upstreams]`, which stays configured for switching back. The default is
+`"forward"`. Changing the mode restarts DNS, and the cache starts cold: forwarded
+and recursive answers never share a cache or snapshot.
+
+- **Filtering and privacy.** Only PariNS's local and subscription rules apply; a
+  forwarder's account policies do not. Queries to authoritative servers are
+  plaintext UDP/TCP on port 53, and with `[ecs] enabled = true` the client subnet
+  (capped to the configured prefixes) is sent only with queries for the answer
+  itself (the question and its CNAME targets), never with the delegation, name
+  server address or DNSSEC key lookups made to reach them.
+- **ECS scope.** Answers are cached by the scope the authoritative server returns.
+  An answer without an ECS option does not depend on the client network
+  ([RFC 7871](https://www.rfc-editor.org/rfc/rfc7871)) and is shared by all clients
+  of its address family. Learned sharing (`[cache.ecs_sharing]`) applies only to
+  forwarding.
+- **DNSSEC.** Answers are validated from the built-in root trust anchor. Bogus data
+  returns SERVFAIL with Extended DNS Error 6 (DNSSEC Bogus,
+  [RFC 8914](https://www.rfc-editor.org/rfc/rfc8914)); unsigned zones answer
+  normally. Positive answers omit the authority section, so unsigned delegation
+  records there never fail validation. AD is set only for validated (Secure) data
+  and only for clients that set DO or AD, and it is cleared when filtering
+  rewrites an answer. A client that
+  sets CD validates for itself: PariNS returns the data unchecked and without AD,
+  cached separately from validated answers.
+- **Failures.** Timeouts and unreachable authorities are upstream failures: stale
+  answers are served under the usual `[cache.stale]` rules, and every resolution
+  stays within `query_timeout_ms`. Each authoritative server gets at most 1.5 s
+  before the next one is tried. DNSSEC Bogus answers count as upstream failures in
+  the metrics but are never replaced by stale data.
+
+`[recursion]` (used only in recursive mode):
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `ipv6` | `false` | | Also query authoritative servers over IPv6; enable only with IPv6 egress. |
+| `max_outbound_per_second` | 500 | 1..=10000 | Sustained queries per second to all authoritative servers together. |
+| `max_outbound_inflight` | 256 | 1..=4096 | Authoritative queries awaiting a response at once. |
+| `max_depth` | 24 | 4..=64 | Referral and CNAME depth for one resolution. |
+| `max_queries_per_request` | 200 | 1..=1000 | Authoritative queries one resolution may send. |
+| `cache_entries` | 65536 | 1024..=1048576 | Delegation, name server and DNSSEC key responses kept by the recursor (entries, not bytes). |
+
+In recursive mode the loopback `/metrics` endpoint (`admin_listen`) adds
+`parins_recursion_*` counters: resolutions by outcome, failures by cause (timeout,
+unfollowed referral, query or depth budget, other), queries sent, rate-limit waits
+and queries in flight. Root hints and the trust anchor are built in and change only
+with a PariNS release. QNAME minimisation is relaxed, because some authoritative servers answer
+NXDOMAIN for names that only have descendants.
 
 ## Optional DoT upstream reuse
 

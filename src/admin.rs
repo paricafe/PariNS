@@ -59,6 +59,23 @@ pub fn render(metrics: &Metrics) -> String {
     output
 }
 
+/// Generation-scoped counters of the active resolution source (recursive mode only).
+fn render_extra(metrics: &[(&str, &str, u64, bool)]) -> String {
+    let mut output = String::new();
+    for (name, help, value, gauge) in metrics {
+        let (metric, kind) = if *gauge {
+            (format!("parins_{name}"), "gauge")
+        } else {
+            (format!("parins_{name}_total"), "counter")
+        };
+        let _ = writeln!(
+            output,
+            "# HELP {metric} {help}\n# TYPE {metric} {kind}\n{metric} {value}"
+        );
+    }
+    output
+}
+
 pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
     ensure!(
         listener.local_addr()?.ip().is_loopback(),
@@ -115,7 +132,8 @@ async fn connection(mut stream: TcpStream, mut ingress: Ingress) -> Result<()> {
         Ok(path) if path == "/metrics" => (
             200,
             "text/plain; version=0.0.4; charset=utf-8",
-            render(ingress.resolver.metrics()),
+            render(ingress.resolver.metrics())
+                + &render_extra(&ingress.resolver.recursion_metrics()),
         ),
         Ok(_) => (404, "text/plain; charset=utf-8", "not found\n".into()),
         Err(status) => (status, "text/plain; charset=utf-8", String::new()),
@@ -188,4 +206,21 @@ async fn read_request(stream: &mut TcpStream) -> Result<String, u16> {
         return Err(400);
     }
     Ok(path.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_extra;
+
+    #[test]
+    fn extra_metrics_render_counters_and_gauges() {
+        let text = render_extra(&[
+            ("recursion_started", "Started.", 3, false),
+            ("recursion_outbound_inflight", "In flight.", 1, true),
+        ]);
+        assert!(text.contains(
+            "# TYPE parins_recursion_started_total counter\nparins_recursion_started_total 3\n"
+        ));
+        assert!(text.contains("# TYPE parins_recursion_outbound_inflight gauge\nparins_recursion_outbound_inflight 1\n"));
+    }
 }

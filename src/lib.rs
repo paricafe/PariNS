@@ -1,4 +1,4 @@
-//! DNS forwarding components for PariNS.
+//! DNS forwarding and recursive resolution components for PariNS.
 
 pub mod admin;
 pub mod cache;
@@ -18,6 +18,7 @@ mod private_files;
 pub mod protocol;
 pub mod query_log;
 pub mod quic;
+pub mod recursion;
 pub mod resolver;
 pub mod runtime_health;
 pub mod runtime_lifecycle;

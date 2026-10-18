@@ -514,8 +514,12 @@ fn semantic_fingerprint_excludes_storage_and_includes_live_dns_policy() {
         semantic_fingerprint(&config, b"filter-b").unwrap()
     );
     config.ecs.enabled = !config.ecs.enabled;
+    let ecs_changed = semantic_fingerprint(&config, b"filter-a").unwrap();
+    assert_ne!(original, ecs_changed);
+    // Forwarded and recursive answers never share a snapshot.
+    config.resolution.mode = crate::config::ResolutionMode::Recursive;
     assert_ne!(
-        original,
+        ecs_changed,
         semantic_fingerprint(&config, b"filter-a").unwrap()
     );
 }

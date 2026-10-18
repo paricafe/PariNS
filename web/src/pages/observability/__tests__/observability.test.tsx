@@ -21,7 +21,7 @@ function fakeApi(handler: (path: string, body?: unknown) => unknown): ApiClient 
 
 const status: StatusView = {
   running: true, revision: 7, last_error: null, listen: "127.0.0.1:5353", uptime_seconds: 3600, generation: 2,
-  dns_health: { state: 'running', ready: true, generation: 2, changed_at_ms: Date.now(), code: null }, diagnostics: { cache: null, upstreams: null, quic: { scope: 'process', doq: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 }, doh3: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 } } },
+  dns_health: { state: 'running', ready: true, generation: 2, changed_at_ms: Date.now(), code: null }, resolution_mode: 'forward', diagnostics: { cache: null, upstreams: null, recursion: null, quic: { scope: 'process', doq: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 }, doh3: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 } } },
   metrics: {
     counters: { requests: 100, cache_hits: 30, cache_misses: 70, query_blocked: 2, response_blocked: 3,
       upstream_failures: 4, responses_noerror: 80, responses_nxdomain: 10, responses_servfail: 5, responses_refused: 3, responses_other: 2 },
@@ -111,6 +111,21 @@ describe("OverviewPage", () => {
       await waitFor(() => expect(screen.getByText('Everything is running normally')).toBeTruthy());
     } finally { vi.useRealTimers(); }
   });
+  it('names recursive resolution, not upstreams, when recursion is failing', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let operations = 100; let failures = 0;
+      const api = fakeApi((path) => path === 'status'
+        ? { ...status, resolution_mode: 'recursive', metrics: { ...status.metrics, counters: { ...status.metrics!.counters, upstream_operations: operations, upstream_failures: failures } } }
+        : stats);
+      render(<OverviewPage api={api} language="en" onOpenDns={() => {}} />);
+      await waitFor(() => expect(screen.getByText('DNS is running')).toBeTruthy());
+      operations += 10; failures += 8;
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await waitFor(() => expect(screen.getByText('Recursive resolution is failing')).toBeTruthy());
+      expect(screen.queryByText('Upstreams are not responding')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
   it('distinguishes a failed runtime from an ordinary stop while retaining cumulative totals', async () => {
     const failed = { ...status, running: false, dns_health: { ...status.dns_health, state: 'failed', ready: false, code: 'task_panic' } };
     const api = fakeApi((path) => path === 'status' ? failed : stats);
@@ -149,6 +164,26 @@ describe("OverviewPage", () => {
     expect(screen.getByText('bind DoH 0.0.0.0:443: Address in use (os error 98)')).toBeTruthy();
     expect(screen.queryByText(/0.0.0.0:53 for DNS/)).toBeNull();
     expect(screen.getByText('Some listeners unavailable')).toBeTruthy();
+  });
+  it('shows the running resolution mode and recursion diagnostics without upstream diagnostics', async () => {
+    const view = render(<OverviewPage api={fakeApi((path) => path === 'status' ? status : stats)} language="en" onOpenDns={() => {}} upstreamCount={2} />);
+    await waitFor(() => expect(screen.getByText('Forward')).toBeTruthy());
+    expect(screen.getByText('Upstreams')).toBeTruthy();
+    expect(screen.queryByText('Recursive resolution diagnostics')).toBeNull();
+    view.unmount();
+    const recursion = { scope: 'recursion_generation', resolutions: { answered: 7, bogus: 1, failed: 0, negative: 2, shutdown: 0, started: 10 }, failures: { budget: 0, other: 0, referral: 0, timeout: 0 }, dnssec: { bogus: 1, indeterminate: 0, insecure: 6, secure: 3 }, ecs_scope: { absent: 4, not_sent: 5, scoped: 1 }, outbound: { inflight: 3, rate_wait_ms: 12, rate_waits: 2, refused_after_shutdown: 0, sent: 42 } };
+    const recursive = { ...status, resolution_mode: 'recursive', diagnostics: { ...status.diagnostics, upstreams: null, recursion } } as StatusView;
+    render(<OverviewPage api={fakeApi((path) => path === 'status' ? recursive : stats)} language="zh-CN" onOpenDns={() => {}} upstreamCount={2} />);
+    await waitFor(() => expect(screen.getByText('递归（DNSSEC 验证）')).toBeTruthy());
+    expect(screen.queryByText('上游')).toBeNull();
+    expect(screen.getByText('递归解析诊断')).toBeTruthy();
+    expect(screen.queryByText('上游请求诊断')).toBeNull();
+  });
+  it('shows no resolution mode while DNS is not running', async () => {
+    const stopped = { ...status, running: false, resolution_mode: null, dns_health: { ...status.dns_health, state: 'stopped', ready: false } } as StatusView;
+    render(<OverviewPage api={fakeApi((path) => path === 'status' ? stopped : stats)} language="en" onOpenDns={() => {}} />);
+    await waitFor(() => expect(screen.getByText('Resolution')).toBeTruthy());
+    expect(screen.getByText('Resolution').nextElementSibling?.textContent).toBe('—');
   });
   it('reports coalesced followers beside the unchanged hit rate', async () => {
     const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, flight_joined: 9 } } } };

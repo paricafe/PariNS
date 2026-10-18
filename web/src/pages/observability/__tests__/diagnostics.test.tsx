@@ -48,10 +48,29 @@ describe('server-owned diagnostic presentation', () => {
   });
   it('keeps admission, handoff and actual protocol counts distinct', () => {
     const protocol = { handshake_inflight: 1, handshake_established: 9, stream_inflight: 2, stream_response_handed_to_transport: 8, admission_source_rejected: 3, stream_peer_cancelled: 4 };
-    render(<TransportDiagnostics language="en" upstreams={{ scope: 'pool_generation', pool_generation: 5, since_ms: null, slots: [{ slot: 0, counts: [{ protocol: null, stage: 'wait', outcome: 'cancelled', reason: 'caller_cancelled', count: 7 }] }] }} quic={{ scope: 'process', doq: protocol, doh3: protocol }} />);
+    render(<TransportDiagnostics language="en" recursion={null} upstreams={{ scope: 'pool_generation', pool_generation: 5, since_ms: null, slots: [{ slot: 0, counts: [{ protocol: null, stage: 'wait', outcome: 'cancelled', reason: 'caller_cancelled', count: 7 }] }] }} quic={{ scope: 'process', doq: protocol, doh3: protocol }} />);
     expect(screen.getByText(/Protocol not chosen yet/)).toBeTruthy();
     expect(screen.getByText(/doesn't guarantee the client received it/)).toBeTruthy();
     expect(screen.getAllByText('Rejected: per-client limit')).toHaveLength(2);
     expect(screen.getAllByText('Requests cancelled by client')).toHaveLength(2);
+  });
+  it('renders recursion counts in a fixed order, keeps unknown counters, and tolerates missing upstream diagnostics', () => {
+    const quic = { scope: 'process', doq: {}, doh3: {} };
+    const recursion = { scope: 'recursion_generation', resolutions: { answered: 7, bogus: 1, deadline: 1, failed: 0, negative: 2, shutdown: 0, started: 10 }, failures: { budget: 0, other: 0, referral: 2, timeout: 1 }, dnssec: { bogus: 1, indeterminate: 0, insecure: 6, secure: 3 }, ecs_scope: { absent: 4, not_sent: 5, scoped: 1 }, outbound: { inflight: 3, rate_wait_ms: 1234, rate_waits: 2, refused_after_shutdown: 0, sent: 42, future_counter: 9 } };
+    const view = render(<TransportDiagnostics language="en" upstreams={null} recursion={recursion} quic={quic} />);
+    expect(screen.queryByText('Upstream request diagnostics')).toBeNull();
+    expect(screen.getByText('Recursive resolution diagnostics')).toBeTruthy();
+    expect(screen.getByText('recursion_generation')).toBeTruthy();
+    const resolutions = screen.getByRole('heading', { name: 'Resolutions' }).parentElement!;
+    expect([...resolutions.querySelectorAll('dt')].map((term) => term.textContent)).toEqual(['Started', 'Answered', 'Name or record does not exist', 'Failed DNSSEC validation', 'Failed', 'Cancelled at the query deadline', 'Ended by shutdown']);
+    expect(screen.getByText('Referral not followed').nextElementSibling?.textContent).toBe('2');
+    expect(screen.getByText('Signed and valid').nextElementSibling?.textContent).toBe('3');
+    expect(screen.getByText('ECS not sent').nextElementSibling?.textContent).toBe('5');
+    expect(screen.getByText('Awaiting a reply').nextElementSibling?.textContent).toBe('3');
+    expect(screen.getByText('Total rate-limit wait (ms)').nextElementSibling?.textContent).toBe('1,234');
+    expect(screen.getByText('outbound_future_counter').nextElementSibling?.textContent).toBe('9');
+    view.rerender(<TransportDiagnostics language="zh-CN" upstreams={null} recursion={null} quic={quic} />);
+    expect(screen.queryByText('递归解析诊断')).toBeNull();
+    expect(screen.getByText('QUIC 连接诊断')).toBeTruthy();
   });
 });

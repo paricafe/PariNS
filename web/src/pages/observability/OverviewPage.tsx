@@ -161,19 +161,20 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
   const average = averageLatencyMillis(latency);
   const blocked = counters ? (counters.query_blocked ?? 0) + (counters.response_blocked ?? 0) : null;
   const health = status?.dns_health.state;
+  const recursive = status?.resolution_mode === 'recursive';
   const [headline, tone]: [string, Tone] = status === null ? [t('shell.headlineLoading'), 'idle']
     : health === 'failed' ? [t('shell.headlineFailed'), 'bad']
       : health === 'degraded' ? [t('shell.headlineDegraded'), 'warn']
       : health === 'unconfigured' ? [t('shell.headlineUnconfigured'), 'idle']
         : !running || health === 'stopped' ? [t('shell.headlineStopped'), 'idle']
           : health === 'starting' || !status.dns_health.ready ? [t('shell.headlineStarting'), 'warn']
-            : troubled ? [t('shell.headlineUpstream'), 'warn'] : troubled === null ? [t('shell.headlineRunning'), 'ok'] : [t('shell.headlineHealthy'), 'ok'];
+            : troubled ? [t(recursive ? 'shell.headlineRecursion' : 'shell.headlineUpstream'), 'warn'] : troubled === null ? [t('shell.headlineRunning'), 'ok'] : [t('shell.headlineHealthy'), 'ok'];
   const summary = status === null ? null
     : health === 'failed' ? t('shell.summaryFailed')
       : health === 'degraded' ? t('shell.summaryDegraded')
       : !running || health === 'stopped' || health === 'unconfigured' ? t('shell.summaryStopped')
         : health === 'starting' || !status.dns_health.ready ? t('shell.summaryStarting')
-          : troubled ? t('shell.summaryUpstream')
+          : troubled ? t(recursive ? 'shell.summaryRecursion' : 'shell.summaryUpstream')
             : counters ? hitRate === null ? t('shell.summaryQueriesOnly', { count: value(counters.requests, language) })
               : t('shell.summaryQueries', { count: value(counters.requests, language), percent: formatNumber(hitRate, language, { maximumFractionDigits: 0 }) }) : null;
   const kpis = [
@@ -211,7 +212,8 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
       </div>
       <dl className="status-strip-facts">
         <div><dt>{t('shell.stripInflight')}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>
-        <div><dt>{t('shell.stripUpstreams')}</dt><dd>{upstreamCount === null ? "—" : t('shell.upstreamCount', { count: upstreamCount })}</dd></div>
+        <div><dt>{t('shell.stripResolution')}</dt><dd>{status?.resolution_mode ? t(`settings.resolution.mode.${status.resolution_mode}`) : "—"}</dd></div>
+        {status?.resolution_mode !== 'recursive' && <div><dt>{t('shell.stripUpstreams')}</dt><dd>{upstreamCount === null ? "—" : t('shell.upstreamCount', { count: upstreamCount })}</dd></div>}
         <div><dt>{t('shell.stripSettings')}</dt><dd>{t({ saved: 'shell.settingsSaved', unsaved: 'shell.settingsUnsaved', unknown: 'shell.settingsUnknown' }[settingsState])}</dd></div>
       </dl>
     </section>
@@ -265,7 +267,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
           <Distribution rows={distribution} language={language} />
         </section>
         {status?.diagnostics.cache && <CacheDiagnosticsPanel value={status.diagnostics.cache} language={language} />}
-        {status && <TransportDiagnostics upstreams={status.diagnostics.upstreams} quic={status.diagnostics.quic} language={language} />}
+        {status && <TransportDiagnostics upstreams={status.diagnostics.upstreams} recursion={status.diagnostics.recursion} quic={status.diagnostics.quic} language={language} />}
         <section className="panel" aria-labelledby="parins-service-title">
           <div className="panel-head"><h2 id="parins-service-title">{t('shell.serviceDetails')}</h2>
             <button type="button" className="button quiet" onClick={onOpenDns}>{t("ui.openDns")}</button></div>

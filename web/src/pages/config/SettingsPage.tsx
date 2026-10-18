@@ -85,7 +85,11 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
   if (!draft) return <p className="muted">{translate('app.connecting', language)}</p>;
   const t = (key: string) => translate(key, language);
   const value = (field: SettingField) => draft.fields[field.path] ?? fieldDisplayValue(getPath(draft.settings, field.path), field);
+  const recursive = (draft.fields['resolution.mode'] ?? getPath(draft.settings, 'resolution.mode')) === 'recursive';
   return <div className="settings-stack">{page.groups.map((group) => {
+    // A conditional group stays visible while one of its fields holds a validation error, so focus can reach it.
+    if (group.when && (draft.fields[group.when.path] ?? getPath(draft.settings, group.when.path)) !== group.when.value
+      && !(error instanceof ModelError && group.fields.some((field) => error.path === field.path))) return null;
     const enabled = group.optional ? draft.optional[group.optional] ?? getPath(draft.settings, group.optional) !== null : true;
     const filterExternal = group.id === 'filterRules' && Boolean(draft.fields.filter_file ?? getPath(draft.settings, 'filter_file'));
     const disabled = locked || !enabled || filterExternal;
@@ -108,7 +112,8 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
         </div></div>
       </div>
       {group.id === 'doh' && enabled && <p className="group-footer notice-footer">{translate(h3 === true ? 'storage.draftDoh3' : 'storage.draftDoh', language, { port: /^0+$/.test(port.trim()) ? t('storage.automaticPort') : port || '—' })}</p>}
-      {(filterExternal || group.helpKey) && <p className="group-footer">{t(filterExternal ? 'settings.filter_file.help' : group.helpKey!)}</p>}
+      {group.id === 'upstreams' && recursive && <p className="group-footer notice-footer">{t('settings.group.upstreams.recursiveHint')}</p>}
+      {(filterExternal || group.helpKey) && <p className={group.id === 'resolution' && recursive ? 'group-footer notice-footer' : 'group-footer'}>{t(filterExternal ? 'settings.filter_file.help' : group.helpKey!)}</p>}
     </section>;
   })}</div>;
 }

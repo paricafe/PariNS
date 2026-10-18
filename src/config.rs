@@ -14,6 +14,10 @@ pub struct Config {
     pub listen: SocketAddr,
     pub upstreams: crate::upstreams::Settings,
     #[serde(default)]
+    pub resolution: ResolutionConfig,
+    #[serde(default)]
+    pub recursion: crate::recursion::Settings,
+    #[serde(default)]
     pub query_log: crate::query_log::Settings,
     #[serde(default)]
     pub storage: crate::storage::Settings,
@@ -53,6 +57,23 @@ pub struct Config {
     pub filter_file: Option<PathBuf>,
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
+}
+
+/// Where answers come from. `[upstreams]` stays configured in both modes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResolutionConfig {
+    pub mode: ResolutionMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolutionMode {
+    /// Forward queries to `[upstreams]`.
+    #[default]
+    Forward,
+    /// Resolve from the root servers with DNSSEC validation (`[recursion]`).
+    Recursive,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -383,6 +404,7 @@ impl Config {
             "cache.persistence.max_bytes must be 1..=512 MiB"
         );
         self.upstreams.validate(self)?;
+        self.recursion.validate()?;
         self.source_limits.validate()?;
         if let Some(address) = self.admin_listen {
             ensure!(address.ip().is_loopback(), "admin_listen must be loopback");

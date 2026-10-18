@@ -423,7 +423,10 @@ pub fn semantic_fingerprint(
         .as_object_mut()
         .context("cache policy is not an object")?
         .remove("persistence");
+    // The answer source is part of the semantics: recursive answers carry
+    // validated AD bits and authority scopes that forwarded ones do not.
     let semantics = serde_json::json!({"semantics": CACHE_SEMANTICS, "cache": cache, "ecs": config.ecs, "upstreams": config.upstreams,
+        "resolution": config.resolution, "recursion": config.recursion,
         "filter_digest": STANDARD.encode(filter_digest)});
     Ok(format!(
         "{:x}",

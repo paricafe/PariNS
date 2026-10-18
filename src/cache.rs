@@ -242,6 +242,9 @@ pub struct Hit {
     pub scope: Scope,
     pub stale: bool,
     pub refresh: bool,
+    /// The source's AD bit when the answer was stored; never replayed in
+    /// `message`. Only a validating source makes it meaningful.
+    pub authentic: bool,
 }
 
 pub struct Cache {
@@ -527,7 +530,7 @@ impl Cache {
             };
         }
         message.metadata.id = query.id;
-        message.metadata.authentic_data = false;
+        let authentic = std::mem::take(&mut message.metadata.authentic_data);
         message.queries = query.queries.clone();
         if let Some(edns) = &query.edns {
             let mut response_edns = Edns::new();
@@ -542,6 +545,7 @@ impl Cache {
                 scope: entry.scope,
                 stale,
                 refresh,
+                authentic,
             }),
             decision: LookupDecision {
                 outcome: if stale {
@@ -1031,8 +1035,8 @@ fn prepare_response(
     if lifetime == 0 {
         return Err(DecisionReason::TtlZero);
     }
+    // AD stays in the stored header; lookup reports it as Hit::authentic.
     stored.metadata.id = 0;
-    stored.metadata.authentic_data = false;
     stored.edns = None;
     Ok((stored, lifetime, negative))
 }

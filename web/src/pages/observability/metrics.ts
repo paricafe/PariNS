@@ -10,7 +10,7 @@ export interface RequestLatency {
 }
 
 import type { SnapshotReport, StorageStatus } from './storage';
-import type { CacheDiagnostics, DnsHealth, QuicDiagnostics, UpstreamDiagnostics } from './diagnostics';
+import type { CacheDiagnostics, DnsHealth, QuicDiagnostics, RecursionDiagnostics, UpstreamDiagnostics } from './diagnostics';
 export interface MetricsSnapshot {
   counters: Record<string, number>;
   request_inflight: number;
@@ -34,9 +34,12 @@ export interface StatusView {
   storage?: StorageStatus;
   cache_persistence?: SnapshotReport;
   dns_health: DnsHealth;
+  /** Resolution mode of the running generation; null while DNS is not running. */
+  resolution_mode: 'forward' | 'recursive' | null;
   /** Per-listener state of the running generation; absent while DNS is stopped. */
   listeners?: ListenerStatus[] | null;
-  diagnostics: { cache: CacheDiagnostics | null; upstreams: UpstreamDiagnostics | null; quic: QuicDiagnostics };
+  /** `upstreams` is null in recursive mode; `recursion` is null in forward mode. Both are null while DNS is not running. */
+  diagnostics: { cache: CacheDiagnostics | null; upstreams: UpstreamDiagnostics | null; recursion: RecursionDiagnostics | null; quic: QuicDiagnostics };
 }
 
 export interface HistorySample {

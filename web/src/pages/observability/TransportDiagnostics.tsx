@@ -1,5 +1,5 @@
 import { formatDate, formatNumber, translate, type Language } from '../../i18n';
-import { diagnosticLabel, protocolLabel, type QuicDiagnostics, type UpstreamDiagnostics, type UpstreamResult, type UpstreamTrace } from './diagnostics';
+import { diagnosticLabel, protocolLabel, type QuicDiagnostics, type RecursionDiagnostics, type UpstreamDiagnostics, type UpstreamResult, type UpstreamTrace } from './diagnostics';
 
 function Result({ value, language }: { value: UpstreamResult; language: Language }) {
   return <span>{protocolLabel(value.protocol, language)} · {diagnosticLabel(`stage_${value.stage}`, language)} · {diagnosticLabel(`outcome_${value.outcome}`, language)}{value.reason && <> · {diagnosticLabel(`upstream_reason_${value.reason}`, language)}</>}</span>;
@@ -17,8 +17,31 @@ export function UpstreamAttempts({ trace, language }: { trace: UpstreamTrace; la
   </section>;
 }
 
-export function TransportDiagnostics({ upstreams, quic, language }: { upstreams: UpstreamDiagnostics | null; quic: QuicDiagnostics; language: Language }) {
+// Known counters first in a stable order (the server object is keyed alphabetically), then any newer ones verbatim.
+const RECURSION_GROUPS = [
+  ['resolutions', 'resolution', ['started', 'answered', 'negative', 'bogus', 'failed', 'deadline', 'shutdown']],
+  ['failures', 'failure', ['timeout', 'referral', 'budget', 'other']],
+  ['dnssec', 'dnssec', ['secure', 'insecure', 'bogus', 'indeterminate']],
+  ['ecs_scope', 'ecs', ['not_sent', 'absent', 'scoped']],
+  ['outbound', 'outbound', ['sent', 'inflight', 'rate_waits', 'rate_wait_ms', 'refused_after_shutdown']],
+] as const;
+
+export function RecursionDiagnosticsPanel({ value, language }: { value: RecursionDiagnostics; language: Language }) {
+  return <section className="panel"><h2>{translate('reliability.recursion', language)}</h2>
+    <p className="small muted">{translate('reliability.recursionScope', language)} <code>{value.scope}</code></p>
+    <div className="storage-grid">{RECURSION_GROUPS.map(([group, prefix, known]) => {
+      const counts = value[group];
+      const names = [...known.filter((name) => name in counts), ...Object.keys(counts).filter((name) => !(known as readonly string[]).includes(name))];
+      return <section key={group}><h3>{translate(`reliability.recursion_${group}`, language)}</h3>
+        <dl className="diagnostic-counts">{names.map((name) => <div key={name}><dt>{diagnosticLabel(`${prefix}_${name}`, language)}</dt><dd>{formatNumber(counts[name], language)}</dd></div>)}</dl>
+      </section>;
+    })}</div>
+  </section>;
+}
+
+export function TransportDiagnostics({ upstreams, recursion, quic, language }: { upstreams: UpstreamDiagnostics | null; recursion: RecursionDiagnostics | null; quic: QuicDiagnostics; language: Language }) {
   return <div className="settings-stack">
+    {recursion && <RecursionDiagnosticsPanel value={recursion} language={language} />}
     {upstreams && <section className="panel"><h2>{translate('reliability.upstreams', language)}</h2>
       <p className="small muted">{translate('reliability.upstreamScope', language, { generation: upstreams.pool_generation, time: upstreams.since_ms === null ? translate('reliability.unknownTime', language) : formatDate(upstreams.since_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })} <code>{upstreams.scope}</code></p>
       {upstreams.slots.map((slot) => <details key={slot.slot}><summary>{translate('reliability.slot', language, { slot: slot.slot })}</summary>

@@ -60,6 +60,22 @@ enabled = false
 max_connections = 8
 idle_timeout_ms = 30000
 
+# Where answers come from: "forward" to [upstreams], or "recursive" from the root
+# servers with DNSSEC validation. Recursive mode uses only PariNS filter rules and
+# sends plaintext queries (with ECS when enabled) to authoritative servers over
+# UDP/TCP port 53. Changing the mode restarts DNS and starts the cache cold.
+[resolution]
+mode = "forward"
+
+# Used only in recursive mode. Root hints and the DNSSEC trust anchor are built in.
+[recursion]
+ipv6 = false # also query authoritative servers over IPv6
+max_outbound_per_second = 500 # all authoritative queries together
+max_outbound_inflight = 256
+max_depth = 24 # referrals and CNAMEs for one resolution
+max_queries_per_request = 200 # authoritative queries one resolution may send
+cache_entries = 65536 # delegation, name server and DNSSEC key responses
+
 # Opt in only when the upstream supports ECS and this privacy policy is desired.
 [ecs]
 enabled = false

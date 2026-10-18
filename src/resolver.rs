@@ -14,7 +14,7 @@ use hickory_proto::op::{Message, ResponseCode};
 
 use crate::{
     cache::Cache,
-    config::{CacheConfig, CoalescingConfig, Config, EcsConfig},
+    config::{CacheConfig, CoalescingConfig, Config, EcsConfig, ResolutionMode},
     ecs::{self, Context},
     filter_subscriptions::handle::PolicyHandle,
     flight::{Answer, Flights, Role},
@@ -105,8 +105,61 @@ impl ForcedShutdown {
     }
 }
 
+/// Where cache misses are resolved; fixed for the life of a Resolver.
+pub(crate) enum Source {
+    Forward(Box<crate::upstreams::Pool>),
+    Recursive(Box<crate::recursion::Recursion>),
+}
+
+impl Source {
+    fn new(config: &Config) -> anyhow::Result<Self> {
+        Ok(match config.resolution.mode {
+            ResolutionMode::Forward => Self::Forward(Box::new(crate::upstreams::Pool::new(
+                &config.upstreams,
+                config,
+            )?)),
+            ResolutionMode::Recursive => Self::Recursive(Box::new(
+                crate::recursion::Recursion::new(&config.recursion)?,
+            )),
+        })
+    }
+
+    async fn exchange(
+        &self,
+        query: &Message,
+        deadline: tokio::time::Instant,
+        operation: &crate::upstreams::diagnostics::Operation,
+    ) -> anyhow::Result<crate::upstreams::Exchange> {
+        match self {
+            Self::Forward(pool) => pool.exchange_observed(query, deadline, operation).await,
+            Self::Recursive(recursion) => Ok(crate::upstreams::Exchange {
+                message: tokio::time::timeout_at(deadline, recursion.exchange(query)).await??,
+                upstream: "recursive".into(),
+            }),
+        }
+    }
+
+    fn shutdown(&self) {
+        match self {
+            Self::Forward(pool) => pool.shutdown(),
+            Self::Recursive(recursion) => recursion.shutdown(),
+        }
+    }
+
+    /// A DNSSEC validation failure is not an unreachable source: it is answered
+    /// as SERVFAIL with EDE 6, never replaced by stale data.
+    fn validation_failed(&self, response: &Message) -> bool {
+        matches!(self, Self::Recursive(_)) && crate::recursion::is_bogus(response)
+    }
+
+    /// Only the validating recursor vouches for data; a forwarder's AD bit is not ours.
+    fn authenticates(&self) -> bool {
+        matches!(self, Self::Recursive(_))
+    }
+}
+
 pub struct Resolver {
-    upstream: Arc<crate::upstreams::Pool>,
+    upstream: Arc<Source>,
     timeout: Duration,
     ecs: EcsConfig,
     generation: RwLock<Arc<Generation>>,
@@ -148,7 +201,7 @@ impl Resolver {
         policy: Arc<PolicyHandle>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            upstream: Arc::new(crate::upstreams::Pool::new(&config.upstreams, config)?),
+            upstream: Arc::new(Source::new(config)?),
             timeout: Duration::from_millis(config.query_timeout_ms),
             ecs: config.ecs.clone(),
             generation: RwLock::new(Arc::new(Generation::new(
@@ -235,8 +288,29 @@ impl Resolver {
     pub(crate) fn forced_shutdown(&self) -> Option<ForcedShutdown> {
         ForcedShutdown::from_u8(self.shutdown_forced.load(Ordering::Acquire))
     }
-    pub fn upstream_diagnostics(&self) -> serde_json::Value {
-        self.upstream.diagnostics_snapshot()
+    pub fn upstream_diagnostics(&self) -> Option<serde_json::Value> {
+        match &*self.upstream {
+            Source::Forward(pool) => Some(pool.diagnostics_snapshot()),
+            Source::Recursive(_) => None,
+        }
+    }
+    pub fn resolution_mode(&self) -> ResolutionMode {
+        match &*self.upstream {
+            Source::Forward(_) => ResolutionMode::Forward,
+            Source::Recursive(_) => ResolutionMode::Recursive,
+        }
+    }
+    pub fn recursion_metrics(&self) -> Vec<(&'static str, &'static str, u64, bool)> {
+        match &*self.upstream {
+            Source::Recursive(recursion) => recursion.metrics(),
+            Source::Forward(_) => Vec::new(),
+        }
+    }
+    pub fn recursion_diagnostics(&self) -> Option<serde_json::Value> {
+        match &*self.upstream {
+            Source::Recursive(recursion) => Some(recursion.diagnostics_snapshot()),
+            Source::Forward(_) => None,
+        }
     }
     pub(crate) fn finish_shutdown(&self) {
         self.shutdown_clean.store(
@@ -389,12 +463,15 @@ impl Resolver {
                         }
                     });
             }
+            let mut authentic = self.authentic(&query, hit.authentic);
             let (mut message, scope) = (hit.message, hit.scope);
             if policy.apply_response(&query, &mut message) {
                 trace.cache = Some("blocked");
                 self.metrics.inc(Counter::ResponseBlocked);
+                authentic = false;
             }
             context.finish(&query, &mut message, scope.reply_scope(context.outgoing));
+            message.metadata.authentic_data = authentic;
             return Some(Reply {
                 message,
                 udp_limit,
@@ -496,18 +573,32 @@ impl Resolver {
                 None,
             )
         });
+        // A fresh source answer carries the source's AD bit; cached fallbacks do not.
+        let mut authentic = self.authentic(&query, message.metadata.authentic_data);
         // Cache retains the original upstream response; policy applies equally
         // on misses and hits and never inserts its synthesized answer.
         if policy.apply_response(&query, &mut message) {
             trace.cache = Some("blocked");
             self.metrics.inc(Counter::ResponseBlocked);
+            authentic = false;
         }
         context.finish(&query, &mut message, scope);
+        message.metadata.authentic_data = authentic;
         Some(Reply {
             message,
             udp_limit,
             padding,
         })
+    }
+}
+
+impl Resolver {
+    /// AD is answered only to clients that signal DNSSEC awareness (RFC 6840 §5.7).
+    fn authentic(&self, query: &Message, validated: bool) -> bool {
+        self.upstream.authenticates()
+            && validated
+            && (query.metadata.authentic_data
+                || query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok))
     }
 }
 
@@ -522,7 +613,7 @@ fn flight_counter(role: &Role) -> Counter {
 /// Network work is shared by the foreground and refresh paths; only foreground
 /// failures may consult stale data. A privacy retry never uses the original scope.
 struct Exchange {
-    upstream: Arc<crate::upstreams::Pool>,
+    upstream: Arc<Source>,
     timeout: Duration,
     cache: Arc<Cache>,
     query: Message,
@@ -572,7 +663,7 @@ impl Exchange {
         let result = async {
             let exchange = self
                 .upstream
-                .exchange_observed(&self.outbound, deadline, &operation)
+                .exchange(&self.outbound, deadline, &operation)
                 .await?;
             endpoint = Some(exchange.upstream);
             let mut response = exchange.message;
@@ -595,7 +686,7 @@ impl Exchange {
                 endpoint = None;
                 let exchange = self
                     .upstream
-                    .exchange_observed(&self.outbound, deadline, &operation)
+                    .exchange(&self.outbound, deadline, &operation)
                     .await?;
                 endpoint = Some(exchange.upstream);
                 response = exchange.message;
@@ -603,6 +694,9 @@ impl Exchange {
             Ok::<_, anyhow::Error>(response)
         }
         .await;
+        let bogus = result
+            .as_ref()
+            .is_ok_and(|response| self.upstream.validation_failed(response));
         let failed = match &result {
             Ok(response) => response.response_code == ResponseCode::ServFail,
             Err(error) => {
@@ -656,7 +750,7 @@ impl Exchange {
                 Answer {
                     response: Ok((response, scope)),
                     admitted,
-                    stale_eligible: failed && !retried,
+                    stale_eligible: failed && !retried && !bogus,
                     upstream: endpoint,
                     outgoing_ecs: crate::query_log::subnet(&self.outbound),
                     cached: false,

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- Optional recursive resolution with DNSSEC validation:
+  `[resolution] mode = "recursive"` (default `"forward"`) resolves from the root
+  servers instead of `[upstreams]`. Only PariNS filter rules apply, and queries to
+  authoritative servers are plaintext. With ECS enabled, the client subnet goes
+  only to the answer's authoritative servers; answers are cached by the scope
+  they return, and answers without ECS are shared within the address family.
+  Bogus data returns SERVFAIL with Extended DNS Error 6 (never stale data); AD
+  is set for validated data when the client sets DO or AD, and CD returns
+  unchecked data. `[recursion]` bounds outbound queries per second and in
+  flight, queries per resolution, referral depth and the infrastructure cache.
+  Status adds `resolution_mode` and `diagnostics.recursion`;
+  `diagnostics.upstreams` is null in recursive mode, and `/metrics` adds
+  `parins_recursion_*` counters. Changing the mode restarts
+  DNS with a cold cache.
+
 ### Changed
 
 - The appearance sheet no longer repeats the theme choice; the top-bar button is

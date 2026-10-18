@@ -6,6 +6,15 @@ export interface UpstreamResult { protocol: string | null; stage: string; outcom
 export interface UpstreamAttempt extends UpstreamResult { pool_generation: number; slot: number; code: number | null; elapsed_ms: number; connection?: 'new' | 'reused' }
 export interface UpstreamTrace { attempts: UpstreamAttempt[]; omitted: number }
 export interface UpstreamDiagnostics { scope: string; pool_generation: number; since_ms: number | null; slots: { slot: number; counts: (UpstreamResult & { count: number })[] }[] }
+/** Counters since the DNS generation started; `outbound.inflight` is a current gauge. */
+export interface RecursionDiagnostics {
+  scope: string;
+  resolutions: Record<string, number>;
+  failures: Record<string, number>;
+  dnssec: Record<string, number>;
+  ecs_scope: Record<string, number>;
+  outbound: Record<string, number>;
+}
 export interface QuicDiagnostics { scope: string; doq: Record<string, number>; doh3: Record<string, number> }
 export interface CacheDiagnostics {
   scope: string;

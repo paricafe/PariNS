@@ -314,10 +314,11 @@ impl Manager {
                 Some("DNS task exited; reapply configuration to restart".to_string())
             } else { self.last_error.clone() },
             "revision": self.saved.as_ref().map_or(0, |s| s.revision),
+            "resolution_mode": running.map(|r| r.resolver.resolution_mode()),
             "metrics": self.services.metrics.snapshot(),
             "metrics_scope": "process",
             "dns_health": health,
-            "diagnostics": {"cache":running.map(|r| r.resolver.cache().diagnostics_snapshot()),"quic":self.services.metrics.quic.snapshot(),"upstreams":running.map(|r| r.resolver.upstream_diagnostics())},
+            "diagnostics": {"cache":running.map(|r| r.resolver.cache().diagnostics_snapshot()),"quic":self.services.metrics.quic.snapshot(),"upstreams":running.and_then(|r| r.resolver.upstream_diagnostics()),"recursion":running.and_then(|r| r.resolver.recursion_diagnostics())},
             "certificates": self.certificate_status(),
             "storage": self.services.status(),
             "cache_persistence": self.cache_report,

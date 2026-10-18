@@ -23,6 +23,8 @@ export interface SettingGroup {
   enableKey: string;
   fields: readonly SettingField[];
   optional?: "dot" | "doh" | "doq";
+  /** Presentation only: shown while the draft value at `path` equals `value`. */
+  when?: { path: string; value: string };
 }
 
 export interface SettingPage {
@@ -46,6 +48,7 @@ const group = (id: string, fields: readonly SettingField[], optional?: SettingGr
   id, titleKey: `settings.group.${id}.title`, helpKey: `settings.group.${id}.help`,
   enableKey: `settings.group.${id}.enable`, fields, ...(optional ? { optional } : {}),
 });
+const when = (item: SettingGroup, path: string, value: string): SettingGroup => ({ ...item, when: { path, value } });
 const quiet = ({ helpKey: _, ...rest }: SettingGroup): SettingGroup => rest;
 const page = (id: string, groups: readonly SettingGroup[]): SettingPage => ({
   id, titleKey: `settings.page.${id}.title`, introKey: `settings.page.${id}.intro`, groups,
@@ -53,6 +56,12 @@ const page = (id: string, groups: readonly SettingGroup[]): SettingPage => ({
 
 export const settingPages = {
   dns: page("dns", [
+    group("resolution", [{ ...select("resolution.mode", ["forward", "recursive"]), helpKey: "settings.resolution.mode.help" }]),
+    when(group("recursion", [
+      field("recursion.ipv6", "checkbox", true), number("recursion.max_outbound_per_second", 1, 10000, true),
+      advanced(number("recursion.max_outbound_inflight", 1, 4096)), advanced(number("recursion.max_queries_per_request", 1, 1000, true)),
+      advanced(number("recursion.max_depth", 4, 64, true)), advanced(number("recursion.cache_entries", 1024, 1048576, true)),
+    ]), "resolution.mode", "recursive"),
     group("upstreams", [
       field("upstreams.servers", "lines", true), { ...select("upstreams.mode", ["weighted", "parallel"]), helpKey: "settings.upstreams.mode.help" },
       field("upstreams.prefer_h3", "checkbox", true), field("upstreams.bootstrap", "lines", true),

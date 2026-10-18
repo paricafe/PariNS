@@ -122,7 +122,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [hidden, setHidden] = useState(() => document.visibilityState === "hidden");
   const [suspended, setSuspended] = useState(false);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('stopped');
-  const [liveNote, setLiveNote] = useState<'limited' | 'unauthorized' | null>(null);
+  const [liveStopped, setLiveStopped] = useState(false);
   const [liveLog, setLiveLog] = useState<LiveLogState | null>(null);
   const [pending, setPending] = useState<Pending>(noPending);
   const [enterAfter, setEnterAfter] = useState(Infinity);
@@ -230,13 +230,12 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       },
       status(status) {
         setLiveStatus(status);
-        if (status === 'limited') { setSuspended(true); setLiveInterval(null); setLiveNote('limited'); }
         if (status === 'unauthorized') {
-          setSuspended(true); setLiveNote('unauthorized');
+          setSuspended(true); setLiveStopped(true);
           // An ordinary request lets the session layer classify the failure like any other 401.
           void load(null, appliedRef.current);
         }
-        if (status === 'open') setLiveNote(null);
+        if (status === 'open') setLiveStopped(false);
       },
     }, subscription());
     client.current = live;
@@ -352,7 +351,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   function chooseInterval(value: string) {
     setLiveInterval(value === 'manual' ? null : Number(value) as LiveInterval);
     setSuspended(false);
-    setLiveNote(null);
+    setLiveStopped(false);
   }
 
   function revealPending() {
@@ -382,7 +381,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
 
   const statuses = ["", "success", "blocked", "error", "dropped"] as const;
   const queryName = (entry: LogEntry) => entry.name || translate("views.unreadableQuery", language);
-  const liveMessage = liveNote === 'limited' ? 'views.liveLimited' : liveNote === 'unauthorized' ? 'views.liveStopped'
+  const liveMessage = liveStopped ? 'views.liveStopped'
     : liveStatus === 'reconnecting' ? 'views.liveReconnecting'
       : liveLog?.log === 'unavailable' ? 'views.liveUnavailable' : liveLog?.log === 'checking' ? 'views.liveChecking' : null;
   const disabled = (page && !page.enabled) || liveLog?.log === 'disabled';

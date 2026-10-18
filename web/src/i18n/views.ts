@@ -140,7 +140,6 @@ export const viewsMessages = {
   liveSeconds: ["{seconds} 秒", "{seconds} s"],
   newEntries: ["有 {count} 条新记录", "{count} new queries"],
   liveReconnecting: ["实时更新已断开，正在重新连接…", "Live updates disconnected; reconnecting…"],
-  liveLimited: ["实时连接数已满，已改为手动刷新。", "Too many live connections; switched to manual refresh."],
   liveStopped: ["实时更新已停止，点“刷新”查看最新记录。", "Live updates stopped. Use Refresh to see the latest queries."],
   liveUnavailable: ["查询记录存储暂时不可用，恢复后会继续更新。", "Query log storage is unavailable right now; updates resume when it's back."],
   liveChecking: ["正在检查查询记录存储，完成后开始更新。", "Checking query log storage; updates start when it finishes."],

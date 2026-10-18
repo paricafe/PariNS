@@ -1,12 +1,10 @@
 import { useId, useRef, useState } from 'react';
 import { ImagePlus, Palette, Trash2 } from 'lucide-react';
 import { translate } from '../i18n';
-import { MAX_OVERLAY, PATTERN_BACKGROUNDS, SOLID_BACKGROUNDS, THEME_ORDER, type BackgroundId, type Theme } from '../appearance/preferences';
+import { MAX_OVERLAY, PATTERN_BACKGROUNDS, SOLID_BACKGROUNDS, type BackgroundId } from '../appearance/preferences';
 import { ACCEPTED_TYPES, ImageError } from '../appearance/image';
 import type { Appearance } from '../appearance/useAppearance';
 import { Drawer } from './beui';
-import { Segmented } from './Segmented';
-import { themeName } from './ThemeButton';
 
 const PROBLEMS = { type: 'errorType', size: 'errorSize', decode: 'errorDecode', encode: 'errorEncode' } as const;
 
@@ -20,9 +18,9 @@ function Swatch({ id, name, checked, onSelect, label, image }: { id: BackgroundI
   </label>;
 }
 
-/** Sheet for theme, background preset/pattern and the browser-local custom image. */
+/** Sheet for the background preset/pattern and the browser-local custom image; the top-bar button owns the theme. */
 export function AppearanceSheet({ appearance }: { appearance: Appearance }) {
-  const { language, theme, background, overlay, image } = appearance;
+  const { language, background, overlay, image } = appearance;
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ key: string; tone: 'error' | 'info' } | null>(null);
@@ -47,11 +45,6 @@ export function AppearanceSheet({ appearance }: { appearance: Appearance }) {
     <button type="button" className="icon-button" aria-label={t('open')} title={t('open')} onClick={() => setOpen(true)}><Palette size={18} strokeWidth={1.9} aria-hidden="true" /></button>
     <Drawer open={open} variant="sheet" className="appearance-sheet" title={t('sheetTitle')} closeLabel={translate('ui.closeDialog', language)} onClose={() => setOpen(false)}>
       <p className="muted small">{t('sheetHelp')}</p>
-      <section className="appearance-section">
-        <h3 className="group-title">{t('themeGroup')}</h3>
-        <Segmented label={t('themeGroup')} value={theme} onChange={(next) => appearance.changeTheme(next as Theme)}
-          options={THEME_ORDER.map((value) => ({ value, label: themeName(value, language) }))} />
-      </section>
       <fieldset className="appearance-section">
         <legend className="group-title">{t('solidGroup')}</legend>
         <div className="bg-options">{SOLID_BACKGROUNDS.map(option)}</div>

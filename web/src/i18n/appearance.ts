@@ -1,11 +1,10 @@
-// Theme button and appearance sheet (theme, background, custom image) strings.
+// Theme button and appearance sheet (background, custom image) strings.
 export const appearanceMessages = {
   theme: ['主题：{state}', 'Theme: {state}'],
   themeNext: ['主题：{state}（点按切换为{next}）', 'Theme: {state} (select for {next})'],
   open: ['外观', 'Appearance'],
   sheetTitle: ['外观', 'Appearance'],
   sheetHelp: ['外观只保存在这个浏览器里，不会上传到服务器。', 'Appearance is saved only in this browser and never sent to the server.'],
-  themeGroup: ['主题', 'Theme'],
   solidGroup: ['纯色背景', 'Solid colors'],
   patternGroup: ['图案', 'Patterns'],
   customGroup: ['自定义图片', 'Custom image'],
@@ -28,7 +27,7 @@ export const appearanceMessages = {
   overlayHelp: ['图片较花或对比强时调高，保证文字清晰。', 'Raise it when the image is busy or high-contrast so text stays readable.'],
   overlayValue: ['{value}%', '{value}%'],
   errorType: ['只支持 PNG、JPEG 或 WebP 图片。', 'Only PNG, JPEG or WebP images are supported.'],
-  errorSize: ['图片文件太大（超过 40 MB）。', 'The image file is too large (over 40 MB).'],
+  errorSize: ['图片过大。', 'Image too large.'],
   errorDecode: ['无法读取这张图片。', 'This image could not be read.'],
   errorEncode: ['无法压缩这张图片。', 'This image could not be compressed.'],
   notSaved: ['这个浏览器不能保存图片，本次访问有效，刷新后恢复默认背景。', 'This browser cannot keep the image; it applies until you reload the page.'],

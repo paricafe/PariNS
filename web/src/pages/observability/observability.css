@@ -81,6 +81,3 @@
 @keyframes log-insert { from { max-height: 0; opacity: 0; transform: translateY(-6px); } to { max-height: 6rem; opacity: 1; transform: none; } }
 @keyframes log-insert-card { from { max-height: 0; padding-block: 0; opacity: 0; transform: translateY(-6px); } to { max-height: 12rem; opacity: 1; transform: none; } }
 @keyframes log-expand { from { opacity: 0; transform: translateY(-4px); } }
-@media (prefers-reduced-motion: reduce) {
-  .trend-tip, .log-new-pill, .log-expansion, .log-row[data-enter] > td, .log-row[data-enter] .log-cell, .log-card[data-enter] { animation: none; }
-}

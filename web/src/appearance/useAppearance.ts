@@ -70,10 +70,7 @@ export function useAppearance() {
       setTheme(next);
     });
   };
-  const changeBackground = (next: BackgroundId) => {
-    if (next === 'custom' && !image) return;
-    setBackground(next); saveBackground(next);
-  };
+  const changeBackground = (next: BackgroundId) => { setBackground(next); saveBackground(next); };
   const changeOverlay = (next: number) => { const value = clampOverlay(next); setOverlay(value); saveOverlay(value); };
   /** Prepares and shows an uploaded image; `saved` is false when this browser cannot keep it beyond this visit. */
   const uploadImage = async (file: Blob): Promise<{ saved: boolean }> => {
@@ -89,7 +86,7 @@ export function useAppearance() {
     if (imageUrl.current) URL.revokeObjectURL(imageUrl.current);
     imageUrl.current = null;
     setImage(null);
-    if (background === 'custom' || storedBackground() === 'custom') { setBackground(DEFAULT_BACKGROUND); saveBackground(DEFAULT_BACKGROUND); }
+    if (background === 'custom') { setBackground(DEFAULT_BACKGROUND); saveBackground(DEFAULT_BACKGROUND); }
   };
 
   return { language, theme, dark, background, overlay, image, changeLanguage, changeTheme, changeBackground, changeOverlay, uploadImage, removeImage };

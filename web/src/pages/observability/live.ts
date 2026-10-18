@@ -6,10 +6,10 @@ export interface LiveFilter { search: string | null; status: string | null; cach
 export interface LiveSubscription { interval: LiveInterval; cursor: number | null; filter: LiveFilter }
 export interface LiveLogState { log: 'ok' | 'disabled' | 'unavailable' | 'checking'; log_epoch: number }
 /**
- * `unauthorized` (4401/4403) and `limited` (4429) are terminal: the client stops and
- * the page decides what comes next. Every other close reconnects with bounded backoff.
+ * `unauthorized` (4401/4403) is terminal: the client stops and the page decides what
+ * comes next. Every other close reconnects with bounded backoff.
  */
-export type LiveStatus = 'connecting' | 'open' | 'reconnecting' | 'unauthorized' | 'limited' | 'stopped';
+export type LiveStatus = 'connecting' | 'open' | 'reconnecting' | 'unauthorized' | 'stopped';
 
 export interface LiveHandlers {
   entries(entries: LogEntry[], more: boolean): void;
@@ -124,7 +124,6 @@ export class LiveLogClient {
     this.teardown();
     if (!this.running) return;
     if (code === 4401 || code === 4403) { this.running = false; this.handlers.status('unauthorized'); return; }
-    if (code === 4429) { this.running = false; this.handlers.status('limited'); return; }
     const delay = BACKOFF_MS[Math.min(this.failures, BACKOFF_MS.length - 1)];
     this.failures += 1;
     this.handlers.status('reconnecting');

@@ -137,12 +137,6 @@ describe('LiveLogClient', () => {
     expect(events.log.at(-1)).toBe('unauthorized');
     vi.advanceTimersByTime(60_000);
     expect(FakeSocket.instances).toHaveLength(11);
-
-    client.start({ interval: 1, cursor: null, filter: { search: null, status: null, cache: null } });
-    latest().serverClose(4429);
-    expect(events.log.at(-1)).toBe('limited');
-    vi.advanceTimersByTime(60_000);
-    expect(FakeSocket.instances).toHaveLength(12);
   });
 
   it('does not connect without an in-memory binding', () => {
@@ -260,16 +254,6 @@ describe('LogsPage live updates', () => {
     expect(screen.queryByText('example.test')).toBeNull();
     expect(api.request).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(socket.ofType('subscribe').at(-1)).toMatchObject({ cursor: 1 }));
-  });
-
-  it('falls back to manual refresh with a note when live connections are limited', async () => {
-    const { api, socket } = await mount();
-    act(() => socket.serverClose(4429));
-    expect(screen.getByText(/Too many live connections/)).toBeTruthy();
-    expect(screen.getByRole('radio', { name: 'Manual' }).getAttribute('aria-checked')).toBe('true');
-    expect(FakeSocket.instances).toHaveLength(1);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await waitFor(() => expect(api.request).toHaveBeenCalledTimes(2));
   });
 
   it('stops on an auth close and lets an ordinary request report the session', async () => {

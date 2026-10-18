@@ -31,9 +31,6 @@ describe('appearance sheet', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Drifting orbs' }));
     expect(document.querySelector('.backdrop')?.hasAttribute('data-static')).toBe(true);
     expect(document.querySelectorAll('.backdrop-layer[data-bg="orbs"] .orb')).toHaveLength(3);
-    // Theme segmented control in the sheet uses the same state as the top-bar button.
-    fireEvent.click(screen.getByRole('radio', { name: 'Dark' }));
-    expect(document.documentElement.classList.contains('dark')).toBe(true);
     const input = document.querySelector('input[type=file]') as HTMLInputElement;
     await act(async () => { fireEvent.change(input, { target: { files: [new File(['x'], 'a.gif', { type: 'image/gif' })] } }); });
     await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Only PNG, JPEG or WebP images are supported.'));

@@ -4,9 +4,7 @@
 export const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
 export const MAX_EDGE = 2560;
 export const MAX_BYTES = 1.5 * 1024 * 1024;
-/** Bounds decode memory: a larger source file is refused before it is decoded. */
-export const MAX_INPUT_BYTES = 40 * 1024 * 1024;
-/** A highly compressed file can still expand to gigabytes when decoded at full size. */
+/** Bounds decode memory: a highly compressed file can still expand to gigabytes, so a header declaring more pixels is refused before decoding. */
 export const MAX_INPUT_PIXELS = 100_000_000;
 const QUALITIES = [0.86, 0.78, 0.7, 0.6];
 
@@ -15,7 +13,7 @@ export class ImageError extends Error {
   constructor(readonly problem: ImageProblem) { super(problem); }
 }
 
-export interface PreparedImage { blob: Blob; width: number; height: number; luminance: number }
+export interface PreparedImage { blob: Blob; luminance: number }
 
 export function fitWithin(width: number, height: number, edge = MAX_EDGE): { width: number; height: number } {
   const scale = Math.min(1, edge / Math.max(width, height));
@@ -36,15 +34,16 @@ function draw(source: CanvasImageSource, width: number, height: number): HTMLCan
   return canvas;
 }
 
-/** Mean relative luminance (0–1) of an 8×8 thumbnail; 0.5 when the pixels cannot be read. */
+/**
+ * Mean relative luminance (0–1) of an 8×8 thumbnail. The source is a bitmap decoded from a
+ * local file, so the canvas is never cross-origin tainted and its pixels are readable.
+ */
 function luminance(source: CanvasImageSource): number {
-  try {
-    const data = draw(source, 8, 8).getContext('2d')!.getImageData(0, 0, 8, 8).data;
-    const linear = (value: number) => { const c = value / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
-    let total = 0;
-    for (let index = 0; index < data.length; index += 4) total += 0.2126 * linear(data[index]) + 0.7152 * linear(data[index + 1]) + 0.0722 * linear(data[index + 2]);
-    return total / (data.length / 4);
-  } catch { return 0.5; }
+  const data = draw(source, 8, 8).getContext('2d')!.getImageData(0, 0, 8, 8).data;
+  const linear = (value: number) => { const c = value / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  let total = 0;
+  for (let index = 0; index < data.length; index += 4) total += 0.2126 * linear(data[index]) + 0.7152 * linear(data[index + 1]) + 0.0722 * linear(data[index + 2]);
+  return total / (data.length / 4);
 }
 
 /** Intrinsic size from the PNG, JPEG or WebP header without decoding; null when unrecognised. */
@@ -83,16 +82,20 @@ export function headerSize(bytes: Uint8Array): { width: number; height: number }
 
 export async function prepareImage(file: Blob): Promise<PreparedImage> {
   if (!(ACCEPTED_TYPES as readonly string[]).includes(file.type)) throw new ImageError('type');
-  if (file.size > MAX_INPUT_BYTES) throw new ImageError('size');
-  // Headers are near the start; a JPEG's frame header may follow large metadata.
-  const size = headerSize(new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer()));
-  if (size && size.width * size.height > MAX_INPUT_PIXELS) throw new ImageError('size');
+  // Headers are near the start; a JPEG's frame header may follow large metadata, so read
+  // the whole file only when the first part does not contain it.
+  const size = headerSize(new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer()))
+    ?? (file.size > 256 * 1024 ? headerSize(new Uint8Array(await file.arrayBuffer())) : null);
+  // Without a readable size the decode could not be bounded (or the content is not the
+  // declared format): refuse rather than decode at full size.
+  if (!size) throw new ImageError('decode');
+  if (size.width * size.height > MAX_INPUT_PIXELS) throw new ImageError('size');
   let bitmap: ImageBitmap;
   try {
     // Decode straight to the target size when it is known, so the full-size image never
     // has to exist in memory.
-    const target = size && fitWithin(size.width, size.height);
-    bitmap = target && (target.width < size.width || target.height < size.height)
+    const target = fitWithin(size.width, size.height);
+    bitmap = target.width < size.width || target.height < size.height
       ? await createImageBitmap(file, { resizeWidth: target.width, resizeHeight: target.height, resizeQuality: 'high' })
       : await createImageBitmap(file);
   } catch { throw new ImageError('decode'); }
@@ -106,7 +109,7 @@ export async function prepareImage(file: Blob): Promise<PreparedImage> {
         let blob = await encode(canvas, 'image/webp', quality);
         // Browsers without a WebP encoder return PNG; JPEG keeps the budget meaningful there.
         if (blob && blob.type !== 'image/webp') blob = await encode(canvas, 'image/jpeg', quality);
-        if (blob && blob.size <= MAX_BYTES) return { blob, width, height, luminance: measured };
+        if (blob && blob.size <= MAX_BYTES) return { blob, luminance: measured };
       }
       ({ width, height } = fitWithin(width, height, Math.round(Math.max(width, height) * 0.8)));
     }

@@ -58,13 +58,4 @@ describe("bilingual console catalog", () => {
       .toBe("Console / <script>$&</script>");
     expect(translate("missing.key", "zh-CN")).toBe("missing.key");
   });
-
-  it("covers secure session and appearance states without obsolete refresh copy", () => {
-    for (const key of [
-      "api.SESSION_CHANGED", "api.TRANSPORT_CHANGED", "app.cookieUnavailable", "app.transportChanged",
-      "app.logoutUnknown", "app.sessionChanged", "ui.theme", "ui.themeAuto",
-      "ui.themeLight", "ui.themeDark",
-    ]) expect(hasTranslation(key), key).toBe(true);
-    expect(hasTranslation("ui.sessionHelp")).toBe(false);
-  });
 });

@@ -68,7 +68,6 @@ export const shellMessages = {
   discardPem: ["放弃粘贴的内容", "Discard pasted content"],
   validSaved: ["已保存的配置检查通过。", "The saved configuration checks out."],
   lastUpdated: ["（显示的是 {time} 的数据）", "(showing data from {time})"],
-  gapTip: ["这段时间服务未运行", "The service wasn't running during this time"],
   restoreDone: ["启动时恢复了 {restored} 条，跳过 {skipped} 条", "Restored {restored} entries at start, skipped {skipped}"],
   restoreNoSnapshot: ["上次没有正常停止，这次从空缓存开始", "The last stop wasn't clean, so the cache started empty"],
   restoreDisabled: ["已关闭，每次启动都从空缓存开始", "Off; the cache starts empty every time"],

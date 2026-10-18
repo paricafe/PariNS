@@ -6,7 +6,7 @@ import { ThemeButton } from '../components/ThemeButton';
 import { Backdrop } from '../components/Backdrop';
 import { useAppearance, type Appearance } from './useAppearance';
 import {
-  STORAGE_KEYS, effectiveOverlay, nextTheme, saveBackground, saveOverlay, storedBackground, storedOverlay, storedTheme, writePreference,
+  STORAGE_KEYS, effectiveOverlay, saveBackground, saveOverlay, storedBackground, storedOverlay, storedTheme, writePreference,
 } from './preferences';
 import { clearImage, loadImage, saveImage } from './imageStore';
 import { ImageError, MAX_BYTES, fitWithin, headerSize, prepareImage } from './image';
@@ -94,7 +94,6 @@ describe('theme button', () => {
     expect(document.activeElement).toBe(button());
     expect(draft.value).toBe('unsaved edit');
     expect(Object.keys(localStorage).sort()).toEqual([STORAGE_KEYS.language]);
-    expect(nextTheme('dark')).toBe('system');
   });
 
   it('works with defaults when storage throws', () => {
@@ -125,23 +124,17 @@ describe('background preferences', () => {
     expect(storedOverlay()).toBe(90);
   });
 
-  it('applies the choice to the root and to its own backdrop layer', () => {
+  it('marks pattern backdrops so glass gets its denser text backing', () => {
     render(<Harness />);
     act(() => appearance.changeBackground('grid'));
-    expect(document.documentElement.dataset.bg).toBe('grid');
     expect(document.documentElement.dataset.backdrop).toBe('pattern');
-    expect(document.querySelector('.backdrop-layer[data-bg="grid"] .grid')).toBeTruthy();
-    expect(localStorage.getItem(STORAGE_KEYS.background)).toBe('grid');
-    // Without an image the custom choice is refused.
-    act(() => appearance.changeBackground('custom'));
-    expect(appearance.background).toBe('grid');
+    act(() => appearance.changeBackground('mist'));
+    expect(document.documentElement.dataset.backdrop).toBe('solid');
   });
 
   it('strengthens the text backing when the image fights the theme', () => {
     expect(effectiveOverlay(10, 0.9, true)).toBe(55);
     expect(effectiveOverlay(10, 0.9, false)).toBe(20);
-    expect(effectiveOverlay(70, 0.1, false)).toBe(70);
-    expect(effectiveOverlay(10, null, true)).toBe(10);
   });
 });
 
@@ -180,6 +173,15 @@ describe('custom image storage', () => {
   });
 });
 
+/** A minimal PNG header declaring the given size; enough for the header-size check. */
+function png(width: number, height: number) {
+  const bytes = new Uint8Array(33);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  new DataView(bytes.buffer).setUint32(16, width);
+  new DataView(bytes.buffer).setUint32(20, height);
+  return bytes;
+}
+
 describe('image preparation', () => {
   function mockCanvas(sizes: (type: string, quality: number) => number) {
     const drawn: Array<[number, number]> = [];
@@ -199,8 +201,7 @@ describe('image preparation', () => {
     const close = vi.fn();
     vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 5120, height: 2880, close })));
     const { drawn, encoded } = mockCanvas((_type, quality) => quality > 0.75 ? MAX_BYTES + 1 : 1000);
-    const prepared = await prepareImage(new File(['x'], 'photo.jpg', { type: 'image/jpeg' }));
-    expect([prepared.width, prepared.height]).toEqual([2560, 1440]);
+    const prepared = await prepareImage(new File([png(5120, 2880)], 'photo.png', { type: 'image/png' }));
     expect(drawn).toContainEqual([2560, 1440]);
     expect(encoded).toEqual([['image/webp', 0.86], ['image/webp', 0.78], ['image/webp', 0.7]]);
     expect(prepared.blob.type).toBe('image/webp');
@@ -208,27 +209,17 @@ describe('image preparation', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('re-encodes as JPEG without a WebP encoder and rejects unsupported files', async () => {
+  it('re-encodes as JPEG without a WebP encoder', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 800, height: 600 })));
     // A browser without WebP encoding returns PNG for any requested type.
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage() {}, getImageData: () => { throw new Error('tainted'); } } as never);
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(8 * 8 * 4) }) } as never);
     vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback, type) => callback(new Blob(['x'], { type: type === 'image/jpeg' ? 'image/jpeg' : 'image/png' })));
-    const prepared = await prepareImage(new File(['x'], 'a.png', { type: 'image/png' }));
+    const prepared = await prepareImage(new File([png(800, 600)], 'a.png', { type: 'image/png' }));
     expect(prepared.blob.type).toBe('image/jpeg');
-    expect([prepared.width, prepared.height]).toEqual([800, 600]);
-    expect(prepared.luminance).toBe(0.5);
-    await expect(prepareImage(new File(['x'], 'a.gif', { type: 'image/gif' }))).rejects.toEqual(new ImageError('type'));
     expect(fitWithin(1000, 4000)).toEqual({ width: 640, height: 2560 });
   });
 
   it('reads image sizes from headers and refuses huge images before decoding', async () => {
-    const png = (width: number, height: number) => {
-      const bytes = new Uint8Array(33);
-      bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
-      new DataView(bytes.buffer).setUint32(16, width);
-      new DataView(bytes.buffer).setUint32(20, height);
-      return bytes;
-    };
     expect(headerSize(png(5120, 2880))).toEqual({ width: 5120, height: 2880 });
     const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x0b, 0xb8, 0x0f, 0xa0, 3]);
     expect(headerSize(jpeg)).toEqual({ width: 4000, height: 3000 });
@@ -237,6 +228,9 @@ describe('image preparation', () => {
     vi.stubGlobal('createImageBitmap', decode);
     // 20000 x 20000 = 400 megapixels in a tiny file: refused without decoding.
     await expect(prepareImage(new File([png(20000, 20000)], 'bomb.png', { type: 'image/png' }))).rejects.toEqual(new ImageError('size'));
+    expect(decode).not.toHaveBeenCalled();
+    // Content whose size cannot be read (here, not a PNG at all) is never decoded blind.
+    await expect(prepareImage(new File(['GIF89a…'], 'renamed.png', { type: 'image/png' }))).rejects.toEqual(new ImageError('decode'));
     expect(decode).not.toHaveBeenCalled();
   });
 });

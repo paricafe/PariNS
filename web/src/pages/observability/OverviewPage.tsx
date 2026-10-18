@@ -207,7 +207,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
       <span className="pulse" aria-hidden="true" />
       <div className="status-strip-main">
         {status === null ? <strong>{t("ui.loadingStatus")}</strong> : !(running && status.dns_health.ready) && <strong>{t(`reliability.${health === 'failed' ? status.dns_health.code === 'startup_failed' ? 'startupFailed' : 'runtimeFailed' : health}`)}</strong>}
-        <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen && !status.listeners?.some((l) => l.kind === 'dns' && l.state === 'retrying') ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
+        <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
       </div>
       <dl className="status-strip-facts">
         <div><dt>{t('shell.stripInflight')}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>

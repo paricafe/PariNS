@@ -21,7 +21,6 @@ export interface ListenerStatus {
   address: string;
   state: 'running' | 'retrying';
   error: string | null;
-  failures: number;
 }
 
 export interface StatusView {

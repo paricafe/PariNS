@@ -170,7 +170,7 @@ export function TrendChart({ samples, hours, language, end }: { samples: readonl
           </text>
         </g>;
       })}
-      {gapsFor(series[0].points).map(([from, to]) => <rect key={from} className="trend-gap" data-active={active?.kind === "gap" && active.from === from || undefined} x={x(from)} y={30} width={Math.max(2, x(to) - x(from))} height={170}><title>{translate('shell.gapTip', language)}</title></rect>)}
+      {gapsFor(series[0].points).map(([from, to]) => <rect key={from} className="trend-gap" data-active={active?.kind === "gap" && active.from === from || undefined} x={x(from)} y={30} width={Math.max(2, x(to) - x(from))} height={170} />)}
       <path className="trend-area" d={areaFor(series[0].points, x, y, y(0))} fill="url(#parins-trend-fill)" stroke="none" />
       {series.map((trace) => <g key={trace.key} stroke={trace.color} className={trace.dash ? "trend-area" : undefined}>
         {trace.dash

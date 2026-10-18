@@ -61,8 +61,7 @@ export const saveOverlay = (overlay: number) => writePreference(STORAGE_KEYS.ove
  * Text backing for a custom image: a bright image under the dark theme (or a dark image under
  * the light theme) needs a stronger canvas-coloured scrim so glass text keeps WCAG AA contrast.
  */
-export function effectiveOverlay(overlay: number, luminance: number | null, dark: boolean): number {
-  if (luminance === null) return overlay;
+export function effectiveOverlay(overlay: number, luminance: number, dark: boolean): number {
   const mismatch = dark ? luminance > 0.45 : luminance < 0.4;
   return Math.max(overlay, mismatch ? 55 : 20);
 }

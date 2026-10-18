@@ -7,7 +7,7 @@ import { SPRING_IOS_FAST } from './beui/motion';
 const ICONS = { system: Monitor, light: Sun, dark: Moon } as const;
 const LABELS = { system: 'ui.themeAuto', light: 'ui.themeLight', dark: 'ui.themeDark' } as const;
 
-export const themeName = (theme: Theme, language: Language) => translate(LABELS[theme], language);
+const themeName = (theme: Theme, language: Language) => translate(LABELS[theme], language);
 
 /** One top-bar button cycling system → light → dark; its name always states the current theme. */
 export function ThemeButton({ theme, language, onChange }: { theme: Theme; language: Language; onChange(theme: Theme): void }) {

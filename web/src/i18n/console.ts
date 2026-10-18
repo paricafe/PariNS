@@ -150,14 +150,12 @@ export const uiMessages = {
   "setupProgress": ["设置进度","Setup progress"],
   "trendRange": ["趋势时间范围","Chart time range"],
   "language": ["界面语言","Interface language"],
-  "theme": ["外观", "Appearance"],
   "themeAuto": ["跟随系统", "System"],
   "themeLight": ["浅色", "Light"],
   "themeDark": ["深色", "Dark"],
   "showNavigation": ["打开导航", "Open navigation"],
   "closeNavigation": ["关闭导航", "Close navigation"],
   "closeDialog": ["关闭弹窗", "Close dialog"],
-  "closeDetails": ["关闭详情", "Close details"],
 } as const;
 
 export const appMessages = {

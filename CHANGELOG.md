@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The appearance sheet no longer repeats the theme choice; the top-bar button is
+  the only theme control.
+- A custom background image is checked by its pixel size instead of its file
+  size: images over 100 megapixels, or whose size cannot be read from the file,
+  are refused before decoding.
+
 ## v0.1.17 — 2026-10-16
 
 ### Changed

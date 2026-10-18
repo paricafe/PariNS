@@ -139,8 +139,8 @@ describe("OverviewPage", () => {
   });
   it('lists listeners that are being rebound while the others keep serving', async () => {
     const degraded = { ...status, dns_health: { ...status.dns_health, state: 'degraded', ready: false, code: 'listener_unavailable' }, listeners: [
-      { kind: 'dns', address: '0.0.0.0:53', state: 'running', error: null, failures: 0 },
-      { kind: 'doh', address: '0.0.0.0:443', state: 'retrying', error: 'bind DoH 0.0.0.0:443: Address in use (os error 98)', failures: 3 },
+      { kind: 'dns', address: '0.0.0.0:53', state: 'running', error: null },
+      { kind: 'doh', address: '0.0.0.0:443', state: 'retrying', error: 'bind DoH 0.0.0.0:443: Address in use (os error 98)' },
     ] } as StatusView;
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? degraded : stats)} language="en" onOpenDns={() => {}} />);
     await waitFor(() => expect(screen.getAllByText('Some listeners are unavailable').length).toBeGreaterThan(0));

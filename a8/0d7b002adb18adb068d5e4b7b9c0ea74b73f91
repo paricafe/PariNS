@@ -1,0 +1,52 @@
+web/src/i18n/appearance.ts
+  s_0cc083ef6e9aa3::t_403f0c2db2bfbf 1,30
+web/src/appearance/useAppearance.ts
+  s_0cc083ef6e9aa3::t_403f0c2db2bfbf 73,89
+web/src/components/AppearanceSheet.tsx
+  s_0cc083ef6e9aa3::t_403f0c2db2bfbf 4,21,23
+web/src/appearance/appearance.test.tsx
+  s_0cc083ef6e9aa3::t_a1618cf627693c 9,212,215
+  s_0cc083ef6e9aa3::t_8d2e8b22e95e2b 176-184,204,217,232-233
+  s_0cc083ef6e9aa3::t_d946c1f645cb4d 127,131-132
+  s_0cc083ef6e9aa3::t_1571f295bcb75d 234
+web/src/appearance/image.ts
+  s_0cc083ef6e9aa3::t_403f0c2db2bfbf 16,37-40,42-46,112
+  s_0cc083ef6e9aa3::t_a1618cf627693c 7
+  s_0cc083ef6e9aa3::t_7f8802f4377e9d 85-92,97-98
+web/src/style.css
+  s_0cc083ef6e9aa3::t_8bad7f5bd613da 16,35,39,63,75,80
+  s_0cc083ef6e9aa3::t_6641b707541882 122,238-239,251,299,334,347
+web/src/pages/observability/live.ts
+  s_0cc083ef6e9aa3::t_58bd8ac9f05781 9-10,12
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_e037e90c3c2f5d 142-143
+web/src/appearance/preferences.ts
+  s_0cc083ef6e9aa3::t_403f0c2db2bfbf 64
+CHANGELOG.md
+  s_0cc083ef6e9aa3::t_ba3578d73fe1fd 9-11
+  s_0cc083ef6e9aa3::t_e037e90c3c2f5d 3-8,12
+web/src/components/ThemeButton.tsx
+  s_0cc083ef6e9aa3::t_403f0c2db2bfbf 10
+web/src/pages/observability/TrendChart.tsx
+  s_0cc083ef6e9aa3::t_2663560ab51b45 173
+web/src/pages/observability/OverviewPage.tsx
+  s_0cc083ef6e9aa3::t_349edd41a61aa5 210
+web/src/pages/observability/LogsPage.tsx
+  s_0cc083ef6e9aa3::t_d25dbb04a4e90b 125,234,238,354,384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a80d7b002adb18adb068d5e4b7b9c0ea74b73f91",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

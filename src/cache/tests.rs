@@ -354,13 +354,19 @@ fn cname_negative_allows_duplicate_links_and_soa_with_other_sections() {
             25,
             RData::NS(NS(Name::from_ascii("ns.target.test.").unwrap())),
         ));
-        for code in [RecordType::RRSIG, RecordType::NSEC] {
+        // Opaque but well-formed RDATA: hickory decodes DNSSEC types structurally.
+        let rrsig = vec![
+            0, 6, 13, 2, 0, 0, 0, 60, 0x70, 0, 0, 0, 0x60, 0, 0, 0, 0, 1, 4, b't', b'e', b's',
+            b't', 0, 1, 2, 3,
+        ];
+        let nsec = vec![0, 0, 1, 0x40];
+        for (code, rdata) in [(RecordType::RRSIG, rrsig), (RecordType::NSEC, nsec)] {
             response.add_authority(Record::from_rdata(
                 Name::from_ascii("target.test.").unwrap(),
                 24,
                 RData::Unknown {
                     code,
-                    rdata: NULL::with(vec![1, 2, 3]),
+                    rdata: NULL::with(rdata),
                 },
             ));
         }

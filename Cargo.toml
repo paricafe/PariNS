@@ -20,6 +20,9 @@ base64 = "0.22"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await", "sink"] }
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
+# Recursive resolution: Natsuki-Kaede/hickory-dns branch parins-ecs (per-request ECS,
+# CNAME/DNSSEC fixes). Pinned by revision; hickory-proto is patched to the same revision below.
+hickory-resolver = { git = "https://github.com/Natsuki-Kaede/hickory-dns", rev = "b3f813236f2982ce0f0a2b42383f64d8f7281a67", default-features = false, features = ["recursor", "dnssec-ring", "tokio"] }
 h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
@@ -55,3 +58,6 @@ tokio = { version = "1", features = ["test-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[patch.crates-io]
+hickory-proto = { git = "https://github.com/Natsuki-Kaede/hickory-dns", rev = "b3f813236f2982ce0f0a2b42383f64d8f7281a67" }

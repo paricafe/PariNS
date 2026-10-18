@@ -161,6 +161,7 @@ pub struct CacheConfig {
     pub negative_percent: u8,
     pub prefetch: PrefetchConfig,
     pub stale: StaleConfig,
+    pub ecs_sharing: EcsSharingConfig,
     pub rules: Vec<CacheRule>,
 }
 
@@ -222,6 +223,25 @@ impl Default for StaleConfig {
     }
 }
 
+/// Learned sharing of answers that upstreams return without ECS. See `crate::cache`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EcsSharingConfig {
+    pub enabled: bool,
+    pub min_networks: u8,
+    pub revoke_cooldown_secs: u64,
+}
+
+impl Default for EcsSharingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_networks: 3,
+            revoke_cooldown_secs: 3600,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheRule {
@@ -249,6 +269,7 @@ impl Default for CacheConfig {
             negative_percent: 20,
             prefetch: PrefetchConfig::default(),
             stale: StaleConfig::default(),
+            ecs_sharing: EcsSharingConfig::default(),
             rules: Vec::new(),
         }
     }
@@ -414,6 +435,14 @@ impl Config {
             (1..=604800).contains(&self.cache.stale.retention_secs)
                 && (1..=300).contains(&self.cache.stale.reply_ttl_secs),
             "invalid cache.stale limits"
+        );
+        // The cooldown floor equals the longest query deadline (60 s), so work
+        // started before a revocation has normally finished before the name can
+        // be relearned; at worst one late answer counts as one observation.
+        ensure!(
+            (2..=8).contains(&self.cache.ecs_sharing.min_networks)
+                && (60..=604_800).contains(&self.cache.ecs_sharing.revoke_cooldown_secs),
+            "invalid cache.ecs_sharing limits"
         );
         ensure!(
             self.cache.rules.len() <= 256,
@@ -667,5 +696,19 @@ mod tests {
         cfg.cache.prefetch.rate_per_sec = 10;
         cfg.cache.stale.reply_ttl_secs = 0;
         assert!(cfg.validate().is_err());
+        cfg.cache.stale.reply_ttl_secs = 30;
+        assert!(!cfg.cache.ecs_sharing.enabled);
+        for (networks, cooldown, valid) in [
+            (2, 60, true),
+            (8, 604_800, true),
+            (1, 3600, false),
+            (9, 3600, false),
+            (3, 59, false),
+            (3, 604_801, false),
+        ] {
+            cfg.cache.ecs_sharing.min_networks = networks;
+            cfg.cache.ecs_sharing.revoke_cooldown_secs = cooldown;
+            assert_eq!(cfg.validate().is_ok(), valid, "{networks} {cooldown}");
+        }
     }
 }

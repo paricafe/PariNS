@@ -19,7 +19,8 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 pub(crate) const VERSION: u32 = 3;
-pub(crate) const CACHE_SEMANTICS: u32 = 3;
+/// 4: learned ECS-invariant entries (`Scope::Learned`) may appear in snapshots.
+pub(crate) const CACHE_SEMANTICS: u32 = 4;
 const HEADER_BYTES: usize = 512;
 const MAX_RECORD_BYTES: usize = 96 * 1024;
 const MAX_RECORDS: usize = 1_000_000;
@@ -74,6 +75,8 @@ enum SavedScope {
     PrivacyV6,
     Network(String),
     ExactSource(String),
+    LearnedV4,
+    LearnedV6,
 }
 
 impl From<Scope> for SavedScope {
@@ -84,6 +87,8 @@ impl From<Scope> for SavedScope {
             Scope::Privacy { ipv4: false } => Self::PrivacyV6,
             Scope::Network(network) => Self::Network(network.to_string()),
             Scope::ExactSource(network) => Self::ExactSource(network.to_string()),
+            Scope::Learned { ipv4: true } => Self::LearnedV4,
+            Scope::Learned { ipv4: false } => Self::LearnedV6,
         }
     }
 }
@@ -103,6 +108,8 @@ impl SavedScope {
                 Scope::Network(network)
             }
             Self::ExactSource(text) => Scope::parse_tag(&format!("exact_ecs:{text}"))?,
+            Self::LearnedV4 => Scope::Learned { ipv4: true },
+            Self::LearnedV6 => Scope::Learned { ipv4: false },
         })
     }
 }

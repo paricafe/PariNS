@@ -81,6 +81,10 @@ export const settingPages = {
       number("cache.stale.reply_ttl_secs", 1, 300),
     ])),
     group("ecs", [field("ecs.enabled", "checkbox"), number("ecs.ipv4_prefix", 0, 32, true), number("ecs.ipv6_prefix", 0, 128)]),
+    group("ecsSharing", [
+      field("cache.ecs_sharing.enabled", "checkbox"), number("cache.ecs_sharing.min_networks", 2, 8),
+      advanced(number("cache.ecs_sharing.revoke_cooldown_secs", 60, 604800)),
+    ]),
   ]),
   filters: page("filters", [
     group("filterSource", [field("filter_file", "nullable", true)]),

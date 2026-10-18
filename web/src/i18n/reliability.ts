@@ -32,6 +32,8 @@ export const reliabilityMessages = {
   scopePrivacyV6: ['隐私模式：没有发送真实网段，IPv6 客户端共用', 'Privacy mode: no real network was sent; shared by IPv6 clients'],
   scopeNetwork: ['同一网段 {network} 内的客户端可共用', 'Shared by clients in {network}'],
   scopeExact: ['只给网段 {network} 完全相同的请求用', 'Only for requests from exactly {network}'],
+  scopeLearnedV4: ['共享（学习）：多个网段答案相同，IPv4 客户端共用', 'Shared (learned): identical across networks; shared by IPv4 clients'],
+  scopeLearnedV6: ['共享（学习）：多个网段答案相同，IPv6 客户端共用', 'Shared (learned): identical across networks; shared by IPv6 clients'],
   noDecision: ['这一步没有记录', 'Nothing recorded for this step'],
   relation: ['上游请求方式', 'How the upstream was asked'], operationFailure: ['这次上游请求失败', 'This upstream request failed'],
   relation_leader: ['发起请求，其他相同查询共用', 'Asked; identical queries shared it'], relation_follower: ['共用了已发出的请求', 'Shared a request already sent'],

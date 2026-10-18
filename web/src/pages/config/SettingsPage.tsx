@@ -145,7 +145,7 @@ function CacheRules({ language }: { language: Language }) {
 }
 
 interface CacheStatus { revision: number; running: boolean; cache?: Record<string, number>; refresh?: Record<string, number>; cache_persistence?: SnapshotReport }
-interface Inspection { revision: number; epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean } }
+interface Inspection { revision: number; epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
 /** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
 function restoreSummary(report: SnapshotReport, language: Language): string {
@@ -171,6 +171,7 @@ function CacheUsage({ language }: { language: Language }) {
   const details: [string, number | undefined, number | undefined][] = [
     ['positiveNegative', cache?.positive_entries, cache?.negative_entries], ['freshStale', cache?.hits, cache?.stale_hits],
     ['missBypass', cache?.misses, cache?.bypasses], ['evictionRejection', cache?.evictions, cache?.rejections],
+    ['ecsSharedHitsEntries', cache?.ecs_shared_hits, cache?.ecs_shared_entries],
   ];
   const persistence = status?.cache_persistence;
   const row = (label: ReactNode, value: ReactNode) => <div className="row" data-layout="inline"><div className="row-label"><span>{label}</span></div><div className="row-control"><span className="row-value num">{value}</span></div></div>;
@@ -185,7 +186,8 @@ function CacheUsage({ language }: { language: Language }) {
             <div className="usage-meter" key={key}><span className="small muted">{t(key)}</span><strong className="num">{usedText} <span className="muted">/ {maxText}</span></strong>
               <div className="usage-track" role="meter" aria-valuemin={0} aria-valuemax={max || 1} aria-valuenow={used} aria-label={t(key)}><i style={{ transform: `scaleX(${max ? Math.min(1, used / max) : 0})` }} /></div></div>)}</div>
           {row(translate('shell.hitRate', language), lookups ? translate('shell.hitRateValue', language, { percent: formatNumber(((cache.hits ?? 0) + (cache.stale_hits ?? 0)) / lookups * 100, language, { maximumFractionDigits: 0 }), hits: formatNumber((cache.hits ?? 0) + (cache.stale_hits ?? 0), language), misses: formatNumber(cache.misses ?? 0, language) }) : '—')}
-          <ExpandRow label={translate('storage.detailedCounts', language)}>{details.map(([key, first, second]) => <div key={key}>{row(t(key), `${formatNumber(first ?? 0, language)} / ${formatNumber(second ?? 0, language)}`)}</div>)}</ExpandRow>
+          <ExpandRow label={translate('storage.detailedCounts', language)}>{details.map(([key, first, second]) => <div key={key}>{row(t(key), `${formatNumber(first ?? 0, language)} / ${formatNumber(second ?? 0, language)}`)}</div>)}
+            {row(t('ecsSharingRevocations'), formatNumber(cache.ecs_sharing_revocations ?? 0, language))}</ExpandRow>
         </>}
       </div>
       <div className="group-actions"><button className="button quiet" type="button" onClick={() => void load()}>{translate('ui.refresh', language)}</button>
@@ -230,6 +232,7 @@ function CacheInspect({ language, dirty }: { language: Language; dirty: boolean 
     {error && <p className="error" role="alert">{presentIssue(error, language)}</p>}
     {result && <div className="inspection-result"><h3>{t(`explain${result.explanation.state[0].toUpperCase()}${result.explanation.state.slice(1)}`)}</h3>
       <p>{t('explanation').replace('{reason}', t(result.explanation.reason)).replace('{scope}', (result.explanation.scope === null ? t('none') : hasTranslation(`views.${result.explanation.scope}`) ? t(result.explanation.scope) : result.explanation.scope))}</p>
+      {result.inspection.ecs_sharing && <p>{t(`ecsSharing${result.inspection.ecs_sharing[0].toUpperCase()}${result.inspection.ecs_sharing.slice(1)}`)}</p>}
       <p className="muted small">{t('variants')}: {result.inspection.variants.length}</p>
       <div className="variant-list">{result.inspection.variants.map((variant, index) => <details key={index}><summary>{String(variant.scope)} · {String(variant.state)}</summary><pre>{JSON.stringify(variant, null, 2)}</pre></details>)}</div>
       {result.inspection.truncated && <p>{t('variantsTruncated')}</p>}

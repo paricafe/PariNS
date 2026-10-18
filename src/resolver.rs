@@ -394,7 +394,7 @@ impl Resolver {
                 trace.cache = Some("blocked");
                 self.metrics.inc(Counter::ResponseBlocked);
             }
-            context.finish(&query, &mut message, scope.reply_scope());
+            context.finish(&query, &mut message, scope.reply_scope(context.outgoing));
             return Some(Reply {
                 message,
                 udp_limit,
@@ -483,7 +483,7 @@ impl Resolver {
                     trace.cache_lookup = Some(decision);
                     trace.cache_scope = Some(hit.scope.tag());
                     trace.cache = Some(if hit.stale { "stale" } else { "fresh" });
-                    (hit.message, hit.scope.reply_scope())
+                    (hit.message, hit.scope.reply_scope(context.outgoing))
                 })
                 .map(Ok)
                 .unwrap_or(result.response)
@@ -543,7 +543,7 @@ impl Exchange {
             && (!refreshing || !hit.refresh)
         {
             return Answer {
-                response: Ok((hit.message, hit.scope.reply_scope())),
+                response: Ok((hit.message, hit.scope.reply_scope(self.context.outgoing))),
                 stale_eligible: false,
                 admitted: false,
                 upstream: None,

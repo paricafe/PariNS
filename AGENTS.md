@@ -68,7 +68,12 @@ until preview/validation.
 
 - Preserve complete query semantics when caching or coalescing. ECS families,
   subnets, no-ECS traffic and privacy fallback never share answers; respect response
-  scope. Missing ECS in a response to nonzero outgoing ECS uses only ExactSource reuse.
+  scope. Missing ECS in a response to nonzero outgoing ECS defaults to ExactSource
+  reuse. Only when one cache key received the same normalized answer from at least
+  K disjoint networks (spanning two or more /16, IPv6 /32) with no contradiction may
+  `[cache.ecs_sharing]` learn sharing within that ECS family; any different answer or
+  explicit nonzero scope revokes it at once, with a cooldown. No-ECS, privacy
+  fallback and the other family never share. Details: `src/cache/sharing.rs`.
 - Match DNS names by labels, including escaped labels, never presentation suffixes.
 - Preserve positive and negative eligibility and TTL rules. Fresh lifetime, stale
   retention and stale reply TTL are separate; never silently extend TTLs. Stale

@@ -24,6 +24,11 @@ pub enum Scope {
     Network(IpNet),
     /// Missing upstream ECS is reusable only for this exact sent source prefix.
     ExactSource(IpNet),
+    /// A missing-ECS answer the cache learned is identical across networks of
+    /// one family. Only the cache assigns it; responses never imply it.
+    Learned {
+        ipv4: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,7 +156,7 @@ impl Context {
             _ => None,
         };
         let reply = cache
-            .and_then(Scope::reply_scope)
+            .and_then(|scope| scope.reply_scope(self.outgoing))
             .or_else(|| received.map(|ecs| ecs.scope_prefix()));
         ResponseScope { cache, reply }
     }
@@ -216,6 +221,9 @@ impl Scope {
                     && IpNet::new(ecs.addr(), ecs.source_prefix())
                         .is_ok_and(|sent| sent.trunc() == network)
             }
+            (Self::Learned { ipv4 }, Some(ecs)) => {
+                ecs.source_prefix() > 0 && ipv4 == ecs.addr().is_ipv4()
+            }
             _ => false,
         }
     }
@@ -227,9 +235,12 @@ impl Scope {
         }
     }
 
-    pub fn reply_scope(self) -> Option<u8> {
+    /// Learned answers echo the requester's own outgoing source prefix, exactly
+    /// as an ExactSource answer for that network would, never a broader scope.
+    pub fn reply_scope(self, outgoing: Option<ClientSubnet>) -> Option<u8> {
         match self {
             Self::NoEcs => None,
+            Self::Learned { .. } => outgoing.map(|ecs| ecs.source_prefix()),
             _ => Some(self.prefix_len()),
         }
     }
@@ -241,6 +252,8 @@ impl Scope {
             Self::Privacy { ipv4: false } => "privacy_v6".into(),
             Self::Network(network) => network.to_string(),
             Self::ExactSource(network) => format!("exact_ecs:{network}"),
+            Self::Learned { ipv4: true } => "learned_v4".into(),
+            Self::Learned { ipv4: false } => "learned_v6".into(),
         }
     }
 
@@ -249,6 +262,8 @@ impl Scope {
             "no_ecs" => Self::NoEcs,
             "privacy_v4" => Self::Privacy { ipv4: true },
             "privacy_v6" => Self::Privacy { ipv4: false },
+            "learned_v4" => Self::Learned { ipv4: true },
+            "learned_v6" => Self::Learned { ipv4: false },
             _ => {
                 if let Some(network) = text.strip_prefix("exact_ecs:") {
                     let parsed: IpNet = network.parse()?;

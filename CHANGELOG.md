@@ -9,6 +9,18 @@
 - A custom background image is checked by its pixel size instead of its file
   size: images over 100 megapixels, or whose size cannot be read from the file,
   are refused before decoding.
+- Optional learned ECS sharing, `[cache.ecs_sharing]` (off by default). When an
+  upstream answers ECS queries without an ECS option, PariNS normally caches the
+  answer separately for each client network. With sharing enabled, a name whose
+  answer was identical for at least `min_networks` (default 3) networks across two
+  or more /16 (IPv6 /32) prefixes is cached once for its address family (scope
+  `learned_v4`/`learned_v6`). Any different answer revokes this immediately and
+  blocks relearning for `revoke_cooldown_secs` (default 3600). No-ECS, privacy and
+  the other address family are never shared. Cache statistics add
+  `ecs_shared_hits`, `ecs_shared_entries` and `ecs_sharing_revocations`, and cache
+  inspection reports `ecs_sharing` (`observing`, `shared`, `revoked` or null).
+- The cache semantic version is now 4: the first start after upgrading skips the
+  previous cache snapshot and begins cold.
 
 ## v0.1.17 — 2026-10-16
 

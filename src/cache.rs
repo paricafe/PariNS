@@ -1,5 +1,8 @@
 //! Concurrent bounded DNS cache. Shards own variant-level LRU partitions; immutable
 //! wire entries are decoded after releasing locks. No network IO belongs here.
+//! When `[cache.ecs_sharing]` is enabled, each shard also owns the bounded
+//! classification records that may store a missing-ECS answer once per family
+//! (`Scope::Learned`); see `sharing` for the learning and revocation rules.
 
 use std::{
     collections::{HashMap, hash_map::RandomState},
@@ -12,7 +15,7 @@ use std::{
 };
 
 use hickory_proto::{
-    op::{Edns, Message, ResponseCode},
+    op::{Edns, Message, Query, ResponseCode},
     rr::{
         DNSClass, Name, RData, RecordType,
         rdata::opt::{ClientSubnet, EdnsCode},
@@ -29,6 +32,7 @@ use crate::{
 
 mod decision;
 pub mod persistence;
+mod sharing;
 pub use decision::{
     DecisionReason, LookupDecision, LookupOutcome, LookupResult, StoreDecision, StoreOutcome,
 };
@@ -149,6 +153,8 @@ struct Counts {
     misses: u64,
     evictions: u64,
     rejections: u64,
+    shared_hits: u64,
+    revocations: u64,
 }
 
 struct Shard {
@@ -156,11 +162,15 @@ struct Shard {
     partitions: [Partition; 2],
     clock: u64,
     counts: Counts,
+    sharing: sharing::Table,
+    /// Current `Scope::Learned` entries; every removal goes through `remove`.
+    learned: usize,
 }
 
 impl Shard {
     fn remove(&mut self, part: usize, id: u64) {
         if let Some(entry) = self.partitions[part].lru.pop(&id) {
+            self.learned -= usize::from(matches!(entry.scope, Scope::Learned { .. }));
             let empty = if let Some(ids) = self.buckets.get_mut(&entry.key) {
                 ids.retain(|entry| entry.id != id);
                 ids.is_empty()
@@ -281,6 +291,8 @@ impl Cache {
                     ],
                     clock: 0,
                     counts: Counts::default(),
+                    sharing: sharing::Table::new(sharing::capacity(config.max_entries, count)),
+                    learned: 0,
                 })
             })
             .collect();
@@ -386,7 +398,26 @@ impl Cache {
     }
 
     pub fn diagnostics_snapshot(&self) -> Value {
-        self.diagnostics.snapshot()
+        let mut value = self.diagnostics.snapshot();
+        let (hits, entries, revocations) = self.sharing_counts();
+        let object = value.as_object_mut().expect("diagnostics object");
+        object.insert("ecs_shared_hits".into(), json!(hits));
+        object.insert("ecs_shared_entries".into(), json!(entries));
+        object.insert("ecs_sharing_revocations".into(), json!(revocations));
+        value
+    }
+
+    fn sharing_counts(&self) -> (u64, usize, u64) {
+        self.shards
+            .iter()
+            .fold((0, 0, 0), |(hits, entries, revoked), shard| {
+                let shard = shard.lock().expect("cache shard poisoned");
+                (
+                    hits + shard.counts.shared_hits,
+                    entries + shard.learned,
+                    revoked + shard.counts.revocations,
+                )
+            })
     }
 
     /// The ECS owner could not identify a safe storage namespace for this
@@ -457,6 +488,7 @@ impl Cache {
                 } else {
                     shard.counts.stale_hits += 1;
                 }
+                shard.counts.shared_hits += u64::from(matches!(entry.scope, Scope::Learned { .. }));
                 entry
             } else {
                 Arc::clone(shard.partitions[part].lru.peek(&id).unwrap())
@@ -598,6 +630,10 @@ impl Cache {
                     .map(|wire| (wire, lifetime, negative))
                     .map_err(|_| DecisionReason::UncacheableResponse)
             });
+        let learning = self.config.ecs_sharing.enabled && !restoring;
+        let fingerprint = (learning && matches!(scope, Scope::ExactSource(_)))
+            .then(|| sharing::fingerprint(&query.queries[0], response))
+            .flatten();
         let mut shard = self.shards[self.shard(&key)]
             .lock()
             .expect("cache shard poisoned");
@@ -606,6 +642,26 @@ impl Cache {
             return StoreDecision::skipped(DecisionReason::EpochChanged);
         }
         shard.prune(&key, now);
+        // Classification follows the epoch check under the same lock, so work
+        // older than an invalidation never teaches or refills shared state.
+        let scope = if learning {
+            let lifetime = prepared
+                .as_ref()
+                .ok()
+                .map(|(_, lifetime, _)| Duration::from_secs(u64::from(*lifetime)));
+            let observation = shard.sharing.observe(
+                &key,
+                scope,
+                fingerprint,
+                lifetime,
+                now,
+                &self.config.ecs_sharing,
+            );
+            shard.counts.revocations += u64::from(observation.revoked);
+            observation.scope
+        } else {
+            scope
+        };
         // Snapshot records arrive most-recent first. A restore cannot evict an
         // already admitted record, supersede live knowledge, or change counters.
         if restoring {
@@ -694,6 +750,7 @@ impl Cache {
         };
         let charged = Arc::clone(&shard.partitions[part].charged);
         charged.fetch_add(charge, Ordering::Relaxed);
+        shard.learned += usize::from(matches!(scope, Scope::Learned { .. }));
         let entry = Arc::new(Entry {
             id,
             key: Arc::clone(&key),
@@ -752,7 +809,7 @@ impl Cache {
                         .filter(|(_, e)| {
                             name.as_ref().is_none_or(|n| &e.key.name == n)
                                 && kind.is_none_or(|k| e.key.kind == k)
-                                && scope.is_none_or(|s| e.scope == s)
+                                && scope.is_none_or(|s| e.scope == s || learned_serves(e.scope, s))
                         })
                         .map(move |(&id, _)| (part, id))
                 })
@@ -761,6 +818,7 @@ impl Cache {
             for (part, id) in matches {
                 shard.remove(part, id);
             }
+            shard.sharing.invalidate(name.as_ref(), kind, scope);
         }
         removed
     }
@@ -768,7 +826,7 @@ impl Cache {
     /// Charge includes entry allocations still held by readers; it is not RSS.
     pub fn snapshot(&self) -> Value {
         let mut counts = Counts::default();
-        let (mut positive, mut negative, mut bytes) = (0, 0, 0);
+        let (mut positive, mut negative, mut bytes, mut learned) = (0, 0, 0, 0);
         for shard in &self.shards {
             let shard = shard.lock().expect("cache shard poisoned");
             positive += shard.partitions[0].lru.len();
@@ -783,13 +841,18 @@ impl Cache {
             counts.misses += shard.counts.misses;
             counts.evictions += shard.counts.evictions;
             counts.rejections += shard.counts.rejections;
+            counts.shared_hits += shard.counts.shared_hits;
+            counts.revocations += shard.counts.revocations;
+            learned += shard.learned;
         }
         json!({"entries":positive+negative,"bytes":bytes,"positive_entries":positive,
             "negative_entries":negative,"hits":counts.hits,"stale_hits":counts.stale_hits,
             "misses":counts.misses,"bypasses":self.bypasses.load(Ordering::Relaxed),
             "evictions":counts.evictions,"rejections":counts.rejections,
             "max_entries":self.config.max_entries,"max_bytes":self.config.max_bytes,
-            "shards":self.shards.len(),"epoch":self.epoch()})
+            "shards":self.shards.len(),"epoch":self.epoch(),
+            "ecs_shared_hits":counts.shared_hits,"ecs_shared_entries":learned,
+            "ecs_sharing_revocations":counts.revocations})
     }
 
     pub fn inspect(&self, name: &Name, kind: Option<RecordType>, now: Instant) -> Value {
@@ -797,8 +860,13 @@ impl Cache {
         // Copy at most 256 Arc entries under locks, then build JSON outside them.
         let mut entries = Vec::new();
         let mut truncated = false;
+        let mut sharing = None;
         for shard in &self.shards {
             let shard = shard.lock().expect("cache shard poisoned");
+            if self.config.ecs_sharing.enabled {
+                // The most cautious state wins when flags or families differ.
+                sharing = shard.sharing.states(&name, kind, now).chain(sharing).max();
+            }
             for p in &shard.partitions {
                 for (_, e) in &p.lru {
                     if e.key.name == name && kind.is_none_or(|k| e.key.kind == k) {
@@ -822,7 +890,8 @@ impl Cache {
                 "hits":e.hits.load(Ordering::Relaxed),"bytes":e.charge,
                 "state":if age < e.lifetime {"fresh"} else if age < e.retention {"stale"} else {"expired"}})
         }).collect();
-        json!({"name":name.to_ascii(),"variants":variants,"truncated":truncated})
+        json!({"name":name.to_ascii(),"variants":variants,"truncated":truncated,
+            "ecs_sharing":sharing})
     }
 
     pub fn explain(&self, query: &Message, outgoing: Option<ClientSubnet>, now: Instant) -> Value {
@@ -869,8 +938,23 @@ fn scopes_overlap(a: Scope, b: Scope) -> bool {
         (Scope::Network(a) | Scope::ExactSource(a), Scope::Network(b) | Scope::ExactSource(b)) => {
             a.contains(&b.addr()) || b.contains(&a.addr())
         }
+        // A learned answer covers every network of its family, so it replaces and
+        // is replaced by any subnet answer of that family (including revocation).
+        (Scope::Learned { ipv4 }, Scope::Network(n) | Scope::ExactSource(n))
+        | (Scope::Network(n) | Scope::ExactSource(n), Scope::Learned { ipv4 }) => {
+            n.addr().is_ipv4() == ipv4
+        }
         _ => a == b,
     }
+}
+
+/// The single positive/negative classification used by admission and sharing.
+fn is_negative(question: &Query, response: &Message) -> bool {
+    response.response_code == ResponseCode::NXDomain
+        || !response
+            .answers
+            .iter()
+            .any(|rr| rr.record_type() == question.query_type())
 }
 
 fn prepare_response(
@@ -896,11 +980,7 @@ fn prepare_response(
         .queries
         .first()
         .ok_or(DecisionReason::UnsupportedQuery)?;
-    let negative = response.response_code == ResponseCode::NXDomain
-        || !response
-            .answers
-            .iter()
-            .any(|rr| rr.record_type() == question.query_type());
+    let negative = is_negative(question, response);
     let mut stored = response.clone();
     let mut lifetime = config.max_ttl_secs;
     if negative {
@@ -1012,3 +1092,15 @@ fn cname_negative_ttl(
 
 #[cfg(test)]
 mod tests;
+
+/// Whether a learned entry answers requests from the network named by an
+/// invalidation filter (same family, nonzero network).
+fn learned_serves(entry: crate::ecs::Scope, filter: crate::ecs::Scope) -> bool {
+    use crate::ecs::Scope;
+    match (entry, filter) {
+        (Scope::Learned { ipv4 }, Scope::Network(network) | Scope::ExactSource(network)) => {
+            network.prefix_len() > 0 && network.addr().is_ipv4() == ipv4
+        }
+        _ => false,
+    }
+}

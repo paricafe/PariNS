@@ -86,6 +86,12 @@ max_inflight = 8
 rate_per_sec = 20
 backoff_secs = 5
 
+# Share answers that proved identical across client networks (ECS-invariant names).
+[cache.ecs_sharing]
+enabled = false
+min_networks = 3
+revoke_cooldown_secs = 3600
+
 [cache.stale]
 enabled = false
 retention_secs = 300

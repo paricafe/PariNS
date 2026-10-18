@@ -162,7 +162,41 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   scope `/0` answer may be shared across ordinary queries of its address family.
   If an upstream omits ECS after a nonzero ECS request, `ExactSource` permits reuse
   only for the identical actual outgoing family/network/source-prefix. It does
-  not invent broader scope or mix privacy and no-ECS namespaces.
+  not invent broader scope or mix privacy and no-ECS namespaces, unless learned
+  sharing (below) has evidence that the answer does not depend on the subnet.
+- `[cache.ecs_sharing]` (disabled by default) learns which of those missing-ECS
+  answers are the same everywhere. For each name/type/class, DO/CD/RD/EDNS
+  combination and ECS family, PariNS compares a normalized answer: rcode, the
+  answer records as a set (including CNAME chains, ignoring TTL and order) and,
+  for NXDOMAIN/NODATA, the SOA owner. Once `min_networks` (default 3, 2–8)
+  disjoint outgoing networks, spanning at least two /16 (IPv6 /32) prefixes, got
+  the same answer while it was still valid, one copy is stored with scope
+  `learned_v4`/`learned_v6` and serves every nonzero ECS query of that family.
+  Nested prefixes a single client could send count as one network. Any different
+  answer — while observing, or when a shared entry is refreshed by any network —
+  or an explicit nonzero response scope revokes it immediately: the shared copy is
+  replaced, each network caches separately again, and the name is not relearned
+  for `revoke_cooldown_secs` (default 3600, 60–604800). Expired evidence is
+  dropped rather than treated as a contradiction. No-ECS, privacy `/0` and the
+  other family never share, and explicit upstream scopes keep RFC 7871 handling.
+  Shared evidence lasts one hour: after that the next answer starts a new
+  observation and `min_networks` networks must agree again, so a name whose
+  answers later diverge by region cannot stay shared because one network keeps
+  refreshing it first. The worst case of a wrong guess is that a client receives a
+  valid answer given to another network of its family until a different answer is
+  seen or the evidence renews; downstream ECS echoes still carry the client's own
+  source prefix as scope. Learned entries obey the
+  same negative budget, TTL, stale and prefetch rules as other entries.
+  Classification uses at most 65,536 records (twice `max_entries`, at least
+  1,024), evicted least-recently-used and not counted in cache bytes (roughly
+  tens of MB at the maximum); under heavy churn a revoked record can be evicted
+  before its cooldown ends. It is updated only when answers are stored, needs no
+  background task, is not saved in snapshots and is reset by clearing the name or
+  the whole cache; clearing one network of a name also clears the learned entry
+  that serves it. The cache
+  page shows `observing`, `shared` or `revoked` per name, and statistics count
+  `ecs_shared_hits`, `ecs_shared_entries` and `ecs_sharing_revocations`.
+  Changing only this section replaces the cache without restarting listeners.
 - Defaults: 32768 answers, 32 MiB charged bytes, 64 subnet variants per query,
   four concurrent shards and a 20% negative-cache reservation. Each shard has
   separate positive/negative entry and byte budgets; unused partitions are not
@@ -250,6 +284,11 @@ backoff_secs = 5
 enabled = false
 retention_secs = 300
 reply_ttl_secs = 30
+
+[cache.ecs_sharing]
+enabled = true
+min_networks = 3
+revoke_cooldown_secs = 3600
 
 [[cache.rules]]
 name = "dynamic.example"

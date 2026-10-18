@@ -37,6 +37,8 @@ function scopeNote(scope: string, language: Language): string {
   if (scope === 'no_ecs') return translate('reliability.scopeNoEcs', language);
   if (scope === 'privacy_v4') return translate('reliability.scopePrivacyV4', language);
   if (scope === 'privacy_v6') return translate('reliability.scopePrivacyV6', language);
+  if (scope === 'learned_v4') return translate('reliability.scopeLearnedV4', language);
+  if (scope === 'learned_v6') return translate('reliability.scopeLearnedV6', language);
   if (scope.startsWith('exact_ecs:')) return translate('reliability.scopeExact', language, { network: scope.slice('exact_ecs:'.length) });
   return translate('reliability.scopeNetwork', language, { network: scope });
 }

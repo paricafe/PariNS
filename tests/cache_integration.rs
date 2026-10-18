@@ -436,3 +436,88 @@ async fn cname_negative_nodata_reuses_upstream_and_preserves_filtering() {
 async fn cname_negative_nxdomain_reuses_upstream_and_preserves_filtering() {
     cname_negative_reuses_upstream_and_preserves_filtering(ResponseCode::NXDomain).await;
 }
+
+#[tokio::test]
+async fn learned_sharing_serves_a_new_network_and_a_different_refresh_revokes_it() {
+    use std::sync::atomic::AtomicU8;
+    let value = Arc::new(AtomicU8::new(1));
+    let current = value.clone();
+    // The upstream answers without ECS, identically for every network, TTL 1.
+    let upstream = Upstream::start(move |q| {
+        let mut reply = answer(q, current.load(Ordering::SeqCst), 0);
+        ecs::set_subnet(&mut reply, None);
+        reply.answers[0].ttl = 1;
+        reply
+    })
+    .await;
+    let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+    config.upstreams.servers = vec![upstream.address.to_string()];
+    config.ecs.enabled = true;
+    config.query_timeout_ms = 200;
+    config.cache.ecs_sharing.enabled = true;
+    let resolver = Resolver::from_config(&config);
+    let name = Name::from_ascii("example.test.").unwrap();
+    let inspect = |resolver: &Resolver| {
+        resolver
+            .cache()
+            .inspect(&name, Some(RecordType::A), std::time::Instant::now())
+    };
+    let value_of = |reply: &Message| reply.answers[0].data.clone();
+    // Three networks over three /16 prefixes teach the cache. Clients carry
+    // ECS (and so EDNS) throughout, which is part of the cache key.
+    let client = |peer: &str| format!("{peer}/32");
+    for (index, peer) in ["192.0.2.1", "198.51.100.1", "203.0.113.1"]
+        .iter()
+        .enumerate()
+    {
+        let reply = resolve(&resolver, Some(&client(peer)), peer, 1).await;
+        assert_eq!(value_of(&reply), RData::A(A::new(192, 0, 2, 1)));
+        assert_eq!(upstream.count(), index + 1);
+    }
+    let inspection = inspect(&resolver);
+    assert_eq!(inspection["ecs_sharing"], "shared");
+    assert_eq!(inspection["variants"][0]["scope"], "learned_v4");
+    // A fourth network hits the learned entry without an upstream query, and
+    // its ECS echo keeps its own source prefix as scope.
+    let reply = resolve(&resolver, Some("10.9.9.9/32"), "10.9.9.9", 2).await;
+    assert_eq!(value_of(&reply), RData::A(A::new(192, 0, 2, 1)));
+    let echoed = ecs::subnet(&reply).unwrap();
+    assert_eq!((echoed.source_prefix(), echoed.scope_prefix()), (32, 24));
+    assert_eq!(upstream.count(), 3);
+    // IPv6 clients and privacy /0 are never served from it.
+    resolve(&resolver, Some("2001:db8::1/128"), "2001:db8::1", 3).await;
+    resolve(&resolver, Some("0.0.0.0/0"), "10.9.9.9", 4).await;
+    assert_eq!(upstream.count(), 5);
+    let stats = resolver.cache().snapshot();
+    assert_eq!(stats["ecs_shared_hits"], 1);
+    assert_eq!(stats["ecs_shared_entries"], 1);
+
+    // After expiry the refresh from another network returns a different answer.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    value.store(2, Ordering::SeqCst);
+    let reply = resolve(&resolver, Some(&client("172.16.0.1")), "172.16.0.1", 5).await;
+    assert_eq!(value_of(&reply), RData::A(A::new(192, 0, 2, 2)));
+    assert_eq!(upstream.count(), 6);
+    let inspection = inspect(&resolver);
+    assert_eq!(inspection["ecs_sharing"], "revoked");
+    assert_eq!(resolver.cache().snapshot()["ecs_sharing_revocations"], 1);
+    assert_eq!(resolver.cache().snapshot()["ecs_shared_entries"], 0);
+    // Every other network now goes upstream for its own answer, then reuses it.
+    for (index, peer) in ["192.0.2.1", "198.51.100.1", "203.0.113.1"]
+        .iter()
+        .enumerate()
+    {
+        resolve(&resolver, Some(&client(peer)), peer, 6).await;
+        assert_eq!(upstream.count(), 7 + index);
+    }
+    resolve(&resolver, Some("192.0.2.77/32"), "192.0.2.77", 7).await;
+    resolve(&resolver, Some("172.16.0.9/32"), "172.16.0.9", 8).await;
+    assert_eq!(upstream.count(), 9);
+    assert!(
+        inspect(&resolver)["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|variant| variant["scope"].as_str().unwrap().starts_with("exact_ecs:"))
+    );
+}

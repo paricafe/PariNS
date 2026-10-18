@@ -529,7 +529,7 @@ fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
     // effective configuration and a fully valid snapshot/checksum.
     let mut cache_policy = serde_json::to_value(&config.cache).unwrap();
     cache_policy.as_object_mut().unwrap().remove("persistence");
-    let prior = serde_json::json!({"semantics": 2, "cache": cache_policy, "ecs": config.ecs,
+    let prior = serde_json::json!({"semantics": 3, "cache": cache_policy, "ecs": config.ecs,
         "upstreams": config.upstreams, "filter_digest": STANDARD.encode(b"filter-a")});
     let prior_fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&prior).unwrap()));
     assert_ne!(fingerprint, prior_fingerprint);
@@ -836,4 +836,55 @@ fn exact_source_without_client_edns_round_trips_and_prior_format_is_rejected() {
             .to_string()
             .contains("version")
     );
+}
+
+#[test]
+fn learned_entries_round_trip_without_restoring_classification() {
+    let mut config = CacheConfig::default();
+    config.ecs_sharing.enabled = true;
+    let cache = Cache::new(config.clone());
+    let q = query("learned.test.");
+    let now = Instant::now();
+    for network in ["192.0.2.0/24", "192.0.3.0/24", "198.51.100.0/24"] {
+        cache.insert(
+            &q,
+            &answer(&q, 60),
+            Scope::ExactSource(network.parse().unwrap()),
+            now,
+        );
+    }
+    let v6 = Scope::Learned { ipv4: false };
+    let q6 = query("learned6.test.");
+    cache.admit(&q6, &answer(&q6, 60), v6, now, cache.epoch(), Some(60));
+    assert_eq!(cache.snapshot()["ecs_shared_entries"], 2);
+    let bytes = encode(&cache, now);
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains(r#""namespace":"learned_v4""#));
+    assert!(text.contains(r#""namespace":"learned_v6""#));
+    let restored = Cache::new(config);
+    assert_eq!(restore(&restored, bytes, 0, now).unwrap().restored, 2);
+    let outgoing = Some("203.0.113.0/24".parse().unwrap());
+    assert_eq!(
+        restored.peek(&q, outgoing, now, false).unwrap().scope,
+        Scope::Learned { ipv4: true }
+    );
+    assert!(restored.peek(&q, None, now, false).is_none());
+    assert_eq!(restored.snapshot()["ecs_shared_entries"], 2);
+    // Classification is not persisted: the name starts unobserved, and the
+    // first per-network answer supersedes the restored learned copy.
+    let inspection = restored.inspect(&Name::from_ascii("learned.test.").unwrap(), None, now);
+    assert_eq!(inspection["ecs_sharing"], Value::Null);
+    restored.insert(
+        &q,
+        &answer(&q, 60),
+        Scope::ExactSource("203.0.113.0/24".parse().unwrap()),
+        now,
+    );
+    assert!(restored.peek(&q, outgoing, now, false).is_some());
+    assert!(
+        restored
+            .peek(&q, Some("192.0.2.0/24".parse().unwrap()), now, false)
+            .is_none()
+    );
+    assert_eq!(restored.snapshot()["ecs_shared_entries"], 1);
 }

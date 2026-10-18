@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.18 — 2026-10-18
 
 ### Added
 
@@ -16,8 +16,8 @@
   flight, queries per resolution, referral depth and the infrastructure cache.
   Status adds `resolution_mode` and `diagnostics.recursion`;
   `diagnostics.upstreams` is null in recursive mode, and `/metrics` adds
-  `parins_recursion_*` counters. Changing the mode restarts
-  DNS with a cold cache.
+  `parins_recursion_*` counters. Changing the mode restarts DNS with a cold
+  cache.
 
 ### Changed
 

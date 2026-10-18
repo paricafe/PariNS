@@ -1,0 +1,130 @@
+web/src/pages/config/ResolutionSettings.test.tsx
+  s_0cc083ef6e9aa3::t_193efb7c34812a 1-58
+web/src/pages/observability/TransportDiagnostics.tsx
+  s_cffe143f0c5c88::t_3ff87c8f31a37b 22
+  s_cffe143f0c5c88::t_923a1cdb05e5ec 23
+  s_0cc083ef6e9aa3::t_7f46050667768a 2,20-21,24-42,44
+web/src/model/__tests__/model.test.ts
+  s_0cc083ef6e9aa3::t_63208e6e9d1d1f 10,19-41,66
+src/recursion.rs
+  s_0cc083ef6e9aa3::t_dbc00278ee0605 883-886
+  s_0cc083ef6e9aa3::t_0759a3c2397a8a 208-211
+  s_cffe143f0c5c88::t_34d2185fe4c183 215-216,221,264-275,335-336,358-373,385
+  s_0cc083ef6e9aa3::t_a6cc701212b3ea 65-66,78,99-102,143,163,183-186,212-213,331
+  s_0cc083ef6e9aa3::t_da90987447815e 223-224,593,661-731,753-836,852-853,866-882,887-893
+  s_cffe143f0c5c88::t_996e30eccc3107 233-263,276-325,337-340,386-389,406-415,437-471,500,503,580,594-597,837-851
+  s_0cc083ef6e9aa3::t_004bfe21a388dc 497-499,502,504-505,517-579,583-590,598-612,628,631-643
+  s_cffe143f0c5c88::t_29f4a5372ca35c 854-865
+  s_cffe143f0c5c88::t_fe01c59c39039f 510-516,732-752
+  s_0cc083ef6e9aa3::t_e87f142f823e0a 1-64,67-77,79-98,103-142,144-162,164-182,187-207,214,217-220,222,225-232,326-330,332-334,341-357,374-384,390-405,416-436,472-496,501,506-509,581-582,613-614,626,629-630,644-660,894
+  s_cffe143f0c5c88::t_2c265f3be0bb4c 591-592,615-625,627
+web/src/i18n/reliability.ts
+  s_cffe143f0c5c88::t_923a1cdb05e5ec 66
+  s_cffe143f0c5c88::t_3ff87c8f31a37b 65
+  s_0cc083ef6e9aa3::t_7f46050667768a 63-64,67-69
+guide/configuration.md
+  s_cffe143f0c5c88::t_db10f6db6adb8c 109-112
+  s_0cc083ef6e9aa3::t_3d2535d86f6940 113-114,117-118,129
+  s_0cc083ef6e9aa3::t_413d16b06a60cd 11,78,88-97,101-108,115-116,120-128,130-131,137
+  s_cffe143f0c5c88::t_2909fb40d3fa9c 132-136
+  s_cffe143f0c5c88::t_2506d8d24c8406 98-100,119
+  s_cffe143f0c5c88::t_bc6d400eb41c99 138
+web/src/i18n/shell.ts
+  s_0cc083ef6e9aa3::t_74f3d9b6c3481d 35
+  s_0cc083ef6e9aa3::t_25badb7de95908 18-19
+src/admin.rs
+  s_cffe143f0c5c88::t_2e011814b9b108 62-78,135-136,226
+  s_cffe143f0c5c88::t_03dfaddec65b88 210-225
+src/manage/runtime.rs
+  s_0cc083ef6e9aa3::t_2f07f20b40c462 317
+  s_0cc083ef6e9aa3::t_5ce7128dcda840 321
+AGENTS.md
+  s_cffe143f0c5c88::t_2909fb40d3fa9c 131-135
+  s_0cc083ef6e9aa3::t_41c322a1edfb64 5-9,45,81-88
+  s_cffe143f0c5c88::t_2506d8d24c8406 136-137
+web/src/pages/observability/OverviewPage.tsx
+  s_0cc083ef6e9aa3::t_25badb7de95908 164,171,177
+  s_0cc083ef6e9aa3::t_74f3d9b6c3481d 215-216
+  s_0cc083ef6e9aa3::t_7f46050667768a 270
+web/src/pages/observability/metrics.ts
+  s_0cc083ef6e9aa3::t_74f3d9b6c3481d 13,37-38,41-42
+src/config.rs
+  s_0cc083ef6e9aa3::t_792344ca17a270 17-20,62-78,407
+web/src/model/settings.ts
+  s_0cc083ef6e9aa3::t_afe38b5241dd13 26-27,51,59-64
+src/cache.rs
+  s_0cc083ef6e9aa3::t_a8b01c36f58c34 245-247,533,548,1038
+src/cache/persistence.rs
+  s_0cc083ef6e9aa3::t_1aede41dcb23e5 426-427,429
+web/src/pages/observability/diagnostics.ts
+  s_cffe143f0c5c88::t_923a1cdb05e5ec 13
+  s_0cc083ef6e9aa3::t_74f3d9b6c3481d 9-12,14-17
+src/lib.rs
+  s_0cc083ef6e9aa3::t_792344ca17a270 1,21
+src/resolver.rs
+  s_0cc083ef6e9aa3::t_e3574247fa065a 110-120
+  s_0cc083ef6e9aa3::t_2f07f20b40c462 125,140,147,153,158,296-302,308,602
+  s_0cc083ef6e9aa3::t_a8b01c36f58c34 466,471,474,576-577,583,586,595-599
+  s_cffe143f0c5c88::t_2e011814b9b108 139,146,292,295,303-307,310,313
+  s_cffe143f0c5c88::t_5a30d223a71bd3 17,108-109,121-124,126-138,141-145,148-152,154-157,159-160,162,204,291,293-294,309,311-312,600-601,603-604,616,666,689,697-699,753
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_0cc083ef6e9aa3::t_d7a2d34d07b796 114-128
+  s_0cc083ef6e9aa3::t_53285c3cfccb74 168-173,175-187
+  s_cffe143f0c5c88::t_ee49cfaf7f62bc 174
+  s_0cc083ef6e9aa3::t_63208e6e9d1d1f 24
+parins.example.toml
+  s_0cc083ef6e9aa3::t_3d2535d86f6940 76
+  s_0cc083ef6e9aa3::t_81a813cc3e7f27 63-75,77-78
+web/src/pages/config/SettingsPage.tsx
+  s_0cc083ef6e9aa3::t_be67bd74d1857f 88,90-92,115-116
+web/src/i18n/settings.ts
+  s_0cc083ef6e9aa3::t_b15e07321cbd39 44-57,59-63
+  s_0cc083ef6e9aa3::t_9973c16474b4b4 58
+CHANGELOG.md
+  s_cffe143f0c5c88::t_358ffa6da78fa8 13-14
+  s_cffe143f0c5c88::t_58109bd290c449 15-17,20
+  s_0cc083ef6e9aa3::t_3acae0c3519153 5-12,21
+  s_cffe143f0c5c88::t_2909fb40d3fa9c 18-19
+tests/recursion.rs
+  s_0cc083ef6e9aa3::t_4e181724b81912 20-24
+  s_cffe143f0c5c88::t_03dfaddec65b88 122-140
+  s_0cc083ef6e9aa3::t_f4fd5022275adb 1-19,25-121
+web/src/pages/observability/__tests__/diagnostics.test.tsx
+  s_cffe143f0c5c88::t_3ff87c8f31a37b 59,65
+  s_0cc083ef6e9aa3::t_53285c3cfccb74 51,57-58,60-64,67-74
+  s_cffe143f0c5c88::t_b704c7e4cd047a 66
+  s_cffe143f0c5c88::t_24f51ca1e567ca 75
+src/recursion/outbound.rs
+  s_cffe143f0c5c88::t_360789beaa4703 156-166,169-193
+  s_0cc083ef6e9aa3::t_2ac886b5e4e984 1-2,8-17,19,21,23-63,99-118,121-128,130-135,139,141-142,144,149,154-155
+  s_cffe143f0c5c88::t_5a45c39782120f 18,20,22
+  s_cffe143f0c5c88::t_5d403ef3a513c7 167-168
+  s_cffe143f0c5c88::t_6bc68df60ba19e 3-5,119-120,129,136-138,140,143,147,150-153
+  s_cffe143f0c5c88::t_7c1a595845837c 6-7,64-98,145-146,148
+src/cache/persistence/tests.rs
+  s_0cc083ef6e9aa3::t_a8a8eecfbe405a 517-520,522
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fda6af2658f5a0015309c53ccf1878d3b5aa13c1",
+  "prompts": {},
+  "sessions": {
+    "s_0cc083ef6e9aa3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3bd52957-6ab9-4af5-8c2e-2823cdbfde89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

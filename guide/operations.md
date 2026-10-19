@@ -238,6 +238,10 @@ max_bytes = 67108864
 retention_secs = 86400 # 60..2592000; an upper bound, not promised coverage
 ```
 
+Each record has a details button: on a mouse it opens a detail card on hover, and
+a click, tap, Enter or Space keeps the card open until it is pressed again, Escape
+is pressed or you click elsewhere. Live insertion pauses while a card is open.
+
 Logs contain client IP, name/type, transport, response code, duration, actual
 cache/filter path, winning upstream (if any), input/output ECS and EDNS flags,
 and bounded answer details (16 records, capped strings). They are authenticated,
@@ -322,6 +326,39 @@ with query logging disabled. Upstream endpoint slots belong to their displayed
 pool generation, and bounded query traces contain at most eight attempts, keeping
 the winning or final failure result. Caller cancellation, parallel race losers and
 shutdown are separate from network failures. Public `/healthz` stays liveness only.
+
+## Recursive resolution
+
+Switching `[resolution] mode` between `"forward"` and `"recursive"`
+([configuration](configuration.md#recursive-resolution)) restarts DNS listeners.
+The new mode starts with an empty cache, because forwarded and recursive answers
+never share a cache or snapshot, so expect slower answers until it warms up.
+Before switching:
+
+- Allow outbound UDP and TCP port 53 to the internet (and IPv6 only when
+  `[recursion] ipv6 = true`). Queries to authoritative servers are plaintext, and
+  with ECS enabled they carry the client subnet to the answer's authoritative
+  servers.
+- Size `[recursion] max_outbound_per_second` and `max_outbound_inflight` for the
+  cache-miss rate you expect; a cold cache miss usually needs several
+  authoritative queries. Queries waiting for these limits stay within
+  `query_timeout_ms`.
+- Only PariNS's own filter rules apply; any policy of the previous upstream
+  resolver no longer does.
+
+With `admin_listen` set, `parins_recursion_*` counters report resolutions started,
+answered, negative, DNSSEC Bogus, cancelled before finishing (`deadline`: the
+query deadline or a cancelled request) and ended by shutdown, failures by cause
+(`failed_timeout`, `failed_referral`, `failed_budget`, `failed_other`),
+authoritative queries sent, rate-limit waits and their total milliseconds, and
+queries admitted (`outbound_inflight`, including those waiting for a rate token).
+Rising `outbound_rate_waits` or `deadline` counts suggest the outbound limits or
+the deadline are too tight for the load.
+
+Learned ECS sharing (`[cache.ecs_sharing]`, forwarding only) is observed on the
+**Cache** page: inspecting a name shows `observing`, `shared` or `revoked`, and the
+cache statistics count `ecs_shared_hits`, `ecs_shared_entries` and
+`ecs_sharing_revocations`.
 
 ## Runtime metrics
 

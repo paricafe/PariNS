@@ -124,15 +124,17 @@ and recursive answers never share a cache or snapshot.
 | --- | --- | --- | --- |
 | `ipv6` | `false` | | Also query authoritative servers over IPv6; enable only with IPv6 egress. |
 | `max_outbound_per_second` | 500 | 1..=10000 | Sustained queries per second to all authoritative servers together. |
-| `max_outbound_inflight` | 256 | 1..=4096 | Authoritative queries awaiting a response at once. |
+| `max_outbound_inflight` | 256 | 1..=4096 | Authoritative queries admitted at once, waiting for a rate token or a response. |
 | `max_depth` | 24 | 4..=64 | Referral and CNAME depth for one resolution. |
-| `max_queries_per_request` | 200 | 1..=1000 | Authoritative queries one resolution may send. |
+| `max_queries_per_request` | 200 | 1..=1000 | Authoritative queries one lookup may send, including delegations, name server addresses and CNAME targets. Each DS or DNSKEY lookup for DNSSEC validation has its own budget; the outbound limits above cap the total. |
 | `cache_entries` | 65536 | 1024..=1048576 | Delegation, name server and DNSSEC key responses kept by the recursor (entries, not bytes). |
 
 In recursive mode the loopback `/metrics` endpoint (`admin_listen`) adds
-`parins_recursion_*` counters: resolutions by outcome, failures by cause (timeout,
-unfollowed referral, query or depth budget, other), queries sent, rate-limit waits
-and queries in flight. Root hints and the trust anchor are built in and change only
+`parins_recursion_*` counters: resolutions by outcome (including those cancelled
+before finishing, at the query deadline or by a cancelled request, and those ended
+by shutdown), failures by cause (timeout, unfollowed referral,
+query or depth budget, other), queries sent, rate-limit waits and queries in flight
+([operations](operations.md#recursive-resolution)). Root hints and the trust anchor are built in and change only
 with a PariNS release. QNAME minimisation is relaxed, because some authoritative servers answer
 NXDOMAIN for names that only have descendants.
 
@@ -281,7 +283,8 @@ and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/r
   Cookie/unknown EDNS options bypass caching to avoid replaying client-specific
   state. Padding is allowed but removed from the stored canonical answer.
 - Hits restore the current request's ID/question and original ECS, with aged
-  TTLs and normalized EDNS. There is no local DNSSEC validation.
+  TTLs and normalized EDNS. Forwarded answers are not validated locally; AD on
+  hits follows the [recursive resolution](#recursive-resolution) rules.
   `[cache.persistence]` defaults to enabled with a 32 MiB snapshot budget: only
   fresh entries are saved at terminal, quiescent shutdown. The snapshot budget
   is independent of cache accounting; its serialized format can reach the limit
@@ -522,9 +525,10 @@ validation and provider protection. Configuration changes require restart.
   refused. Trusted forwarding of third-party subnets is not implemented.
   Downstream ECS echoes the original client option and is omitted if the client
   did not supply one. A nonzero ECS REFUSED triggers one anonymous `/0` retry
-  within the original deadline; that retry's result is not cached. This
-  release does not perform DNSSEC validation or authenticate the plaintext
-  upstream; the AD bit is cleared in client responses.
+  within the original deadline; that retry's result is not cached. In forward
+  mode PariNS does not validate DNSSEC or authenticate a plaintext upstream, and
+  clears the AD bit in client responses; only
+  [recursive mode](#recursive-resolution) validates and sets AD.
 
 The example and setup wizard default to loopback **DNS**; the management console
 defaults separately to `0.0.0.0:3000` over HTTP until inbound DoH is enabled.

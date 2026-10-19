@@ -169,6 +169,11 @@ reachability.
 - Zero-downtime replacement for changes that currently restart DNS (anything outside
   the [listener-preserving settings](operations.md#configuration-changes-and-statistics)).
 
-The design forwards to existing resolvers; a standalone iterative resolver is out
-of scope. The implementation uses Rust, Tokio for asynchronous IO, and Hickory for
-DNS message parsing and encoding.
+PariNS forwards to existing resolvers by default; optional recursive resolution
+is a validating resolver for its own clients, not a general recursive server
+(no RPZ, DNS64, local zones or mixed forward/recursive resolution). The
+implementation uses Rust, Tokio for asynchronous IO, and Hickory for DNS message
+parsing and encoding. Recursion uses the Hickory recursor from a fork
+(`Natsuki-Kaede/hickory-dns`, branch `parins-ecs`) pinned by revision in
+`Cargo.toml`, with `hickory-proto` patched to the same revision; the first build
+fetches it with Git, and updating it means changing both revisions together.

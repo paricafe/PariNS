@@ -1,16 +1,23 @@
 # PariNS
 
 PariNS is a self-hosted DNS forwarder written in Rust, with subnet-aware caching,
-filtering, encrypted DNS and a built-in web console. Run it on a local machine,
-home network or VPS, using your own upstream resolvers and policies.
+filtering, encrypted DNS and a built-in web console. It forwards to your own
+upstream resolvers, or can optionally resolve from the root servers itself with
+DNSSEC validation. Run it on a local machine, home network or VPS.
 
 ## Features
 
 - **DNS transports:** UDP, TCP, DoT, DoH over HTTP/2 and HTTP/3, and DoQ.
 - **Upstream pools:** weighted selection or parallel queries across plaintext
   and authenticated encrypted resolvers.
+- **Optional recursive resolution:** `[resolution] mode = "recursive"` resolves
+  from the root servers with DNSSEC validation instead of forwarding. Forwarding
+  stays the default.
 - **Subnet-aware cache:** ECS isolation, positive and negative caching, optional
-  prefetch, stale answers and request coalescing. ECS is opt-in.
+  prefetch, stale answers and request coalescing. ECS is opt-in. Optional learned
+  sharing (`[cache.ecs_sharing]`) caches an answer once per address family only
+  after several networks received the identical answer, and stops sharing as soon
+  as answers differ.
 - **Filtering:** local rules and HTTPS subscriptions, allow exceptions and CNAME
   checks.
 - **Web console:** guided setup, Chinese/English UI, light/dark themes, statistics,
@@ -18,8 +25,10 @@ home network or VPS, using your own upstream resolvers and policies.
 - **Deployment:** prebuilt Linux binaries, systemd installation, managed software
   update checks, or standalone TOML configuration.
 
-PariNS forwards queries to existing resolvers; it is not an authoritative DNS
-server or standalone iterative resolver and does not perform DNSSEC validation.
+PariNS is not an authoritative DNS server. Its recursive mode is a validating
+resolver for PariNS's own clients, not a general recursive server: it has no RPZ,
+DNS64 or local zones, and one instance either forwards or resolves recursively,
+never both.
 
 ## Quick start
 
@@ -76,7 +85,7 @@ services unchanged ([details](https://github.com/paricafe/PariNS/blob/main/guide
 ## Documentation
 
 - [Deployment](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md) — offline/source installation, file mode and HTTPS setup.
-- [Configuration](https://github.com/paricafe/PariNS/blob/main/guide/configuration.md) — upstreams, ECS, cache, filters and resource limits.
+- [Configuration](https://github.com/paricafe/PariNS/blob/main/guide/configuration.md) — upstreams, recursive resolution, ECS, cache, filters and resource limits.
 - [Operations](https://github.com/paricafe/PariNS/blob/main/guide/operations.md) — accounts, updates, backups, certificates and diagnostics.
 - [Development](https://github.com/paricafe/PariNS/blob/main/guide/development.md) — build, test, benchmark and package.
 - [Releases](https://github.com/paricafe/PariNS/releases) · [Changelog](CHANGELOG.md)

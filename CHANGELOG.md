@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.1.19 — 2026-10-19
+
+### Changed
+
+- Console settings use standard DNS terms as titles (for example 最大 TTL /
+  Maximum TTL, 预取 / Prefetch, 过期缓存（Serve stale）, DoT 连接池 / DoT
+  connection pool), with plain-language explanations in the help text, in both
+  languages. `cache.max_variants`, `cache.ecs_sharing.min_networks` and
+  `upstreams.max_extra_inflight` gained help text. Configuration keys and values
+  are unchanged.
+- Console glass surfaces are calmer: the light that followed the pointer and the
+  hover lift on overview cards are gone, every glass surface (including popups)
+  has the same symmetric edge highlight and a light neutral shadow, and the
+  primary button is a solid colour. Text on glass keeps WCAG AA contrast over
+  every background, including custom images.
+- Query log rows no longer expand in place. Each record has a details button: on
+  a mouse, hovering it opens a detail card that you can move into; a click, tap,
+  Enter or Space keeps the card open until it is pressed again, Escape is pressed
+  or you click elsewhere. Live insertion pauses while a card is open.
+- `[recursion] max_queries_per_request` is documented as a per-lookup budget: each
+  DS or DNSKEY lookup for DNSSEC validation has its own, and the outbound rate
+  and in-flight limits cap the total. The `parins_recursion_deadline_total` help
+  now says it also counts cancelled requests, and
+  `parins_recursion_outbound_inflight` includes queries waiting for a rate token.
+- README and guides describe optional recursive resolution and learned ECS
+  sharing; the operations guide adds a checklist for switching to recursive mode.
+
+### Fixed
+
+- Cache inspection reported `shared` for a name whose other address family was
+  still observing, and kept reporting `shared` after the one-hour evidence had
+  expired; it now reports the most cautious state.
+- In recursive mode, a client served by the cache while another request for the
+  same name was being admitted received no AD bit for validated data.
+
 ## v0.1.18 — 2026-10-18
 
 ### Added

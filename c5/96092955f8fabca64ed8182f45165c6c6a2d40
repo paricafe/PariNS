@@ -1,0 +1,97 @@
+src/doh.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 20-25,81,95,110,139,193,218,271,276
+src/server.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 9-13,291,307-320,400,411-416,421,475,811-812,816,818-821,823,868,985-991,993-1003
+  s_cffe143f0c5c88::t_eb50b37a8f78dc 172-193,200-202,281,286-288,300,462,485-487,602,625,661,686-692,992
+  s_cffe143f0c5c88::t_09c3bf0268ea45 1004
+src/upstreams/h3.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 6-15,27,34,117-119,123,131-141,147,165-166,271,278-279,281
+src/protocol.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 29-37,70-72,85,90,191-197,316-341
+  s_cffe143f0c5c88::t_a80840fa6d64d9 342
+src/ecs.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 78-81
+tests/doh.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 221-278
+src/admin.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 2-3,9,14,78-82,88,100,105-106
+src/upstream.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 11-14,30-32,37,42-46,48,93-94,99-101
+deploy/parins.service
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 18-21
+src/tls.rs
+  s_cffe143f0c5c88::t_2b4cfcd6631b04 280-284
+  s_cffe143f0c5c88::t_0836cada9857ec 29,241,245-248,272-275,401
+src/cache/tests/reliability.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 25,66-68,222
+tests/padding.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 171,176
+tests/recursion.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 68,73
+examples/bench_cache.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 28,30-36,39-42
+src/quic.rs
+  s_cffe143f0c5c88::t_cbd2dbdaa9f1a8 126-128
+  s_cffe143f0c5c88::t_8708bef681f76d 267-268
+  s_cffe143f0c5c88::t_0836cada9857ec 7-12,16,125,129-133
+src/upstreams.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 246-264
+tests/ecs.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 303-376
+src/transport/accept.rs
+  s_cffe143f0c5c88::t_3e5dfc1dc89f90 1-8,11,18-22,25,37-105,110-178
+  s_cffe143f0c5c88::t_f324cd4cdc722d 9-10,12-17,23-24,26-36,106-109
+tests/admin.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 170-187
+tests/cache_refresh.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 129,134,281,286,303,308,399-405,482,487,532,537
+src/transport/mod.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 1
+src/cache/persistence.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 231-237,239-241,244-280,282-287,289-292
+src/cache/persistence/tests.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 2,69,121,213-219,304,334,377,395-396,415,451,551,610,626,659,699,739-740,762,812,861-862,890-891,905-942
+  s_cffe143f0c5c88::t_f3c4d10a89e933 943
+tests/cache_persistence.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 34
+src/cache/tests.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 13-36,69-77,79,82-83,92-111,118,135,138,144,156,172-175,178,180,192,194-195,201,204,214,216,219,222-223,225,243,245-248,250,256-257,260,374,422-424,434,536,567,616-618,629,663-664,670,679,684,687-693,718,733,766,782-789,803,811-812,814,830-831,849,872-873,930-931,934-935,945-946,956-957,966,989,1015-1016,1028,1036,1064-1065,1094,1150,1187,1223,1225-1226,1264,1289,1303
+src/upstreams/transport.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 11-16,18-21,43,434-451,462-463,469-471,574-577,585-588,618,622,685-688,692
+tests/listener_shutdown.rs
+  s_cffe143f0c5c88::t_cbd2dbdaa9f1a8 285
+  s_cffe143f0c5c88::t_0836cada9857ec 222-225,239-240,245-256,286
+src/recursion.rs
+  s_cffe143f0c5c88::t_8708bef681f76d 533-534
+  s_cffe143f0c5c88::t_0836cada9857ec 14-17,33,36,455-459,522-532,535-540,561-569,787-833,838-845,847-856
+  s_cffe143f0c5c88::t_e6439f3e3e4df1 834-837,846
+  s_cffe143f0c5c88::t_f5b26016715c04 857-858
+src/main.rs
+  s_cffe143f0c5c88::t_1e7bdd6f533a05 7,18-28
+  s_cffe143f0c5c88::t_b205bc9d4c9830 29-30
+tests/quic.rs
+  s_cffe143f0c5c88::t_cbd2dbdaa9f1a8 821-823,839-840
+  s_cffe143f0c5c88::t_0836cada9857ec 778-820,824-838,841-854
+tests/upstreams.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 56-65,121,143,159,300,349,393,430,528,561,594,653,847-849,966,994,1024,1082-1084,1086-1087,1102-1103,1107,1109-1110,1112-1121,1125-1128,1168,1254,1261,1462-1465,1569,1575,1695,1720,1725-1726,1749,1752,1754,1758,1761,1767,1813-1815,1888,1892,1901,2067-2145
+src/cache.rs
+  s_cffe143f0c5c88::t_0836cada9857ec 599-601,609,657-659,664,697,878,912,916-919,958-961
+src/quic/diagnostics.rs
+  s_cffe143f0c5c88::t_cbd2dbdaa9f1a8 48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c596092955f8fabca64ed8182f45165c6c6a2d40",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

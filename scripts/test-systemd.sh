@@ -180,7 +180,8 @@ fi
 sudo chmod go-w /opt
 install_service() {
     if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info" > "$fixture/install.log" 2>&1; then
-        cat "$fixture/install.log"
+        # Keep the one-time setup token out of CI logs.
+        sed -E 's/^( +)[0-9a-f]{64}$/\1<setup token>/' "$fixture/install.log"
     else
         install_status=$?
         # This disposable fixture contains only generated test configuration.
@@ -196,9 +197,15 @@ install_service() {
     sudo cmp "$binary" /opt/parins-managed/parins
 }
 expect_fresh_install_message() {
-    grep -Fq 'Fresh setup console: http://' "$fixture/install.log"
-    grep -Fq '/var/lib/parins-managed/setup-token' "$fixture/install.log"
-    ! grep -Fq 'Existing configuration preserved.' "$fixture/install.log"
+    # The official-A updater suite runs the immutable v0.1.5 installer, whose
+    # first-setup wording predates the three-step guidance.
+    "$official_updater_check" && return 0
+    grep -Fq 'Fresh setup, three steps:' "$fixture/install.log"
+    grep -Fq '       ssh -N -L 3000:127.0.0.1:3000 ' "$fixture/install.log"
+    grep -Fxq '  2. Open http://127.0.0.1:3000 in your browser.' "$fixture/install.log"
+    # The service created the token before install-verify accepted readiness.
+    grep -Fxq "       $(sudo cat /var/lib/parins-managed/setup-token)" "$fixture/install.log"
+    ! grep -Fq 'Existing configuration preserved.' "$fixture/install.log" || return 1
 }
 expect_initialized_install_message() {
     # The official-A updater suite intentionally runs the immutable v0.1.5

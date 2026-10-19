@@ -116,8 +116,11 @@ sh "$repo/scripts/bootstrap.sh" --help | grep -Fq -- "[--version $version]"
 # A caller can start from any directory; dry-run stages nothing.
 (cd / && sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --dry-run)
 [ ! -e "$fixture/stage/opt" ]
-# Piped execution is independent of $0 and the working directory.
-(cd / && sh -s -- --root "$fixture/stage" < "$repo/scripts/bootstrap.sh")
+# A truncated download defines main but never calls it, so nothing is staged.
+sed '$d' "$repo/scripts/bootstrap.sh" | (cd / && sh -s -- --root "$fixture/stage")
+[ ! -e "$fixture/stage/opt" ]
+# Piped execution (curl ... | sudo sh) is independent of $0 and the working directory.
+cat "$repo/scripts/bootstrap.sh" | (cd / && sh -s -- --root "$fixture/stage")
 cmp "$package/parins" "$fixture/stage/opt/parins-managed/parins"
 mkdir -p "$fixture/stage/var/lib/parins-managed/certificates" "$fixture/stage/var/lib/parins/tls"
 printf 'keep private state\n' > "$fixture/stage/var/lib/parins-managed/state.json"
@@ -127,16 +130,20 @@ sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version "$version"
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json"
 grep -Fxq 'keep certificate identity' "$fixture/stage/var/lib/parins-managed/certificates/identity.pem"
 grep -Fxq 'keep external certificate' "$fixture/stage/var/lib/parins/tls/external.pem"
-# Bootstrap must forward explicit enrollment; it must not select this mode.
-cp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
-if sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" > "$fixture/enrollment-refused.log" 2>&1; then
+# Older layouts are never adopted; the removed enrollment option is refused.
+printf '# PariNS managed installer unit v2\n[Service]\n' > "$fixture/stage/etc/systemd/system/parins-managed.service"
+cp "$fixture/stage/etc/systemd/system/parins-managed.service" "$fixture/old-unit"
+if sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" > "$fixture/old-layout.log" 2>&1; then
     printf '%s\n' 'Bootstrap silently adopted an old unit.' >&2; exit 1
 fi
-sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --enable-updater --dry-run
-cmp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
-sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --enable-updater
-cmp "$repo/deploy/parins-managed.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
+grep -Fq 'older layouts are not adopted' "$fixture/old-layout.log"
+if sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --enable-updater > "$fixture/old-layout.log" 2>&1; then
+    printf '%s\n' 'Bootstrap accepted the removed enrollment option.' >&2; exit 1
+fi
+grep -Fq 'unknown option: --enable-updater' "$fixture/old-layout.log"
+cmp "$fixture/old-unit" "$fixture/stage/etc/systemd/system/parins-managed.service"
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json"
+cp "$repo/deploy/parins-managed.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
 # Every install input is mandatory; no legacy package fallback.
 mv "$package/LICENSE.beui" "$fixture/notice-copy"
 manifest

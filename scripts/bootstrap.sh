@@ -1,13 +1,16 @@
 #!/bin/sh
 # Download a verified release and delegate installation to its bundled installer.
+#   curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh
 # Keep the entry point last so a truncated piped download cannot start installing.
 set -eu
 umask 077
 
 fail() { printf 'PariNS bootstrap: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo sh bootstrap.sh [--version v0.1.20] [--enable-updater] [--dry-run]' \
+    printf '%s\n' 'Usage: curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh' \
+        '       sudo sh bootstrap.sh [--version v0.1.20] [--dry-run]' \
         '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.20] [--dry-run]' \
+        'Options also work when piped: ... | sudo sh -s -- --dry-run' \
         'Linux x86_64/aarch64 and systemd are required for live installation.' \
         '--root stages files only; no service or candidate binary is executed.'
 }
@@ -35,7 +38,7 @@ cleanup() {
     exit "$status"
 }
 main() {
-    version=v0.1.20 root= dry_run=false enable_updater=false
+    version=v0.1.20 root= dry_run=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--root)
@@ -43,7 +46,6 @@ main() {
                 case "$1" in --version) version=$2 ;; --root) root=$2; [ -n "$root" ] || fail 'empty staging root' ;; esac
                 shift 2 ;;
             --dry-run) dry_run=true; shift ;;
-            --enable-updater) enable_updater=true; shift ;;
             --help|-h) usage; exit 0 ;;
             *) usage >&2; fail "unknown option: $1" ;;
         esac
@@ -68,7 +70,7 @@ main() {
         [ "$(owner "$root")" = "$(id -u)" ] || fail 'staging root must be owned by the current user'
         private_directory "$root" || fail 'staging root must be private (mode 0700)'
     else
-        [ "$(id -u)" = 0 ] || fail 'live installation requires root; run sudo sh bootstrap.sh'
+        [ "$(id -u)" = 0 ] || fail 'live installation requires root; run it with sudo'
         command -v systemctl >/dev/null 2>&1 || fail 'systemctl is required'
         [ -d /run/systemd/system ] || fail 'systemd must be running as the service manager'
     fi
@@ -126,9 +128,9 @@ main() {
     set --
     if [ -n "$root" ]; then set -- "$@" --root "$root"; fi
     if "$dry_run"; then set -- "$@" --dry-run; fi
-    if "$enable_updater"; then set -- "$@" --enable-updater; fi
     # The installer owns platform validation, atomic replacement and rollback.
-    sh "$package/install.sh" "$@"
+    # When piped, stdin is the rest of this script; the installer never reads it.
+    sh "$package/install.sh" "$@" </dev/null
 }
 
 main "$@"

@@ -4,11 +4,10 @@ set -eu
 umask 077
 fail() { printf 'PariNS installer: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo sh install.sh [--binary PATH] [--enable-updater] [--dry-run]' \
+    printf '%s\n' 'Usage: sudo sh install.sh [--binary PATH] [--dry-run]' \
         '       sh install.sh --root EXISTING_PRIVATE_DIRECTORY [--binary PATH] [--dry-run]' \
         'The default binary is parins beside install.sh (or ../target/release/parins in source).' \
-        '--root is staging only: no systemctl, privileged changes or binary execution.' \
-        '--enable-updater explicitly enrolls only the exact official v0.1.4 managed layout; no data migration.'
+        '--root is staging only: no systemctl, privileged changes or binary execution.'
 }
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 binary="$script_dir/parins"
@@ -18,7 +17,7 @@ unit_source="$script_dir/deploy/parins-managed.service"
 if [ ! -f "$binary" ]; then binary="$script_dir/../target/release/parins"; fi
 if [ ! -f "$helper" ]; then helper="$script_dir/../target/release/parins-updater"; fi
 if [ ! -f "$unit_source" ]; then unit_source="$script_dir/../deploy/parins-managed.service"; fi
-root= dry_run=false enable_updater=false adopting_v2=false initialized=false
+root= dry_run=false initialized=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --binary|--root|--helper|--build-info)
@@ -26,7 +25,6 @@ while [ "$#" -gt 0 ]; do
             case "$1" in --binary) binary=$2 ;; --helper) helper=$2 ;; --build-info) build_info=$2 ;; --root) root=$2; [ -n "$root" ] || fail 'empty staging root' ;; esac
             shift 2 ;;
         --dry-run) dry_run=true; shift ;;
-        --enable-updater) enable_updater=true; shift ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; fail "unknown option: $1" ;;
     esac
@@ -98,14 +96,9 @@ IFS= read -r line < "$unit_source" || fail 'empty service template'
 [ "$line" = "$marker" ] || fail 'unrecognized managed service template'
 if [ -f "$unit_target" ]; then
     IFS= read -r line < "$unit_target" || fail 'empty existing service unit'
-    if [ "$line" != "$marker" ]; then
-        "$enable_updater" || fail 'existing managed unit requires explicit --enable-updater enrollment; unknown layouts are not adopted'
-        # Exact bytes from official tag v0.1.4, commit d33ee4612f10719e036d885edf2851e68bdd7ca9.
-        [ "$(digest "$unit_target")" = 7ee1b07a86ef834ee1abae5d9383f7b94e8a46945b5f49e38ea3c78d9d00293d ] || fail '--enable-updater accepts only the exact official v0.1.4 managed unit'
-        adopting_v2=true
-    else
-        cmp -s "$unit_target" "$unit_source" || fail 'existing v3 base unit differs from the supported installation contract'
-    fi
+    [ "$line" = "$marker" ] ||
+        fail "$unit_target is not a current PariNS managed unit; older layouts are not adopted. Back up and remove the old service and its data by hand, then install again"
+    cmp -s "$unit_target" "$unit_source" || fail 'existing v3 base unit differs from the supported installation contract'
 elif [ -e "$binary_target" ]; then
     fail 'existing binary without a managed service marker; migrate explicitly'
 fi
@@ -350,14 +343,13 @@ rollback() {
             fi
             if ! "$was_enabled"; then systemctl disable parins-managed.service 9>&- || true; fi
             systemctl daemon-reload 9>&- || exit "$status"
-            if "$was_active" && "$new_started" && ! "$adopting_v2"; then
+            if "$was_active" && "$new_started"; then
                 restore_nonce=$("$helper" install-restore <&9 9<&-) || { printf '%s\n' 'Manual recovery required: prior version was not started.' >&2; exit "$status"; }
                 flock -u 9; exec 9>&-; lock_held=false
                 systemctl start parins-managed.service && "$helper" install-verify "$restore_nonce" || printf '%s\n' 'Manual recovery required: prior version readiness not confirmed.' >&2
             else
                 flock -u 9; exec 9>&-; lock_held=false
                 if "$was_active" && ! "$new_started"; then systemctl start parins-managed.service || true; fi
-                if "$adopting_v2" && "$new_started"; then printf '%s\n' 'Installation files restored; service remains stopped. v0.1.4 has no verified rollback epoch; inspect retained business data before manually starting it.' >&2; fi
             fi
         fi
     elif ! "$committed" && [ -z "$root" ] && "$stopped" && "$was_active"; then
@@ -455,6 +447,37 @@ if [ -z "$root" ]; then
     committed=true
     systemctl enable --now parins-updater.path || request_path_enabled=false
 fi
+# First-setup guidance, after install-verify confirmed this invocation's
+# readiness. The service publishes readiness only after it created the setup
+# token for uninitialized state, so no extra wait is needed. Print only an
+# exact one-time token read from a regular, singly linked file.
+fresh_guidance() {
+    token_file="$state_dir/setup-token" token=
+    if [ -f "$token_file" ] && [ ! -L "$token_file" ] && [ "$(links "$token_file")" = 1 ]; then
+        token=$(timeout 5 head -c 65 "$token_file" 2>/dev/null) || token=
+        case "$token" in *[!0-9a-f]*) token= ;; esac
+        [ "${#token}" = 64 ] || token=
+    fi
+    # A local route lookup sends no traffic. Behind NAT this is the private
+    # address, so the guidance names the public-address case.
+    address=$(ip -4 route get 192.0.2.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }') || address=
+    [ -n "$address" ] || address=SERVER_ADDRESS
+    login=${SUDO_USER:-root}
+    case "$login" in ''|*[!A-Za-z0-9._-]*) login=USER ;; esac
+    printf '\n%s\n' 'Fresh setup, three steps:'
+    printf '%s\n' '  1. On your computer, open an SSH tunnel to this server and keep it open:'
+    printf '       ssh -N -L 3000:127.0.0.1:3000 %s@%s\n' "$login" "$address"
+    printf '%s\n' "     Skip this if your browser runs on this server; behind NAT, use the server's public address." \
+        '  2. Open http://127.0.0.1:3000 in your browser.'
+    if [ -n "$token" ]; then
+        printf '%s\n' '  3. Enter this one-time setup token (it stops working once setup is done):'
+        printf '       %s\n' "$token"
+    else
+        printf '%s\n' '  3. Enter the one-time setup token from: sudo cat /var/lib/parins-managed/setup-token'
+    fi
+    printf '%s\n' 'The console uses unencrypted HTTP on 0.0.0.0:3000: allow TCP 3000 only from administrators, or use only the tunnel.' \
+        'DNS starts after setup. PariNS has not changed host DNS or firewall rules.'
+}
 committed=true
 printf 'Installed. Backup: %s\n' "$backup"
 if [ -n "$root" ]; then
@@ -463,16 +486,7 @@ else
     if "$initialized"; then
         printf '%s\n' 'Existing configuration preserved. Continue using your existing management address and administrator account.'
     else
-        printf '%s\n' 'Fresh setup console: http://SERVER_PUBLIC_IP:3000 (listens on 0.0.0.0:3000 by default)' \
-            'Allow TCP 3000 in the host firewall/cloud security group for your admin IP; no firewall rules are changed here.' \
-            'HTTP is unencrypted: prefer local access or an SSH tunnel for initial setup, especially when entering passwords or private keys.' \
-            'If your new configuration enables inbound DoH, use the HTTPS management address shown by PariNS instead.' \
-            'Read the one-time setup token locally: sudo cat /var/lib/parins-managed/setup-token' \
-            'Open the console to initialize. DNS starts only after setup; no host DNS or firewall was changed.'
-        # Local interface addresses are useful hints, not a claim about public NAT.
-        if command -v ip >/dev/null 2>&1; then
-            ip -4 -o address show scope global | awk '{split($4, address, "/"); printf "Local interface setup address (before DoH): http://%s:3000\n", address[1]}'
-        fi
+        fresh_guidance
     fi
     printf '%s\n' 'Check service: sudo systemctl status parins-managed.service' \
         'View logs: sudo journalctl -u parins-managed.service -n 50 --no-pager'

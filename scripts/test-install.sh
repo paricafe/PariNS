@@ -77,11 +77,48 @@ if command -v dash >/dev/null 2>&1; then preflight_shell=dash; fi
     exec 8<&- 9>&-
 ' sh "$fixture"
 rm "$fixture/tools/env"
+# First-setup guidance prints the exact token, a filled-in tunnel and the local
+# URL, and never a symlinked, hard-linked or malformed token file.
+sed -n '/^fresh_guidance() {/,/^}$/p' "$repo/scripts/install.sh" > "$fixture/guidance-function.sh"
+mkdir "$fixture/guidance-tools" "$fixture/guidance-state"
+printf '#!/bin/sh\nprintf "192.0.2.1 via 198.51.100.1 dev eth0 src 198.51.100.7 uid 0\\n"\n' > "$fixture/guidance-tools/ip"
+printf '#!/bin/sh\nshift\nexec "$@"\n' > "$fixture/guidance-tools/timeout"
+chmod 0755 "$fixture/guidance-tools/ip" "$fixture/guidance-tools/timeout"
+guidance() {
+    PATH="$fixture/guidance-tools:$PATH" SUDO_USER=$1 sh -eu -c '
+        links() { stat -c %h "$1" 2>/dev/null || stat -f %l "$1"; }
+        . "$1/guidance-function.sh"
+        state_dir=$1/guidance-state
+        fresh_guidance
+    ' sh "$fixture" > "$fixture/guidance.log"
+}
+token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+printf '%s' "$token" > "$fixture/guidance-state/setup-token"
+guidance alice
+grep -Fxq '       ssh -N -L 3000:127.0.0.1:3000 alice@198.51.100.7' "$fixture/guidance.log"
+grep -Fxq '  2. Open http://127.0.0.1:3000 in your browser.' "$fixture/guidance.log"
+grep -Fxq "       $token" "$fixture/guidance.log"
+! grep -Fq 'sudo cat' "$fixture/guidance.log" || exit 1
+! grep -q "http.*$token" "$fixture/guidance.log" || exit 1
+guidance ''
+grep -Fq ' root@198.51.100.7' "$fixture/guidance.log"
+for bad in short not-hex link hardlink; do
+    rm -f "$fixture/guidance-state/setup-token" "$fixture/guidance-state/other"
+    case "$bad" in
+        short) printf '0123' > "$fixture/guidance-state/setup-token" ;;
+        not-hex) printf '%064d' 0 | tr 0 g > "$fixture/guidance-state/setup-token" ;;
+        link) printf '%s' "$token" > "$fixture/guidance-state/other"; ln -s other "$fixture/guidance-state/setup-token" ;;
+        hardlink) printf '%s' "$token" > "$fixture/guidance-state/other"; ln "$fixture/guidance-state/other" "$fixture/guidance-state/setup-token" ;;
+    esac
+    guidance alice
+    grep -Fq 'setup token from: sudo cat /var/lib/parins-managed/setup-token' "$fixture/guidance.log"
+    ! grep -Eq '^ +[0-9a-g]{64}$' "$fixture/guidance.log" || exit 1
+done
 stage="$fixture/stage"
 mkdir -m 0700 "$stage"
 sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" --dry-run > "$fixture/dry-run.log"
 grep -Fxq 'Dry run: no files or services changed.' "$fixture/dry-run.log"
-! grep -Eq 'Fresh setup|setup-token|Existing configuration preserved|Check service:' "$fixture/dry-run.log"
+! grep -Eq 'Fresh setup|setup-token|ssh -N|Existing configuration preserved|Check service:' "$fixture/dry-run.log" || exit 1
 [ ! -e "$stage/opt" ]
 mkdir -p "$stage/var/lib/parins/tls" "$stage/etc/systemd/system"
 printf 'external private HTTPS identity\n' > "$stage/var/lib/parins/tls/identity.pem"
@@ -90,7 +127,7 @@ printf 'legacy service unchanged\n' > "$stage/etc/systemd/system/parins.service"
 chmod 0750 "$stage/etc"
 sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" > "$fixture/staging.log"
 grep -Fxq 'Staging only: state is untouched and no service or executable was started.' "$fixture/staging.log"
-! grep -Eq 'Fresh setup|setup-token|Existing configuration preserved|Check service:' "$fixture/staging.log"
+! grep -Eq 'Fresh setup|setup-token|ssh -N|Existing configuration preserved|Check service:' "$fixture/staging.log" || exit 1
 cmp "$binary" "$stage/opt/parins-managed/parins"
 cmp "$repo/deploy/parins-managed.service" "$stage/etc/systemd/system/parins-managed.service"
 cmp "$helper" "$stage/usr/libexec/parins-updater"
@@ -217,32 +254,24 @@ for scenario in unknown-directory dangling-link orphaned-private legacy-state le
             printf '# PariNS managed installer unit v1\n[Service]\nStateDirectory=parins\n' > "$target/etc/systemd/system/parins-managed.service" ;;
     esac
     expect_failure --root "$target" --binary "$binary"
-expect_failure --root "$target" --binary "$binary" --dry-run
+    expect_failure --root "$target" --binary "$binary" --dry-run
     [ ! -e "$target/opt" ]
 done
-# First onboarding is an explicit, exact-layout operation, never a marker-only
-# legacy fallback. Staging proves no candidate/systemctl runs or business writes.
-enrollment="$fixture/enrollment"
-mkdir -p "$enrollment/etc/systemd/system/parins-managed.service.d" "$enrollment/opt/parins-managed" "$enrollment/var/lib/parins-managed/runtime"
-cp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$enrollment/etc/systemd/system/parins-managed.service"
-cp "$binary" "$enrollment/opt/parins-managed/parins"
-printf 'existing state stays byte-identical\n' > "$enrollment/var/lib/parins-managed/state.json"
-printf 'existing runtime stays byte-identical\n' > "$enrollment/var/lib/parins-managed/runtime/observability.sqlite3"
-printf '[Service]\nSupplementaryGroups=certificate-readers\n' > "$enrollment/etc/systemd/system/parins-managed.service.d/certificates.conf"
-expect_failure --root "$enrollment" --binary "$binary"
-sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$enrollment" --binary "$binary" --enable-updater --dry-run
-cmp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$enrollment/etc/systemd/system/parins-managed.service"
-printf '# marker retained but base unit changed\n' >> "$enrollment/etc/systemd/system/parins-managed.service"
-expect_failure --root "$enrollment" --binary "$binary" --enable-updater
-cp "$repo/scripts/fixtures/parins-managed-v0.1.4.service" "$enrollment/etc/systemd/system/parins-managed.service"
-printf '[Service]\nExecStart=/bin/true\n' > "$enrollment/etc/systemd/system/parins-managed.service.d/evil.conf"
-expect_failure --root "$enrollment" --binary "$binary" --enable-updater
-rm "$enrollment/etc/systemd/system/parins-managed.service.d/evil.conf"
-sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$enrollment" --binary "$binary" --enable-updater
-cmp "$repo/deploy/parins-managed.service" "$enrollment/etc/systemd/system/parins-managed.service"
-grep -Fxq 'existing state stays byte-identical' "$enrollment/var/lib/parins-managed/state.json"
-grep -Fxq 'existing runtime stays byte-identical' "$enrollment/var/lib/parins-managed/runtime/observability.sqlite3"
-[ ! -f "$enrollment/var/lib/parins-updater/private/journal.json" ]
+# Older managed layouts are rejected before any write, with a manual-handling
+# hint; the removed enrollment option is not accepted either.
+old_layout="$fixture/old-layout"
+mkdir -p "$old_layout/etc/systemd/system" "$old_layout/opt/parins-managed" "$old_layout/var/lib/parins-managed"
+printf '# PariNS managed installer unit v2\n[Service]\nStateDirectory=parins-managed\n' > "$old_layout/etc/systemd/system/parins-managed.service"
+cp "$old_layout/etc/systemd/system/parins-managed.service" "$fixture/old-unit"
+cp "$binary" "$old_layout/opt/parins-managed/parins"
+printf 'existing state stays byte-identical\n' > "$old_layout/var/lib/parins-managed/state.json"
+expect_failure --root "$old_layout" --binary "$binary"
+grep -Fq 'is not a current PariNS managed unit; older layouts are not adopted. Back up and remove the old service and its data by hand' "$fixture/failure.log"
+expect_failure --root "$old_layout" --binary "$binary" --enable-updater
+grep -Fq 'unknown option: --enable-updater' "$fixture/failure.log"
+cmp "$fixture/old-unit" "$old_layout/etc/systemd/system/parins-managed.service"
+grep -Fxq 'existing state stays byte-identical' "$old_layout/var/lib/parins-managed/state.json"
+[ ! -e "$old_layout/usr" ]
 # Even an owned unit cannot legitimize an unexpected logical or backing link.
 cp "$fixture/preflight-unit" "$stage/etc/systemd/system/parins-managed.service"
 rm "$stage/var/lib/parins-managed"

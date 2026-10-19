@@ -633,8 +633,11 @@ impl Exchange {
                 .peek(&self.query, self.context.outgoing, Instant::now(), false)
             && (!refreshing || !hit.refresh)
         {
+            // Carry the stored AD bit like a fresh answer's; reply rules still decide it.
+            let mut message = hit.message;
+            message.metadata.authentic_data = hit.authentic;
             return Answer {
-                response: Ok((hit.message, hit.scope.reply_scope(self.context.outgoing))),
+                response: Ok((message, hit.scope.reply_scope(self.context.outgoing))),
                 stale_eligible: false,
                 admitted: false,
                 upstream: None,

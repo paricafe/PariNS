@@ -9,7 +9,8 @@
 //!   request. Unknown helper outcomes never unlock by timeout; only a matching
 //!   terminal fence and installed identity resolve that intent.
 //! - A new invocation drives the existing Abort arbitration for unfinished old work.
-//!   Root fences precommit work without changing an already committed operation.
+//!   Root fences precommit work without changing an already committed operation,
+//!   recording the generic reason `aborted`; the application keeps its own reason.
 //! - Explicit Stage admission refusals are durable terminals in the same journal,
 //!   correlated by operation ID and phase nonce. They preserve the owning operation,
 //!   its cooldown anchor and fences, and publish both outcomes for reconciliation
@@ -435,7 +436,8 @@ impl Executor {
         }
         let op = matching(journal, inbox)?;
         if op.status.phase.precommit() {
-            self.finish(journal, Phase::Aborted, Some("preflight_failed"))?;
+            // Only the application knows why it aborted; it keeps its own reason.
+            self.finish(journal, Phase::Aborted, Some("aborted"))?;
         }
         // Persisted terminal is the irreversible fence against late commit.
         self.publish(journal)

@@ -288,7 +288,7 @@ struct State {
 
 impl State {
     fn current(services: &RuntimeServices) -> Self {
-        let status = services.status();
+        let status = services.storage.status();
         let log = if !services.storage.log_enabled() {
             "disabled"
         } else {

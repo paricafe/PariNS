@@ -21,6 +21,9 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     store::private_permissions(&metadata, 0o700)?;
     let saved = store::read_stored(&dir)?.context("management is not initialized")?;
     let config = Config::parse_in(&saved.toml, &dir)?;
+    // Startup reads the rollback copy too; a copy this version rejects would
+    // keep the candidate's management from opening.
+    super::runtime::previous_fingerprints(&saved, &dir)?;
     let snapshot = Snapshot::prepare(&config, address)?;
     config.check_non_identity_files()?;
     let material = crate::filter_subscriptions::service::read_only(
@@ -119,6 +122,34 @@ mod tests {
         assert_eq!(
             std::fs::read(&cache).unwrap(),
             b"must not consume clean cache"
+        );
+    }
+
+    #[test]
+    fn invalid_rollback_copy_fails_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("managed");
+        let store = Store::open(&path).unwrap();
+        let mut stored = Stored {
+            username: "admin".into(),
+            password_hash: store::hash_password("test-password").unwrap(),
+            toml: include_str!("../../parins.example.toml").into(),
+            previous: Some("listen = 'not an address'\n".into()),
+            revision: 2,
+        };
+        store.save(&stored).unwrap();
+        let error = managed(&path, "127.0.0.1:3000".parse().unwrap()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("rollback configuration"),
+            "{error:#}"
+        );
+        stored.previous = Some(include_str!("../../parins.example.toml").into());
+        store.save(&stored).unwrap();
+        assert_eq!(
+            managed(&path, "127.0.0.1:3000".parse().unwrap())
+                .unwrap()
+                .config_revision,
+            2
         );
     }
 

@@ -158,7 +158,7 @@ impl Coordinator {
 
 fn readiness(manager: &crate::manage::runtime::Manager) -> bool {
     let health = manager.services.health.snapshot();
-    let storage = manager.services.status();
+    let storage = manager.services.storage.status();
     manager.resolver().is_some()
         && health.ready
         && storage.health == "healthy"
@@ -336,12 +336,19 @@ async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) 
                 .as_mut()
                 .filter(|o| o.operation_id == op.operation_id)
             {
+                // Root records a generic reason for an Abort; the reason this
+                // application persisted with "aborting" is the specific one.
+                let own_abort = terminal.phase == ipc::Phase::Aborted
+                    && current.phase == "aborting"
+                    && current.reason.is_some();
                 current.finished = true;
                 current.phase = serde_json::to_value(terminal.phase)?
                     .as_str()
                     .unwrap_or("failed")
                     .into();
-                current.reason = terminal.reason.clone();
+                if !own_abort {
+                    current.reason = terminal.reason.clone();
+                }
                 s.commit_intent = None;
                 return Ok(true);
             }
@@ -375,7 +382,7 @@ async fn heartbeat(
     ensure!(identity == &pending.identity, "launch_identity_mismatch");
     let manager = shared.manager.lock().await;
     let health = manager.services.health.snapshot();
-    let storage = manager.services.status();
+    let storage = manager.services.storage.status();
     *sequence = sequence
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("health sequence exhausted"))?;
@@ -514,10 +521,13 @@ async fn stage_and_commit(
     if *stop.borrow() {
         return Err("interrupted");
     }
-    let manager = shared.manager.lock().await;
-    if manager.saved.as_ref().map(|s| s.revision) != Some(op.config_revision)
-        || !readiness(&manager)
-    {
+    // The permit excludes configuration changes, so the revision cannot move
+    // while the Manager lock is released for the root read and the preflight
+    // subprocess (up to 30 s); readiness is checked again before commit.
+    let current = |manager: &crate::manage::runtime::Manager| {
+        manager.saved.as_ref().map(|s| s.revision) == Some(op.config_revision) && readiness(manager)
+    };
+    if !current(&*shared.manager.lock().await) {
         return Err("config_changed");
     }
     let root = tokio::task::spawn_blocking(ipc::read_public_status)
@@ -538,6 +548,10 @@ async fn stage_and_commit(
         .map_err(|_| "preflight_failed")?
         != baseline
     {
+        return Err("config_changed");
+    }
+    let manager = shared.manager.lock().await;
+    if !current(&manager) {
         return Err("config_changed");
     }
     coordinator
@@ -1327,6 +1341,10 @@ mod tests {
                     fence.last_operation.as_ref().unwrap().phase,
                     ipc::Phase::Aborted
                 );
+                assert_eq!(
+                    fence.last_operation.as_ref().unwrap().reason.as_deref(),
+                    Some("aborted")
+                );
                 fence.installed.sha256 = "0".repeat(64);
                 reconcile(&coordinator, Some(&fence)).await.unwrap();
                 assert!(coordinator.frozen.load(Ordering::Acquire));
@@ -1335,7 +1353,11 @@ mod tests {
                 assert!(!coordinator.frozen.load(Ordering::Acquire));
                 let saved = state::read(dir.path()).unwrap().unwrap();
                 assert!(saved.commit_intent.is_none());
-                assert!(saved.operation.unwrap().finished);
+                let operation = saved.operation.unwrap();
+                assert!(operation.finished);
+                assert_eq!(operation.phase, "aborted");
+                // The application's own abort reason survives root's fence.
+                assert_eq!(operation.reason.as_deref(), Some("interrupted"));
             }
         }
     }

@@ -59,8 +59,15 @@ pub async fn restore(
     }
 }
 
+/// Cache snapshot save and runtime-data drain run in parallel, each bounded by
+/// this budget, so a slow save cannot starve the drain.
+const TERMINAL_BUDGET: Duration = Duration::from_secs(10);
+/// The final storage close, after the save, drains only what arrived since.
+const CLOSE_BUDGET: Duration = Duration::from_secs(2);
+
 /// No caller may enter serving again after this boundary. A save failure must
-/// still let independent log/statistics persistence finish.
+/// still let independent log/statistics persistence finish. Storage releases
+/// the runtime directory lock only after the snapshot save has finished.
 pub async fn terminal(
     services: Arc<RuntimeServices>,
     persistence: Arc<CachePersistence>,
@@ -68,7 +75,7 @@ pub async fn terminal(
 ) -> SnapshotReport {
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = cancelled.clone();
-    let closing = async move {
+    let save = async move {
         let mut report = SnapshotReport {
             reason: Some("shutdown_not_quiescent".into()),
             ..Default::default()
@@ -127,20 +134,39 @@ pub async fn terminal(
                 }
             }
         }
-        if let Err(error) = services.shutdown().await {
-            eprintln!("runtime data flush incomplete: {error}");
-        }
         report
     };
-    match tokio::time::timeout(Duration::from_secs(10), closing).await {
-        Ok(report) => report,
-        Err(_) => {
-            cancelled.store(true, Ordering::Release);
-            eprintln!("runtime shutdown exceeded 10 seconds; persistence incomplete");
-            SnapshotReport {
-                reason: Some("terminal_persistence_timeout".into()),
-                ..Default::default()
+    let save = async {
+        match tokio::time::timeout(TERMINAL_BUDGET, save).await {
+            Ok(report) => Some(report),
+            Err(_) => {
+                cancelled.store(true, Ordering::Release);
+                eprintln!("cache snapshot save exceeded 10 seconds; not saved");
+                None
             }
         }
+    };
+    let drain = tokio::time::timeout(TERMINAL_BUDGET, services.storage.flush());
+    let (report, drained) = tokio::join!(save, drain);
+    let Some(report) = report else {
+        // The cancelled save may still be finishing its blocking work; keep the
+        // directory lock until the process exits.
+        match drained {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("runtime data flush incomplete: {error}"),
+            Err(_) => eprintln!("runtime data flush exceeded 10 seconds"),
+        }
+        return SnapshotReport {
+            reason: Some("terminal_persistence_timeout".into()),
+            ..Default::default()
+        };
+    };
+    // Close reports the final storage outcome; drain failures are counted as
+    // dropped records in storage status.
+    match tokio::time::timeout(CLOSE_BUDGET, services.storage.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("runtime data flush incomplete: {error}"),
+        Err(_) => eprintln!("runtime data close exceeded 2 seconds; persistence incomplete"),
     }
+    report
 }

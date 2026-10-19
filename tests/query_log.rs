@@ -302,11 +302,13 @@ async fn stale_fallback_records_actual_failed_exchange_and_cached_answer() {
         1,
         RData::A(A::new(192, 0, 2, 42)),
     ));
-    resolver.cache().insert(
+    let cache = resolver.cache();
+    cache.insert_decision_if_epoch(
         &q,
         &response,
         ecs::Scope::NoEcs,
         Instant::now() - Duration::from_secs(2),
+        cache.epoch(),
     );
     let reply = resolver
         .resolve(&q.to_vec().unwrap(), "127.0.0.1".parse().unwrap())

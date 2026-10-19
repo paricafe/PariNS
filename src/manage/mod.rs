@@ -185,6 +185,9 @@ fn invalid(err: anyhow::Error) -> ApiError {
     } else if err
         .downcast_ref::<std::io::Error>()
         .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+        || err
+            .downcast_ref::<crate::server::Unbound>()
+            .is_some_and(|unbound| unbound.in_use)
     {
         "CONFIG_CONFLICT"
     } else {
@@ -301,25 +304,12 @@ impl Shared {
     }
 
     fn ensure_current(&self, transport: &Snapshot) -> std::result::Result<(), ApiError> {
-        if self.active.lock().unwrap().snapshot.realm != transport.realm {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "TRANSPORT_CHANGED",
-                "Management address changed; reconnect",
-            ));
-        }
-        Ok(())
+        current_realm(&self.active.lock().unwrap(), transport)
     }
 
     fn session(&self, transport: &Snapshot) -> std::result::Result<Session, ApiError> {
         let mut active = self.active.lock().unwrap();
-        if active.snapshot.realm != transport.realm {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "TRANSPORT_CHANGED",
-                "Management address changed; reconnect",
-            ));
-        }
+        current_realm(&active, transport)?;
         active
             .sessions
             .retain(|s| s.created.elapsed() < SESSION_LIFETIME);
@@ -337,13 +327,7 @@ impl Shared {
         transport: &Snapshot,
     ) -> std::result::Result<Option<Session>, ApiError> {
         let mut active = self.active.lock().unwrap();
-        if active.snapshot.realm != transport.realm {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "TRANSPORT_CHANGED",
-                "Management address changed; reconnect",
-            ));
-        }
+        current_realm(&active, transport)?;
         let Some(supplied) = session_cookie(headers, transport.scheme) else {
             return Ok(None);
         };
@@ -374,13 +358,7 @@ impl Shared {
         transport: &Snapshot,
     ) -> std::result::Result<(), ApiError> {
         let mut active = self.active.lock().unwrap();
-        if active.snapshot.realm != transport.realm {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "TRANSPORT_CHANGED",
-                "Management address changed; reconnect",
-            ));
-        }
+        current_realm(&active, transport)?;
         active
             .sessions
             .retain(|session| session.created.elapsed() < SESSION_LIFETIME);
@@ -397,6 +375,40 @@ impl Shared {
         }
         Ok(())
     }
+}
+
+/// A request admitted under a replaced management transport must reconnect.
+fn current_realm(active: &Active, transport: &Snapshot) -> std::result::Result<(), ApiError> {
+    if active.snapshot.realm != transport.realm {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "TRANSPORT_CHANGED",
+            "Management address changed; reconnect",
+        ));
+    }
+    Ok(())
+}
+
+/// Setup tokens are compared in constant time; both have a fixed length.
+fn setup_token_matches(supplied: &str, expected: &str) -> bool {
+    supplied.len() == expected.len()
+        && supplied
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
+fn invalid_setup_token() -> ApiError {
+    error(StatusCode::FORBIDDEN, "SETUP_TOKEN", "Invalid setup token")
+}
+
+fn already_setup() -> ApiError {
+    error(
+        StatusCode::CONFLICT,
+        "ALREADY_SETUP",
+        "Setup is already complete",
+    )
 }
 
 fn verify_binding(headers: &HeaderMap, session: &Session) -> std::result::Result<(), ApiError> {
@@ -558,26 +570,37 @@ async fn api(
             return Ok(json!({"toml":include_str!("../../parins.example.toml")}));
         }
         ("POST", "/api/setup/preview") => {
+            // A token guess here costs the same attempt budget as setup itself.
+            shared.auth.attempt(peer.ip())?;
             let document: Document = decode(body)?;
-            let manager = shared.manager.lock().await;
-            if manager.saved.is_some() {
-                return Err(error(
-                    StatusCode::CONFLICT,
-                    "ALREADY_SETUP",
-                    "Setup is already complete",
-                ));
-            }
+            let store = {
+                let manager = shared.manager.lock().await;
+                if manager.saved.is_some() {
+                    return Err(already_setup());
+                }
+                manager.store.clone()
+            };
             let supplied = headers
                 .get("x-parins-setup")
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("");
-            let expected = manager.store.setup_token().map_err(|_| internal())?;
-            if supplied != expected {
-                return Err(error(
-                    StatusCode::FORBIDDEN,
-                    "SETUP_TOKEN",
-                    "Invalid setup token",
-                ));
+            let expected = tokio::task::spawn_blocking(move || store.setup_token())
+                .await
+                .map_err(|_| internal())?;
+            // Setup may have completed after the check above.
+            let Ok(expected) = expected else {
+                return Err(if shared.manager.lock().await.saved.is_some() {
+                    already_setup()
+                } else {
+                    internal()
+                });
+            };
+            if !setup_token_matches(supplied, &expected) {
+                return Err(invalid_setup_token());
+            }
+            let manager = shared.manager.lock().await;
+            if manager.saved.is_some() {
+                return Err(already_setup());
             }
             let change = manager
                 .transport_change(&document.toml, host)
@@ -658,19 +681,11 @@ async fn api(
                 let _permit = permit;
                 let mut manager = control.manager.lock().await;
                 if manager.saved.is_some() {
-                    return Err(error(
-                        StatusCode::CONFLICT,
-                        "ALREADY_SETUP",
-                        "Setup is already complete",
-                    ));
+                    return Err(already_setup());
                 }
                 let expected = manager.store.setup_token().map_err(|_| internal())?;
-                if supplied != expected {
-                    return Err(error(
-                        StatusCode::FORBIDDEN,
-                        "SETUP_TOKEN",
-                        "Invalid setup token",
-                    ));
+                if !setup_token_matches(&supplied, &expected) {
+                    return Err(invalid_setup_token());
                 }
                 store::validate_username(&setup.username).map_err(invalid)?;
                 let hash = control
@@ -800,7 +815,11 @@ async fn api(
             let input = history_options(query)?;
             let services = shared.manager.lock().await.services.clone();
             Ok(json!(
-                services.statistics(input).await.map_err(storage_error)?
+                services
+                    .storage
+                    .statistics(input)
+                    .await
+                    .map_err(storage_error)?
             ))
         }
         ("POST", "/api/query-log/list") => {
@@ -811,7 +830,7 @@ async fn api(
             let services = manager.services.clone();
             drop(manager);
             Ok(
-                json!({"revision":revision,"page":services.list_logs(input).await.map_err(storage_error)?}),
+                json!({"revision":revision,"page":services.storage.list_logs(input).await.map_err(storage_error)?}),
             )
         }
         ("POST", "/api/query-log/clear" | "/api/stats/reset" | "/api/stats/history/clear") => {
@@ -845,9 +864,9 @@ async fn api(
                 let services = manager.services.clone();
                 drop(manager);
                 let result = match action {
-                    0 => services.clear_logs(epoch).await,
-                    1 => services.reset_totals(epoch).await,
-                    _ => services.clear_history(epoch).await,
+                    0 => services.storage.clear_logs(epoch).await,
+                    1 => services.storage.reset_totals(epoch).await,
+                    _ => services.storage.clear_history(epoch).await,
                 }
                 .map_err(storage_error)?;
                 Ok(json!({"removed":result.removed,"epoch":result.epoch,"revision":revision}))
@@ -1718,6 +1737,69 @@ mod tests {
             shared.session(&old),
             Err(super::ApiError(_, "TRANSPORT_CHANGED", _))
         ));
+    }
+
+    #[tokio::test]
+    async fn setup_preview_token_guesses_share_the_attempt_budget() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let address = "127.0.0.1:3000".parse().unwrap();
+        let active = Arc::new(Mutex::new(Active {
+            snapshot: Arc::new(Snapshot::initial()),
+            sessions: Vec::new(),
+        }));
+        let store = Store::open(&temp.path().join("state")).unwrap();
+        let token = store.setup_token().unwrap();
+        let manager = Arc::new(tokio::sync::Mutex::new(
+            Manager::open(store, address, active.clone()).await.unwrap(),
+        ));
+        let shared = Arc::new(Shared {
+            filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+            live: Default::default(),
+            manager: manager.clone(),
+            active: active.clone(),
+            auth: auth_budget::Budget::new(),
+            mutation: Arc::new(Semaphore::new(1)),
+            address,
+        });
+        let transport = active.lock().unwrap().snapshot.clone();
+        let body = serde_json::to_vec(&json!({"toml":"listen='127.0.0.1:0'\n"})).unwrap();
+        let mut guess = token.clone().into_bytes();
+        guess[63] = if guess[63] == b'0' { b'1' } else { b'0' };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3000"));
+        headers.insert("x-parins-setup", HeaderValue::from_bytes(&guess).unwrap());
+        for attempt in 0..6 {
+            let mut cookie = None;
+            let error = api(
+                shared.clone(),
+                transport.clone(),
+                ApiRequest {
+                    peer: address,
+                    method: "POST",
+                    path: "/api/setup/preview",
+                    headers: &headers,
+                    body: &body,
+                },
+                &mut cookie,
+            )
+            .await
+            .unwrap_err();
+            let expected = if attempt < 5 {
+                "SETUP_TOKEN"
+            } else {
+                "LOGIN_LIMIT"
+            };
+            assert_eq!(error.1, expected);
+        }
+        assert!(setup_token_matches(&token, &token));
+        assert!(!setup_token_matches(
+            std::str::from_utf8(&guess).unwrap(),
+            &token
+        ));
+        assert!(!setup_token_matches(&token[..63], &token));
+        let _shutdown = shared.mutation.acquire().await.unwrap();
+        manager.lock().await.terminal_shutdown().await;
     }
 
     #[test]

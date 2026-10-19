@@ -1,7 +1,9 @@
 //! Process-owned metrics and runtime persistence shared across DNS generations.
+//! Storage operations go through [`RuntimeServices::storage`]; this type adds
+//! only the DNS health transition shared by health and the history sampler.
 use crate::{
     metrics::Metrics,
-    query_log::{ListOptions, Page, QueryLog},
+    query_log::QueryLog,
     storage::{self, RuntimeSettings},
 };
 use std::{
@@ -40,9 +42,6 @@ impl RuntimeServices {
             dns_transition: Mutex::new(()),
         })
     }
-    pub fn publish_settings(&self, settings: RuntimeSettings, revision: u64) {
-        self.storage.publish_settings(settings, revision);
-    }
     pub fn set_dns_state(&self, running: bool, generation: u64) {
         use crate::runtime_health::State;
         self.set_dns_health(
@@ -71,33 +70,6 @@ impl RuntimeServices {
         if self.health.publish(state, generation, code) {
             self.storage.set_dns_state(running, generation);
         }
-    }
-    pub fn status(&self) -> storage::Status {
-        self.storage.status()
-    }
-    pub async fn list_logs(&self, options: ListOptions) -> storage::Result<Page> {
-        self.storage.list_logs(options).await
-    }
-    pub async fn clear_logs(&self, epoch: u64) -> storage::Result<storage::ClearResult> {
-        self.storage.clear_logs(epoch).await
-    }
-    pub async fn statistics(
-        &self,
-        options: storage::HistoryOptions,
-    ) -> storage::Result<storage::StatisticsView> {
-        self.storage.statistics(options).await
-    }
-    pub async fn reset_totals(&self, epoch: u64) -> storage::Result<storage::ClearResult> {
-        self.storage.reset_totals(epoch).await
-    }
-    pub async fn clear_history(&self, epoch: u64) -> storage::Result<storage::ClearResult> {
-        self.storage.clear_history(epoch).await
-    }
-    pub async fn flush(&self) -> storage::Result<()> {
-        self.storage.flush().await
-    }
-    pub async fn shutdown(&self) -> storage::Result<()> {
-        self.storage.shutdown().await
     }
 }
 
@@ -135,17 +107,19 @@ mod tests {
         // Remove the deliberate transition history so aggregation cannot mix
         // generations; the next forced tail proves the sampler's current state.
         services
-            .clear_history(services.status().history_epoch)
+            .storage
+            .clear_history(services.storage.status().history_epoch)
             .await
             .unwrap();
-        services.flush().await.unwrap();
+        services.storage.flush().await.unwrap();
         let history = services
+            .storage
             .statistics(storage::HistoryOptions::default())
             .await
             .unwrap();
         let point = history.samples.last().unwrap();
         assert_eq!(point.generation, health.generation);
         assert_eq!(point.running, health.ready);
-        services.shutdown().await.unwrap();
+        services.storage.shutdown().await.unwrap();
     }
 }

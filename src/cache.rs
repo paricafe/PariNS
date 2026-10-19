@@ -548,10 +548,6 @@ impl Cache {
         }
     }
 
-    pub fn insert(&self, query: &Message, response: &Message, scope: Scope, now: Instant) {
-        self.insert_if_epoch(query, response, scope, now, self.epoch());
-    }
-
     pub fn insert_if_epoch(
         &self,
         query: &Message,

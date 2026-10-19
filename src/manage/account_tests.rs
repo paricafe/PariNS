@@ -177,12 +177,18 @@ async fn credential_rotation_preserves_runtime_cache_and_configuration_envelope(
         300,
         RData::A(A::new(192, 0, 2, 1)),
     ));
-    cache.insert(&query, &answer, Scope::NoEcs, std::time::Instant::now());
+    cache.insert_decision_if_epoch(
+        &query,
+        &answer,
+        Scope::NoEcs,
+        std::time::Instant::now(),
+        cache.epoch(),
+    );
     assert_eq!(cache.snapshot()["entries"], 1);
     let cache_epoch = cache.epoch();
     let filter_state = serde_json::to_value(filters.snapshot()).unwrap();
     let update_state = updates.view();
-    let storage_status = serde_json::to_value(services.status()).unwrap();
+    let storage_status = serde_json::to_value(services.storage.status()).unwrap();
     drop(manager);
     assert_eq!(
         request(
@@ -225,7 +231,7 @@ async fn credential_rotation_preserves_runtime_cache_and_configuration_envelope(
         filter_state
     );
     assert_eq!(updates.view(), update_state);
-    let after = serde_json::to_value(services.status()).unwrap();
+    let after = serde_json::to_value(services.storage.status()).unwrap();
     for key in [
         "configured_revision",
         "applied_revision",

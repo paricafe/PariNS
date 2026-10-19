@@ -288,11 +288,13 @@ async fn local_policy_retirement_is_checked_before_managed_config_and_certificat
 async fn assert_sampler(services: &RuntimeServices, running: bool, generation: u64) {
     // Isolate the current-state tail from intentional aggregate transition gaps.
     services
-        .clear_history(services.status().history_epoch)
+        .storage
+        .clear_history(services.storage.status().history_epoch)
         .await
         .unwrap();
-    services.flush().await.unwrap();
+    services.storage.flush().await.unwrap();
     let stats = services
+        .storage
         .statistics(HistoryOptions::default())
         .await
         .unwrap();
@@ -535,7 +537,7 @@ async fn aborted_dns_task_publishes_failed_sampler_state_and_never_clean_shutdow
     assert_eq!(services.health.snapshot().state, HealthState::Running);
     assert_eq!(services.health.snapshot().generation, 2);
     assert_sampler(&services, true, 2).await;
-    services.shutdown().await.unwrap();
+    services.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -569,7 +571,7 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
         .unwrap();
     let services = manager.services.clone();
     let generation = manager.generation;
-    let storage_revision = manager.services.status().configured_revision;
+    let storage_revision = manager.services.storage.status().configured_revision;
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.toml
@@ -592,7 +594,7 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     ));
     assert_eq!(manager.generation, generation);
     assert_eq!(
-        manager.services.status().configured_revision,
+        manager.services.storage.status().configured_revision,
         storage_revision
     );
     manager.stop().await;
@@ -722,5 +724,58 @@ async fn startup_retry_backs_off_to_sixty_seconds_and_clears_on_success() {
     assert!(manager.resolver().is_some());
     assert!(manager.startup.is_none());
     assert_eq!(manager.startup_retry_at(), None);
+    manager.terminal_shutdown().await;
+}
+
+#[tokio::test]
+async fn unreadable_local_rules_keep_dns_stopped_after_a_failed_apply_rolls_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+            toml: format!("filter_file='missing.rules'\n{}", config()),
+            previous: None,
+            revision: 1,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: vec![],
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active)
+        .await
+        .unwrap();
+    assert!(manager.resolver().is_none());
+    let reason = manager.last_error.clone().expect("local rules failure");
+    // The candidate's rules compile, but one of its listeners cannot bind, so
+    // apply restores the saved revision whose local rules are unavailable.
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = holder.local_addr().unwrap().port();
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml = format!("admin_listen='127.0.0.1:{port}'\n{}", config());
+    let error = manager.apply(next.clone()).await.unwrap_err();
+    // The occupied port is reported as such, so the console can say so.
+    assert!(
+        error
+            .downcast_ref::<crate::server::Unbound>()
+            .is_some_and(|unbound| unbound.in_use),
+        "{error:#}"
+    );
+    assert!(
+        manager.resolver().is_none(),
+        "the empty placeholder policy must never serve"
+    );
+    assert_eq!(manager.saved.as_ref().unwrap().revision, 1);
+    assert_eq!(manager.last_error.as_ref(), Some(&reason));
+    assert_eq!(manager.status()["running"], false);
+    assert!(manager.startup_retry_at().is_none());
+    // A configuration whose rules compile replaces the placeholder.
+    drop(holder);
+    manager.apply(next).await.unwrap();
+    assert!(manager.resolver().is_some());
+    assert!(manager.last_error.is_none());
     manager.terminal_shutdown().await;
 }

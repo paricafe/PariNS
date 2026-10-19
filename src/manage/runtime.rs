@@ -12,12 +12,12 @@ use crate::runtime_health::State as HealthState;
 use crate::{
     cache::persistence::SnapshotReport,
     cache_persistence::{CachePersistence, ConsumedSnapshot},
-    config::Config,
+    config::{CacheConfig, Config},
     runtime_services::RuntimeServices,
     server::Server,
     storage::RuntimeSettings,
 };
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use futures_util::FutureExt;
 use serde_json::Value;
 use std::{
@@ -165,6 +165,21 @@ pub(super) struct Manager {
     last_reload: Option<Value>,
     reload_attempt: u64,
     startup: Option<StartupFailure>,
+    /// The saved local rules could not be compiled at startup, so the filter
+    /// service holds an empty placeholder. No start, retry or rollback restore
+    /// may serve it; only applying a configuration whose rules compile clears it.
+    local_error: Option<String>,
+}
+
+/// Subscription fingerprints of the saved rollback copy. Startup needs them,
+/// so candidate preflight rejects a copy this version cannot read.
+pub(super) fn previous_fingerprints(saved: &Stored, dir: &std::path::Path) -> Result<Vec<String>> {
+    let Some(text) = &saved.previous else {
+        return Ok(Vec::new());
+    };
+    Config::parse_in(text, dir)
+        .and_then(|config| config.filter_subscriptions.fingerprints())
+        .context("saved rollback configuration (previous revision) is invalid")
 }
 
 /// The saved configuration failed to start (for example a port held by another
@@ -207,17 +222,12 @@ impl Manager {
             .unwrap_or_default();
         let local = config.as_ref().map(Config::load_policy).transpose();
         let local_error = local.as_ref().err().map(ToString::to_string);
-        let previous = saved
-            .as_ref()
-            .and_then(|s| s.previous.as_ref())
-            .map(|text| {
-                Config::parse_in(text, &store.dir)
-                    .and_then(|c| c.filter_subscriptions.fingerprints())
-            })
-            .transpose()?
-            .unwrap_or_default();
-        // A broken local file must keep management available; local_error below
-        // prevents a listener from ever serving this placeholder policy.
+        let previous = match &saved {
+            Some(saved) => previous_fingerprints(saved, &store.dir)?,
+            None => Vec::new(),
+        };
+        // A broken local file must keep management available; Manager keeps
+        // local_error so no start path ever serves this placeholder policy.
         let local = local.ok().flatten().unwrap_or_default();
         use crate::filter_subscriptions::service::Service as Filters;
         let filters = if updates.frozen.load(std::sync::atomic::Ordering::Acquire) {
@@ -290,14 +300,11 @@ impl Manager {
             last_reload: None,
             reload_attempt: 0,
             startup: None,
+            local_error,
         };
         if let Some(saved) = this.saved.clone() {
-            if let Some(error) = local_error {
-                this.last_error = Some(format!("DNS unavailable: {error}"));
-            } else {
-                this.restore(&saved.toml, if skip_restore { None } else { consumed.ok() })
-                    .await;
-            }
+            this.restore(&saved.toml, if skip_restore { None } else { consumed.ok() })
+                .await;
         }
         Ok(this)
     }
@@ -320,7 +327,7 @@ impl Manager {
             "dns_health": health,
             "diagnostics": {"cache":running.map(|r| r.resolver.cache().diagnostics_snapshot()),"quic":self.services.metrics.quic.snapshot(),"upstreams":running.and_then(|r| r.resolver.upstream_diagnostics()),"recursion":running.and_then(|r| r.resolver.recursion_diagnostics())},
             "certificates": self.certificate_status(),
-            "storage": self.services.status(),
+            "storage": self.services.storage.status(),
             "cache_persistence": self.cache_report,
             // Addresses are reported only for listeners that are serving.
             "listen": running
@@ -440,27 +447,40 @@ impl Manager {
         if self.updates_only(next).ok()? {
             return Some(false);
         }
-        let previous = self.saved.as_ref().filter(|_| self.resolver().is_some())?;
-        let split_cache = |text: &str| -> Option<(toml::Value, serde_json::Value, toml::Value)> {
-            let mut value: toml::Value = toml::from_str(text).ok()?;
-            let original = value.clone();
-            for field in [
-                "storage",
-                "query_log",
-                "statistics",
-                "updates",
-                "filter",
-                "filter_file",
-                "filter_subscriptions",
-            ] {
-                value.as_table_mut()?.remove(field);
-            }
-            value.as_table_mut()?.remove("cache");
-            let mut cache = serde_json::to_value(Config::parse(text).ok()?.cache).ok()?;
-            cache.as_object_mut()?.remove("persistence");
-            Some((value, cache, original))
-        };
-        match (split_cache(&previous.toml), split_cache(next)) {
+        self.cache_only_change(next, &Config::parse(next).ok()?.cache)
+    }
+
+    /// Whether `next` differs from the running configuration only in cache,
+    /// storage, statistics, update or filter settings, and if so whether the
+    /// cache itself changes. `next_cache` is the cache section parsed from `next`.
+    fn cache_only_change(&self, next: &str, next_cache: &CacheConfig) -> Option<bool> {
+        let running = self.running.as_ref().filter(|r| !r.task.is_finished())?;
+        let previous = self.saved.as_ref()?;
+        let split =
+            |text: &str, cache: &CacheConfig| -> Option<(toml::Value, Value, toml::Value)> {
+                let mut value: toml::Value = toml::from_str(text).ok()?;
+                let original = value.clone();
+                for field in [
+                    "storage",
+                    "query_log",
+                    "statistics",
+                    "updates",
+                    "filter",
+                    "filter_file",
+                    "filter_subscriptions",
+                    "cache",
+                ] {
+                    value.as_table_mut()?.remove(field);
+                }
+                let mut cache = serde_json::to_value(cache).ok()?;
+                cache.as_object_mut()?.remove("persistence");
+                Some((value, cache, original))
+            };
+        // The running generation's Config is the parsed saved configuration.
+        match (
+            split(&previous.toml, &running.config.cache),
+            split(next, next_cache),
+        ) {
             (Some((a, old, original)), Some((b, new, candidate)))
                 if a == b && original != candidate =>
             {
@@ -502,6 +522,12 @@ impl Manager {
     }
 
     async fn restore(&mut self, toml: &str, snapshot: Option<ConsumedSnapshot>) {
+        if let Some(error) = &self.local_error {
+            // Retrying cannot help: the local rules are compiled only when a
+            // configuration is applied. Keep the real reason visible.
+            self.last_error = Some(format!("DNS unavailable: {error}"));
+            return;
+        }
         let result = async {
             ensure!(
                 self.cache_ready,
@@ -645,7 +671,7 @@ impl Manager {
                 self.saved.as_ref().map_or(0, |s| s.revision),
             )
             .await?;
-        if let Some(replace_cache) = self.hot_update(&next.toml) {
+        if let Some(replace_cache) = self.cache_only_change(&next.toml, &config.cache) {
             // Manager's mutex serializes this transaction. There is no fallible
             // IO after persist and no await between live swap and revision update.
             let store = self.store.clone();
@@ -657,6 +683,7 @@ impl Manager {
                 resolver.replace_cache(config.cache.clone());
             }
             self.services
+                .storage
                 .publish_settings(RuntimeSettings::from_config(&config), next.revision);
             self.running
                 .as_mut()
@@ -679,8 +706,8 @@ impl Manager {
             // An administrator's change is all or nothing: a candidate whose
             // listeners cannot all bind is rejected before persistence, and the
             // previous configuration is restored. Only restarts retry listeners.
-            if let Some(errors) = server.unbound() {
-                anyhow::bail!(errors);
+            if let Some(unbound) = server.unbound() {
+                return Err(unbound.into());
             }
             let listen = server.local_addr();
             let store = self.store.clone();
@@ -689,6 +716,7 @@ impl Manager {
             tokio::task::spawn_blocking(move || store.save(&saved)).await??;
             self.filters.publish_config(filter_candidate, next.revision);
             self.services
+                .storage
                 .publish_settings(RuntimeSettings::from_config(&config), next.revision);
             self.generation = self.generation.saturating_add(1);
             Ok::<_, anyhow::Error>(Running::start(
@@ -706,6 +734,7 @@ impl Manager {
                 self.running = Some(running);
                 self.saved = Some(next);
                 self.last_error = None;
+                self.local_error = None;
                 self.startup_recovered();
                 Ok(true)
             }
@@ -714,8 +743,9 @@ impl Manager {
                     self.restore(&previous.toml, None).await;
                 }
                 // A failed restart of the previous configuration already explains
-                // what dns_retry keeps restarting; keep that message.
-                if self.running.is_none() && self.startup.is_none() {
+                // what dns_retry keeps restarting, and unavailable local rules
+                // explain why it was not restarted; keep those messages.
+                if self.running.is_none() && self.startup.is_none() && self.local_error.is_none() {
                     self.last_error = Some(format!("Apply failed; DNS is stopped: {error:#}"));
                 }
                 Err(error.context("configuration not applied"))

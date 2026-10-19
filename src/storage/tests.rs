@@ -56,7 +56,7 @@ async fn pause(handle: &Handle) -> (mpsc::Sender<()>, tokio::task::JoinHandle<Re
 /// Waits for the asynchronous existing-database open and check to finish.
 async fn checked(runtime: &RuntimeServices) {
     tokio::time::timeout(Duration::from_secs(15), async {
-        while runtime.status().health == "checking" {
+        while runtime.storage.status().health == "checking" {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -75,21 +75,22 @@ async fn slow_existing_check_is_not_interrupted_and_keeps_queued_writes() {
     let dir = private_dir();
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
     runtime.storage.record_log(0, entry("fresh"));
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     // A nonzero stored epoch proves records queued during the check adopt it.
-    runtime.clear_logs(0).await.unwrap();
+    runtime.storage.clear_logs(0).await.unwrap();
     runtime.storage.record_log(1, entry("fresh"));
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     drop(runtime);
 
     delay_check(dir.path(), Duration::from_millis(5500));
     let started = Instant::now();
     let runtime = RuntimeServices::open(dir.path(), settings(), 2).unwrap();
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert_eq!(runtime.status().health, "checking");
-    let Err(Error::StorageUnavailable(message)) = runtime.list_logs(ListOptions::default()).await
+    assert_eq!(runtime.storage.status().health, "checking");
+    let Err(Error::StorageUnavailable(message)) =
+        runtime.storage.list_logs(ListOptions::default()).await
     else {
         panic!("controls are answered while checking");
     };
@@ -98,18 +99,26 @@ async fn slow_existing_check_is_not_interrupted_and_keeps_queued_writes() {
     runtime.storage.record_log(epoch, entry("upstream"));
     runtime.metrics.inc(Counter::Requests);
     runtime.set_dns_state(true, 1);
-    assert_eq!(runtime.status().pending_entries, 1);
+    assert_eq!(runtime.storage.status().pending_entries, 1);
     checked(&runtime).await;
     assert!(started.elapsed() >= Duration::from_millis(5500));
-    assert_eq!(runtime.status().health, "healthy");
-    runtime.flush().await.unwrap();
-    let page = runtime.list_logs(ListOptions::default()).await.unwrap();
+    assert_eq!(runtime.storage.status().health, "healthy");
+    runtime.storage.flush().await.unwrap();
+    let page = runtime
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
     assert_eq!(page.log_epoch, 1);
     assert_eq!(page.total, 2);
     assert_eq!(page.entries[0].cache, "upstream");
-    let statistics = runtime.statistics(HistoryOptions::default()).await.unwrap();
+    let statistics = runtime
+        .storage
+        .statistics(HistoryOptions::default())
+        .await
+        .unwrap();
     assert_eq!(statistics.totals.metrics.counters["requests"], 2);
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -117,17 +126,17 @@ async fn shutdown_cancels_a_running_check_and_retains_the_database() {
     let dir = private_dir();
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
     runtime.storage.record_log(0, entry("fresh"));
-    runtime.flush().await.unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     drop(runtime);
 
     delay_check(dir.path(), Duration::from_secs(60));
     let runtime = RuntimeServices::open(dir.path(), settings(), 2).unwrap();
-    assert_eq!(runtime.status().health, "checking");
+    assert_eq!(runtime.storage.status().health, "checking");
     let started = Instant::now();
-    assert!(runtime.shutdown().await.is_err());
+    assert!(runtime.storage.shutdown().await.is_err());
     assert!(started.elapsed() < Duration::from_secs(2));
-    let status = runtime.status();
+    let status = runtime.storage.status();
     assert_eq!(status.health, "unavailable");
     assert!(status.error.unwrap().contains("cancelled by shutdown"));
     drop(runtime);
@@ -139,10 +148,14 @@ async fn shutdown_cancels_a_running_check_and_retains_the_database() {
         .retain(|(delayed, _)| *delayed != path);
     let reopened = RuntimeServices::open(dir.path(), settings(), 3).unwrap();
     checked(&reopened).await;
-    assert_eq!(reopened.status().health, "healthy");
-    let page = reopened.list_logs(ListOptions::default()).await.unwrap();
+    assert_eq!(reopened.storage.status().health, "healthy");
+    let page = reopened
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
     assert_eq!(page.total, 1);
-    reopened.shutdown().await.unwrap();
+    reopened.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -153,22 +166,28 @@ async fn committed_logs_totals_and_points_survive_reopen_without_double_counting
     runtime.storage.record_log(0, entry("fresh"));
     runtime.metrics.inc(Counter::Requests);
     runtime.metrics.inc(Counter::CacheHits);
-    runtime.flush().await.unwrap();
-    let before = runtime.statistics(HistoryOptions::default()).await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    let before = runtime
+        .storage
+        .statistics(HistoryOptions::default())
+        .await
+        .unwrap();
     assert_eq!(before.totals.metrics.counters["requests"], 1);
     assert!(!before.samples.is_empty());
     let id = runtime
+        .storage
         .list_logs(ListOptions::default())
         .await
         .unwrap()
         .entries[0]
         .id;
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     drop(runtime);
     let runtime = RuntimeServices::open(dir.path(), settings(), 2).unwrap();
     checked(&runtime).await;
     assert_eq!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
@@ -176,14 +195,19 @@ async fn committed_logs_totals_and_points_survive_reopen_without_double_counting
             .id,
         id
     );
-    let recovered = runtime.statistics(HistoryOptions::default()).await.unwrap();
+    let recovered = runtime
+        .storage
+        .statistics(HistoryOptions::default())
+        .await
+        .unwrap();
     assert_eq!(recovered.totals.metrics.counters["requests"], 1);
     assert_eq!(recovered.process_metrics.counters["requests"], 0);
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     assert_eq!(
         runtime
+            .storage
             .statistics(HistoryOptions::default())
             .await
             .unwrap()
@@ -192,11 +216,12 @@ async fn committed_logs_totals_and_points_survive_reopen_without_double_counting
             .counters["requests"],
         2
     );
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     let runtime = RuntimeServices::open(dir.path(), settings(), 3).unwrap();
     checked(&runtime).await;
     assert_eq!(
         runtime
+            .storage
             .statistics(HistoryOptions::default())
             .await
             .unwrap()
@@ -205,15 +230,16 @@ async fn committed_logs_totals_and_points_survive_reopen_without_double_counting
             .counters["requests"],
         2
     );
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn clear_epoch_rejects_queued_and_inflight_records_and_ids_never_reuse() {
     let runtime = RuntimeServices::ephemeral(settings());
     runtime.storage.record_log(0, entry("fresh"));
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     let old_id = runtime
+        .storage
         .list_logs(ListOptions::default())
         .await
         .unwrap()
@@ -230,9 +256,10 @@ async fn clear_epoch_rejects_queued_and_inflight_records_and_ids_never_reuse() {
     paused.await.unwrap().unwrap();
     assert_eq!(clear.await.unwrap().unwrap().epoch, 1);
     runtime.storage.record_log(0, entry("fresh"));
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     assert!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
@@ -240,9 +267,10 @@ async fn clear_epoch_rejects_queued_and_inflight_records_and_ids_never_reuse() {
             .is_empty()
     );
     runtime.storage.record_log(1, entry("upstream"));
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     assert!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
@@ -251,10 +279,10 @@ async fn clear_epoch_rejects_queued_and_inflight_records_and_ids_never_reuse() {
             > old_id
     );
     assert!(matches!(
-        runtime.clear_logs(0).await,
+        runtime.storage.clear_logs(0).await,
         Err(Error::Conflict { current_epoch: 1 })
     ));
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -270,8 +298,9 @@ async fn classifications_are_anded_before_pagination_and_disabled_history_remain
     ] {
         runtime.storage.record_log(0, entry(cache));
     }
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     let first = runtime
+        .storage
         .list_logs(ListOptions {
             cache: Some("cached".into()),
             status: Some("success".into()),
@@ -284,6 +313,7 @@ async fn classifications_are_anded_before_pagination_and_disabled_history_remain
     assert_eq!(first.total, 6);
     assert_eq!(first.entries[0].cache, "stale");
     let next = runtime
+        .storage
         .list_logs(ListOptions {
             cache: Some("cached".into()),
             before_id: first.next_cursor,
@@ -294,6 +324,7 @@ async fn classifications_are_anded_before_pagination_and_disabled_history_remain
     assert_eq!(next.entries.len(), 1);
     assert_eq!(next.entries[0].cache, "fresh");
     let non_cached = runtime
+        .storage
         .list_logs(ListOptions {
             cache: Some("non_cached".into()),
             ..Default::default()
@@ -303,12 +334,16 @@ async fn classifications_are_anded_before_pagination_and_disabled_history_remain
     assert_eq!(non_cached.entries.len(), 4);
     let mut updated = settings();
     updated.query_log.enabled = false;
-    runtime.publish_settings(updated, 1);
+    runtime.storage.publish_settings(updated, 1);
     assert!(runtime.query_log.begin().is_none());
-    let page = runtime.list_logs(ListOptions::default()).await.unwrap();
+    let page = runtime
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
     assert!(!page.enabled);
     assert_eq!(page.total, 6);
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -319,7 +354,7 @@ async fn newer_logs_are_filtered_above_the_cursor_newest_first_and_capped() {
             .storage
             .record_log(0, entry(if index % 2 == 0 { "blocked" } else { "fresh" }));
     }
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     // Without a cursor the client already holds history: start from the newest id.
     let start = runtime
         .storage
@@ -376,7 +411,7 @@ async fn newer_logs_are_filtered_above_the_cursor_newest_first_and_capped() {
     assert!(unmatched.entries.is_empty());
     assert_eq!(unmatched.scanned_to, 205);
     assert_eq!(none.log_epoch, 0);
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -389,15 +424,16 @@ async fn queue_limits_drop_new_logs_without_losing_independent_totals() {
         runtime.metrics.inc(Counter::Requests);
         runtime.storage.record_log(0, entry("fresh"));
     }
-    let status = runtime.status();
+    let status = runtime.storage.status();
     assert_eq!(status.pending_entries, 128);
     assert_eq!(status.dropped_logs, 172);
     assert!(status.pending_bytes <= settings().storage.queue_max_bytes);
     release.send(()).unwrap();
     paused.await.unwrap().unwrap();
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     assert_eq!(
         runtime
+            .storage
             .statistics(HistoryOptions::default())
             .await
             .unwrap()
@@ -408,13 +444,14 @@ async fn queue_limits_drop_new_logs_without_losing_independent_totals() {
     );
     assert_eq!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
             .total,
         128
     );
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -424,26 +461,26 @@ async fn byte_limit_and_reliable_settings_survive_full_queues() {
     config.storage.queue_max_entries = 65536;
     let runtime = RuntimeServices::ephemeral(config.clone());
     let (release, paused) = pause(&runtime.storage).await;
-    assert_eq!(runtime.status().last_dropped_log_at_ms, None);
+    assert_eq!(runtime.storage.status().last_dropped_log_at_ms, None);
     let before = now_ms();
     let mut large = entry("fresh");
     large.name = "x".repeat(60_000);
     for _ in 0..100 {
         runtime.storage.record_log(0, large.clone());
     }
-    assert!(runtime.status().pending_bytes <= 1_048_576);
-    assert!(runtime.status().dropped_logs > 0);
-    let last = runtime.status().last_dropped_log_at_ms.unwrap();
+    assert!(runtime.storage.status().pending_bytes <= 1_048_576);
+    assert!(runtime.storage.status().dropped_logs > 0);
+    let last = runtime.storage.status().last_dropped_log_at_ms.unwrap();
     assert!((before..=now_ms()).contains(&last));
     config.query_log.enabled = false;
-    runtime.publish_settings(config, 37);
+    runtime.storage.publish_settings(config, 37);
     assert!(runtime.query_log.begin().is_none());
-    assert_eq!(runtime.status().configured_revision, 37);
+    assert_eq!(runtime.storage.status().configured_revision, 37);
     release.send(()).unwrap();
     paused.await.unwrap().unwrap();
-    runtime.flush().await.unwrap();
-    assert_eq!(runtime.status().applied_revision, 37);
-    runtime.shutdown().await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    assert_eq!(runtime.storage.status().applied_revision, 37);
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -451,7 +488,7 @@ async fn independent_epochs_and_read_only_failure_preserve_committed_state() {
     let runtime = RuntimeServices::ephemeral(settings());
     runtime.metrics.inc(Counter::Requests);
     runtime.storage.record_log(0, entry("fresh"));
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     inspect(&runtime.storage, |conn| {
         conn.execute_batch("PRAGMA query_only=ON")?;
         Ok(())
@@ -459,23 +496,28 @@ async fn independent_epochs_and_read_only_failure_preserve_committed_state() {
     .await
     .unwrap();
     assert!(matches!(
-        runtime.reset_totals(0).await,
+        runtime.storage.reset_totals(0).await,
         Err(Error::StorageUnavailable(_))
     ));
     assert!(matches!(
-        runtime.clear_history(0).await,
+        runtime.storage.clear_history(0).await,
         Err(Error::StorageUnavailable(_))
     ));
     assert!(matches!(
-        runtime.clear_logs(0).await,
+        runtime.storage.clear_logs(0).await,
         Err(Error::StorageUnavailable(_))
     ));
-    let view = runtime.statistics(HistoryOptions::default()).await.unwrap();
+    let view = runtime
+        .storage
+        .statistics(HistoryOptions::default())
+        .await
+        .unwrap();
     assert_eq!(view.totals.epoch, 0);
     assert_eq!(view.history_epoch, 0);
     assert_eq!(view.totals.metrics.counters["requests"], 1);
     assert_eq!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
@@ -488,32 +530,37 @@ async fn independent_epochs_and_read_only_failure_preserve_committed_state() {
     })
     .await
     .unwrap();
-    runtime.reset_totals(0).await.unwrap();
+    runtime.storage.reset_totals(0).await.unwrap();
     runtime.metrics.inc(Counter::Requests);
-    runtime.clear_history(0).await.unwrap();
+    runtime.storage.clear_history(0).await.unwrap();
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
-    let view = runtime.statistics(HistoryOptions::default()).await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    let view = runtime
+        .storage
+        .statistics(HistoryOptions::default())
+        .await
+        .unwrap();
     assert_eq!(view.totals.epoch, 1);
     assert_eq!(view.history_epoch, 1);
     assert_eq!(view.totals.metrics.counters["requests"], 2);
     assert_eq!(view.samples.iter().map(|p| p.requests).sum::<u64>(), 1);
     assert_eq!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
             .total,
         1
     );
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn full_database_rolls_back_batch_and_retains_prior_rows() {
     let runtime = RuntimeServices::ephemeral(settings());
     runtime.storage.record_log(0, entry("fresh"));
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     inspect(&runtime.storage, |conn| {
         let pages: u64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         conn.pragma_update(None, "max_page_count", pages)?;
@@ -524,23 +571,24 @@ async fn full_database_rolls_back_batch_and_retains_prior_rows() {
     let mut large = entry("upstream");
     large.name = "x".repeat(60_000);
     runtime.storage.record_log(0, large);
-    assert!(runtime.flush().await.is_err());
+    assert!(runtime.storage.flush().await.is_err());
     assert_eq!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
             .total,
         1
     );
-    assert!(runtime.status().dropped_logs >= 1);
+    assert!(runtime.storage.status().dropped_logs >= 1);
     inspect(&runtime.storage, |conn| {
         conn.pragma_update(None, "max_page_count", 32768)?;
         Ok(())
     })
     .await
     .unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -553,16 +601,34 @@ async fn corrupt_database_is_preserved_unavailable_and_keeps_single_writer_lock(
     drop(file);
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
     checked(&runtime).await;
-    assert_eq!(runtime.status().health, "unavailable");
+    assert_eq!(runtime.storage.status().health, "unavailable");
     assert!(matches!(
-        runtime.list_logs(ListOptions::default()).await,
+        runtime.storage.list_logs(ListOptions::default()).await,
         Err(Error::StorageUnavailable(_))
     ));
     assert!(RuntimeServices::open(dir.path(), settings(), 1).is_err());
     runtime.metrics.inc(Counter::Requests);
     assert_eq!(runtime.metrics.snapshot().counters["requests"], 1);
     assert_eq!(std::fs::read(path).unwrap(), b"not a SQLite database");
-    assert!(runtime.shutdown().await.is_err());
+    assert!(runtime.storage.shutdown().await.is_err());
+}
+
+#[tokio::test]
+async fn a_database_without_tables_is_initialized_like_a_new_one() {
+    // What a crash during the first commit leaves once its journal rolls back:
+    // a valid, non-empty SQLite file with no tables.
+    let dir = private_dir();
+    let path = dir.path().join("observability.sqlite3");
+    drop(crate::manage::store::create_private(&path).unwrap());
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("PRAGMA user_version=7;")
+        .unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
+    checked(&runtime).await;
+    assert_eq!(runtime.storage.status().health, "healthy");
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[cfg(unix)]
@@ -603,7 +669,7 @@ async fn private_component_permissions_links_and_database_pragmas() {
     })
     .await
     .unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     let external = dir.path().join("external");
     crate::manage::store::create_private(&external).unwrap();
     let unsafe_dir = dir.path().join("unsafe");
@@ -622,8 +688,9 @@ async fn smaller_limits_remain_pending_until_background_cleanup_finishes() {
     for _ in 0..2000 {
         runtime.storage.record_log(0, entry("fresh"));
     }
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     let original = runtime
+        .storage
         .list_logs(ListOptions::default())
         .await
         .unwrap()
@@ -631,27 +698,32 @@ async fn smaller_limits_remain_pending_until_background_cleanup_finishes() {
     assert!(original > 512);
     let mut updated = settings();
     updated.query_log.max_entries = 3;
-    runtime.publish_settings(updated, 12);
-    let page = runtime.list_logs(ListOptions::default()).await.unwrap();
+    runtime.storage.publish_settings(updated, 12);
+    let page = runtime
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
     assert_eq!(page.storage.configured_revision, 12);
     assert!(page.storage.capacity_pending);
     assert_ne!(page.storage.applied_revision, 12);
     let deadline = Instant::now() + Duration::from_secs(3);
-    while runtime.status().capacity_pending && Instant::now() < deadline {
+    while runtime.storage.status().capacity_pending && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let status = runtime.status();
+    let status = runtime.storage.status();
     assert!(!status.capacity_pending);
     assert_eq!(status.applied_revision, 12);
     assert!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
             .total
             <= 3
     );
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -660,12 +732,16 @@ async fn delayed_checkpoint_cannot_replace_newer_totals_or_duplicate_minute_poin
     config.storage.flush_interval_ms = 100;
     let runtime = RuntimeServices::ephemeral(config);
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
-    let old_view = runtime.statistics(HistoryOptions::default()).await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    let old_view = runtime
+        .storage
+        .statistics(HistoryOptions::default())
+        .await
+        .unwrap();
     let old_point = old_view.samples.last().unwrap().clone();
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
-    let before = runtime.status().history_samples;
+    runtime.storage.flush().await.unwrap();
+    let before = runtime.storage.status().history_samples;
     {
         let mut owner = runtime.storage.0.shared.stats.lock().unwrap();
         owner.latest = Some(statistics::Checkpoint {
@@ -685,8 +761,8 @@ async fn delayed_checkpoint_cannot_replace_newer_totals_or_duplicate_minute_poin
     })
     .await
     .unwrap();
-    assert_eq!(runtime.status().history_samples, before);
-    runtime.shutdown().await.unwrap();
+    assert_eq!(runtime.storage.status().history_samples, before);
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[test]
@@ -700,7 +776,7 @@ fn abrupt_exit_child() {
         .unwrap();
     tokio.block_on(async {
         let runtime = RuntimeServices::open(Path::new(&path),settings(),1).unwrap();
-        runtime.storage.record_log(0,entry("fresh")); runtime.metrics.inc(Counter::Requests); runtime.flush().await.unwrap();
+        runtime.storage.record_log(0,entry("fresh")); runtime.metrics.inc(Counter::Requests); runtime.storage.flush().await.unwrap();
         inspect(&runtime.storage, |conn| {
             conn.execute_batch("PRAGMA cache_size=1; BEGIN IMMEDIATE; UPDATE query_log SET name='not-committed.test'; UPDATE metadata SET value=999 WHERE key='log_epoch';")?;
             // Exit without dropping the connection, worker or runtime. A hot
@@ -730,12 +806,17 @@ async fn abrupt_process_exit_keeps_committed_data_and_rolls_back_partial_transac
     );
     let runtime = RuntimeServices::open(directory.path(), settings(), 2).unwrap();
     checked(&runtime).await;
-    let page = runtime.list_logs(ListOptions::default()).await.unwrap();
+    let page = runtime
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
     assert_eq!(page.log_epoch, 0);
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].name, "example.test.");
     assert_eq!(
         runtime
+            .storage
             .statistics(HistoryOptions::default())
             .await
             .unwrap()
@@ -744,7 +825,7 @@ async fn abrupt_process_exit_keeps_committed_data_and_rolls_back_partial_transac
             .counters["requests"],
         1
     );
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -759,22 +840,22 @@ async fn indexed_coverage_reports_twenty_six_seconds_not_six_hour_configuration(
         record.time_ms = end - ((1999 - index) as f64 / 38.1 * 1000.0) as u64;
         runtime.storage.record_log(0, record);
     }
-    runtime.flush().await.unwrap();
-    let status = runtime.status();
+    runtime.storage.flush().await.unwrap();
+    let status = runtime.storage.status();
     assert_eq!(status.query_log_entries, 1000);
     assert_eq!(status.cleanup.removed.entry_limit, 1000);
     assert!((26_000..=26_300).contains(&status.query_log_coverage.span_ms.unwrap()));
     assert_eq!(status.query_log_coverage.latest_time_ms, Some(end));
     assert_eq!(status.dropped_by_reason.queue_full, 0);
-    runtime.clear_logs(0).await.unwrap();
-    let status = runtime.status();
+    runtime.storage.clear_logs(0).await.unwrap();
+    let status = runtime.storage.status();
     assert_eq!(status.query_log_coverage.span_ms, None);
     assert_eq!(status.cleanup.removed.manual, 1000);
     assert!(matches!(
         status.cleanup.last_reason,
         Some(CleanupReason::Manual)
     ));
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -786,15 +867,15 @@ async fn byte_age_cleanup_and_io_drops_have_distinct_reasons() {
     old.time_ms = 1;
     old.duration_ms = 86_401_000.0;
     runtime.storage.record_log(0, old);
-    runtime.flush().await.unwrap();
-    assert_eq!(runtime.status().cleanup.removed.age, 1);
+    runtime.storage.flush().await.unwrap();
+    assert_eq!(runtime.storage.status().cleanup.removed.age, 1);
     for _ in 0..40 {
         let mut record = entry("fresh");
         record.name = "x".repeat(60_000);
         runtime.storage.record_log(0, record);
     }
-    runtime.flush().await.unwrap();
-    let status = runtime.status();
+    runtime.storage.flush().await.unwrap();
+    let status = runtime.storage.status();
     assert!(status.query_log_bytes <= 1_048_576);
     assert!(status.query_log_entries > 0);
     assert!(status.cleanup.removed.byte_limit > 0);
@@ -805,10 +886,10 @@ async fn byte_age_cleanup_and_io_drops_have_distinct_reasons() {
     })
     .await
     .unwrap();
-    assert_eq!(runtime.status().last_dropped_log_at_ms, None);
+    assert_eq!(runtime.storage.status().last_dropped_log_at_ms, None);
     runtime.storage.record_log(0, entry("fresh"));
-    assert!(runtime.flush().await.is_err());
-    let status = runtime.status();
+    assert!(runtime.storage.flush().await.is_err());
+    let status = runtime.storage.status();
     assert_eq!(status.dropped_by_reason.io_failure, 1);
     assert!(status.last_dropped_log_at_ms.is_some());
     assert_eq!(status.dropped_by_reason.queue_full, 0);
@@ -818,7 +899,7 @@ async fn byte_age_cleanup_and_io_drops_have_distinct_reasons() {
     })
     .await
     .unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -831,7 +912,7 @@ async fn filesystem_sample_is_cached_and_snapshot_path_does_not_block_diagnostic
     )
     .unwrap();
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
-    let first = runtime.status().filesystem;
+    let first = runtime.storage.status().filesystem;
     #[cfg(unix)]
     {
         assert!(first.total_bytes.unwrap() > 0);
@@ -839,13 +920,13 @@ async fn filesystem_sample_is_cached_and_snapshot_path_does_not_block_diagnostic
         assert!(first.error.is_none());
     }
     assert!(!first.stale);
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     assert_eq!(
-        runtime.status().filesystem.sampled_at_ms,
+        runtime.storage.status().filesystem.sampled_at_ms,
         first.sampled_at_ms
     );
     assert_eq!(first.warning_threshold_bytes, 268_435_456);
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     let unavailable = Filesystem::sample(Some(&dir.path().join("absent")), &settings());
     assert!(unavailable.available_bytes.is_none());
     assert!(unavailable.total_bytes.is_none());
@@ -862,18 +943,19 @@ async fn unknown_format_is_not_migrated_or_erased() {
     })
     .await
     .unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
     checked(&runtime).await;
-    assert_eq!(runtime.status().health, "unavailable");
+    assert_eq!(runtime.storage.status().health, "unavailable");
     assert!(
         runtime
+            .storage
             .status()
             .error
             .unwrap()
             .contains("unsupported runtime database format")
     );
-    assert!(runtime.shutdown().await.is_err());
+    assert!(runtime.storage.shutdown().await.is_err());
     let conn = rusqlite::Connection::open(dir.path().join("observability.sqlite3")).unwrap();
     assert_eq!(
         conn.query_row("SELECT value FROM metadata WHERE key='format'", [], |r| r
@@ -890,8 +972,8 @@ async fn clock_rollback_keeps_new_log_and_minute_points_with_monotonic_retention
     let directory = private_dir();
     let runtime = RuntimeServices::open(directory.path(), settings(), 1).unwrap();
     runtime.storage.record_log(0, entry("fresh"));
-    runtime.flush().await.unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     let lower = now_ms() + 172_800_000;
     let conn = rusqlite::Connection::open(directory.path().join("observability.sqlite3")).unwrap();
     conn.execute(
@@ -902,9 +984,10 @@ async fn clock_rollback_keeps_new_log_and_minute_points_with_monotonic_retention
     drop(conn);
     let runtime = RuntimeServices::open(directory.path(), settings(), 2).unwrap();
     checked(&runtime).await;
-    assert!(runtime.status().clock_rollback);
+    assert!(runtime.storage.status().clock_rollback);
     assert_eq!(
         runtime
+            .storage
             .list_logs(ListOptions::default())
             .await
             .unwrap()
@@ -913,13 +996,18 @@ async fn clock_rollback_keeps_new_log_and_minute_points_with_monotonic_retention
     );
     runtime.storage.record_log(0, entry("upstream"));
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
-    let page = runtime.list_logs(ListOptions::default()).await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    let page = runtime
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.entries[0].cache, "upstream");
     assert!(page.entries[0].time_ms < lower);
     assert!(
         runtime
+            .storage
             .statistics(HistoryOptions::default())
             .await
             .unwrap()
@@ -935,14 +1023,14 @@ async fn clock_rollback_keeps_new_log_and_minute_points_with_monotonic_retention
     })
     .await
     .unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn malformed_statistics_payload_returns_storage_error_without_killing_worker() {
     let runtime = RuntimeServices::ephemeral(settings());
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
+    runtime.storage.flush().await.unwrap();
     inspect(&runtime.storage, |conn| {
         let bytes: Vec<u8> =
             conn.query_row("SELECT payload FROM statistics_points LIMIT 1", [], |r| {
@@ -962,12 +1050,18 @@ async fn malformed_statistics_payload_returns_storage_error_without_killing_work
     .await
     .unwrap();
     assert!(matches!(
-        runtime.statistics(HistoryOptions::default()).await,
+        runtime.storage.statistics(HistoryOptions::default()).await,
         Err(Error::StorageUnavailable(_))
     ));
-    assert!(runtime.list_logs(ListOptions::default()).await.is_ok());
-    runtime.clear_history(0).await.unwrap();
-    runtime.shutdown().await.unwrap();
+    assert!(
+        runtime
+            .storage
+            .list_logs(ListOptions::default())
+            .await
+            .is_ok()
+    );
+    runtime.storage.clear_history(0).await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -977,8 +1071,8 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     settings.statistics.reset_interval_days = 1;
     let runtime = RuntimeServices::open(directory.path(), settings.clone(), 1).unwrap();
     runtime.metrics.inc(Counter::Requests);
-    runtime.flush().await.unwrap();
-    runtime.shutdown().await.unwrap();
+    runtime.storage.flush().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     let lower = now_ms() + 172_800_000;
     let conn = rusqlite::Connection::open(directory.path().join("observability.sqlite3")).unwrap();
     conn.execute(
@@ -990,7 +1084,7 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     let runtime = RuntimeServices::open(directory.path(), settings.clone(), 2).unwrap();
     checked(&runtime).await;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while runtime.status().totals_epoch == 0 {
+        while runtime.storage.status().totals_epoch == 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -999,8 +1093,9 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     runtime.metrics.inc(Counter::Requests);
     for _ in 0..8 {
         // Each request yields a worker turn where the automatic scheduler runs.
-        runtime.flush().await.unwrap();
+        runtime.storage.flush().await.unwrap();
         let totals = runtime
+            .storage
             .statistics(HistoryOptions::default())
             .await
             .unwrap()
@@ -1009,19 +1104,86 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
         assert_eq!(totals.metrics.counters["requests"], 1);
         assert!(totals.since_ms < lower, "display remains wall clock");
     }
-    runtime.shutdown().await.unwrap();
+    runtime.storage.shutdown().await.unwrap();
     let reopened = RuntimeServices::open(directory.path(), settings, 3).unwrap();
     checked(&reopened).await;
     reopened.metrics.inc(Counter::Requests);
-    reopened.flush().await.unwrap();
+    reopened.storage.flush().await.unwrap();
     let totals = reopened
+        .storage
         .statistics(HistoryOptions::default())
         .await
         .unwrap()
         .totals;
     assert_eq!(totals.epoch, 1, "reset cut survives process restart");
     assert_eq!(totals.metrics.counters["requests"], 2);
-    reopened.shutdown().await.unwrap();
+    reopened.storage.shutdown().await.unwrap();
+}
+
+/// Stored totals and points must have exactly the current fixed-cardinality
+/// shape (`validate_metrics`), so an older file with other keys is rejected.
+/// Changing the persisted statistics shape therefore requires a new
+/// DATABASE_FORMAT; update both pinned values together.
+#[test]
+fn persisted_statistics_shape_is_bound_to_database_format() {
+    use sha2::{Digest, Sha256};
+    let shape = Metrics::default().snapshot();
+    let mut digest = Sha256::new();
+    for key in shape.counters.keys() {
+        digest.update(key.as_bytes());
+        digest.update([0]);
+    }
+    for histogram in [&shape.request_latency, &shape.upstream_latency] {
+        for bucket in &histogram.buckets {
+            digest.update(bucket.upper_bound_micros.unwrap_or(u64::MAX).to_be_bytes());
+        }
+    }
+    let actual = format!("{:x}", digest.finalize());
+    assert_eq!(
+        (DATABASE_FORMAT, actual.as_str()),
+        (
+            2,
+            "e57f021e89a9b9a08d03124a614f736ea3298a11fe7643fd7e0c24e3ffa46c6b"
+        ),
+        "the persisted statistics shape changed; bump DATABASE_FORMAT and pin the new digest. Keys: {:?}",
+        shape.counters.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn periodic_flush_defers_cleanup_to_its_interval_without_capacity_pressure() {
+    async fn metadata(handle: &Handle, key: &'static str) -> u64 {
+        let (send, receive) = mpsc::channel();
+        inspect(handle, move |conn| {
+            let value = conn.query_row("SELECT value FROM metadata WHERE key=?", [key], |r| {
+                r.get::<_, u64>(0)
+            })?;
+            send.send(value).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        receive.recv().unwrap()
+    }
+    let mut config = settings();
+    config.storage.flush_interval_ms = 100;
+    config.storage.cleanup_interval_secs = 3600;
+    let runtime = RuntimeServices::ephemeral(config);
+    // Opening runs one cleanup; each cleanup advances the stored clock floor.
+    let opened = metadata(&runtime.storage, "clock_lower_ms").await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    runtime.storage.record_log(0, entry("fresh"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while metadata(&runtime.storage, "log_count").await == 0 {
+        assert!(Instant::now() < deadline, "periodic flush did not commit");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        metadata(&runtime.storage, "clock_lower_ms").await,
+        opened,
+        "a periodic flush within all bounds ran cleanup"
+    );
+    runtime.storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1042,6 +1204,6 @@ async fn shutdown_releases_directory_lock_even_with_a_duplicated_descriptor() {
     handle.shutdown().await.unwrap();
     let reopened = RuntimeServices::open(directory.path(), settings(), 2).unwrap();
     checked(&reopened).await;
-    reopened.shutdown().await.unwrap();
+    reopened.storage.shutdown().await.unwrap();
     drop(duplicate);
 }

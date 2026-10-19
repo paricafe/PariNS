@@ -333,7 +333,7 @@ fn check_epoch(conn: &Connection, name: &str, expected: u64) -> Result<u64> {
 
 impl Database {
     fn open(directory: Option<PathBuf>, fresh: bool, shared: &Arc<Shared>) -> Result<Self> {
-        let conn = match &directory {
+        let mut conn = match &directory {
             Some(dir) => Connection::open(dir.join("observability.sqlite3"))?,
             None => Connection::open_in_memory()?,
         };
@@ -344,6 +344,13 @@ impl Database {
         conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 64)?;
         conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 64)?;
         conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+        // A crash during the first commit can leave a non-empty file whose hot
+        // journal rolls it back to no tables on open. Such a file holds no data,
+        // so it is initialized like a new one instead of failing the format check.
+        let fresh = fresh
+            || conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })? == 0;
         if !fresh {
             // No deadline: a large file on a cold page cache may take long.
             // Only process shutdown interrupts the check.
@@ -386,83 +393,100 @@ impl Database {
         }
         conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-2048;")?;
         if fresh {
+            // auto_vacuum must precede the first table. Tables and the format
+            // row commit together, so a crash never leaves an unformatted file.
             conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
-            conn.execute_batch(SCHEMA)?;
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute_batch(SCHEMA)?;
+            tx.execute(
                 "INSERT INTO metadata VALUES('format',?1)",
                 [DATABASE_FORMAT],
             )?;
+            tx.commit()?;
         }
-        let desired = shared.desired.lock().expect("storage settings");
+        // Read stored state first; publish it below under short locks.
+        let lower = epoch(&conn, "clock_lower_ms")?;
+        let log_epoch = epoch(&conn, "log_epoch")?;
+        let totals_epoch = epoch(&conn, "totals_epoch")?;
+        let history_epoch = epoch(&conn, "history_epoch")?;
+        let stored = conn
+            .query_row(
+                "SELECT payload,reset_clock_ms FROM statistics_totals WHERE id=1",
+                [],
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u64>(1)?)),
+            )
+            .optional()?
+            .map(|(bytes, reset_clock_ms)| {
+                let totals: Totals = serde_json::from_slice(&bytes)?;
+                validate_metrics(&totals.metrics, &shared.metrics.snapshot())?;
+                if totals.epoch != totals_epoch {
+                    return Err(Error::StorageUnavailable(
+                        "statistics epoch mismatch".into(),
+                    ));
+                }
+                Ok((totals, reset_clock_ms))
+            })
+            .transpose()?;
+        let (settings, revision) = {
+            let desired = shared.desired.lock().expect("storage settings");
+            (desired.settings.clone(), desired.revision)
+        };
         let mut database = Self {
             conn,
             directory,
-            settings: desired.settings.clone(),
-            revision: desired.revision,
+            settings,
+            revision,
             cleanup_anchor: Instant::now(),
-            cleanup_wall: now_ms(),
+            cleanup_wall: now_ms().max(lower),
             last_cleanup: Instant::now(),
             run_id: String::new(),
             settings_pending: true,
             reset_clock_ms: 0,
-            opened_log_epoch: 0,
+            opened_log_epoch: log_epoch,
         };
-        drop(desired);
-        let lower = epoch(&database.conn, "clock_lower_ms")?;
-        database.cleanup_wall = database.cleanup_wall.max(lower);
-        let mut status = shared.status.lock().expect("storage status");
-        status.clock_rollback = now_ms() < lower;
-        status.log_epoch = epoch(&database.conn, "log_epoch")?;
-        status.totals_epoch = epoch(&database.conn, "totals_epoch")?;
-        status.history_epoch = epoch(&database.conn, "history_epoch")?;
-        database.opened_log_epoch = status.log_epoch;
-        shared.log_epoch.store(status.log_epoch, Ordering::Release);
-        let mut owner = shared.stats.lock().expect("statistics owner");
-        owner.totals_epoch = status.totals_epoch;
-        owner.history_epoch = status.history_epoch;
-        // Points sampled while checking belong to the stored epochs. A
-        // checkpoint taken before the stored base was loaded must not persist.
-        for point in &mut owner.points {
-            point.history_epoch = status.history_epoch;
-            point.totals_epoch = status.totals_epoch;
-        }
-        owner.latest = None;
-        let stored: Option<(Vec<u8>, u64)> = database
-            .conn
-            .query_row(
-                "SELECT payload,reset_clock_ms FROM statistics_totals WHERE id=1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((bytes, reset_clock_ms)) = stored {
-            database.reset_clock_ms = reset_clock_ms;
-            let totals: Totals = serde_json::from_slice(&bytes)?;
-            validate_metrics(&totals.metrics, &shared.metrics.snapshot())?;
-            if totals.epoch != owner.totals_epoch {
-                return Err(Error::StorageUnavailable(
-                    "statistics epoch mismatch".into(),
-                ));
+        let initial = {
+            let mut owner = shared.stats.lock().expect("statistics owner");
+            owner.totals_epoch = totals_epoch;
+            owner.history_epoch = history_epoch;
+            // Points sampled while checking belong to the stored epochs. A
+            // checkpoint taken before the stored base was loaded must not persist.
+            for point in &mut owner.points {
+                point.history_epoch = history_epoch;
+                point.totals_epoch = totals_epoch;
             }
-            owner.base = totals.metrics;
-            owner.since_ms = totals.since_ms;
-        } else {
-            let totals = owner.totals(&shared.metrics.snapshot());
+            owner.latest = None;
+            database.run_id = owner.run_id.clone();
+            match stored {
+                Some((totals, reset_clock_ms)) => {
+                    database.reset_clock_ms = reset_clock_ms;
+                    owner.base = totals.metrics;
+                    owner.since_ms = totals.since_ms;
+                    None
+                }
+                None => Some(owner.totals(&shared.metrics.snapshot())),
+            }
+        };
+        if let Some(totals) = initial {
             database.reset_clock_ms = database.cleanup_now();
             database.conn.execute(
                 "INSERT INTO statistics_totals VALUES(1,?1,?2,?3,0,?4,?5)",
                 params![
                     totals.epoch,
                     totals.since_ms,
-                    owner.run_id,
+                    database.run_id,
                     serde_json::to_vec(&totals)?,
                     database.reset_clock_ms
                 ],
             )?;
         }
-        database.run_id = owner.run_id.clone();
-        drop(owner);
-        drop(status);
+        {
+            let mut status = shared.status.lock().expect("storage status");
+            status.clock_rollback = now_ms() < lower;
+            status.log_epoch = log_epoch;
+            status.totals_epoch = totals_epoch;
+            status.history_epoch = history_epoch;
+        }
+        shared.log_epoch.store(log_epoch, Ordering::Release);
         database.set_page_cap()?;
         let cleanup = database.cleanup();
         database.report_error(shared, &cleanup);
@@ -603,7 +627,26 @@ impl Database {
         } else {
             self.committed(shared);
         }
-        result.and_then(|_| self.cleanup())
+        // Age expiry waits for the cleanup interval; only a write that leaves
+        // a bound exceeded, or the file near its cap, cleans up right away.
+        result.and_then(|_| {
+            if self.capacity_pressure()? {
+                self.cleanup()
+            } else {
+                Ok(())
+            }
+        })
+    }
+    fn capacity_pressure(&self) -> Result<bool> {
+        let limits = &self.settings;
+        if epoch(&self.conn, "log_count")? > limits.query_log.max_entries as u64
+            || epoch(&self.conn, "log_bytes")? > limits.query_log.max_bytes
+            || epoch(&self.conn, "point_count")? > limits.statistics.max_samples as u64
+        {
+            return Ok(true);
+        }
+        let (size, pages, free) = self.page_info()?;
+        Ok(pages.saturating_sub(free) + 32 >= limits.storage.max_database_bytes / size)
     }
     fn write_batch(
         &mut self,
@@ -725,6 +768,8 @@ impl Database {
             }
         }
     }
+    /// Explicit flush and shutdown leave every record committed and the
+    /// stored data within its bounds, including age retention.
     fn drain(&mut self, shared: &Shared, logs: &mpsc::Receiver<LogItem>) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
@@ -738,6 +783,8 @@ impl Database {
                 ));
             }
         }
+        self.cleanup()?;
+        self.last_cleanup = Instant::now();
         Ok(())
     }
     /// Every query-log read shares one deadline and the same filter semantics.

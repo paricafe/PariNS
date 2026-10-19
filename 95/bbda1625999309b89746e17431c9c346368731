@@ -1,0 +1,55 @@
+src/manage/runtime.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 15,20,168-182,225-230,303,306-307,330,450-483,525-530,674,686,719,737,746-748
+  s_cffe143f0c5c88::t_eb50b37a8f78dc 709-710
+src/runtime_lifecycle.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 62-67,69-70,78,139-145,148-169,171
+src/manage/updates/operation.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 161,339-343,349-351,385,524-530,553-556,1344-1347,1356-1360
+src/storage/database.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 336,396-397,399-401,405,407-433,437-438,440,445,447-455,457-469,476,482-489,630-649,771-772,786-787
+  s_cffe143f0c5c88::t_c17602f61b0849 347-353
+src/manage/account_tests.rs
+  s_cffe143f0c5c88::t_ebb41cf6fcb132 180-186
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 191,234
+src/update/executor/mod.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 12-13,439-440
+src/storage/tests.rs
+  s_cffe143f0c5c88::t_c17602f61b0849 616-631
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 59,78,80,83-84,91-93,102,105-111,115-119,121,129-130,135,137,139,151-156,158,169-174,178,184,190,198-202,206-207,210,219,224,233,240,242,259,262,270,273,282,285,301,303,316,327,337,339-343,346,357,414,427,433,436,447,454,464,471-473,476,478,481-483,491,499,503,507,510-514,520,533,535,537-542,549,556,563,574,577,584,591,604,606,613-614,672,691,693,701-706,711,714,719,726,735-740,743-744,764-765,779,809-813,819,828,843-844,850-851,858,870-871,877-878,889,891-892,902,915,923,925,929,946,949,952,958,975-976,987,990,999-1004,1010,1026,1033,1053,1056-1064,1074-1075,1087,1096,1098,1107,1111,1113,1120-1186,1207
+  s_cffe143f0c5c88::t_f5b324dd19bbda 615
+src/manage/live.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 291
+src/manage/mod.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 307,312,330,361,380-413,573-574,576-582,587-603,684,687-688,818-822,833,867-869,1742-1802
+  s_cffe143f0c5c88::t_eb50b37a8f78dc 188-190
+  s_cffe143f0c5c88::t_b9a27d26276e34 1803-1804
+src/storage/mod.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 2-3
+src/manage/runtime_tests.rs
+  s_cffe143f0c5c88::t_99345557cb4cc4 759-766
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 291-292,295,297,540,574,597,729-758,767-779
+  s_cffe143f0c5c88::t_37853bfd65fc03 780-781
+src/manage/check.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 24-26,128-153
+  s_cffe143f0c5c88::t_3a6ff22f67000d 154-155
+tests/query_log.rs
+  s_cffe143f0c5c88::t_ebb41cf6fcb132 305-306,311
+src/runtime_services.rs
+  s_cffe143f0c5c88::t_eba03dd2bd8f8b 2-3,6,110-111,114,116,123
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "95bbda1625999309b89746e17431c9c346368731",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

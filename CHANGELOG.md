@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Dark mode glass is flatter: a near-uniform hairline edge instead of a bright
+  top edge, no drop shadow under panels, no top sheen, a neutral fill close to
+  the background instead of a blue-grey one (a denser neutral fill over patterns
+  and images), and no glow on the status dot. Light mode is unchanged.
+
 ### Fixed
 
 - After an online software update, the new process left filter subscription

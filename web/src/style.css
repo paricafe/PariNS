@@ -11,6 +11,8 @@
            hairline for capsules and swatches), --edge / --edge-soft (control borders), --blur,
            --glass-saturate, --glass-brightness. Depth comes from the rim, not from shadows: --shadow is a
            faint neutral ambient shadow, --shadow-lift is for floating layers only (popups, save bar, drawer).
+           Dark is flatter still: a near-uniform rim, a hairline instead of a panel shadow, no sheen and a
+           neutral veil close to the canvas (a denser neutral fill over busy backdrops).
            Only the outermost surface of a joined group gets backdrop-filter and the rim; inner parts use
            --raised/--hover and no second blur, rim or shadow.
    Radius: --radius (cards 24), --radius-lg (sheets, sidebar 28), --radius-control (inputs 14),
@@ -51,26 +53,29 @@
   color-scheme: dark;
   --canvas: #0c0c0e;
   --orb-1: #6d5efc; --orb-2: #0fb5a6; --orb-3: #c2417a; --grid-line: rgb(255 255 255 / .06);
-  --glass-alpha: .3; --glass-brightness: 1;
-  --surface: rgb(26 28 40 / var(--glass-alpha)); --surface-strong: rgb(30 32 46 / .9);
-  --glass-sheen: linear-gradient(180deg, rgb(255 255 255 / .03), rgb(255 255 255 / 0) 40%);
-  --rim: linear-gradient(180deg, rgb(255 255 255 / .22), rgb(255 255 255 / .1) 22%, rgb(255 255 255 / .07) 70%, rgb(255 255 255 / .06));
-  --glass-highlight: inset 0 0 0 .5px rgb(255 255 255 / .12);
-  --raised: rgb(255 255 255 / .05); --hover: rgb(255 255 255 / .07);
+  /* Flat dark glass: a neutral veil close to the canvas, a near-uniform hairline rim, no sheen. */
+  --glass-alpha: .05; --glass-brightness: 1;
+  --surface: rgb(255 255 255 / var(--glass-alpha)); --surface-strong: rgb(30 30 33 / .92);
+  --glass-sheen: none;
+  --rim: linear-gradient(180deg, rgb(255 255 255 / .12), rgb(255 255 255 / .09) 22%, rgb(255 255 255 / .08));
+  --glass-highlight: inset 0 0 0 .5px rgb(255 255 255 / .1);
+  --raised: rgb(255 255 255 / .04); --hover: rgb(255 255 255 / .06);
   --edge: rgb(255 255 255 / .2); --edge-soft: rgb(255 255 255 / .08);
   --text: #eef0ff; --muted: #aab0cf; --faint: #8187a6;
   --divider: rgb(255 255 255 / .09); --control-border: rgb(255 255 255 / .2); --control-bg: rgb(8 10 24 / .45);
   --primary: #9b8cff; --primary-2: #2ee6d2; --on-primary: #0b0c18; --accent-soft: rgb(155 140 255 / .16);
   --focus: #b3a8ff;
   --ok: #4ade80; --danger: #fb7185; --warning: #fbbf24;
-  --shadow: 0 1px 1px rgb(0 0 0 / .2), 0 8px 24px -16px rgb(0 0 0 / .5);
-  --shadow-lift: 0 2px 6px rgb(0 0 0 / .25), 0 16px 36px -18px rgb(0 0 0 / .6);
+  --shadow: 0 0 0 .5px rgb(0 0 0 / .3);
+  --shadow-lift: 0 12px 28px -14px rgb(0 0 0 / .45);
   --switch-on: #30d158; --switch-off: rgb(120 120 128 / .32); --segment-track: rgb(118 118 128 / .24); --segment-thumb: #636366;
-  --row-bg: rgb(28 30 44 / var(--glass-alpha)); --separator: rgb(84 84 88 / .5); --destructive: #ff453a; --link: #4c9dff;
+  --row-bg: var(--surface); --separator: rgb(84 84 88 / .5); --destructive: #ff453a; --link: #4c9dff;
 }
 /* Busier backdrops get a denser glass fill so text keeps WCAG AA contrast. */
 :root[data-backdrop="pattern"] { --glass-alpha: .34; }
 :root[data-backdrop="image"] { --glass-alpha: .58; }
+/* Dark: busier backdrops switch the veil to a neutral dark fill, so light text keeps its contrast. */
+:root.dark:is([data-backdrop="pattern"], [data-backdrop="image"]) { --surface: rgb(18 18 21 / var(--glass-alpha)); }
 :root.dark[data-backdrop="pattern"] { --glass-alpha: .4; }
 :root.dark[data-backdrop="image"] { --glass-alpha: .54; }
 /* HDR displays: brighter specular rims and accents in Display P3; SDR keeps the sRGB values above. */
@@ -83,8 +88,8 @@
   }
   :root.dark {
     --edge: color(display-p3 1 1 1 / .26);
-    --rim: linear-gradient(180deg, color(display-p3 1 1 1 / .28), color(display-p3 1 1 1 / .13) 22%, color(display-p3 1 1 1 / .09) 70%, color(display-p3 1 1 1 / .07));
-    --glass-highlight: inset 0 0 0 .5px color(display-p3 1 1 1 / .16);
+    --rim: linear-gradient(180deg, color(display-p3 1 1 1 / .14), color(display-p3 1 1 1 / .1) 22%, color(display-p3 1 1 1 / .09));
+    --glass-highlight: inset 0 0 0 .5px color(display-p3 1 1 1 / .12);
     --primary: color(display-p3 .64 .58 1); --primary-2: color(display-p3 .25 .95 .85); --focus: color(display-p3 .74 .7 1);
   }
 }
@@ -399,6 +404,7 @@ meter { width: 100%; }
 .status-strip[data-tone="ok"] .pulse { background: var(--ok); box-shadow: 0 0 12px var(--ok); }
 .status-strip[data-tone="warn"] .pulse { background: var(--warning); box-shadow: 0 0 12px var(--warning); }
 .status-strip[data-tone="bad"] .pulse { background: var(--danger); box-shadow: 0 0 12px var(--danger); }
+.dark .status-strip .pulse { box-shadow: none; }
 .status-strip[data-tone="ok"] .pulse::after, .status-strip[data-tone="warn"] .pulse::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid currentColor; color: var(--ok); animation: pulse-ring 2.2s ease-out infinite; }
 .status-strip[data-tone="warn"] .pulse::after { color: var(--warning); }
 @keyframes pulse-ring { from { transform: scale(.5); opacity: .8; } to { transform: scale(1.7); opacity: 0; } }

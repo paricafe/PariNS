@@ -1,0 +1,39 @@
+web/src/components/UnitInput.tsx
+  s_cffe143f0c5c88::t_4d5ffd3ef3b31f 4,6,12,31-37,53
+web/src/i18n/shell.ts
+  s_cffe143f0c5c88::t_de93a6601445cd 66-70
+web/src/i18n/index.ts
+  s_cffe143f0c5c88::t_de93a6601445cd 12,52-56,60-65
+  s_cffe143f0c5c88::t_2b4ab2e47d9db2 66-67
+web/src/model/__tests__/model.test.ts
+  s_cffe143f0c5c88::t_ec6c5e4597ce13 129-130,132-153
+  s_cffe143f0c5c88::t_223484442962bc 7,131
+CHANGELOG.md
+  s_cffe143f0c5c88::t_26da8401f7a654 3-12
+web/src/model/units.ts
+  s_cffe143f0c5c88::t_4d5ffd3ef3b31f 1-23
+web/src/i18n/settings.ts
+  s_cffe143f0c5c88::t_de93a6601445cd 207
+web/src/pages/config/SettingsPage.tsx
+  s_cffe143f0c5c88::t_4d5ffd3ef3b31f 61
+web/src/components/UnitInput.test.tsx
+  s_cffe143f0c5c88::t_223484442962bc 47-58
+web/src/model/values.ts
+  s_cffe143f0c5c88::t_4d5ffd3ef3b31f 4,37-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c527d9fd97832e3febb68db32b1441e842a81bbf",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

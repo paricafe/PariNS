@@ -219,9 +219,10 @@ async fn unfinished_doh_resolution_still_forces_shutdown() {
     assert!(!quiescent);
 }
 
-/// A QUIC peer whose handshake never completes (here: only its Initial reaches
-/// the server) owns no resolver work. Stopping must not wait for the handshake
-/// timeout, so the stop stays quiescent and the clean snapshot remains possible.
+/// A QUIC peer whose handshake never completes (here: it completes address
+/// validation, but no later server packet reaches it) owns no resolver work.
+/// Stopping must not wait for the handshake timeout, so the stop stays quiescent
+/// and the clean snapshot remains possible.
 #[tokio::test]
 async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     let cert = Certificate::new();
@@ -235,14 +236,24 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     let metrics = server.metrics().clone();
     let doq = server.encrypted_addrs()[0].1;
     let (stop, task) = run(server);
-    // Relay only the client's first datagram (its Initial), then drop all traffic.
+    // Relay every client datagram but only the server's first reply (its Retry):
+    // the client's validated Initial starts a handshake that never completes.
     let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let relay_address = relay.local_addr().unwrap();
     let forward = tokio::spawn(async move {
         let mut buffer = [0; 2048];
-        let (length, _) = relay.recv_from(&mut buffer).await.unwrap();
-        relay.send_to(&buffer[..length], doq).await.unwrap();
-        relay
+        let mut client = None;
+        let mut retried = false;
+        loop {
+            let (length, from) = relay.recv_from(&mut buffer).await.unwrap();
+            if from != doq {
+                client = Some(from);
+                relay.send_to(&buffer[..length], doq).await.unwrap();
+            } else if !retried && let Some(client) = client {
+                retried = true;
+                relay.send_to(&buffer[..length], client).await.unwrap();
+            }
+        }
     });
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.der.clone()).unwrap();
@@ -258,7 +269,6 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     client.set_default_client_config(quinn::ClientConfig::new(std::sync::Arc::new(crypto)));
     let connecting = client.connect(relay_address, "localhost").unwrap();
-    let _relay = timeout(WAIT, forward).await.unwrap().unwrap();
     timeout(WAIT, async {
         while metrics.quic.snapshot()["doq"]["handshake_inflight"] == 0 {
             tokio::task::yield_now().await;
@@ -272,6 +282,8 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
         "unfinished QUIC handshake forced shutdown"
     );
     assert_eq!(metrics.quic.snapshot()["doq"]["handshake_shutdown"], 1);
+    assert_eq!(metrics.quic.snapshot()["doq"]["incoming"], 1);
+    forward.abort();
     drop(connecting);
     client.close(0u32.into(), b"done");
 }

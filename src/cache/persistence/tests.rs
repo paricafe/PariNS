@@ -1,4 +1,5 @@
 use super::*;
+use crate::cache::tests::insert;
 use hickory_proto::rr::{
     Record as DnsRecord,
     rdata::{A, CNAME, NS, SOA},
@@ -65,7 +66,7 @@ fn every_section_ages_twice_and_restoring_does_not_observe_requests() {
         40,
         RData::A(A::new(192, 0, 2, 3)),
     ));
-    cache.insert(&q, &response, Scope::NoEcs, inserted);
+    insert(&cache, &q, &response, Scope::NoEcs, inserted);
     let bytes = encode(&cache, inserted + Duration::from_millis(3250));
     let restored = Cache::new(CacheConfig::default());
     let now = inserted + Duration::from_secs(10);
@@ -117,7 +118,7 @@ fn negative_answers_preserve_soa_lifetime_without_stale_restore() {
             30,
         )),
     ));
-    cache.insert(&q, &response, Scope::NoEcs, now);
+    insert(&cache, &q, &response, Scope::NoEcs, now);
     let restored = Cache::new(config);
     assert_eq!(
         restore(
@@ -209,7 +210,13 @@ fn cname_negative_restore_preserves_partition_lifetime_and_cold_state() {
             RData::A(A::new(192, 0, 2, 53)),
         ));
         assert!(cache.insert_if_epoch(&q, &response, scope, inserted, cache.epoch()));
-        cache.insert(&positive, &answer(&positive, 60), Scope::NoEcs, inserted);
+        insert(
+            &cache,
+            &positive,
+            &answer(&positive, 60),
+            Scope::NoEcs,
+            inserted,
+        );
         for _ in 0..3 {
             assert!(!cache.lookup(&q, outgoing, inserted, false).unwrap().refresh);
         }
@@ -294,7 +301,7 @@ fn ecs_network_privacy_and_no_ecs_are_distinct_after_restore() {
         Scope::Network("192.0.2.0/24".parse().unwrap()),
         Scope::Network("2001:db8::/32".parse().unwrap()),
     ] {
-        cache.insert(&q, &answer(&q, 60), scope, now);
+        insert(&cache, &q, &answer(&q, 60), scope, now);
     }
     let restored = Cache::new(CacheConfig::default());
     assert_eq!(
@@ -324,7 +331,7 @@ fn checksum_policy_version_clock_and_wire_fail_before_any_import() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("integrity.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     let bytes = encode(&cache, now);
     for change in [
         "checksum",
@@ -367,7 +374,7 @@ fn expired_stale_entries_and_ttl_zero_supersession_never_reappear() {
     let cache = Cache::new(config.clone());
     let now = Instant::now();
     let q = query("stale.test.");
-    cache.insert(&q, &answer(&q, 5), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 5), Scope::NoEcs, now);
     assert!(
         cache
             .peek(&q, None, now + Duration::from_secs(6), true)
@@ -385,8 +392,8 @@ fn expired_stale_entries_and_ttl_zero_supersession_never_reappear() {
         .restored,
         0
     );
-    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
-    cache.insert(&q, &answer(&q, 0), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 0), Scope::NoEcs, now);
     assert_eq!(
         restore(&Cache::new(config), encode(&cache, now), 0, now)
             .unwrap()
@@ -405,7 +412,7 @@ fn restore_respects_current_policy_capacity_variants_and_zero_heat() {
     let now = Instant::now();
     for i in 1..=6 {
         let q = query(&format!("entry{i}.test."));
-        cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+        insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     }
     let bytes = encode(&cache, now);
     let limited = Cache::new(CacheConfig {
@@ -441,7 +448,7 @@ fn byte_budget_cancel_and_write_failure_are_explicit() {
     let cache = Cache::new(CacheConfig::default());
     let now = Instant::now();
     let q = query("budget.test.");
-    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     let mut bytes = Cursor::new(Vec::new());
     let report = cache
         .write_clean_snapshot(
@@ -541,7 +548,7 @@ fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
     let cache = Cache::new(config.cache.clone());
     let q = query("prior-semantics.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     let mut bytes = Cursor::new(Vec::new());
     let saved_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
     cache
@@ -600,7 +607,7 @@ fn names_without_presentation_round_trip_restore_with_positive_and_negative_entr
     let now = Instant::now();
     for name in &names {
         let positive = question(name, RecordType::A);
-        cache.insert(&positive, &answer(&positive, 60), Scope::NoEcs, now);
+        insert(&cache, &positive, &answer(&positive, 60), Scope::NoEcs, now);
         let negative = question(name, RecordType::AAAA);
         let mut response = protocol::error_response(&negative, ResponseCode::NXDomain);
         response.add_authority(DnsRecord::from_rdata(
@@ -616,7 +623,7 @@ fn names_without_presentation_round_trip_restore_with_positive_and_negative_entr
                 30,
             )),
         ));
-        cache.insert(&negative, &response, Scope::NoEcs, now);
+        insert(&cache, &negative, &response, Scope::NoEcs, now);
     }
     assert_eq!(cache.snapshot()["entries"], 2 * names.len());
     let restored = Cache::new(CacheConfig::default());
@@ -649,7 +656,7 @@ fn restore_rejects_noncanonical_wire_names() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("question.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     let original = encode(&cache, now);
     let mut trailing = Name::from_ascii("question.test.")
         .unwrap()
@@ -689,7 +696,7 @@ fn restore_rejects_malformed_scope_and_question_even_with_recomputed_checksum() 
     let cache = Cache::new(CacheConfig::default());
     let q = query("question.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     let original = encode(&cache, now);
     for bad_scope in [true, false] {
         let mut header: Header = serde_json::from_slice(&original[..HEADER_BYTES]).unwrap();
@@ -729,7 +736,8 @@ fn current_variants_negative_partition_and_admission_remain_authoritative() {
     let now = Instant::now();
     let q = query("variants.test.");
     for scope in ["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"] {
-        cache.insert(
+        insert(
+            &cache,
             &q,
             &answer(&q, 60),
             Scope::Network(scope.parse().unwrap()),
@@ -751,7 +759,7 @@ fn full_stream_bounds_and_read_faults_are_enforced() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("bounds.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     let original = encode(&cache, now);
     let mut header: Header = serde_json::from_slice(&original[..HEADER_BYTES]).unwrap();
     header.records = MAX_RECORDS + 1;
@@ -801,7 +809,7 @@ fn exact_source_without_client_edns_round_trips_and_prior_format_is_rejected() {
     assert!(query.edns.is_none());
     let now = Instant::now();
     let scope = Scope::ExactSource("192.0.2.0/24".parse().unwrap());
-    cache.insert(&query, &answer(&query, 60), scope, now);
+    insert(&cache, &query, &answer(&query, 60), scope, now);
     let bytes = encode(&cache, now);
     let restored = Cache::new(CacheConfig::default());
     let report = restore(&restored, bytes.clone(), 1000, now).unwrap();
@@ -850,7 +858,8 @@ fn learned_entries_round_trip_without_restoring_classification() {
     let q = query("learned.test.");
     let now = Instant::now();
     for network in ["192.0.2.0/24", "192.0.3.0/24", "198.51.100.0/24"] {
-        cache.insert(
+        insert(
+            &cache,
             &q,
             &answer(&q, 60),
             Scope::ExactSource(network.parse().unwrap()),
@@ -878,7 +887,8 @@ fn learned_entries_round_trip_without_restoring_classification() {
     // first per-network answer supersedes the restored learned copy.
     let inspection = restored.inspect(&Name::from_ascii("learned.test.").unwrap(), None, now);
     assert_eq!(inspection["ecs_sharing"], Value::Null);
-    restored.insert(
+    insert(
+        &restored,
         &q,
         &answer(&q, 60),
         Scope::ExactSource("203.0.113.0/24".parse().unwrap()),
@@ -891,4 +901,43 @@ fn learned_entries_round_trip_without_restoring_classification() {
             .is_none()
     );
     assert_eq!(restored.snapshot()["ecs_shared_entries"], 1);
+}
+
+/// A restore keeps the first records that fit, and a new process hashes keys
+/// into other shards, so the file lists records by recency across all shards.
+#[test]
+fn snapshot_lists_records_most_recently_used_first_across_shards() {
+    let cache = Cache::new(CacheConfig::default());
+    let now = Instant::now();
+    for index in 0..16 {
+        let q = query(&format!("n{index}.test."));
+        insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
+    }
+    // Later shards hold the more recently used entries: shard order is wrong.
+    let mut used = HashMap::new();
+    let mut populated = 0;
+    for shard in &cache.shards {
+        let shard = shard.lock().unwrap();
+        populated += usize::from(!shard.partitions[0].lru.is_empty());
+        for (_, entry) in shard.partitions[0].lru.iter() {
+            let clock = used.len() as u64 + 1;
+            entry.accessed.store(clock, Ordering::Relaxed);
+            used.insert(entry.key.name.clone(), clock);
+        }
+    }
+    assert!(populated > 1, "the keys span several shards");
+    let bytes = encode(&cache, now);
+    let order: Vec<u64> = bytes[HEADER_BYTES..]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (query, _, _) = serde_json::from_slice::<Record>(line)
+                .unwrap()
+                .decode()
+                .unwrap();
+            used[&key_name(query.queries[0].name())]
+        })
+        .collect();
+    assert_eq!(order.len(), 16);
+    assert!(order.windows(2).all(|pair| pair[0] > pair[1]), "{order:?}");
 }

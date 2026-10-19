@@ -8,9 +8,17 @@
 //! connection, so a sent query is never replayed. Attempts record new or reused
 //! connections.
 //!
+//! A sent query is never resent. A hostname endpoint tries its bootstrap addresses
+//! in order, but moves to the next address only after a failure marked
+//! [`NotSent`] (connect, TLS or QUIC handshake, stream open, or a request never
+//! handed to the transport); any later failure is this endpoint's answer. With
+//! HTTP/3 preferred, only a not-sent H3 attempt falls back to H2 (see `h3`).
+//!
 //! DoH answers have HTTP Age normalized into RR TTLs here, before Resolver sees
-//! them; cache code has no HTTP policy. DoQ in-flight requests retain their endpoint
-//! owner independently of the current bootstrap-address cache entry.
+//! them; cache code has no HTTP policy. EDNS TCP keepalive in an answer belongs to
+//! the upstream connection and is removed here (DoQ rejects it, RFC 9250). DoQ
+//! in-flight requests retain their endpoint owner independently of the current
+//! bootstrap-address cache entry.
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -32,7 +40,7 @@ use tokio::{
 use tokio_rustls::TlsConnector;
 
 use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, ConnectionUse, Stage};
-use super::{Endpoint, Protocol, Settings, valid_address};
+use super::{Endpoint, NotSent, Protocol, Settings, not_sent, valid_address};
 use crate::{protocol, transport::tcp};
 
 // RFC 9111 sections 5.1 and 1.2.2: use the first Age member, ignore
@@ -221,16 +229,6 @@ pub(super) async fn idle(usage: Arc<Usage>, after: Duration) {
         tokio::time::sleep(if wait.is_zero() { after } else { wait }).await;
     }
 }
-
-/// The request never reached the connection, so a fresh connection may carry it.
-#[derive(Debug)]
-struct NotSent;
-impl std::fmt::Display for NotSent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("HTTP/2 connection unavailable before the request was sent")
-    }
-}
-impl std::error::Error for NotSent {}
 
 pub(super) struct Client {
     pub spec: Endpoint,
@@ -433,18 +431,24 @@ impl Client {
                         .await
                 }
                 Protocol::Https => {
-                    if let Some(h3) = &self.h3
-                        && let Ok(response) = h3
-                            .exchange(&self.spec, query, address, deadline, scope)
-                            .await
-                    {
-                        Ok(response)
-                    } else {
-                        ensure!(scope.remaining(), "upstream deadline exhausted before H2");
-                        let mut attempt = scope.start(Some(ActualProtocol::Doh2));
-                        let result = self.https(query, address, &mut attempt).await;
-                        attempt.finish(&result);
-                        result
+                    let h3 = match &self.h3 {
+                        Some(h3) => Some(
+                            h3.exchange(&self.spec, query, address, deadline, scope)
+                                .await,
+                        ),
+                        None => None,
+                    };
+                    match h3 {
+                        Some(Ok(response)) => Ok(response),
+                        // A request H3 may have sent is never repeated over H2.
+                        Some(Err(error)) if !error.is::<NotSent>() => Err(error),
+                        _ => {
+                            ensure!(scope.remaining(), "upstream deadline exhausted before H2");
+                            let mut attempt = scope.start(Some(ActualProtocol::Doh2));
+                            let result = self.https(query, address, &mut attempt).await;
+                            attempt.finish(&result);
+                            result
+                        }
                     }
                 }
                 Protocol::Quic => {
@@ -455,13 +459,16 @@ impl Client {
                 }
             };
             match response {
-                Ok(message) => {
+                Ok(mut message) => {
+                    protocol::strip_tcp_keepalive(&mut message);
                     return Ok(super::Exchange {
                         message,
                         upstream: self.spec.label.clone(),
                     });
                 }
-                Err(failure) => error = failure,
+                // Nothing reached this address: the next one may carry the query.
+                Err(failure) if failure.is::<NotSent>() => error = failure,
+                Err(failure) => return Err(failure),
             }
         }
         Err(error)
@@ -564,7 +571,10 @@ impl Client {
         address: SocketAddr,
         attempt: &mut Attempt,
     ) -> Result<Message> {
-        let (connection, used) = self.h2_connection(address, attempt).await?;
+        let (connection, used) = self
+            .h2_connection(address, attempt)
+            .await
+            .map_err(not_sent)?;
         attempt.connection(used);
         match self.h2_request(&connection, query, attempt).await {
             // A reused connection that closed before taking the request (idle
@@ -572,7 +582,10 @@ impl Client {
             Err(error) if used == ConnectionUse::Reused && error.is::<NotSent>() => {
                 self.h2_retire(&connection);
                 drop(connection);
-                let (connection, used) = self.h2_connection(address, attempt).await?;
+                let (connection, used) = self
+                    .h2_connection(address, attempt)
+                    .await
+                    .map_err(not_sent)?;
                 attempt.connection(used);
                 self.h2_request(&connection, query, attempt).await
             }
@@ -602,18 +615,11 @@ impl Client {
         // Both waits count against the caller's deadline, which encloses this call.
         let _permit = connection.streams.acquire().await?;
         let _stream = InFlight::new(&connection.usage);
-        let mut sender = connection
-            .sender
-            .clone()
-            .ready()
-            .await
-            .map_err(|error| anyhow::Error::new(NotSent).context(error))?;
+        let mut sender = connection.sender.clone().ready().await.map_err(not_sent)?;
         let (request, outbound) = doh_get(&self.spec, query)?;
         attempt.stage(Stage::RequestWrite);
         // Dropping this on cancellation resets only this stream (RST_STREAM).
-        let (response, _) = sender
-            .send_request(request, true)
-            .map_err(|error| anyhow::Error::new(NotSent).context(error))?;
+        let (response, _) = sender.send_request(request, true).map_err(not_sent)?;
         attempt.stage(Stage::ResponseHeaders);
         let response = response.await?;
         let age = doh_head(response.status(), response.headers(), attempt)?;
@@ -676,11 +682,14 @@ impl Client {
         address: SocketAddr,
         attempt: &mut Attempt,
     ) -> Result<Message> {
-        let connection = self.quic_connection(address, attempt).await?;
+        let connection = self
+            .quic_connection(address, attempt)
+            .await
+            .map_err(not_sent)?;
         // Retain the endpoint owner for this entire request. Bootstrap rotation
         // may replace the cached owner while this stream is still in flight.
         attempt.stage(Stage::Wait);
-        let (mut send, mut recv) = connection.connection.open_bi().await?;
+        let (mut send, mut recv) = connection.connection.open_bi().await.map_err(not_sent)?;
         let mut outbound = query.clone();
         outbound.metadata.id = 0;
         // EDNS TCP keepalive is hop-specific and prohibited on DoQ (RFC 9250).

@@ -300,3 +300,77 @@ async fn refused_nonzero_ecs_retries_anonymously_once() {
     );
     mock.await.unwrap();
 }
+
+/// EDNS TCP keepalive is consumed at ingress: never forwarded upstream, never
+/// answered, and a query carrying it uses the normal cache. The upstream query
+/// advertises at most 1232 bytes whatever the client's UDP size.
+#[tokio::test]
+async fn tcp_keepalive_is_hop_local_and_upstream_udp_size_is_capped() {
+    use hickory_proto::rr::{
+        RData, Record,
+        rdata::{A, opt::EdnsCode},
+    };
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+    config.upstreams.servers = vec![upstream.local_addr().unwrap().to_string()];
+    let resolver = Resolver::from_config(&config);
+    let mut input = query(None);
+    let mut edns = Edns::new();
+    edns.set_max_payload(4096);
+    edns.options_mut()
+        .insert(EdnsOption::Unknown(11, vec![0, 100]));
+    input.edns = Some(edns);
+    let mock = tokio::spawn(async move {
+        let mut bytes = [0; 4096];
+        let (n, peer) =
+            tokio::time::timeout(Duration::from_secs(1), upstream.recv_from(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+        let q = protocol::decode(&bytes[..n]).unwrap();
+        let edns = q.edns.as_ref().unwrap();
+        assert!(edns.option(EdnsCode::Keepalive).is_none());
+        assert_eq!(edns.max_payload(), protocol::MAX_UDP_PAYLOAD);
+        let mut reply = protocol::error_response(&q, ResponseCode::NoError);
+        reply.add_answer(Record::from_rdata(
+            q.queries[0].name().clone(),
+            60,
+            RData::A(A::new(192, 0, 2, 1)),
+        ));
+        reply
+            .edns
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .insert(EdnsOption::Unknown(11, vec![0, 100]));
+        upstream
+            .send_to(&reply.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+        upstream
+    });
+    let peer = "192.0.2.123".parse().unwrap();
+    let wire = input.to_vec().unwrap();
+    let first = resolver.resolve(&wire, peer).await.unwrap().message;
+    let upstream = mock.await.unwrap();
+    let second = resolver.resolve(&wire, peer).await.unwrap().message;
+    for reply in [&first, &second] {
+        assert_eq!(reply.answers.len(), 1);
+        assert!(
+            reply
+                .edns
+                .as_ref()
+                .unwrap()
+                .option(EdnsCode::Keepalive)
+                .is_none()
+        );
+    }
+    // The repeated query was a cache hit: the upstream saw only the first one.
+    let mut bytes = [0; 512];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), upstream.recv_from(&mut bytes))
+            .await
+            .is_err()
+    );
+    assert_eq!(resolver.metrics().snapshot().counters["cache_hits"], 1);
+}

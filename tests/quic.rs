@@ -775,3 +775,80 @@ async fn doq_and_h3_source_connection_cap_is_independent_and_reclaimed() {
         client.close(0u32.into(), b"done");
     }
 }
+
+/// A spoofed source never completes address validation: its Initial gets a
+/// stateless Retry and holds neither the global connection slot nor the
+/// per-source budget, so a validating client still connects at capacity one.
+#[tokio::test]
+async fn unvalidated_initials_take_no_connection_slot_or_source_budget() {
+    for protocol in [Protocol::Doq, Protocol::H3] {
+        let fixture = Fixture::with_limits(
+            protocol,
+            false,
+            parins::limits::Settings {
+                enabled: true,
+                max_connections: 1,
+                ..Default::default()
+            },
+            1,
+        )
+        .await;
+        // Capture a genuine client Initial at a socket that never answers.
+        let capture = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let capturer = fixture.client(protocol);
+        let _pending = capturer
+            .connect(capture.local_addr().unwrap(), "localhost")
+            .unwrap();
+        let mut initial = vec![0; 2048];
+        let (length, _) = timeout(Duration::from_secs(1), capture.recv_from(&mut initial))
+            .await
+            .unwrap()
+            .unwrap();
+        initial.truncate(length);
+        capturer.close(0u32.into(), b"captured");
+        // Replay it from an address that ignores the server's Retry.
+        capture.send_to(&initial, fixture.address).await.unwrap();
+        let name = |event: &str| {
+            format!(
+                "quic_{}_{event}",
+                match protocol {
+                    Protocol::Doq => "doq",
+                    Protocol::H3 => "doh3",
+                }
+            )
+        };
+        let counter = |event: &str| fixture.resolver.metrics().snapshot().counters[&name(event)];
+        // A Retry leaves no counter; give the endpoint time to answer it.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(counter("incoming"), 0);
+        assert_eq!(fixture.connections.available_permits(), 1);
+        assert!(
+            fixture
+                .source_limits
+                .try_connection(fixture.address.ip())
+                .is_ok()
+        );
+        let client = fixture.client(protocol);
+        let connection = timeout(
+            Duration::from_secs(2),
+            client.connect(fixture.address, "localhost").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The validating client was retried too, then admitted once.
+        assert_eq!(counter("incoming"), 1);
+        timeout(Duration::from_secs(1), async {
+            while counter("handshake_established") == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(counter("admission_global_rejected"), 0);
+        assert_eq!(counter("admission_source_rejected"), 0);
+        connection.close(0u32.into(), b"done");
+        fixture.close().await;
+        client.close(0u32.into(), b"done");
+    }
+}

@@ -167,6 +167,24 @@ async fn oversized_headers_and_idle_clients_cannot_hold_shutdown() {
     );
 }
 
+/// Health probes keep answering while DNS connections hold the shared limit.
+#[tokio::test]
+async fn health_has_its_own_budget_when_dns_connections_are_exhausted() {
+    let server = Server::start().await;
+    let held = server
+        .ingress
+        .connections
+        .clone()
+        .acquire_many_owned(4)
+        .await;
+    let health = server
+        .request(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await;
+    assert!(health.starts_with("HTTP/1.1 200 OK\r\n"));
+    drop(held);
+    server.finish().await;
+}
+
 #[tokio::test]
 async fn wildcard_admin_binding_is_rejected_before_accepting_requests() {
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();

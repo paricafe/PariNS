@@ -53,6 +53,16 @@ fn client(config: &Config) -> anyhow::Result<Arc<Pool>> {
     Pool::new(&config.upstreams, config).map(Arc::new)
 }
 
+/// The resolver's call with the example configuration's 2-second query timeout.
+async fn exchange(pool: &Pool, query: &Message) -> anyhow::Result<parins::upstreams::Exchange> {
+    pool.exchange_observed(
+        query,
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        &parins::upstreams::diagnostics::Operation::new(false, None),
+    )
+    .await
+}
+
 fn verify_forwarded(mut received: Message, expected: &Message) -> Message {
     let id = received.id;
     received.metadata.id = expected.id;
@@ -108,7 +118,7 @@ async fn weighted_distribution_and_udp_preserve_edns() {
     ))
     .unwrap();
     for _ in 0..40 {
-        assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+        assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
     }
     assert_eq!(ta.await.unwrap(), 30);
     assert_eq!(tb.await.unwrap(), 10);
@@ -130,7 +140,7 @@ async fn tcp_preserves_edns() {
         );
         write(&mut stream, &response.to_vec().unwrap()).await;
     });
-    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
     task.await.unwrap();
 }
 
@@ -146,7 +156,7 @@ async fn parallel_servfail_cannot_win_and_loser_is_cancelled() {
         .collect();
     let winner = sockets[1].local_addr().unwrap();
     let client = client(&config(servers, Mode::Parallel)).unwrap();
-    let task = tokio::spawn(async move { client.exchange(&query()).await.unwrap() });
+    let task = tokio::spawn(async move { exchange(&client, &query()).await.unwrap() });
     let mut loser = None;
     for (i, socket) in sockets.iter().enumerate() {
         let mut bytes = [0; 65535];
@@ -287,9 +297,7 @@ async fn dot_authenticated_and_edns_preserved() {
         write(&mut stream, &response.to_vec().unwrap()).await;
     });
     assert_eq!(
-        client(&config)
-            .unwrap()
-            .exchange(&query())
+        exchange(&client(&config).unwrap(), &query())
             .await
             .unwrap()
             .message
@@ -338,9 +346,7 @@ async fn doh_authenticated_and_edns_preserved() {
         while connection.accept().await.is_some() {}
     });
     assert_eq!(
-        client(&config)
-            .unwrap()
-            .exchange(&query())
+        exchange(&client(&config).unwrap(), &query())
             .await
             .unwrap()
             .message
@@ -384,7 +390,7 @@ async fn doq_authenticated_preserves_edns_except_prohibited_keepalive() {
         .options_mut()
         .insert(EdnsOption::Unknown(11, Vec::new()));
     let client = client(&config).unwrap();
-    let (first, second) = tokio::join!(client.exchange(&q), client.exchange(&q));
+    let (first, second) = tokio::join!(exchange(&client, &q), exchange(&client, &q));
     assert_eq!(first.unwrap().message.id, 123);
     assert_eq!(second.unwrap().message.id, 123);
     drop(client);
@@ -421,9 +427,7 @@ async fn bootstrap_resolved_self_loop_is_rejected_before_dns_send() {
             .unwrap();
     });
     assert!(
-        client(&config)
-            .unwrap()
-            .exchange(&query())
+        exchange(&client(&config).unwrap(), &query())
             .await
             .unwrap_err()
             .to_string()
@@ -521,7 +525,7 @@ async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
     });
     let client = client(&config).unwrap();
     for _ in 0..2 {
-        client.exchange(&query()).await.unwrap();
+        exchange(&client, &query()).await.unwrap();
     }
     task.await.unwrap();
     assert_eq!(upstream.await.unwrap(), 2);
@@ -554,7 +558,7 @@ async fn parallel_extra_budget_is_released_when_caller_cancels() {
     let client = client(&config).unwrap();
     for _ in 0..2 {
         let clone = client.clone();
-        let task = tokio::spawn(async move { clone.exchange(&query()).await });
+        let task = tokio::spawn(async move { exchange(&clone, &query()).await });
         let (_, pa) = timeout(Duration::from_secs(2), a.recv_from(&mut [0; 65535]))
             .await
             .unwrap()
@@ -587,7 +591,7 @@ async fn parallel_refused_formerr_notimp_wait_for_valid_answer() {
             Mode::Parallel,
         );
         let client = client(&config).unwrap();
-        let task = tokio::spawn(async move { client.exchange(&query()).await.unwrap() });
+        let task = tokio::spawn(async move { exchange(&client, &query()).await.unwrap() });
         let mut bytes = [0; 65535];
         let (n, peer) = a.recv_from(&mut bytes).await.unwrap();
         let mut response = verify_forwarded(Message::from_vec(&bytes[..n]).unwrap(), &query());
@@ -646,7 +650,7 @@ async fn doh_rejects_redirect_wrong_content_type_and_oversize_body() {
         });
         let result = timeout(
             Duration::from_secs(2),
-            client(&config).unwrap().exchange(&query()),
+            exchange(&client(&config).unwrap(), &query()),
         )
         .await
         .unwrap();
@@ -840,9 +844,9 @@ async fn h3_preferred_reuses_connection_concurrently_preserves_edns_and_closes_o
     let client = client(&config).unwrap();
     let q = query();
     let (a, b, c) = tokio::join!(
-        client.exchange(&q),
-        client.exchange(&q),
-        client.exchange(&q)
+        exchange(&client, &q),
+        exchange(&client, &q),
+        exchange(&client, &q)
     );
     for response in [a, b, c] {
         assert_eq!(response.unwrap().message.id, 123);
@@ -959,7 +963,7 @@ async fn dot_slot_wait_and_h3_connecting_wait_consume_original_deadline() {
         std::future::pending::<()>().await;
     });
     let first_client = client.clone();
-    let first = tokio::spawn(async move { first_client.exchange(&query()).await });
+    let first = tokio::spawn(async move { exchange(&first_client, &query()).await });
     ready_rx.await.unwrap();
     let operation = Operation::new(true, None);
     let start = tokio::time::Instant::now();
@@ -987,7 +991,7 @@ async fn dot_slot_wait_and_h3_connecting_wait_consume_original_deadline() {
     config.upstreams.prefer_h3 = true;
     let client = Pool::new(&config.upstreams, &config).map(Arc::new).unwrap();
     let first_client = client.clone();
-    let first = tokio::spawn(async move { first_client.exchange(&query()).await });
+    let first = tokio::spawn(async move { exchange(&first_client, &query()).await });
     silent.recv_from(&mut [0; 65535]).await.unwrap();
     let operation = Operation::new(true, None);
     let start = tokio::time::Instant::now();
@@ -1017,7 +1021,7 @@ async fn h3_preference_off_uses_h2_without_quic_packets() {
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
     config.upstreams.ca_file = Some(ca);
     let server = tokio::spawn(serve_h2(listener, tls, 1));
-    client(&config).unwrap().exchange(&query()).await.unwrap();
+    exchange(&client(&config).unwrap(), &query()).await.unwrap();
     assert!(
         timeout(Duration::from_millis(20), udp.recv_from(&mut [0; 1500]))
             .await
@@ -1075,9 +1079,12 @@ async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
     tcp_server.await.unwrap();
 }
 
+/// A sent H3 request that fails (bad status, invalid answer, stream reset) is
+/// this query's upstream failure: it is never resent over H2. The cooldown then
+/// moves the next query to H2 without trying H3.
 #[tokio::test]
-async fn h3_invalid_response_falls_back_to_verified_h2() {
-    use parins::upstreams::diagnostics::{Operation, Outcome, Reason};
+async fn h3_failure_after_sending_is_not_resent_and_cools_down_to_h2() {
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome, Reason};
     // Case 8 (a slow answer) stays on H3; see h3_slow_answer_completes_on_h3.
     for case in (1..=9).filter(|case| *case != 8) {
         let (_dir, ca, tls) = identity(b"h3");
@@ -1092,27 +1099,33 @@ async fn h3_invalid_response_falls_back_to_verified_h2() {
         settings.ca_file = Some(ca);
         settings.prefer_h3 = true;
         let client = client(&config).unwrap();
-        let operation = Operation::new(true, None);
-        assert_eq!(
+        let q = query();
+        let exchange = |operation| {
             timeout(
                 Duration::from_secs(2),
                 client.exchange_observed(
-                    &query(),
+                    &q,
                     tokio::time::Instant::now() + Duration::from_secs(1),
-                    &operation
-                )
+                    operation,
+                ),
             )
-            .await
-            .unwrap()
-            .unwrap()
-            .message
-            .id,
+        };
+        let failed = Operation::new(true, None);
+        assert!(exchange(&failed).await.unwrap().is_err(), "case {case}");
+        let trace = failed.trace().unwrap();
+        assert_eq!(trace.attempts.len(), 1, "case {case}: no H2 resend");
+        assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+        assert_eq!(trace.attempts[0].outcome, Outcome::Failed);
+        let cooled = Operation::new(true, None);
+        assert_eq!(
+            exchange(&cooled).await.unwrap().unwrap().message.id,
             123,
             "case {case}"
         );
-        let trace = operation.trace().unwrap();
-        assert_eq!(trace.attempts.len(), 2);
-        assert_eq!(trace.attempts[1].outcome, Outcome::Succeeded);
+        let next = cooled.trace().unwrap();
+        assert_eq!(next.attempts[0].outcome, Outcome::Skipped);
+        assert_eq!(next.attempts[1].protocol, Some(ActualProtocol::Doh2));
+        assert_eq!(next.attempts[1].outcome, Outcome::Succeeded);
         match case {
             1 => {
                 assert_eq!(trace.attempts[0].reason, Some(Reason::HttpStatus));
@@ -1152,8 +1165,7 @@ async fn h3_valid_dns_failure_is_not_a_transport_failure() {
     let client = client(&config).unwrap();
     for _ in 0..2 {
         assert_eq!(
-            client
-                .exchange(&query())
+            exchange(&client, &query())
                 .await
                 .unwrap()
                 .message
@@ -1239,14 +1251,14 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
     });
     let client = client(&config).unwrap();
     let clone = client.clone();
-    let stalled = tokio::spawn(async move { clone.exchange(&query()).await });
+    let stalled = tokio::spawn(async move { exchange(&clone, &query()).await });
     timeout(Duration::from_secs(2), ready)
         .await
         .unwrap()
         .unwrap();
     stalled.abort();
     assert!(stalled.await.unwrap_err().is_cancelled());
-    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
     drop(client);
     timeout(Duration::from_secs(2), server)
         .await
@@ -1447,13 +1459,10 @@ async fn doh_age_normalizes_downstream_ttls_and_cache_lifetime_for_h2_and_h3() {
                 }
                 let cache = Cache::new(config.cache.clone());
                 let now = Instant::now();
-                cache.insert(&query, &response, Scope::NoEcs, now);
-                assert_eq!(cache.get(&query, None, now).is_some(), remaining != 0);
-                assert!(
-                    cache
-                        .get(&query, None, now + Duration::from_secs(remaining.into()))
-                        .is_none()
-                );
+                cache.insert_decision_if_epoch(&query, &response, Scope::NoEcs, now, cache.epoch());
+                let hit = |at| cache.lookup_with_decision(&query, None, at, false).hit;
+                assert_eq!(hit(now).is_some(), remaining != 0);
+                assert!(hit(now + Duration::from_secs(remaining.into())).is_none());
                 if age == Some("600") {
                     resolver
                         .resolve(&query.to_vec().unwrap(), "127.0.0.1".parse().unwrap())
@@ -1557,13 +1566,13 @@ async fn doq_rotation(cancel_old: bool) {
     });
     let client = client(&config).unwrap();
     let clone = client.clone();
-    let old_request = tokio::spawn(async move { clone.exchange(&query()).await });
+    let old_request = tokio::spawn(async move { exchange(&clone, &query()).await });
     timeout(Duration::from_secs(2), ready)
         .await
         .unwrap()
         .unwrap();
     rotated.store(true, Ordering::SeqCst);
-    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
     release.send(()).unwrap();
     acknowledged.await.unwrap();
     if cancel_old {
@@ -1683,7 +1692,7 @@ async fn h2_goaway_moves_new_queries_to_a_new_connection_without_replay() {
     let server = tokio::spawn(serve_h2_with(listener, tls, 3, 1, false));
     let client = client(&config).unwrap();
     for _ in 0..3 {
-        assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+        assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
         // Let the GOAWAY arrive before the next query, as it would between queries in production.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -1708,13 +1717,13 @@ async fn h2_caller_cancellation_resets_one_stream_and_keeps_the_connection() {
     // The first request is held unanswered; the caller gives up on it.
     let server = tokio::spawn(serve_h2_with(listener, tls, 2, usize::MAX, true));
     let client = client(&config).unwrap();
-    let stalled = timeout(Duration::from_millis(200), client.exchange(&query())).await;
+    let stalled = timeout(Duration::from_millis(200), exchange(&client, &query())).await;
     assert!(
         stalled.is_err(),
         "the stalled query is cancelled by its caller"
     );
-    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
-    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
+    assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
     assert_eq!(
         timeout(Duration::from_secs(2), server)
             .await
@@ -1737,26 +1746,25 @@ async fn h3_definite_refusal_stops_h3_for_the_pool_generation() {
     let mut h2_tls = (*tls).clone();
     h2_tls.alpn_protocols = vec![b"h2".to_vec()];
     let quic_server = tokio::spawn(serve_h3(endpoint, 11));
-    let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 2));
+    let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 1));
     let client = client(&config).unwrap();
     let deadline = || tokio::time::Instant::now() + Duration::from_secs(2);
+    // The refused request was sent: it fails without an H2 resend.
     let first = Operation::new(true, None);
-    assert_eq!(
+    assert!(
         client
             .exchange_observed(&query(), deadline(), &first)
             .await
-            .unwrap()
-            .message
-            .id,
-        123
+            .is_err()
     );
     let trace = first.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 1);
     assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
     assert_eq!(
         (trace.attempts[0].reason, trace.attempts[0].code),
         (Some(Reason::HttpStatus), Some(405))
     );
-    assert_eq!(trace.attempts[1].outcome, Outcome::Succeeded);
+    assert_eq!(trace.attempts[0].outcome, Outcome::Failed);
     let second = Operation::new(true, None);
     assert_eq!(
         client
@@ -1802,9 +1810,9 @@ async fn h2_concurrent_first_queries_share_one_connect() {
     let client = client(&config).unwrap();
     let q = query();
     let (a, b, c) = tokio::join!(
-        client.exchange(&q),
-        client.exchange(&q),
-        client.exchange(&q)
+        exchange(&client, &q),
+        exchange(&client, &q),
+        exchange(&client, &q)
     );
     for response in [a, b, c] {
         assert_eq!(response.unwrap().message.id, 123);
@@ -1877,11 +1885,11 @@ async fn h2_silently_dead_connection_is_retired_by_keepalive() {
         }
     });
     let client = client(&config).unwrap();
-    assert_eq!(client.exchange(&query()).await.unwrap().message.id, 123);
+    assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
     dead.store(true, std::sync::atomic::Ordering::SeqCst);
     // The next query rides the dead connection and is lost to its caller's deadline.
     assert!(
-        timeout(Duration::from_millis(300), client.exchange(&query()))
+        timeout(Duration::from_millis(300), exchange(&client, &query()))
             .await
             .is_err()
     );
@@ -1890,7 +1898,7 @@ async fn h2_silently_dead_connection_is_retired_by_keepalive() {
     // Restore the path: had the old connection survived, it would be reused here.
     dead.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        timeout(Duration::from_secs(2), client.exchange(&query()))
+        timeout(Duration::from_secs(2), exchange(&client, &query()))
             .await
             .unwrap()
             .unwrap()
@@ -2055,4 +2063,83 @@ async fn h3_silently_dead_path_closes_within_the_idle_timeout() {
         1
     );
     relay_task.abort();
+}
+
+/// A hostname endpoint moves to its next bootstrap address only when nothing
+/// was sent to the previous one; a query that reached an address is never
+/// resent to another.
+#[tokio::test]
+async fn hostname_upstream_tries_next_address_only_when_nothing_was_sent() {
+    use hickory_proto::rr::{
+        RData, Record,
+        rdata::{A, AAAA},
+    };
+    let bootstrap = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let bootstrap_address = bootstrap.local_addr().unwrap();
+    let resolver = tokio::spawn(async move {
+        let mut bytes = [0; 512];
+        loop {
+            let (n, peer) = bootstrap.recv_from(&mut bytes).await.unwrap();
+            let mut message = Message::from_vec(&bytes[..n]).unwrap();
+            message.metadata.message_type = MessageType::Response;
+            let name = message.queries[0].name().clone();
+            message.add_answer(Record::from_rdata(
+                name,
+                60,
+                match message.queries[0].query_type() {
+                    RecordType::A => RData::A(A::new(127, 0, 0, 1)),
+                    _ => RData::AAAA(AAAA::new(0, 0, 0, 0, 0, 0, 0, 1)),
+                },
+            ));
+            bootstrap
+                .send_to(&message.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+    });
+    let pool = |port: u16| {
+        let mut config = config(vec![format!("tcp://resolver.test:{port}")], Mode::Weighted);
+        config.upstreams.bootstrap = vec![bootstrap_address];
+        client(&config).unwrap()
+    };
+
+    // 127.0.0.1 refuses the connection, so ::1 carries the query.
+    let second = TcpListener::bind("[::1]:0").await.unwrap();
+    let port = second.local_addr().unwrap().port();
+    let answered = tokio::spawn(async move {
+        let (mut stream, _) = second.accept().await.unwrap();
+        let response = verify_forwarded(
+            Message::from_vec(&read(&mut stream).await).unwrap(),
+            &query(),
+        );
+        write(&mut stream, &response.to_vec().unwrap()).await;
+    });
+    assert_eq!(
+        exchange(&pool(port), &query()).await.unwrap().message.id,
+        123
+    );
+    answered.await.unwrap();
+
+    // 127.0.0.1 receives the query and closes unanswered: ::1 never sees it.
+    let (first, second) = loop {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = first.local_addr().unwrap().port();
+        if let Ok(second) = TcpListener::bind(("::1", port)).await {
+            break (first, second);
+        }
+    };
+    let port = first.local_addr().unwrap().port();
+    let dropped = tokio::spawn(async move {
+        let (mut stream, _) = first.accept().await.unwrap();
+        read(&mut stream).await;
+    });
+    assert!(exchange(&pool(port), &query()).await.is_err());
+    dropped.await.unwrap();
+    assert!(
+        timeout(Duration::from_millis(100), second.accept())
+            .await
+            .is_err(),
+        "a sent query must not move to the next address"
+    );
+    resolver.abort();
 }

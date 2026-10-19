@@ -126,11 +126,12 @@ fn positive(query: &Message, ttl: u32, value: u8) -> Message {
 }
 
 fn fill(resolver: &Resolver, query: &Message, age: u64) {
-    resolver.cache().insert(
+    resolver.cache().insert_decision_if_epoch(
         query,
         &positive(query, 60, 1),
         Scope::NoEcs,
         Instant::now() - Duration::from_secs(age),
+        resolver.cache().epoch(),
     );
 }
 
@@ -277,11 +278,12 @@ async fn negative_and_other_ecs_namespaces_never_supply_stale() {
             1,
         )),
     ));
-    resolver.cache().insert(
+    resolver.cache().insert_decision_if_epoch(
         &query,
         &negative,
         Scope::NoEcs,
         Instant::now() - Duration::from_secs(2),
+        resolver.cache().epoch(),
     );
     assert_eq!(
         resolve(&resolver, &query).await.response_code,
@@ -298,11 +300,12 @@ async fn negative_and_other_ecs_namespaces_never_supply_stale() {
     let (outbound, context) =
         Context::prepare(&query, "192.0.2.1".parse().unwrap(), &config.ecs).unwrap();
     let answer = positive(&outbound, 60, 1);
-    resolver.cache().insert(
+    resolver.cache().insert_decision_if_epoch(
         &query,
         &answer,
         context.response_scope(&answer).cache.unwrap(),
         Instant::now() - Duration::from_secs(61),
+        resolver.cache().epoch(),
     );
     upstream.mode.store(4, SeqCst);
     assert_eq!(
@@ -393,7 +396,13 @@ async fn prefetch_rate_limit_and_cache_replacement_cancel_old_work() {
     resolver.replace_cache(config.cache.clone());
     assert!(!Arc::ptr_eq(&old, &resolver.cache()));
     assert_eq!(resolver.refresh_snapshot().scheduled, 0);
-    assert!(resolver.cache().get(&first, None, Instant::now()).is_none());
+    assert!(
+        resolver
+            .cache()
+            .lookup_with_decision(&first, None, Instant::now(), false)
+            .hit
+            .is_none()
+    );
     resolver.shutdown_refresh().await;
 }
 
@@ -470,11 +479,12 @@ async fn prefetch_keys_keep_ecs_namespaces_separate() {
         let (outbound, context) =
             Context::prepare(&query, peer.parse().unwrap(), &config.ecs).unwrap();
         let answer = positive(&outbound, 60, 1);
-        resolver.cache().insert(
+        resolver.cache().insert_decision_if_epoch(
             &query,
             &answer,
             context.response_scope(&answer).cache.unwrap(),
             Instant::now() - Duration::from_secs(59),
+            resolver.cache().epoch(),
         );
         for _ in 0..3 {
             let response = resolver
@@ -519,11 +529,12 @@ async fn foreground_shares_pending_prefetch_across_expiry_and_falls_back_per_cal
         config.cache.stale.enabled = true;
         let resolver = Arc::new(Resolver::from_config(&config));
         let query = query("expiry-race.test.");
-        resolver.cache().insert(
+        resolver.cache().insert_decision_if_epoch(
             &query,
             &positive(&query, 2, 1),
             Scope::NoEcs,
             Instant::now() - Duration::from_millis(1600),
+            resolver.cache().epoch(),
         );
         assert_eq!(
             resolve(&resolver, &query).await.answers[0].data,

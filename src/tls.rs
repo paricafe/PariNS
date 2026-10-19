@@ -26,7 +26,7 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::{ingress::Ingress, metrics::Counter, protocol, transport::tcp};
+use crate::{ingress::Ingress, metrics::Counter, protocol, transport::tcp, upstreams::not_sent};
 
 mod pool;
 pub use pool::PoolSettings;
@@ -238,10 +238,14 @@ impl Upstream {
             }
         };
         let result = async {
+            // A failed connect sent nothing, so the caller may try another address.
             let Some(pool) = &self.pool else {
                 mark(&mut attempt, ConnectionUse::New);
                 return transaction(
-                    &mut self.connect(address, &mut attempt).await?,
+                    &mut self
+                        .connect(address, &mut attempt)
+                        .await
+                        .map_err(not_sent)?,
                     query,
                     &mut attempt,
                 )
@@ -265,13 +269,19 @@ impl Upstream {
             );
             let mut stream = match cached {
                 Some(idle) => idle.stream,
-                None => self.connect(address, &mut attempt).await?,
+                None => self
+                    .connect(address, &mut attempt)
+                    .await
+                    .map_err(not_sent)?,
             };
             let response = match transaction(&mut stream, query, &mut attempt).await {
                 Ok(response) => response,
                 Err(error) if reused && closed_connection(&error) => {
-                    // A server may close an idle connection at any time. Retry only
-                    // this transport closure, once, within the original query budget.
+                    // The one exception to "a sent query is never resent": a server
+                    // may close an idle connection at any time, and a query written
+                    // into a closed connection was never processed. Retry only this
+                    // transport closure (`closed_connection`), once, on a new
+                    // connection within the original query budget.
                     drop(stream);
                     if let Some(attempt) = &mut attempt {
                         attempt.finish(&Err::<(), _>(error));
@@ -388,7 +398,7 @@ pub async fn serve(
             joined = tasks.join_next(), if !tasks.is_empty() => {
                 if let Some(Err(error)) = joined { break Err(error.into()); }
             }
-            accepted = listener.accept() => {
+            accepted = crate::transport::accept::accept(&listener) => {
                 let (stream, peer) = match accepted {
                     Ok(value) => value,
                     Err(error) => break Err(error.into()),

@@ -218,6 +218,64 @@ async fn real_h2_tls_get_post_errors_and_shutdown() {
         .unwrap();
 }
 
+/// Alt-Svc names the HTTP/3 port only while that listener serves.
+#[tokio::test]
+async fn alt_svc_follows_the_http3_listener_state() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = watch::channel(false);
+    let ingress = Ingress {
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
+        resolver: Arc::new(common::resolver(
+            "127.0.0.1:9".parse().unwrap(),
+            Duration::from_millis(100),
+        )),
+        queries: Arc::new(Semaphore::new(1)),
+        connections: Arc::new(Semaphore::new(1)),
+        stop: stopped,
+        io_timeout: Duration::from_secs(2),
+        shutdown_grace: Duration::from_millis(150),
+        max_streams: 2,
+    };
+    let serving = Arc::new(AtomicBool::new(true));
+    let state = serving.clone();
+    let h3_port: doh::H3Port = Arc::new(move || state.load(SeqCst).then_some(8443));
+    let (server_tls, client_tls) = certificates();
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress, Some(h3_port)));
+    let tls = TlsConnector::from(client_tls)
+        .connect(
+            "localhost".try_into().unwrap(),
+            TcpStream::connect(address).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let (mut client, connection) = h2::client::handshake(tls).await.unwrap();
+    let driver = tokio::spawn(connection);
+    for (up, expected) in [(true, "h3=\":8443\"; ma=300"), (false, "clear")] {
+        serving.store(up, SeqCst);
+        let request = http::Request::builder()
+            .uri("https://localhost/other")
+            .body(())
+            .unwrap();
+        let (response, _) = client.send_request(request, true).unwrap();
+        let response = timeout(Duration::from_secs(2), response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), 404);
+        assert_eq!(response.headers()["alt-svc"], expected);
+    }
+    stop.send(true).unwrap();
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(client);
+    let _ = timeout(Duration::from_secs(2), driver).await;
+}
+
 #[tokio::test]
 async fn incomplete_body_expires_and_shutdown_releases_admission() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

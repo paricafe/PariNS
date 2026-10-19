@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use parins::config::Config;
 
 fn main() -> Result<()> {
+    raise_open_file_limit();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -12,6 +13,19 @@ fn main() -> Result<()> {
     // Tokio's default unbounded destructor defeat the terminal IO budget.
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     result
+}
+
+/// Every TCP, DoT, DoH or QUIC client connection and upstream socket holds a
+/// descriptor, and the usual soft limit (1024) is far below the configurable
+/// connection bounds. Raise the soft limit to the hard limit the administrator or
+/// systemd set; a platform that refuses keeps its soft limit.
+fn raise_open_file_limit() {
+    use rustix::process::{Resource, getrlimit, setrlimit};
+    let mut limit = getrlimit(Resource::Nofile);
+    if limit.maximum.is_some() && limit.current < limit.maximum {
+        limit.current = limit.maximum;
+        let _ = setrlimit(Resource::Nofile, limit);
+    }
 }
 
 async fn run() -> Result<()> {

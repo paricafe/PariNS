@@ -65,11 +65,12 @@ fn validated(query: &Message, target: Option<&str>) -> Message {
 }
 
 async fn answer(resolver: &Resolver, query: &Message, target: Option<&str>) -> Message {
-    resolver.cache().insert(
+    resolver.cache().insert_decision_if_epoch(
         query,
         &validated(query, target),
         Scope::NoEcs,
         Instant::now(),
+        resolver.cache().epoch(),
     );
     resolver
         .resolve(&query.to_vec().unwrap(), "192.0.2.10".parse().unwrap())

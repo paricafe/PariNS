@@ -17,6 +17,12 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use crate::{ingress::Ingress, metrics::Counter, resolver::ForcedShutdown};
 
 pub const PATH: &str = "/dns-query";
+
+/// The DoH HTTP/3 port while that listener is serving, `None` while it is not
+/// (for example while it retries a bind). Each HTTP/2 response asks, so Alt-Svc
+/// never sends clients to an HTTP/3 endpoint that is down.
+pub type H3Port = Arc<dyn Fn() -> Option<u16> + Send + Sync>;
+
 pub(crate) fn alt_svc(port: Option<u16>) -> String {
     port.map_or_else(|| "clear".into(), |port| format!("h3=\":{port}\"; ma=300"))
 }
@@ -72,7 +78,7 @@ pub async fn serve(
     listener: TcpListener,
     tls: Arc<rustls::ServerConfig>,
     ingress: Ingress,
-    h3_port: Option<u16>,
+    h3_port: Option<H3Port>,
 ) -> anyhow::Result<()> {
     let mut stop = ingress.stop.clone();
     let mut connections = JoinSet::new();
@@ -86,7 +92,7 @@ pub async fn serve(
             joined = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = joined { break Err(error.into()); }
             },
-            accepted = listener.accept() => {
+            accepted = crate::transport::accept::accept(&listener) => {
                 let (socket, peer) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error.into()),
@@ -101,6 +107,7 @@ pub async fn serve(
                 };
                 let acceptor = acceptor.clone();
                 let ingress = ingress.clone();
+                let h3_port = h3_port.clone();
                 connections.spawn(async move {
                     let _permit = permit;
                     let _source = source;
@@ -129,7 +136,7 @@ async fn connection(
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     peer: IpAddr,
     ingress: Ingress,
-    h3_port: Option<u16>,
+    h3_port: Option<H3Port>,
 ) -> anyhow::Result<()> {
     let mut builder = h2::server::Builder::new();
     builder
@@ -183,6 +190,7 @@ async fn connection(
                     continue
                 };
                 let ingress = ingress.clone();
+                let h3_port = h3_port.clone();
                 requests.spawn(async move {
                     let _permit = permit;
                     // One total deadline includes body collection, resolution and response flow control.
@@ -207,7 +215,7 @@ async fn request_task(
     mut respond: SendResponse<Bytes>,
     peer: IpAddr,
     ingress: Ingress,
-    h3_port: Option<u16>,
+    h3_port: Option<H3Port>,
 ) -> anyhow::Result<()> {
     let (parts, mut stream) = request.into_parts();
     // Biased: a query received in full before the stop is still answered.
@@ -260,12 +268,12 @@ async fn send(
     respond: &mut SendResponse<Bytes>,
     status: u16,
     bytes: Vec<u8>,
-    h3_port: Option<u16>,
+    h3_port: Option<H3Port>,
 ) -> anyhow::Result<()> {
     let mut builder = Response::builder()
         .status(status)
         .header("cache-control", "no-store")
-        .header("alt-svc", alt_svc(h3_port));
+        .header("alt-svc", alt_svc(h3_port.and_then(|port| port())));
     if status == 200 {
         builder = builder.header("content-type", "application/dns-message");
     }

@@ -45,6 +45,7 @@ const NAMES: &[&str] = &[
 
 #[derive(Clone, Copy)]
 pub enum Event {
+    /// A client connection whose address is validated (after a Retry if needed).
     Incoming,
     AdmissionGlobalRejected,
     AdmissionSourceRejected,

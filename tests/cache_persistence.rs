@@ -31,7 +31,7 @@ fn filled() -> (Cache, Message, Instant) {
         RData::A(A::new(192, 0, 2, 1)),
     ));
     let now = Instant::now();
-    cache.insert(&query, &answer, Scope::NoEcs, now);
+    cache.insert_decision_if_epoch(&query, &answer, Scope::NoEcs, now, cache.epoch());
     (cache, query, now)
 }
 

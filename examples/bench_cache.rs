@@ -25,12 +25,21 @@ impl SharedCache {
     fn new() -> Self {
         Self(Cache::new(benchmark_config()))
     }
+    // The resolver's calls, including their decision diagnostics.
     fn insert(&self, fixture: &Fixture, now: Instant) {
-        self.0
-            .insert(&fixture.query, &fixture.response, fixture.scope, now);
+        self.0.insert_decision_if_epoch(
+            &fixture.query,
+            &fixture.response,
+            fixture.scope,
+            now,
+            self.0.epoch(),
+        );
     }
     fn get(&self, fixture: &Fixture, now: Instant) -> Option<(Message, Scope)> {
-        self.0.get(&fixture.query, fixture.outgoing, now)
+        self.0
+            .lookup_with_decision(&fixture.query, fixture.outgoing, now, false)
+            .hit
+            .map(|hit| (hit.message, hit.scope))
     }
 }
 

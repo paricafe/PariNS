@@ -11,7 +11,10 @@
 //!   client network (RFC 7871), so it is echoed as scope 0, which the cache
 //!   shares within the address family. Answers never become ExactSource.
 //! - DNSSEC: Bogus data becomes SERVFAIL with Extended DNS Error 6. AD is set
-//!   only when every answer and authority record is Secure.
+//!   only when every answer record, and for a negative answer every authority
+//!   record, is Secure. A positive answer keeps in its authority section only the
+//!   NSEC/NSEC3 records and their signatures, and only for DO clients, so a
+//!   downstream validator can check a wildcard expansion.
 //! - Infrastructure caches (delegations, name servers, DNSSEC keys) belong to
 //!   the recursor and are bounded by entry counts; answers are never read from
 //!   or stored in the recursor's answer cache.
@@ -27,10 +30,10 @@ use std::{
 
 use anyhow::{Result, anyhow, ensure};
 use hickory_proto::{
-    dnssec::Proof,
+    dnssec::{Proof, rdata::DNSSECRData},
     op::{Edns, Message, MessageType, OpCode, ResponseCode},
     rr::{
-        Record, RecordType,
+        RData, Record, RecordType,
         rdata::opt::{ClientSubnet, EdnsCode, EdnsOption},
     },
 };
@@ -449,8 +452,11 @@ enum FailKind {
 }
 
 impl FailKind {
-    /// The validating recursor passes most errors on as text, so this falls back to the
-    /// message. Diagnostics only: the answer is the same SERVFAIL either way.
+    /// Typed variants are matched first. Errors that crossed the validating layer
+    /// arrive as text: the recursor's `From<RecursorError> for NetError` keeps only
+    /// `to_string()` for everything but negative answers, so their kind is
+    /// recovered from that text. Diagnostics only: the answer is the same SERVFAIL
+    /// either way.
     fn of(error: &RecursorError) -> Self {
         match error {
             RecursorError::Timeout | RecursorError::Net(NetError::Timeout) => Self::Timeout,
@@ -513,11 +519,25 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
     let answered = answers
         .iter()
         .any(|record| record.record_type() == query.queries[0].query_type());
-    // A positive answer stands on its answer records; its authority section only
-    // carries delegation NS RRsets, which are unsigned by design (validated as Bogus).
-    // A negative answer keeps its SOA and denial records, which carry its proof.
-    let authorities = if answered { Vec::new() } else { authorities };
-    let proof = validation(answers.iter().chain(&authorities));
+    // A positive answer stands on its answer records. Its authority section keeps
+    // only denial records for DO clients: a wildcard-expanded answer needs its
+    // NSEC/NSEC3 proof that no closer name exists (RFC 4035 §5.3.4, RFC 5155
+    // §8.8), which the recursor has already checked. Other authority records, such
+    // as delegation NS RRsets that are unsigned by design (validated as Bogus), are
+    // dropped and never affect the proof. A negative answer keeps its SOA and
+    // denial records, which carry its proof.
+    let (authorities, proof) = if answered {
+        let dnssec_ok = query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
+        let denials = authorities
+            .into_iter()
+            // Only validated proof travels under an AD answer.
+            .filter(|record| dnssec_ok && is_denial(record) && record.proof == Proof::Secure)
+            .collect();
+        (denials, validation(answers.iter()))
+    } else {
+        let proof = validation(answers.iter().chain(&authorities));
+        (authorities, proof)
+    };
     if proof == Some(Validation::Bogus) {
         return bogus(query, scope);
     }
@@ -535,6 +555,15 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
         },
         proof,
         scope: Some(scope),
+    }
+}
+
+/// An NSEC or NSEC3 record, or a signature over one.
+fn is_denial(record: &Record) -> bool {
+    let denial = |kind| matches!(kind, RecordType::NSEC | RecordType::NSEC3);
+    match &record.data {
+        RData::DNSSEC(DNSSECRData::RRSIG(rrsig)) => denial(rrsig.input().type_covered),
+        _ => denial(record.record_type()),
     }
 }
 
@@ -753,6 +782,78 @@ mod tests {
         assert_eq!(outcome.kind, Kind::Answered);
         assert_eq!(response.response_code, ResponseCode::NoError);
         assert!(response.authentic_data && response.authorities.is_empty());
+    }
+
+    /// A wildcard-expanded answer keeps its NSEC proof for DO clients, so a
+    /// downstream validator can check that no closer name exists.
+    #[test]
+    fn positive_answer_keeps_only_denial_proof_for_dnssec_clients() {
+        use hickory_proto::{
+            dnssec::{
+                Algorithm,
+                rdata::{NSEC, RRSIG, SigInput},
+            },
+            rr::{SerialNumber, rdata::NS},
+        };
+        let zone = Name::from_ascii("example.").unwrap();
+        let signature = |covered| {
+            let input = SigInput {
+                type_covered: covered,
+                algorithm: Algorithm::ED25519,
+                num_labels: 1,
+                original_ttl: 60,
+                sig_expiration: SerialNumber::new(2),
+                sig_inception: SerialNumber::new(1),
+                key_tag: 1,
+                signer_name: zone.clone(),
+            };
+            let mut record = Record::from_rdata(
+                Name::from_ascii("*.example.").unwrap(),
+                60,
+                RData::DNSSEC(DNSSECRData::RRSIG(RRSIG::from_sig(input, vec![0; 64]))),
+            );
+            record.proof = Proof::Secure;
+            record
+        };
+        let mut nsec = Record::from_rdata(
+            Name::from_ascii("example.").unwrap(),
+            60,
+            RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                Name::from_ascii("*.example.").unwrap(),
+                [RecordType::NS, RecordType::SOA],
+            ))),
+        );
+        nsec.proof = Proof::Secure;
+        let mut ns = Record::from_rdata(
+            Name::from_ascii("glb.example.").unwrap(),
+            300,
+            RData::NS(NS(Name::from_ascii("ns.glb.example.").unwrap())),
+        );
+        ns.proof = Proof::Bogus;
+        let denial = vec![nsec.clone(), signature(RecordType::NSEC)];
+        // An unvalidated proof record is never passed on under an AD answer.
+        let mut unproven = nsec.clone();
+        unproven.name = Name::from_ascii("other.example.").unwrap();
+        unproven.proof = Proof::Indeterminate;
+        for dnssec_ok in [true, false] {
+            let mut message = Message::query();
+            message.answers = vec![a(Proof::Secure), signature(RecordType::A)];
+            message.authorities = vec![
+                ns.clone(),
+                nsec.clone(),
+                signature(RecordType::NSEC),
+                signature(RecordType::NS),
+                unproven.clone(),
+            ];
+            let outcome = respond(&query(None, dnssec_ok), Ok(message), EcsScope::NotSent);
+            let response = outcome.response.unwrap();
+            assert_eq!(outcome.kind, Kind::Answered);
+            assert!(response.authentic_data);
+            assert_eq!(
+                response.authorities,
+                if dnssec_ok { denial.clone() } else { vec![] }
+            );
+        }
     }
 
     #[test]

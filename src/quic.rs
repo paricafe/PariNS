@@ -4,10 +4,16 @@
 //! (see `quic::lifecycle`). Server retains this cleanup across adapter cancellation,
 //! and a completed shutdown permits immediate rebinding of the same address.
 //!
+//! Admission: an Initial from an address Quinn has not validated is answered with a
+//! stateless Retry and takes no connection slot or source budget, so spoofed
+//! sources cannot hold handshakes open. Only a validated Incoming (its Retry or
+//! NEW_TOKEN token proved the address) takes the global slot and the per-source
+//! budget before the handshake starts.
+//!
 //! Shutdown: only request streams with a complete query (a DoQ stream whose FIN
 //! arrived, an HTTP/3 request whose body ended) can force a stop. Unfinished
 //! handshakes and streams still receiving their query are cancelled at once and
-//! recorded as `stream_shutdown`. Peer close notification (QUIC close, like the
+//! recorded as `handshake_shutdown` or `stream_shutdown`. Peer close notification (QUIC close, like the
 //! HTTP/2 GOAWAY acknowledgement in `doh`) uses at most half the shutdown grace, then
 //! the connection is dropped. Any force records its first bounded cause, and a
 //! terminal stop that cannot publish a clean cache snapshot logs that cause. An
@@ -116,6 +122,15 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
             _ = connections.join_next(), if !connections.is_empty() => {},
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
+                if !incoming.remote_address_validated() {
+                    // Quinn guarantees may_retry() for an unvalidated address. A
+                    // Retry is not counted: `incoming` stays one per client
+                    // connection, and the persisted counter set stays fixed.
+                    if let Err(error) = incoming.retry() {
+                        error.into_incoming().refuse();
+                    }
+                    continue;
+                }
                 ingress.resolver.metrics().quic.inc(protocol,Event::Incoming);
                 let Ok(permit) = ingress.connections.clone().try_acquire_owned() else {
                     ingress.resolver.metrics().inc(crate::metrics::Counter::ConnectionsRejected);
@@ -249,8 +264,9 @@ async fn doq_request(
         _ = send.stopped() => {guard.finish(Event::StreamPeerCancelled);return Ok(());},
     };
     *stage = 2;
+    // The shared ingress never answers with EDNS TCP keepalive: requests drop it
+    // (`protocol::request`) and the upstream pool strips it from answers.
     if let Some(mut response) = response {
-        ensure_no_keepalive(&response)?;
         response[..2].copy_from_slice(&[0, 0]);
         send.write_all(&(response.len() as u16).to_be_bytes())
             .await?;

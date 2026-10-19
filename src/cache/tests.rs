@@ -10,6 +10,30 @@ use hickory_proto::{
     },
 };
 
+/// The resolver's foreground lookup (observed, fresh entries only).
+pub(super) fn get(
+    cache: &Cache,
+    query: &Message,
+    outgoing: Option<ClientSubnet>,
+    now: Instant,
+) -> Option<(Message, Scope)> {
+    cache
+        .lookup_with_decision(query, outgoing, now, false)
+        .hit
+        .map(|hit| (hit.message, hit.scope))
+}
+
+/// The resolver's admission, checked against the current epoch.
+pub(super) fn insert(
+    cache: &Cache,
+    query: &Message,
+    response: &Message,
+    scope: Scope,
+    now: Instant,
+) {
+    cache.insert_decision_if_epoch(query, response, scope, now, cache.epoch());
+}
+
 fn query(name: &str) -> Message {
     let mut q = Message::new(10, MessageType::Query, OpCode::Query);
     q.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
@@ -42,15 +66,21 @@ fn subnets_are_independent_and_new_overlapping_scope_supersedes_old_answer() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("Example.Test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 1, 60), network("192.0.0.0/16"), now);
-    cache.insert(&q, &answer(&q, 2, 60), network("192.0.2.0/24"), now);
-    cache.insert(&q, &answer(&q, 3, 60), network("198.51.100.0/24"), now);
+    insert(&cache, &q, &answer(&q, 1, 60), network("192.0.0.0/16"), now);
+    insert(&cache, &q, &answer(&q, 2, 60), network("192.0.2.0/24"), now);
+    insert(
+        &cache,
+        &q,
+        &answer(&q, 3, 60),
+        network("198.51.100.0/24"),
+        now,
+    );
     for (subnet, expected) in [("192.0.2.0/24", 2), ("198.51.100.0/24", 3)] {
-        let (r, _) = cache.get(&q, ecs(subnet), now).unwrap();
+        let (r, _) = get(&cache, &q, ecs(subnet), now).unwrap();
         assert_eq!(r.answers[0].data, RData::A(A::new(192, 0, 2, expected)));
     }
-    assert!(cache.get(&q, ecs("203.0.113.0/24"), now).is_none());
-    assert!(cache.get(&q, ecs("192.0.3.0/24"), now).is_none());
+    assert!(get(&cache, &q, ecs("203.0.113.0/24"), now).is_none());
+    assert!(get(&cache, &q, ecs("192.0.3.0/24"), now).is_none());
     assert_eq!(cache.snapshot()["entries"], 2);
 }
 
@@ -59,21 +89,33 @@ fn no_ecs_family_and_privacy_namespaces_are_isolated() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("example.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 1, 60), network("0.0.0.0/0"), now);
-    assert!(cache.get(&q, ecs("192.0.2.0/24"), now).is_some());
-    assert!(cache.get(&q, ecs("::/0"), now).is_none());
-    assert!(cache.get(&q, ecs("0.0.0.0/0"), now).is_none());
-    assert!(cache.get(&q, None, now).is_none());
-    cache.insert(&q, &answer(&q, 2, 60), Scope::Privacy { ipv4: true }, now);
-    cache.insert(&q, &answer(&q, 3, 60), Scope::NoEcs, now);
-    cache.insert(&q, &answer(&q, 4, 60), network("2001:db8::/32"), now);
+    insert(&cache, &q, &answer(&q, 1, 60), network("0.0.0.0/0"), now);
+    assert!(get(&cache, &q, ecs("192.0.2.0/24"), now).is_some());
+    assert!(get(&cache, &q, ecs("::/0"), now).is_none());
+    assert!(get(&cache, &q, ecs("0.0.0.0/0"), now).is_none());
+    assert!(get(&cache, &q, None, now).is_none());
+    insert(
+        &cache,
+        &q,
+        &answer(&q, 2, 60),
+        Scope::Privacy { ipv4: true },
+        now,
+    );
+    insert(&cache, &q, &answer(&q, 3, 60), Scope::NoEcs, now);
+    insert(
+        &cache,
+        &q,
+        &answer(&q, 4, 60),
+        network("2001:db8::/32"),
+        now,
+    );
     for (subnet, value) in [
         (ecs("0.0.0.0/0"), 2),
         (None, 3),
         (ecs("2001:db8:1234::/56"), 4),
     ] {
         assert_eq!(
-            cache.get(&q, subnet, now).unwrap().0.answers[0].data,
+            get(&cache, &q, subnet, now).unwrap().0.answers[0].data,
             RData::A(A::new(192, 0, 2, value))
         );
     }
@@ -90,17 +132,16 @@ fn ttl_ages_all_sections_and_restores_current_question() {
         10,
         RData::A(A::new(192, 0, 2, 3)),
     ));
-    cache.insert(&q, &response, Scope::NoEcs, now);
+    insert(&cache, &q, &response, Scope::NoEcs, now);
     let mut current = query("EXAMPLE.test.");
     current.metadata.id = 200;
-    let r = cache
-        .get(&current, None, now + Duration::from_secs(3))
+    let r = get(&cache, &current, None, now + Duration::from_secs(3))
         .unwrap()
         .0;
     assert_eq!(r.id, 200);
     assert_eq!(r.queries, current.queries);
     assert_eq!((r.answers[0].ttl, r.additionals[0].ttl), (57, 7));
-    assert!(cache.get(&q, None, now + Duration::from_secs(10)).is_none());
+    assert!(get(&cache, &q, None, now + Duration::from_secs(10)).is_none());
     assert_eq!(cache.snapshot()["entries"], 0);
     assert_eq!(cache.snapshot()["bytes"], 0);
 }
@@ -112,7 +153,7 @@ fn soa_controls_nxdomain_and_nodata_lifetime() {
         let q = query("example.test.");
         let now = Instant::now();
         let mut response = protocol::error_response(&q, code);
-        cache.insert(&q, &response, Scope::NoEcs, now);
+        insert(&cache, &q, &response, Scope::NoEcs, now);
         assert_eq!(cache.snapshot()["entries"], 0);
         let soa = SOA::new(
             Name::from_ascii("ns.test.").unwrap(),
@@ -128,13 +169,15 @@ fn soa_controls_nxdomain_and_nodata_lifetime() {
             120,
             RData::SOA(soa),
         ));
-        cache.insert(&q, &response, Scope::NoEcs, now);
-        let r = cache.get(&q, None, now + Duration::from_secs(5)).unwrap().0;
+        insert(&cache, &q, &response, Scope::NoEcs, now);
+        let r = get(&cache, &q, None, now + Duration::from_secs(5))
+            .unwrap()
+            .0;
         assert_eq!(r.response_code, code);
         assert_eq!(r.authorities[0].ttl, 25);
-        assert!(cache.get(&q, None, now + Duration::from_secs(30)).is_none());
+        assert!(get(&cache, &q, None, now + Duration::from_secs(30)).is_none());
         response.authorities[0].name = Name::from_ascii("other.test.").unwrap();
-        cache.insert(&q, &response, Scope::NoEcs, now);
+        insert(&cache, &q, &response, Scope::NoEcs, now);
         assert_eq!(cache.snapshot()["entries"], 0);
     }
 }
@@ -146,19 +189,19 @@ fn error_zero_ttl_and_client_specific_edns_are_not_cached() {
     let now = Instant::now();
     for code in [ResponseCode::ServFail, ResponseCode::Refused] {
         let r = protocol::error_response(&q, code);
-        cache.insert(&q, &r, Scope::NoEcs, now);
+        insert(&cache, &q, &r, Scope::NoEcs, now);
     }
-    cache.insert(&q, &answer(&q, 1, 0), Scope::NoEcs, now);
-    cache.insert(&q, &answer(&q, 1, u32::MAX), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 0), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, u32::MAX), Scope::NoEcs, now);
     let mut q2 = q.clone();
     let mut edns = Edns::new();
     edns.options_mut()
         .insert(EdnsOption::Unknown(10, vec![1; 8])); // DNS Cookie
     q2.edns = Some(edns.clone());
-    cache.insert(&q2, &answer(&q2, 1, 60), Scope::NoEcs, now);
+    insert(&cache, &q2, &answer(&q2, 1, 60), Scope::NoEcs, now);
     let mut r = answer(&q, 1, 60);
     r.edns = Some(edns);
-    cache.insert(&q, &r, Scope::NoEcs, now);
+    insert(&cache, &q, &r, Scope::NoEcs, now);
     assert_eq!(cache.snapshot()["entries"], 0);
     assert_eq!(cache.snapshot()["bytes"], 0);
 }
@@ -168,18 +211,18 @@ fn semantic_flags_and_edns_presence_do_not_share_entries() {
     let cache = Cache::new(CacheConfig::default());
     let mut q = query("example.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 60), Scope::NoEcs, now);
     q.metadata.checking_disabled = true;
-    assert!(cache.get(&q, None, now).is_none());
+    assert!(get(&cache, &q, None, now).is_none());
     q.metadata.checking_disabled = false;
     q.metadata.recursion_desired = true;
-    assert!(cache.get(&q, None, now).is_none());
+    assert!(get(&cache, &q, None, now).is_none());
     q.metadata.recursion_desired = false;
     q.edns = Some(Edns::new());
-    assert!(cache.get(&q, None, now).is_none());
-    cache.insert(&q, &answer(&q, 2, 60), Scope::NoEcs, now);
+    assert!(get(&cache, &q, None, now).is_none());
+    insert(&cache, &q, &answer(&q, 2, 60), Scope::NoEcs, now);
     q.edns.as_mut().unwrap().set_dnssec_ok(true);
-    assert!(cache.get(&q, None, now).is_none());
+    assert!(get(&cache, &q, None, now).is_none());
 }
 
 #[test]
@@ -197,24 +240,24 @@ fn capacity_lru_variants_and_bytes_remain_bounded() {
     let b = query("b.test.");
     let c = query("c.test.");
     for q in [&a, &b] {
-        cache.insert(q, &answer(q, 1, 60), Scope::NoEcs, now);
+        insert(&cache, q, &answer(q, 1, 60), Scope::NoEcs, now);
     }
-    cache.get(&a, None, now).unwrap();
-    cache.insert(&c, &answer(&c, 1, 60), Scope::NoEcs, now);
-    assert!(cache.get(&b, None, now).is_none());
-    assert!(cache.get(&a, None, now).is_some());
+    get(&cache, &a, None, now).unwrap();
+    insert(&cache, &c, &answer(&c, 1, 60), Scope::NoEcs, now);
+    assert!(get(&cache, &b, None, now).is_none());
+    assert!(get(&cache, &a, None, now).is_some());
     for prefix in ["192.0.1.0/24", "192.0.2.0/24", "192.0.3.0/24"] {
-        cache.insert(&a, &answer(&a, 1, 60), network(prefix), now);
+        insert(&cache, &a, &answer(&a, 1, 60), network(prefix), now);
         assert!(
             cache.snapshot()["entries"].as_u64().unwrap() <= 2
                 && cache.snapshot()["bytes"].as_u64().unwrap() <= 4096
         );
     }
-    assert!(cache.get(&a, ecs("192.0.1.0/24"), now).is_none());
-    assert!(cache.get(&a, ecs("192.0.3.0/24"), now).is_some());
+    assert!(get(&cache, &a, ecs("192.0.1.0/24"), now).is_none());
+    assert!(get(&cache, &a, ecs("192.0.3.0/24"), now).is_some());
     let mut large = answer(&a, 1, 60);
     large.answers = vec![large.answers[0].clone(); 500];
-    cache.insert(&a, &large, Scope::NoEcs, now);
+    insert(&cache, &a, &large, Scope::NoEcs, now);
     assert!(cache.snapshot()["bytes"].as_u64().unwrap() <= 4096);
     let actual: usize = cache
         .shards
@@ -328,7 +371,7 @@ fn cname_negative_proves_unordered_chains_using_dns_names() {
                 decision.admitted(),
                 "{code:?}: {name}, {links:?}: {decision:?}"
             );
-            let hit = cache.get(&q, None, now).unwrap().0;
+            let hit = get(&cache, &q, None, now).unwrap().0;
             assert_eq!(hit.response_code, code);
             assert_eq!(hit.answers, response.answers);
             assert_eq!(cache.snapshot()["negative_entries"], 1);
@@ -376,7 +419,9 @@ fn cname_negative_allows_duplicate_links_and_soa_with_other_sections() {
             RData::A(A::new(192, 0, 2, 1)),
         ));
         assert!(cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
-        let hit = cache.get(&q, None, now + Duration::from_secs(5)).unwrap().0;
+        let hit = get(&cache, &q, None, now + Duration::from_secs(5))
+            .unwrap()
+            .0;
         assert!(!hit.authoritative);
         assert_eq!(hit.answers.len(), 2);
         assert_eq!((hit.answers[0].ttl, hit.answers[1].ttl), (55, 15));
@@ -386,7 +431,7 @@ fn cname_negative_allows_duplicate_links_and_soa_with_other_sections() {
         assert_eq!(hit.authorities[3].ttl, 19);
         assert_eq!(hit.authorities[4].ttl, 19);
         assert_eq!(hit.additionals[0].ttl, 17);
-        assert!(cache.get(&q, None, now + Duration::from_secs(18)).is_none());
+        assert!(get(&cache, &q, None, now + Duration::from_secs(18)).is_none());
     }
 }
 
@@ -488,7 +533,7 @@ fn cname_negative_rejects_unproved_chain_or_terminal_soa() {
                 !cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()),
                 "{code:?}: {case}"
             );
-            assert!(cache.get(&q, None, now).is_none());
+            assert!(get(&cache, &q, None, now).is_none());
         }
     }
 }
@@ -519,7 +564,7 @@ fn cname_direct_and_terminal_addresses_remain_positive() {
         response.metadata.response_code = ResponseCode::NXDomain;
         response.authorities = cname_negative_answer(&q, ResponseCode::NXDomain).authorities;
         assert!(!cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
-        assert!(cache.get(&q, None, now).is_none());
+        assert!(get(&cache, &q, None, now).is_none());
     }
 }
 
@@ -568,7 +613,9 @@ fn cname_negative_lifetime_obeys_every_existing_ttl_bound() {
                 7,
                 "{code:?}: {bound}"
             );
-            let hit = cache.get(&q, None, now + Duration::from_secs(5)).unwrap().0;
+            let hit = get(&cache, &q, None, now + Duration::from_secs(5))
+                .unwrap()
+                .0;
             assert_eq!(
                 hit.answers
                     .iter()
@@ -579,7 +626,7 @@ fn cname_negative_lifetime_obeys_every_existing_ttl_bound() {
                 Some(2),
                 "{code:?}: {bound}"
             );
-            assert!(cache.get(&q, None, now + Duration::from_secs(7)).is_none());
+            assert!(get(&cache, &q, None, now + Duration::from_secs(7)).is_none());
         }
         for ttl in [0, i32::MAX as u32 + 1] {
             for section in 0..3 {
@@ -613,13 +660,14 @@ fn cname_negative_exact_source_does_not_share_namespaces_or_question_types() {
         let cache = Cache::new(CacheConfig::default());
         let q = query("alias.source.test.");
         let now = Instant::now();
-        cache.insert(
+        insert(
+            &cache,
             &q,
             &cname_negative_answer(&q, code),
             Scope::ExactSource("192.0.2.0/24".parse().unwrap()),
             now,
         );
-        assert!(cache.get(&q, ecs("192.0.2.99/24"), now).is_some());
+        assert!(get(&cache, &q, ecs("192.0.2.99/24"), now).is_some());
         for outgoing in [
             ecs("192.0.3.0/24"),
             ecs("192.0.2.0/25"),
@@ -628,17 +676,21 @@ fn cname_negative_exact_source_does_not_share_namespaces_or_question_types() {
             ecs("::/0"),
             None,
         ] {
-            assert!(cache.get(&q, outgoing, now).is_none());
+            assert!(get(&cache, &q, outgoing, now).is_none());
         }
         for kind in [RecordType::AAAA, RecordType::CNAME] {
             let mut other = q.clone();
             other.queries[0].set_query_type(kind);
-            assert!(cache.get(&other, ecs("192.0.2.0/24"), now).is_none());
+            assert!(get(&cache, &other, ecs("192.0.2.0/24"), now).is_none());
         }
         assert!(
-            cache
-                .get(&query("missing.target.test."), ecs("192.0.2.0/24"), now)
-                .is_none()
+            get(
+                &cache,
+                &query("missing.target.test."),
+                ecs("192.0.2.0/24"),
+                now
+            )
+            .is_none()
         );
     }
 }
@@ -663,7 +715,7 @@ fn cname_negative_rejection_supersedes_old_positive_and_negative_but_not_old_epo
                 } else {
                     answer(&q, 1, 60)
                 };
-                cache.insert(&q, &old, network("192.0.0.0/16"), now);
+                insert(&cache, &q, &old, network("192.0.0.0/16"), now);
                 let mut replacement = cname_negative_answer(&q, code);
                 if cause == DecisionReason::TtlZero {
                     replacement.answers[0].ttl = 0;
@@ -678,7 +730,7 @@ fn cname_negative_rejection_supersedes_old_positive_and_negative_but_not_old_epo
                     StoreDecision::skipped(DecisionReason::EpochChanged)
                 );
                 assert_eq!(
-                    cache.get(&q, ecs("192.0.2.0/24"), now).unwrap().0.answers,
+                    get(&cache, &q, ecs("192.0.2.0/24"), now).unwrap().0.answers,
                     old.answers
                 );
                 assert_eq!(
@@ -711,7 +763,7 @@ fn empty_negative_keeps_existing_soa_selection() {
         unrelated.name = Name::from_ascii("unrelated.test.").unwrap();
         response.add_authority(unrelated);
         assert!(cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
-        assert_eq!(cache.get(&q, None, now).unwrap().0.authorities.len(), 2);
+        assert_eq!(get(&cache, &q, None, now).unwrap().0.authorities.len(), 2);
     }
 }
 
@@ -727,14 +779,14 @@ fn eviction_removes_one_variant_not_the_entire_domain() {
     let a = query("a.test.");
     let b = query("b.test.");
     let c = query("c.test.");
-    cache.insert(&a, &answer(&a, 1, 60), network("192.0.1.0/24"), now);
-    cache.insert(&a, &answer(&a, 2, 60), network("192.0.2.0/24"), now);
-    cache.insert(&b, &answer(&b, 3, 60), Scope::NoEcs, now);
-    assert!(cache.get(&a, ecs("192.0.1.0/24"), now).is_some());
-    cache.insert(&c, &answer(&c, 4, 60), Scope::NoEcs, now);
-    assert!(cache.get(&a, ecs("192.0.1.0/24"), now).is_some());
-    assert!(cache.get(&a, ecs("192.0.2.0/24"), now).is_none());
-    assert!(cache.get(&b, None, now).is_some());
+    insert(&cache, &a, &answer(&a, 1, 60), network("192.0.1.0/24"), now);
+    insert(&cache, &a, &answer(&a, 2, 60), network("192.0.2.0/24"), now);
+    insert(&cache, &b, &answer(&b, 3, 60), Scope::NoEcs, now);
+    assert!(get(&cache, &a, ecs("192.0.1.0/24"), now).is_some());
+    insert(&cache, &c, &answer(&c, 4, 60), Scope::NoEcs, now);
+    assert!(get(&cache, &a, ecs("192.0.1.0/24"), now).is_some());
+    assert!(get(&cache, &a, ecs("192.0.2.0/24"), now).is_none());
+    assert!(get(&cache, &b, None, now).is_some());
     assert_eq!(cache.snapshot()["evictions"], 1);
 }
 
@@ -748,7 +800,7 @@ fn negative_churn_cannot_evict_positive_partition() {
     });
     let now = Instant::now();
     let q = query("positive.test.");
-    cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 60), Scope::NoEcs, now);
     for i in 0..20 {
         let q = query(&format!("missing{i}.test."));
         let response = match i % 3 {
@@ -756,10 +808,10 @@ fn negative_churn_cannot_evict_positive_partition() {
             1 => cname_negative_answer(&q, ResponseCode::NoError),
             _ => cname_negative_answer(&q, ResponseCode::NXDomain),
         };
-        cache.insert(&q, &response, Scope::NoEcs, now);
-        assert!(cache.get(&q, None, now).is_some());
+        insert(&cache, &q, &response, Scope::NoEcs, now);
+        assert!(get(&cache, &q, None, now).is_some());
     }
-    assert!(cache.get(&q, None, now).is_some());
+    assert!(get(&cache, &q, None, now).is_some());
     assert_eq!(cache.snapshot()["positive_entries"], 1);
     assert_eq!(cache.snapshot()["negative_entries"], 2);
 }
@@ -775,8 +827,8 @@ fn stale_is_positive_only_bounded_and_never_a_normal_hit() {
     let cache = Cache::new(cfg);
     let now = Instant::now();
     let q = query("stale.test.");
-    cache.insert(&q, &answer(&q, 1, 10), Scope::NoEcs, now);
-    assert!(cache.get(&q, None, now + Duration::from_secs(11)).is_none());
+    insert(&cache, &q, &answer(&q, 1, 10), Scope::NoEcs, now);
+    assert!(get(&cache, &q, None, now + Duration::from_secs(11)).is_none());
     let hit = cache
         .lookup(&q, None, now + Duration::from_secs(11), true)
         .unwrap();
@@ -794,7 +846,7 @@ fn stale_is_positive_only_bounded_and_never_a_normal_hit() {
         cname_negative_answer(&q, ResponseCode::NoError),
         cname_negative_answer(&q, ResponseCode::NXDomain),
     ] {
-        cache.insert(&q, &response, Scope::NoEcs, now);
+        insert(&cache, &q, &response, Scope::NoEcs, now);
         let hit = cache
             .lookup(&q, None, now + Duration::from_secs(29), false)
             .unwrap();
@@ -817,8 +869,8 @@ fn short_specific_answer_does_not_resurrect_superseded_broad_scope() {
     let cache = Cache::new(cfg);
     let now = Instant::now();
     let q = query("fresh.test.");
-    cache.insert(&q, &answer(&q, 1, 60), network("192.0.0.0/16"), now);
-    cache.insert(&q, &answer(&q, 2, 1), network("192.0.2.0/24"), now);
+    insert(&cache, &q, &answer(&q, 1, 60), network("192.0.0.0/16"), now);
+    insert(&cache, &q, &answer(&q, 2, 1), network("192.0.2.0/24"), now);
     let hit = cache
         .lookup(&q, ecs("192.0.2.0/24"), now + Duration::from_secs(2), true)
         .unwrap();
@@ -875,12 +927,12 @@ fn deterministic_rule_precedence_and_label_boundaries() {
         ("notexample.test.", 60),
     ] {
         let q = query(name);
-        cache.insert(&q, &answer(&q, 1, 300), Scope::NoEcs, now);
-        assert_eq!(cache.get(&q, None, now).unwrap().0.answers[0].ttl, ttl);
+        insert(&cache, &q, &answer(&q, 1, 300), Scope::NoEcs, now);
+        assert_eq!(get(&cache, &q, None, now).unwrap().0.answers[0].ttl, ttl);
     }
     let q = query("skip.test.");
-    cache.insert(&q, &answer(&q, 1, 300), Scope::NoEcs, now);
-    assert!(cache.get(&q, None, now).is_none());
+    insert(&cache, &q, &answer(&q, 1, 300), Scope::NoEcs, now);
+    assert!(get(&cache, &q, None, now).is_none());
     assert_eq!(cache.explain(&q, None, now)["reason"], "rule_bypass");
 }
 
@@ -890,8 +942,8 @@ fn targeted_invalidation_blocks_old_epoch_and_keeps_unrelated_scopes() {
     let now = Instant::now();
     let q = query("clear.test.");
     let epoch = cache.epoch();
-    cache.insert(&q, &answer(&q, 1, 60), network("192.0.2.0/24"), now);
-    cache.insert(&q, &answer(&q, 2, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 60), network("192.0.2.0/24"), now);
+    insert(&cache, &q, &answer(&q, 2, 60), Scope::NoEcs, now);
     assert_eq!(
         cache.invalidate(
             Some(&name("CLEAR.test")),
@@ -901,8 +953,8 @@ fn targeted_invalidation_blocks_old_epoch_and_keeps_unrelated_scopes() {
         1
     );
     assert!(!cache.insert_if_epoch(&q, &answer(&q, 2, 60), Scope::NoEcs, now, epoch));
-    assert!(cache.get(&q, None, now).is_none());
-    assert!(cache.get(&q, ecs("192.0.2.0/24"), now).is_some());
+    assert!(get(&cache, &q, None, now).is_none());
+    assert!(get(&cache, &q, ecs("192.0.2.0/24"), now).is_some());
     assert!(cache.insert_if_epoch(&q, &answer(&q, 2, 60), Scope::NoEcs, now, cache.epoch()));
 }
 
@@ -911,7 +963,7 @@ fn outstanding_readers_remain_charged_after_invalidation() {
     let cache = Cache::new(CacheConfig::default());
     let now = Instant::now();
     let q = query("held.test.");
-    cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 60), Scope::NoEcs, now);
     let key = Key::of(&q).unwrap();
     let held = {
         let shard = cache.shards[cache.shard(&key)].lock().unwrap();
@@ -934,7 +986,7 @@ fn inspection_and_race_checks_do_not_make_an_entry_popular() {
     let cache = Cache::new(cfg);
     let now = Instant::now();
     let q = query("prefetch.test.");
-    cache.insert(&q, &answer(&q, 1, 100), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 100), Scope::NoEcs, now);
     let later = now + Duration::from_secs(95);
     for _ in 0..5 {
         assert!(!cache.peek(&q, None, later, false).unwrap().refresh);
@@ -960,8 +1012,8 @@ fn smallest_valid_cache_still_admits_a_small_positive_answer() {
     });
     let now = Instant::now();
     let q = query("a.test.");
-    cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
-    assert!(cache.get(&q, None, now).is_some());
+    insert(&cache, &q, &answer(&q, 1, 60), Scope::NoEcs, now);
+    assert!(get(&cache, &q, None, now).is_some());
     assert_eq!(cache.snapshot()["shards"], 1);
 }
 
@@ -973,7 +1025,7 @@ fn variant_ceiling_cannot_cross_partition_isolation() {
     });
     let now = Instant::now();
     let q = query("variant.test.");
-    cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 60), Scope::NoEcs, now);
     assert!(!cache.insert_if_epoch(
         &q,
         &negative_answer(&q),
@@ -981,7 +1033,7 @@ fn variant_ceiling_cannot_cross_partition_isolation() {
         now,
         cache.epoch()
     ));
-    assert!(cache.get(&q, None, now).is_some());
+    assert!(get(&cache, &q, None, now).is_some());
 }
 
 #[test]
@@ -1009,8 +1061,8 @@ fn cache_rules_use_dns_labels_and_equivalent_escaped_names() {
     let actual_child = query("foo.example.test.");
     assert_eq!(cache.explain(&actual_child, None, now)["eligible"], false);
     let exact = query("example.test.");
-    cache.insert(&exact, &answer(&exact, 1, 300), Scope::NoEcs, now);
-    assert_eq!(cache.get(&exact, None, now).unwrap().0.answers[0].ttl, 17);
+    insert(&cache, &exact, &answer(&exact, 1, 300), Scope::NoEcs, now);
+    assert_eq!(get(&cache, &exact, None, now).unwrap().0.answers[0].ttl, 17);
     assert_eq!(
         cache.inspect(&name(r"\145xample.test"), None, now)["variants"]
             .as_array()
@@ -1039,7 +1091,7 @@ fn uncacheable_success_supersedes_old_fresh_and_stale_answers() {
             let cache = Cache::new(cfg);
             let q = query("superseded.test.");
             let now = Instant::now();
-            cache.insert(&q, &answer(&q, 1, ttl), Scope::NoEcs, now);
+            insert(&cache, &q, &answer(&q, 1, ttl), Scope::NoEcs, now);
             let later = now + Duration::from_secs(2);
             assert!(cache.lookup(&q, None, later, true).is_some());
             let response = match replacement {
@@ -1095,7 +1147,7 @@ fn ede_success_supersedes_fresh_and_stale_without_admitting_diagnostics() {
             )),
         ));
         for response in [answer(&q, 2, 0), answer(&q, 2, 60), negative] {
-            cache.insert(&q, &answer(&q, 1, ttl), Scope::NoEcs, now);
+            insert(&cache, &q, &answer(&q, 1, ttl), Scope::NoEcs, now);
             assert!(cache.lookup(&q, None, later, true).is_some());
             assert!(!cache.insert_if_epoch(
                 &q,
@@ -1132,7 +1184,7 @@ fn success_supersedes_overlaps_but_keeps_disjoint_and_private_namespaces() {
             Scope::Privacy { ipv4: true },
             Scope::Privacy { ipv4: false },
         ] {
-            cache.insert(&q, &answer(&q, 1, 1), scope, now);
+            insert(&cache, &q, &answer(&q, 1, 1), scope, now);
         }
         let later = now + Duration::from_secs(2);
         assert!(!cache.insert_if_epoch(&q, &answer(&q, 2, 0), network(new), later, cache.epoch()));
@@ -1168,9 +1220,10 @@ fn ede_supersession_keeps_disjoint_scopes_privacy_and_query_semantics() {
         Scope::Privacy { ipv4: true },
         Scope::Privacy { ipv4: false },
     ] {
-        cache.insert(&q, &answer(&q, 1, 1), scope, now);
+        insert(&cache, &q, &answer(&q, 1, 1), scope, now);
     }
-    cache.insert(
+    insert(
+        &cache,
         &other_query,
         &answer(&other_query, 1, 1),
         network("192.0.0.0/16"),
@@ -1208,7 +1261,7 @@ fn failed_truncated_or_client_specific_updates_do_not_supersede() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("retain.test.");
     let now = Instant::now();
-    cache.insert(&q, &answer(&q, 1, 60), Scope::NoEcs, now);
+    insert(&cache, &q, &answer(&q, 1, 60), Scope::NoEcs, now);
     let mut truncated = answer(&q, 2, 0);
     truncated.metadata.truncation = true;
     let mut client_specific = answer(&q, 2, 0);
@@ -1233,7 +1286,7 @@ fn failed_truncated_or_client_specific_updates_do_not_supersede() {
     ] {
         assert!(!cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()));
         assert_eq!(
-            cache.get(&q, None, now).unwrap().0.answers[0].data,
+            get(&cache, &q, None, now).unwrap().0.answers[0].data,
             RData::A(A::new(192, 0, 2, 1))
         );
     }
@@ -1247,5 +1300,5 @@ fn failed_truncated_or_client_specific_updates_do_not_supersede() {
         now,
         old_epoch
     ));
-    assert!(cache.get(&q, None, now).is_some());
+    assert!(get(&cache, &q, None, now).is_some());
 }

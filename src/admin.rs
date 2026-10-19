@@ -1,18 +1,17 @@
 //! Read-only loopback liveness and fixed-cardinality Prometheus exposition.
-use std::fmt::Write;
+//! Its connections have their own small budget, separate from DNS.
+use std::{fmt::Write, sync::Arc};
 
 use anyhow::{Result, ensure};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     task::JoinSet,
     time::timeout,
 };
 
-use crate::{
-    ingress::Ingress,
-    metrics::{Counter, Metrics},
-};
+use crate::{ingress::Ingress, metrics::Metrics};
 
 /// Concurrent snapshots are approximate, as in the existing JSON exporter.
 pub fn render(metrics: &Metrics) -> String {
@@ -76,11 +75,17 @@ fn render_extra(metrics: &[(&str, &str, u64, bool)]) -> String {
     output
 }
 
+/// Concurrent loopback health and metrics connections. A budget of its own keeps
+/// probes answering while DNS connections fill the shared limit, and keeps
+/// probes from taking DNS connection slots.
+const MAX_CONNECTIONS: usize = 8;
+
 pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
     ensure!(
         listener.local_addr()?.ip().is_loopback(),
         "admin listener must bind a loopback address"
     );
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut stop = ingress.stop.clone();
     let mut tasks = JoinSet::new();
     let outcome = loop {
@@ -92,13 +97,13 @@ pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
             joined = tasks.join_next(), if !tasks.is_empty() => {
                 if let Some(Err(error)) = joined { break Err(error.into()); }
             },
-            accepted = listener.accept() => {
+            accepted = crate::transport::accept::accept(&listener) => {
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error.into()),
                 };
-                let Ok(permit) = ingress.connections.clone().try_acquire_owned() else {
-                    ingress.resolver.metrics().inc(Counter::ConnectionsRejected);
+                // Excess probes are closed at once; DNS rejection counters stay DNS-only.
+                let Ok(permit) = connections.clone().try_acquire_owned() else {
                     continue
                 };
                 let ingress = ingress.clone();

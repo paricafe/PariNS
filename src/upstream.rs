@@ -8,7 +8,10 @@ use tokio::net::{TcpStream, UdpSocket};
 
 use crate::protocol::{self, MAX_MESSAGE};
 use crate::transport::tcp;
-use crate::upstreams::diagnostics::{ActualProtocol, Attempt, AttemptScope, Stage};
+use crate::upstreams::{
+    diagnostics::{ActualProtocol, Attempt, AttemptScope, Stage},
+    not_sent,
+};
 
 fn stage(attempt: &mut Option<Attempt>, stage: Stage) {
     if let Some(attempt) = attempt {
@@ -24,18 +27,25 @@ pub(crate) async fn exchange_tcp_observed(
     exchange_tcp_inner(query, address, scope, true).await
 }
 
+/// `first` is the query's first transmission: it gets a fresh ID, and a connect
+/// failure means nothing was sent. The TCP retry after a truncated UDP answer is
+/// not first: the upstream already received the query.
 async fn exchange_tcp_inner(
     query: &Message,
     address: SocketAddr,
     scope: Option<&AttemptScope>,
-    randomize_id: bool,
+    first: bool,
 ) -> Result<Message> {
     let mut attempt = scope.map(|s| s.start(Some(ActualProtocol::Tcp)));
     let result = async {
         stage(&mut attempt, Stage::Connect);
-        let mut stream = TcpStream::connect(address).await?;
+        let mut stream = match TcpStream::connect(address).await {
+            Ok(stream) => stream,
+            Err(error) if first => return Err(not_sent(error)),
+            Err(error) => return Err(error.into()),
+        };
         let mut outbound = query.clone();
-        if randomize_id {
+        if first {
             outbound.metadata.id = rand::random();
         }
         stage(&mut attempt, Stage::RequestWrite);
@@ -80,13 +90,15 @@ pub(crate) async fn exchange_observed(
         } else {
             "[::]:0"
         };
-        let socket = UdpSocket::bind(bind).await?;
-        socket.connect(address).await?;
+        let socket = UdpSocket::bind(bind).await.map_err(not_sent)?;
+        socket.connect(address).await.map_err(not_sent)?;
         let mut outbound = query.clone();
         outbound.metadata.id = rand::random();
         let wire = protocol::encode_hop(&outbound, false, false, 128, MAX_MESSAGE)?;
         stage(&mut attempt, Stage::RequestWrite);
-        socket.send(&wire).await?;
+        // A failed send left nothing on the wire; a later failure may follow a
+        // datagram the upstream received.
+        socket.send(&wire).await.map_err(not_sent)?;
         let mut buffer = vec![0; MAX_MESSAGE];
         loop {
             stage(&mut attempt, Stage::ResponseRead);

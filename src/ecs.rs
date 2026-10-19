@@ -75,6 +75,10 @@ impl Context {
             return Err(ResponseCode::FormErr);
         }
         let mut outgoing_query = query.clone();
+        // A client's larger UDP size does not apply to the upstream hop (DNS Flag Day 2020).
+        if let Some(edns) = &mut outgoing_query.edns {
+            edns.set_max_payload(edns.max_payload().min(MAX_UDP_PAYLOAD));
+        }
         if !config.enabled || query.queries[0].query_class() != DNSClass::IN {
             set_subnet(&mut outgoing_query, None);
             return Ok((

@@ -6,8 +6,11 @@
 //! pool keep serving. Health is ready only while every listener runs, otherwise
 //! degraded. Identities are prepared once per generation, so a certificate error
 //! still fails the whole start. DoH over HTTP/3 binds the DoH TCP address and its
-//! actual port. Stopping the generation cancels pending retries and releases
-//! every socket, including Quinn drivers.
+//! actual port; HTTP/2 responses advertise it in Alt-Svc only while it runs. A new
+//! outage (the first failure after startup or after stable service) is logged at
+//! once, repeats within one outage at most every ten minutes. Stopping the
+//! generation cancels pending retries and releases every socket, including Quinn
+//! drivers; one listener's error during that drain does not cut the others short.
 
 use std::{
     future::Future,
@@ -166,12 +169,37 @@ pub enum ListenerState {
     Retrying,
 }
 
+/// Listeners of a candidate that did not bind. `in_use` reports an address that
+/// another process already holds, such as a system resolver on port 53.
+#[derive(Debug)]
+pub struct Unbound {
+    pub detail: String,
+    pub in_use: bool,
+}
+impl std::fmt::Display for Unbound {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(&self.detail)
+    }
+}
+impl std::error::Error for Unbound {}
+
+fn address_in_use(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+    })
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ListenerStatus {
     pub kind: ListenerKind,
     pub address: SocketAddr,
     pub state: ListenerState,
     pub error: Option<String>,
+    /// The last failure was an address already in use.
+    #[serde(skip)]
+    in_use: bool,
     #[serde(skip)]
     pub failures: u32,
     #[serde(skip)]
@@ -250,14 +278,17 @@ impl Listeners {
         listener.address = address;
         listener.state = ListenerState::Running;
         listener.error = None;
+        listener.in_use = false;
         drop(status);
         self.changed.send_replace(());
     }
     /// Marks the listener as retrying; logging is rate limited by [`FailureLog`].
-    fn failed(&self, index: usize, error: String, failures: u32) {
+    fn failed(&self, index: usize, error: &anyhow::Error, failures: u32) {
+        let in_use = address_in_use(error);
+        let error = format!("{error:#}");
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         let listener = &mut status[index];
-        if listener.logged.due(&error) {
+        if listener.record_failure(&error, failures) {
             eprintln!(
                 "PariNS {} {} unavailable: {error}; retrying automatically",
                 listener.kind.label(),
@@ -266,9 +297,24 @@ impl Listeners {
         }
         listener.state = ListenerState::Retrying;
         listener.error = Some(error);
+        listener.in_use = in_use;
         listener.failures = failures;
         drop(status);
         self.changed.send_replace(());
+    }
+}
+
+impl ListenerStatus {
+    /// Whether this failure is due to be logged. The first failure of an outage
+    /// (after startup or after the listener served stably) starts a new log
+    /// history, so a recovered listener that fails the same way again is
+    /// reported at once, and so is its next recovery.
+    fn record_failure(&mut self, error: &str, failures: u32) -> bool {
+        if failures == 1 {
+            self.logged = FailureLog::default();
+            self.recovery_logged = None;
+        }
+        self.logged.due(error)
     }
 }
 
@@ -351,6 +397,7 @@ async fn serve_bound(
     kind: ListenerKind,
     bound: Bound,
     tls: &ListenerTls,
+    listeners: &Arc<Listeners>,
     ingress: crate::ingress::Ingress,
 ) -> Result<()> {
     use crate::quic::Protocol;
@@ -361,11 +408,17 @@ async fn serve_bound(
             crate::tls::serve(listener, tls.dot.clone().expect("DoT identity"), ingress).await
         }
         (_, Bound::Tcp(listener)) => {
+            // Advertise HTTP/3 only while its listener actually serves.
+            let h3_port = tls.h3_port.map(|port| {
+                let listeners = listeners.clone();
+                Arc::new(move || listeners.serving(ListenerKind::Doh3).then_some(port))
+                    as crate::doh::H3Port
+            });
             crate::doh::serve(
                 listener,
                 tls.doh.clone().expect("DoH identity"),
                 ingress,
-                tls.h3_port,
+                h3_port,
             )
             .await
         }
@@ -406,7 +459,7 @@ async fn supervise(
                     Ok(bound) => bound,
                     Err(error) => {
                         failures = failures.saturating_add(1);
-                        listeners.failed(index, format!("{error:#}"), failures);
+                        listeners.failed(index, &error, failures);
                         continue;
                     }
                 }
@@ -419,7 +472,7 @@ async fn supervise(
         }
         listeners.running(index, address);
         let serving = std::time::Instant::now();
-        let result = serve_bound(slot.kind, bound, &tls, ingress.clone()).await;
+        let result = serve_bound(slot.kind, bound, &tls, &listeners, ingress.clone()).await;
         if *stop.borrow() {
             return result;
         }
@@ -429,10 +482,9 @@ async fn supervise(
         failures = failures.saturating_add(1);
         listeners.failed(
             index,
-            match result {
-                Ok(()) => "listener stopped unexpectedly".into(),
-                Err(error) => format!("{error:#}"),
-            },
+            &result
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("listener stopped unexpectedly")),
             failures,
         );
     }
@@ -547,7 +599,7 @@ impl Server {
                     Some(bound)
                 }
                 Err(error) => {
-                    unbound.push((status.len(), format!("{error:#}")));
+                    unbound.push((status.len(), error));
                     None
                 }
             };
@@ -570,6 +622,7 @@ impl Server {
                 logged: FailureLog::default(),
                 recovery_logged: None,
                 error: None,
+                in_use: false,
             });
             slots.push(Slot {
                 kind,
@@ -605,7 +658,7 @@ impl Server {
             changed: watch::channel(()).0,
         });
         for (index, error) in unbound {
-            listeners.failed(index, error, 1);
+            listeners.failed(index, &error, 1);
         }
         Ok(Self {
             config,
@@ -630,14 +683,13 @@ impl Server {
 
     /// Bind errors of listeners that are not yet serving, for callers that must
     /// not commit a partially bound candidate.
-    pub fn unbound(&self) -> Option<String> {
-        let errors: Vec<_> = self
-            .listeners
-            .snapshot()
-            .into_iter()
-            .filter_map(|listener| listener.error)
-            .collect();
-        (!errors.is_empty()).then(|| errors.join("; "))
+    pub fn unbound(&self) -> Option<Unbound> {
+        let snapshot = self.listeners.snapshot();
+        let errors: Vec<_> = snapshot.iter().filter_map(|l| l.error.clone()).collect();
+        (!errors.is_empty()).then(|| Unbound {
+            detail: errors.join("; "),
+            in_use: snapshot.iter().any(|l| l.error.is_some() && l.in_use),
+        })
     }
 
     /// The plain DNS address: actual when bound, configured while it retries.
@@ -756,13 +808,19 @@ impl Server {
         };
         self.reload.close();
         let _ = stopping.send(true);
+        // One listener's error does not cut the others' drain short: keep the
+        // first error and wait for every supervisor within the grace.
         let drained = timeout(
             Duration::from_millis(self.config.shutdown_grace_ms),
             async {
+                let mut first = Ok(());
                 while let Some(result) = supervisors.join_next().await {
-                    result??;
+                    let result = result.map_err(anyhow::Error::from).and_then(|r| r);
+                    if first.is_ok() {
+                        first = result;
+                    }
                 }
-                Ok::<_, anyhow::Error>(())
+                first
             },
         )
         .await;
@@ -807,7 +865,7 @@ async fn serve_plain(
             Some(result) = tasks.join_next(), if !tasks.is_empty() => {
                 if let Err(error) = result { break Err(error.into()); }
             }
-            accepted = tcp.accept() => {
+            accepted = crate::transport::accept::accept(&tcp) => {
                 let (stream, peer) = match accepted { Ok(value) => value, Err(error) => break Err(error.into()) };
                 let Ok(permit) = ingress.connections.clone().try_acquire_owned() else {
                     metrics.inc(Counter::ConnectionsRejected);
@@ -923,6 +981,26 @@ async fn serve_tcp(
 mod tests {
     use super::*;
     use crate::runtime_health::State;
+
+    #[test]
+    fn a_new_outage_logs_again_while_repeats_within_one_outage_are_limited() {
+        let mut listener = ListenerStatus {
+            kind: ListenerKind::Dot,
+            address: "127.0.0.1:853".parse().unwrap(),
+            state: ListenerState::Running,
+            error: None,
+            in_use: false,
+            failures: 0,
+            logged: FailureLog::default(),
+            recovery_logged: None,
+        };
+        assert!(listener.record_failure("address in use", 1));
+        assert!(!listener.record_failure("address in use", 2));
+        listener.recovery_logged = Some(std::time::Instant::now());
+        // Served stably, then failed the same way: a new outage.
+        assert!(listener.record_failure("address in use", 1));
+        assert!(listener.recovery_logged.is_none());
+    }
 
     #[tokio::test]
     async fn an_exiting_listener_is_retried_alone_and_stop_cancels_its_retry() {

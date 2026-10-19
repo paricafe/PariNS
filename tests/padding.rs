@@ -168,11 +168,12 @@ async fn stale_answer_is_padded_after_failed_upstream_and_keeps_its_answer() {
         1,
         RData::A(A::new(192, 0, 2, 42)),
     ));
-    ingress.resolver.cache().insert(
+    ingress.resolver.cache().insert_decision_if_epoch(
         &question,
         &cached,
         ecs::Scope::NoEcs,
         std::time::Instant::now() - Duration::from_secs(2),
+        ingress.resolver.cache().epoch(),
     );
     let serve = async {
         let mut buffer = [0; 4096];

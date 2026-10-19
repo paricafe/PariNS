@@ -22,7 +22,7 @@ fn exact_source_matches_only_identical_family_network_and_prefix() {
         let cache = Cache::new(CacheConfig::default());
         let query = query("exact.test.");
         let now = Instant::now();
-        cache.insert(&query, &answer(&query, 1, 60), exact(scope), now);
+        insert(&cache, &query, &answer(&query, 1, 60), exact(scope), now);
         assert!(cache.peek(&query, ecs(same), now, false).is_some());
         for outgoing in [ecs(different), ecs("0.0.0.0/0"), ecs("::/0"), None] {
             assert!(cache.peek(&query, outgoing, now, false).is_none());
@@ -63,8 +63,9 @@ fn network_exact_supersession_is_bidirectional_for_every_uncacheable_success() {
             let cache = Cache::new(config);
             let query = query("supersede.test.");
             let now = Instant::now();
-            cache.insert(&query, &answer(&query, 1, 60), old, now);
-            cache.insert(
+            insert(&cache, &query, &answer(&query, 1, 60), old, now);
+            insert(
+                &cache,
                 &query,
                 &answer(&query, 3, 60),
                 exact("198.51.100.0/24"),
@@ -218,7 +219,7 @@ fn diagnostic_decisions_report_actual_branches_without_budget_misclassification(
         negative,
         StoreDecision::skipped(DecisionReason::NegativeWithoutSoa)
     );
-    cache.insert(&query, &answer(&query, 1, 60), Scope::NoEcs, now);
+    insert(&cache, &query, &answer(&query, 1, 60), Scope::NoEcs, now);
     assert_eq!(
         cache
             .lookup_with_decision(&query, None, now, false)

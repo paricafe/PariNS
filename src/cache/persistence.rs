@@ -228,66 +228,68 @@ impl Cache {
             ..SnapshotReport::default()
         };
         let mut hash = Sha256::new();
+        // Records go out most recently used first across all shards, because a
+        // restore admits them in file order until a budget is full, and a new
+        // process hashes keys into different shards. Each shard lock is held only
+        // to copy its entry handles. Shards keep independent use clocks, which
+        // advance at similar rates under uniform hashing: the order is exact
+        // within a shard and approximate across shards.
+        let mut entries: Vec<_> = Vec::new();
         for shard in &self.shards {
-            let entries = {
-                let shard = shard.lock().expect("cache shard poisoned");
-                let mut entries: Vec<_> = shard
+            let shard = shard.lock().expect("cache shard poisoned");
+            entries.extend(
+                shard
                     .partitions
                     .iter()
-                    .flat_map(|p| p.lru.iter().map(|(_, e)| Arc::clone(e)))
-                    .collect();
-                entries.sort_unstable_by_key(|e| {
-                    std::cmp::Reverse(e.accessed.load(Ordering::Relaxed))
-                });
-                entries
-            };
-            for entry in entries {
-                cancelled(cancel)?;
-                // Round upward to avoid extending the original fresh deadline by
-                // truncating a fractional second at either snapshot boundary.
-                let age = now.saturating_duration_since(entry.inserted);
-                let remaining = entry
-                    .lifetime
-                    .saturating_sub(age)
-                    .as_secs()
-                    .min(u64::from(u32::MAX)) as u32;
-                if remaining == 0 || report.saved >= MAX_RECORDS {
-                    report.skipped += 1;
-                    continue;
-                }
-                let elapsed = age
-                    .as_secs()
-                    .saturating_add(u64::from(age.subsec_nanos() > 0))
-                    .min(u64::from(u32::MAX)) as u32;
-                let mut response = protocol::decode(&entry.wire)?;
-                age_records(&mut response, elapsed);
-                let record = Record {
-                    key: SavedKey {
-                        name: STANDARD.encode(entry.key.name.to_bytes()?),
-                        kind: entry.key.kind.into(),
-                        class: entry.key.class.into(),
-                        dnssec_ok: entry.key.dnssec_ok,
-                        checking_disabled: entry.key.checking_disabled,
-                        recursion_desired: entry.key.recursion_desired,
-                        edns: entry.key.edns,
-                    },
-                    scope: entry.scope.into(),
-                    remaining_secs: remaining,
-                    wire: STANDARD.encode(response.to_vec()?),
-                };
-                let mut line = serde_json::to_vec(&record)?;
-                line.push(b'\n');
-                if line.len() > MAX_RECORD_BYTES
-                    || report.bytes + line.len() as u64 > max_bytes as u64
-                {
-                    report.skipped += 1;
-                    continue;
-                }
-                writer.write_all(&line)?;
-                hash.update(&line);
-                report.saved += 1;
-                report.bytes += line.len() as u64;
+                    .flat_map(|p| p.lru.iter().map(|(_, e)| Arc::clone(e))),
+            );
+        }
+        entries.sort_by_cached_key(|e| std::cmp::Reverse(e.accessed.load(Ordering::Relaxed)));
+        for entry in entries {
+            cancelled(cancel)?;
+            // Round upward to avoid extending the original fresh deadline by
+            // truncating a fractional second at either snapshot boundary.
+            let age = now.saturating_duration_since(entry.inserted);
+            let remaining = entry
+                .lifetime
+                .saturating_sub(age)
+                .as_secs()
+                .min(u64::from(u32::MAX)) as u32;
+            if remaining == 0 || report.saved >= MAX_RECORDS {
+                report.skipped += 1;
+                continue;
             }
+            let elapsed = age
+                .as_secs()
+                .saturating_add(u64::from(age.subsec_nanos() > 0))
+                .min(u64::from(u32::MAX)) as u32;
+            let mut response = protocol::decode(&entry.wire)?;
+            age_records(&mut response, elapsed);
+            let record = Record {
+                key: SavedKey {
+                    name: STANDARD.encode(entry.key.name.to_bytes()?),
+                    kind: entry.key.kind.into(),
+                    class: entry.key.class.into(),
+                    dnssec_ok: entry.key.dnssec_ok,
+                    checking_disabled: entry.key.checking_disabled,
+                    recursion_desired: entry.key.recursion_desired,
+                    edns: entry.key.edns,
+                },
+                scope: entry.scope.into(),
+                remaining_secs: remaining,
+                wire: STANDARD.encode(response.to_vec()?),
+            };
+            let mut line = serde_json::to_vec(&record)?;
+            line.push(b'\n');
+            if line.len() > MAX_RECORD_BYTES || report.bytes + line.len() as u64 > max_bytes as u64
+            {
+                report.skipped += 1;
+                continue;
+            }
+            writer.write_all(&line)?;
+            hash.update(&line);
+            report.saved += 1;
+            report.bytes += line.len() as u64;
         }
         let mut header = Header {
             version: VERSION,

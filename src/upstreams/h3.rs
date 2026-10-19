@@ -3,11 +3,16 @@
 //!
 //! H3 preference applies only to HTTPS endpoints and stays within the resolver
 //! deadline. The H3 budget covers only obtaining a usable connection and sending the
-//! request; a sent request waits for its answer until the resolver deadline, without
-//! cooldown or an H2 resend. Connect, transport and protocol faults fall back to the
-//! verified H2 path and start the cooldown. A definite 4xx (not 408/414/421/425/429/431)
-//! stops H3 for that endpoint until the pool generation is replaced. H2 and H3 share
-//! one RFC 8484 GET builder. Cancelling a request releases its stream without breaking
+//! request. A request is sent once its HEADERS frame is written; a sent query is
+//! never resent. Only a failure before that point (connect or handshake failure, a
+//! skipped attempt, or no send within the budget) is marked `NotSent` and falls
+//! back to the verified H2 path. A sent request waits for its answer until the
+//! resolver deadline; a failure after sending (an HTTP error status, stream reset,
+//! or the connection's idle timeout) is this query's upstream failure, with no H2
+//! resend. Any H3 failure starts the cooldown. A definite 4xx (not
+//! 408/414/421/425/429/431) also stops H3 for that endpoint until the pool
+//! generation is replaced, so later queries go straight to H2. H2 and H3 share one
+//! RFC 8484 GET builder. Cancelling a request releases its stream without breaking
 //! other requests on the connection.
 //!
 //! Because a sent H3 request has no separate budget, its connection uses a 1-second
@@ -19,14 +24,14 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use bytes::{Buf, Bytes};
 use hickory_proto::op::Message;
 use tokio::time::{Instant, timeout};
 
-use super::Endpoint;
 use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, Reason, Stage};
 use super::transport::{InFlight, Usage, doh_answer, doh_chunk, doh_head};
+use super::{Endpoint, not_sent};
 
 type Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 type Stream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
@@ -109,11 +114,13 @@ impl Client {
         if let Some(status) = refused {
             attempt.http_status(status);
             attempt.skipped();
-            anyhow::bail!("HTTP/3 refused with status {status}");
+            return Err(not_sent(anyhow::anyhow!(
+                "HTTP/3 refused with status {status}"
+            )));
         }
         if self.cooling_down() {
             attempt.skipped();
-            anyhow::bail!("HTTP/3 cooling down");
+            return Err(not_sent(anyhow::anyhow!("HTTP/3 cooling down")));
         }
         // The budget covers only obtaining a usable connection and sending the
         // request, so a dead or slow H3 path still leaves time for H2. Once sent,
@@ -121,15 +128,23 @@ impl Client {
         // is not an H3 fault, causes no cooldown and is not re-sent over H2.
         let budget =
             Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now()) / 2);
-        ensure!(!budget.is_zero(), "HTTP/3 deadline exhausted");
-        let sent = match timeout(budget, self.send(spec, query, address, &mut attempt)).await {
-            Ok(sent) => sent,
+        if budget.is_zero() {
+            return Err(not_sent(anyhow::anyhow!("HTTP/3 deadline exhausted")));
+        }
+        let mut sent = false;
+        let request = timeout(
+            budget,
+            self.send(spec, query, address, &mut attempt, &mut sent),
+        )
+        .await;
+        let request = match request {
+            Ok(request) => request,
             Err(error) => {
                 attempt.reason(Reason::Deadline);
                 Err(error.into())
             }
         };
-        let result = match sent {
+        let result = match request {
             Ok((stream, outbound, in_flight)) => {
                 self.receive(stream, in_flight, &outbound, query, &mut attempt)
                     .await
@@ -147,7 +162,8 @@ impl Client {
                 state.retry_after = Some(Instant::now() + Duration::from_secs(30));
             }
         }
-        result
+        // Only a request that never reached the transport may be carried by H2.
+        result.map_err(|error| if sent { error } else { not_sent(error) })
     }
 
     fn cooling_down(&self) -> bool {
@@ -252,13 +268,17 @@ impl Client {
         query: &Message,
         address: SocketAddr,
         attempt: &mut Attempt,
+        sent: &mut bool,
     ) -> Result<(RequestGuard, Message, InFlight)> {
         let connection = self.connection(spec, address, attempt).await?;
         let mut sender = connection.sender.clone();
         let in_flight = InFlight::new(&connection.usage);
         let (request, outbound) = super::transport::doh_get(spec, query)?;
         attempt.stage(Stage::RequestWrite);
+        // A GET is complete once its HEADERS frame is written: the server may
+        // answer it even if FIN or anything later fails.
         let mut stream = RequestGuard(sender.send_request(request).await?, false);
+        *sent = true;
         stream.0.finish().await?;
         Ok((stream, outbound, in_flight))
     }

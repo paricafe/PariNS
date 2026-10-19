@@ -367,16 +367,6 @@ impl Cache {
         }
     }
 
-    pub fn get(
-        &self,
-        query: &Message,
-        outgoing: Option<ClientSubnet>,
-        now: Instant,
-    ) -> Option<(Message, Scope)> {
-        self.lookup(query, outgoing, now, false)
-            .map(|hit| (hit.message, hit.scope))
-    }
-
     pub fn lookup(
         &self,
         query: &Message,
@@ -606,19 +596,17 @@ impl Cache {
         }
         // Only a complete, transaction-independent successful answer supersedes
         // earlier knowledge. Transient errors and client-specific extensions do not.
+        if !superseding_edns(response) {
+            return StoreDecision::skipped(DecisionReason::UnsupportedEdns);
+        }
         if response.truncation
             || response.signature.is_some()
-            || !superseding_edns(response)
             || !matches!(
                 response.response_code,
                 ResponseCode::NoError | ResponseCode::NXDomain
             )
         {
-            return StoreDecision::skipped(if superseding_edns(response) {
-                DecisionReason::UncacheableResponse
-            } else {
-                DecisionReason::UnsupportedEdns
-            });
+            return StoreDecision::skipped(DecisionReason::UncacheableResponse);
         }
         // Expensive response preparation remains outside the shard lock. Admission
         // failure is distinct from supersession: TTL=0 is still newer knowledge.
@@ -666,13 +654,14 @@ impl Cache {
         } else {
             scope
         };
-        // Snapshot records arrive most-recent first. A restore cannot evict an
-        // already admitted record, supersede live knowledge, or change counters.
+        // Snapshot records arrive most recently used first (see
+        // `write_clean_snapshot`). A restore cannot evict an already admitted
+        // record, supersede live knowledge, or change counters.
         if restoring {
             let Ok((wire, _, negative)) = &prepared else {
                 return StoreDecision::skipped(*prepared.as_ref().unwrap_err());
             };
-            let charge = wire.len() + key.name.len() + size_of::<Entry>() + size_of::<Key>() + 192;
+            let charge = charge(wire, &key);
             let p = &shard.partitions[usize::from(*negative)];
             if p.lru.len() >= p.max_entries
                 || p.charged.load(Ordering::Relaxed).saturating_add(charge) > p.max_bytes
@@ -705,9 +694,7 @@ impl Cache {
             Ok(prepared) => prepared,
             Err(reason) => return StoreDecision::rejected(reason, superseded),
         };
-        // Conservative per-variant estimate includes duplicated indices, Arc controls,
-        // HashMap slack and LRU allocation. Live Arc readers retain this charge after eviction.
-        let charge = wire.len() + key.name.len() + size_of::<Entry>() + size_of::<Key>() + 192;
+        let charge = charge(&wire, &key);
         let part = usize::from(negative);
         if charge > shard.partitions[part].max_bytes || shard.partitions[part].max_entries == 0 {
             shard.counts.rejections += 1;
@@ -888,7 +875,7 @@ impl Cache {
             json!({"name":e.key.name.to_ascii(),"qtype":e.key.kind.to_string(),
                 "dnssec_ok":e.key.dnssec_ok,"checking_disabled":e.key.checking_disabled,
                 "recursion_desired":e.key.recursion_desired,"edns":e.key.edns,
-                "scope":scope_text(e.scope),"negative":e.negative,
+                "scope":e.scope.tag(),"negative":e.negative,
                 "fresh_remaining_secs":e.lifetime.saturating_sub(age).as_secs(),
                 "retention_remaining_secs":e.retention.saturating_sub(age).as_secs(),
                 "hits":e.hits.load(Ordering::Relaxed),"bytes":e.charge,
@@ -922,12 +909,14 @@ impl Cache {
         json!({"eligible":true,"reason":match selected {
             Some((true,_))=>"matching_fresh_scope",Some((false,_))=>"failure_only_stale",None=>"no_matching_retained_entry"},
             "policy":policy,"state":match selected {Some((true,_))=>"fresh",Some((false,_))=>"stale",None=>"miss"},
-            "scope":selected.map(|(_,scope)|scope_text(scope))})
+            "scope":selected.map(|(_,scope)|scope.tag())})
     }
 }
 
-fn scope_text(scope: Scope) -> String {
-    scope.tag()
+/// Conservative per-variant estimate: it includes duplicated indices, Arc controls,
+/// HashMap slack and LRU allocation. Live Arc readers retain this charge after eviction.
+fn charge(wire: &[u8], key: &Key) -> usize {
+    wire.len() + key.name.len() + size_of::<Entry>() + size_of::<Key>() + 192
 }
 
 /// Cache keys hold lowercase FQDNs, so `Name` equality is exact label-wise byte equality.
@@ -966,19 +955,10 @@ fn prepare_response(
     response: &Message,
     config: &Policy,
 ) -> Result<(Message, u32, bool), DecisionReason> {
-    if response.truncation
-        || response.signature.is_some()
-        || !plain_edns(response)
-        || !matches!(
-            response.response_code,
-            ResponseCode::NoError | ResponseCode::NXDomain
-        )
-    {
-        return Err(if plain_edns(response) {
-            DecisionReason::UncacheableResponse
-        } else {
-            DecisionReason::UnsupportedEdns
-        });
+    // `admit` has established a complete NOERROR/NXDOMAIN answer. EDE may
+    // supersede older knowledge but is never admitted for replay.
+    if !plain_edns(response) {
+        return Err(DecisionReason::UnsupportedEdns);
     }
     let question = query
         .queries

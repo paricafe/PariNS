@@ -26,6 +26,15 @@ pub fn strip_padding(message: &mut Message) {
     }
 }
 
+/// EDNS TCP keepalive (RFC 7828) describes one TCP connection. PariNS never
+/// negotiates it: client queries lose it at ingress and upstream answers at the
+/// upstream pool, so it is never forwarded, cached or answered.
+pub fn strip_tcp_keepalive(message: &mut Message) {
+    if let Some(edns) = &mut message.edns {
+        edns.options_mut().remove(EdnsCode::Keepalive);
+    }
+}
+
 /// Per-hop final encoding, after ID, ECS, policy and framing decisions.
 /// The unpadded hot path encodes exactly once. Padding never truncates answers.
 pub fn encode_hop(
@@ -58,30 +67,27 @@ pub fn encode_hop(
     Ok(normalized.to_vec()?)
 }
 
+/// Padding intent of a query. Every encrypted transport (DoT, DoH, DoQ, DoH3)
+/// carries a whole message on a stream, so the padded size is bounded by the
+/// maximum DNS message size, never by an EDNS UDP payload size.
 #[derive(Clone, Copy, Default)]
 pub struct Padding {
     pub requested: bool,
-    pub limit: usize,
 }
 
 impl Padding {
     pub fn from_query(query: &Message) -> Self {
         Self {
             requested: has_padding(query),
-            limit: query
-                .edns
-                .as_ref()
-                .map_or(512, |e| usize::from(e.max_payload()).max(512)),
         }
     }
     pub fn encode_response(self, message: &Message, encrypted: bool) -> Result<Vec<u8>> {
-        encode_hop(message, encrypted, self.requested, 468, self.limit)
+        encode_hop(message, encrypted, self.requested, 468, MAX_MESSAGE)
     }
 }
 
 pub fn encode_upstream(message: &Message, encrypted: bool) -> Result<Vec<u8>> {
-    let intent = Padding::from_query(message);
-    encode_hop(message, encrypted, intent.requested, 128, intent.limit)
+    encode_hop(message, encrypted, has_padding(message), 128, MAX_MESSAGE)
 }
 
 /// Flight and refresh share one semantic key. Padding intent remains one bit;
@@ -182,7 +188,13 @@ pub fn request(bytes: &[u8]) -> Request {
     };
     match error {
         Some(code) => Request::Reply(error_response(&query, code)),
-        None => Request::Forward(query),
+        None => {
+            // Without the hop-specific option the query shares cache entries and
+            // upstream work with equivalent queries.
+            let mut query = query;
+            strip_tcp_keepalive(&mut query);
+            Request::Forward(query)
+        }
     }
 }
 
@@ -299,6 +311,33 @@ mod tests {
                 .edns
                 .is_none()
         );
+    }
+
+    /// A stream carries the whole padded answer even past the client's EDNS UDP
+    /// size: that size limits UDP datagrams, not encrypted streams.
+    #[test]
+    fn encrypted_padding_is_bounded_by_message_size_not_udp_payload() {
+        use hickory_proto::rr::{RData, Record, rdata::A};
+        let mut q = query();
+        let mut edns = Edns::new();
+        edns.set_max_payload(512);
+        edns.options_mut().insert(EdnsOption::Unknown(12, vec![]));
+        q.edns = Some(edns);
+        let mut response = error_response(&q, ResponseCode::NoError);
+        response.edns = q.edns.clone();
+        for _ in 0..40 {
+            response.add_answer(Record::from_rdata(
+                q.queries[0].name().clone(),
+                60,
+                RData::A(A::new(192, 0, 2, 1)),
+            ));
+        }
+        let padded = Padding::from_query(&q)
+            .encode_response(&response, true)
+            .unwrap();
+        assert!(padded.len() > 512);
+        assert_eq!(padded.len() % 468, 0);
+        assert!(has_padding(&decode(&padded).unwrap()));
     }
 
     #[test]

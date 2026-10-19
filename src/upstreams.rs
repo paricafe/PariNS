@@ -243,6 +243,25 @@ fn valid_address(address: SocketAddr) -> Result<()> {
     Ok(())
 }
 
+/// Marks a failure that happened before any byte of the query left PariNS
+/// (connect, handshake, stream open, or a request not yet handed to the
+/// transport). Only such a failure may move the query to another address or
+/// transport; a query that may have been sent is never resent.
+#[derive(Debug)]
+pub(crate) struct NotSent;
+impl std::fmt::Display for NotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upstream query not sent")
+    }
+}
+impl std::error::Error for NotSent {}
+
+/// Adds the [`NotSent`] marker as context. The original error stays reachable
+/// for attempt classification (`downcast_ref` still finds it).
+pub(crate) fn not_sent(error: impl Into<anyhow::Error>) -> anyhow::Error {
+    error.into().context(NotSent)
+}
+
 #[derive(Clone, Debug)]
 pub struct Exchange {
     pub message: Message,
@@ -255,7 +274,6 @@ pub struct Pool {
     scores: Mutex<Vec<i64>>,
     cursor: AtomicUsize,
     extra: Arc<Semaphore>,
-    timeout: std::time::Duration,
     diagnostics: Arc<diagnostics::Diagnostics>,
 }
 
@@ -282,22 +300,7 @@ impl Pool {
             settings: settings.clone(),
             cursor: AtomicUsize::new(0),
             extra: Arc::new(Semaphore::new(settings.max_extra_inflight)),
-            timeout: std::time::Duration::from_millis(config.query_timeout_ms),
         })
-    }
-
-    pub async fn exchange(&self, query: &Message) -> Result<Exchange> {
-        self.exchange_until(query, tokio::time::Instant::now() + self.timeout)
-            .await
-    }
-
-    pub async fn exchange_until(
-        &self,
-        query: &Message,
-        deadline: tokio::time::Instant,
-    ) -> Result<Exchange> {
-        self.exchange_observed(query, deadline, &diagnostics::Operation::new(false, None))
-            .await
     }
 
     pub fn diagnostics_snapshot(&self) -> serde_json::Value {

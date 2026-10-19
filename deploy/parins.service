@@ -15,6 +15,10 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=80
+# max_tcp_connections and max_inflight are each bounded to 65536, so inbound
+# streams plus upstream sockets, listeners, storage and an overlapping
+# generation stay well below this. systemd's default soft limit is 1024.
+LimitNOFILE=524288
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

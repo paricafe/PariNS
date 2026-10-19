@@ -1,0 +1,25 @@
+README.md
+  s_cffe143f0c5c88::t_fe87b83f428805 4-6,13-15,17-20,28-31,88
+guide/configuration.md
+  s_cffe143f0c5c88::t_f4d3210bdab552 127,129,133-137,286-287,528-531
+guide/development.md
+  s_cffe143f0c5c88::t_dfcdc61c35c57d 172-179
+guide/operations.md
+  s_cffe143f0c5c88::t_a95b991f9db9eb 241-244,330-362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "013a564ceb9f581545bd68c5805da6b9061a2db0",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

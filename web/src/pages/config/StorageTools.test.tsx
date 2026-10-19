@@ -56,7 +56,7 @@ describe('persistent storage operations', () => {
     render(<BannerProvider><StorageTools language="en" /></BannerProvider>);
     await waitFor(() => expect((screen.getByRole('button', { name: 'Reset totals' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Reset totals' }));
-    await waitFor(() => expect(screen.getByText(/confirm it finished/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Completion couldn't be confirmed/)).toBeTruthy());
     expect((screen.getByRole('button', { name: 'Reset totals' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Check result' }));
     await waitFor(() => expect(screen.getByText(/result isn't visible yet/)).toBeTruthy());

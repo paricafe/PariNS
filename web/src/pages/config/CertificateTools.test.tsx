@@ -52,7 +52,7 @@ describe('security runtime status and certificate reload ownership', () => {
     render(<SecurityRuntime language="en" />);
     await waitFor(() => expect(screen.getByText('a'.repeat(64))).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Reload certificates' }));
-    await waitFor(() => expect(screen.getByText(/confirm the reload/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/reload couldn't be confirmed/)).toBeTruthy());
     expect((screen.getByRole('button', { name: 'Reload certificates' }) as HTMLButtonElement).disabled).toBe(true);
     current = { ...base, certificate_generation: 3, last_reload: { attempt_id: 8, source: 'signal', started_at_ms: 1800000000000, completed_at_ms: 1800000000010, outcome: 'applied', error_code: null } };
     fireEvent.click(screen.getByRole('button', { name: 'Check result' }));
@@ -73,7 +73,7 @@ describe('security runtime status and certificate reload ownership', () => {
     await waitFor(() => expect(screen.getByText('a'.repeat(64))).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Reload certificates' }));
     await waitFor(() => expect(screen.getByText(/previous certificates are still in use/)).toBeTruthy());
-    expect(screen.getByRole('alert').textContent).toContain("names don't match");
+    expect(screen.getByRole('alert').textContent).toContain("don't include the console hostname");
     expect(screen.getByText('a'.repeat(64))).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Check result' })).toBeNull();
   });

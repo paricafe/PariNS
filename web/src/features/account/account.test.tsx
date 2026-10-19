@@ -72,7 +72,7 @@ describe('administrator credential controls', () => {
     view.rerender(tree('zh-CN'));
     expect((screen.getByLabelText('当前密码') as HTMLInputElement).value).toBe('current-password');
     fireEvent.click(screen.getByRole('button', { name: '修改并重新登录' }));
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('当前密码不对'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('当前密码不正确'));
     for (const label of ['当前密码', '新密码', '确认新密码']) expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe('');
     expect(screen.getByRole('dialog', { name: '管理员账户' })).toBeTruthy();
   });
@@ -128,7 +128,7 @@ describe('administrator credential controls', () => {
     expect((screen.getByRole('button', { name: 'Admin account' }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => { reject(new TypeError('connection lost')); });
     await screen.findByRole('heading', { name: 'Sign in to PariNS' });
-    expect(screen.getByRole('status').textContent).toContain('confirm the change');
+    expect(screen.getByRole('status').textContent).toContain("change couldn't be confirmed");
     expect(fetcher.mock.calls.filter(([url]) => url === '/api/account/credentials')).toHaveLength(1);
   });
 });

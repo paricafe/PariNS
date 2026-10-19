@@ -138,10 +138,10 @@ describe("unit field ranges", () => {
     // 600 MB entered in the MB unit is above the 512 MiB snapshot limit.
     const bytes = issue("cache.persistence.max_bytes", String(600 * 1024 ** 2));
     expect(bytes.key).toBe("settings.validation.rangeUnit");
-    expect(presentIssue(bytes, "zh-CN")).toBe("请填 1 MB 到 512 MB 之间的值。");
+    expect(presentIssue(bytes, "zh-CN")).toBe("请填写 1 MB 到 512 MB 之间的值。");
     expect(presentIssue(bytes, "en")).toBe("Enter a value from 1 MB to 512 MB.");
     const seconds = issue("statistics.retention_secs", "60");
-    expect(presentIssue(seconds, "zh-CN")).toBe("请填 1 小时 到 365 天 之间的值。");
+    expect(presentIssue(seconds, "zh-CN")).toBe("请填写 1 小时 到 365 天 之间的值。");
     expect(presentIssue(seconds, "en")).toBe("Enter a value from 1 hour to 365 days.");
   });
 

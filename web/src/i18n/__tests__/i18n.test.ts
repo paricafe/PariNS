@@ -54,8 +54,8 @@ describe("bilingual console catalog", () => {
   });
 
   it("interpolates as text and keeps missing keys visible", () => {
-    expect(translate("app.context", "en", { page: "<script>$&</script>" }))
-      .toBe("Console / <script>$&</script>");
+    expect(translate("shell.about", "en", { label: "<script>$&</script>" }))
+      .toBe("About “<script>$&</script>”");
     expect(translate("missing.key", "zh-CN")).toBe("missing.key");
   });
 });

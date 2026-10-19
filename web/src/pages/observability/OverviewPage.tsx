@@ -285,14 +285,15 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
   </div>;
 }
 
-const LISTENER_LABELS: Record<ListenerStatus['kind'], string> = { dns: 'DNS', admin: 'admin', dot: 'DoT', doh: 'DoH', doh3: 'DoH HTTP/3', doq: 'DoQ' };
+/** Protocol names are the same in every language; the metrics endpoint (`admin_listen`) has a translated name. */
+const LISTENER_LABELS: Record<Exclude<ListenerStatus['kind'], 'admin'>, string> = { dns: 'DNS', dot: 'DoT', doh: 'DoH', doh3: 'DoH HTTP/3', doq: 'DoQ' };
 
 /** Listeners of a running generation that are being rebound on their own; the rest keep serving. */
 function ListenerFailures({ listeners, t }: { listeners: ListenerStatus[]; t: (key: string, params?: Record<string, string | number>) => string }) {
   return <div role="alert" className="notice error startup-failure">
     <strong>{t('shell.listenerDownTitle')}</strong>
     {listeners.map((listener) => {
-      const protocol = LISTENER_LABELS[listener.kind];
+      const protocol = listener.kind === 'admin' ? t('shell.listenerMetrics') : LISTENER_LABELS[listener.kind];
       const conflict = listener.error !== null && /address (?:already )?in use/i.test(listener.error);
       return <p key={`${listener.kind}-${listener.address}`}>{conflict ? t('shell.startupPortInUse', { protocol, address: listener.address }) : t('shell.listenerDown', { protocol, address: listener.address })}
         {listener.error && <><br /><code>{listener.error}</code></>}</p>;
@@ -306,7 +307,7 @@ function StartupFailure({ error, t }: { error: string; t: (key: string, params?:
   const conflict = /bind (.+?) (\S+:\d+): address (?:already )?in use/i.exec(error);
   return <div role="alert" className="notice error startup-failure">
     <strong>{t('shell.startupFailedTitle')}</strong>
-    {conflict && <p>{t('shell.startupPortInUse', { protocol: conflict[1], address: conflict[2] })}</p>}
+    {conflict && <p>{t('shell.startupPortInUse', { protocol: conflict[1] === 'admin' ? t('shell.listenerMetrics') : conflict[1], address: conflict[2] })}</p>}
     <p>{t('shell.startupRetrying')}</p>
     <code>{error}</code>
   </div>;

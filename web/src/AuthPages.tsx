@@ -35,9 +35,21 @@ export function LoginPage({ language }: { language: Language }) {
   </div></section>;
 }
 
-function socketAddress(value: string): boolean {
-  const match = /^(?:\[([0-9a-fA-F:.]+)\]|(\d{1,3}(?:\.\d{1,3}){3})):(\d{1,5})$/.exec(value);
-  return Boolean(match && Number(match[3]) > 0 && Number(match[3]) <= 65535 && (match[1] ? match[1].includes(':') : match[2].split('.').every((part) => Number(part) <= 255)));
+type ListenMode = 'local' | 'network';
+const LISTEN: Record<ListenMode, string> = { local: '127.0.0.1:5353', network: '0.0.0.0:53' };
+type Preset = 'cloudflare' | 'google' | 'quad9' | 'alidns' | 'custom';
+/** Hostname DoH endpoints need explicit bootstrap addresses; Rust validates both. */
+const PRESETS: Record<Exclude<Preset, 'custom'>, { servers: string[]; bootstrap: string[] }> = {
+  cloudflare: { servers: ['https://cloudflare-dns.com/dns-query'], bootstrap: ['1.1.1.1:53', '1.0.0.1:53'] },
+  google: { servers: ['https://dns.google/dns-query'], bootstrap: ['8.8.8.8:53', '8.8.4.4:53'] },
+  quad9: { servers: ['https://dns.quad9.net/dns-query'], bootstrap: ['9.9.9.9:53', '149.112.112.112:53'] },
+  alidns: { servers: ['https://dns.alidns.com/dns-query'], bootstrap: ['223.5.5.5:53', '223.6.6.6:53'] },
+};
+const lines = (value: string) => value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+/** An occupied listener address: setup binds every listener before saving and reports CONFIG_CONFLICT. */
+function listenerInUse(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === 'CONFIG_CONFLICT';
 }
 
 export function SetupPage({ language }: { language: Language }) {
@@ -46,21 +58,25 @@ export function SetupPage({ language }: { language: Language }) {
   const [step, setStep] = useState(0);
   const [token, setToken] = useState(''); const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState(''); const [confirmPassword, setConfirmPassword] = useState('');
-  const [listen, setListen] = useState('127.0.0.1:5353'); const [servers, setServers] = useState('');
+  const [listenMode, setListenMode] = useState<ListenMode>('local');
+  const [preset, setPreset] = useState<Preset>(() => language === 'zh-CN' ? 'alidns' : 'cloudflare');
+  const [servers, setServers] = useState('');
   const [bootstrap, setBootstrap] = useState(''); const [mode, setMode] = useState('weighted'); const [preferH3, setPreferH3] = useState(false);
   const [toml, setToml] = useState(''); const [generated, setGenerated] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [templateError, setTemplateError] = useState<unknown>(null);
   const t = (key: string) => translate(`ui.${key}`, language);
   useEffect(() => { void api.request<{ toml: string }>('template').then((result) => setTemplate(result.toml)).catch(setTemplateError); }, [api]);
+  const listen = LISTEN[listenMode];
+  const upstreams = preset === 'custom'
+    ? { servers: lines(servers), bootstrap: lines(bootstrap), mode, prefer_h3: preferH3 }
+    : { ...PRESETS[preset], mode: 'weighted', prefer_h3: false };
   const next = () => {
     setError(null);
     if (step === 0 && (password !== confirmPassword || password.length < 12 || !token.trim() || !username.trim())) { setError(translate('app.passwordMismatch', language)); return; }
     if (step === 1) {
-      if (!socketAddress(listen.trim())) { setError(translate('app.addressFormat', language)); return; }
-      const upstreams = servers.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-      if (!upstreams.length) { setError(translate('settings.validation.required', language)); return; }
+      if (!upstreams.servers.length) { setError(translate('settings.validation.required', language)); return; }
       if (!template) { setError(translate('app.startFailed', language)); return; }
-      try { const candidate = networkTemplate(template, listen.trim(), { servers: upstreams, bootstrap: bootstrap.split(/\r?\n/).map((line) => line.trim()).filter(Boolean), mode, prefer_h3: preferH3 }); setToml(candidate); setGenerated(candidate); }
+      try { const candidate = networkTemplate(template, listen, upstreams); setToml(candidate); setGenerated(candidate); }
       catch (reason) { setError(present(reason, language)); return; }
     }
     setStep((current) => Math.min(current + 1, 2));
@@ -69,7 +85,10 @@ export function SetupPage({ language }: { language: Language }) {
     event.preventDefault(); if (step < 2) { next(); return; }
     setBusy(true); setError(null);
     try { await setup(username.trim(), password, toml, token.trim()); setToken(''); setPassword(''); setConfirmPassword(''); }
-    catch (reason) { setError(present(reason, language)); }
+    catch (reason) {
+      if (listenMode === 'network' && toml === generated && listenerInUse(reason)) setError(translate('ui.port53InUse', language, { detail: reason.message }));
+      else setError(present(reason, language));
+    }
     finally { setBusy(false); }
   };
   return <section className="auth-wrap"><div className="auth-card setup-card">
@@ -85,23 +104,34 @@ export function SetupPage({ language }: { language: Language }) {
       </>}
       {step === 1 && <>
         <p className="muted small">{t('networkIntro')}</p>
-        <label htmlFor="setup-listen">{t('listen')}</label><input id="setup-listen" value={listen} onChange={(event) => setListen(event.target.value)} placeholder={t('listenPlaceholder')} required spellCheck={false} />
-        <small>{t('listenHelp')}</small>
-        <label htmlFor="setup-servers">{t('upstream')}</label><textarea id="setup-servers" rows={5} placeholder={translate('settings.upstreams.servers.placeholder', language)} value={servers} onChange={(event) => setServers(event.target.value)} required spellCheck={false} />
-        <span className="setup-label">{translate('settings.upstreams.mode.label', language)}</span>
-        <Segmented label={translate('settings.upstreams.mode.label', language)} value={mode} onChange={setMode}
-          options={(['weighted', 'parallel'] as const).map((value) => ({ value, label: translate(`settings.upstreams.mode.${value}`, language) }))} />
-        <small>{translate('settings.upstreams.mode.help', language)}</small>
-        <Switch checked={preferH3} onCheckedChange={setPreferH3} label={translate('settings.upstreams.prefer_h3.label', language)} />
-        <label htmlFor="setup-bootstrap">{translate('settings.upstreams.bootstrap.label', language)}</label><textarea id="setup-bootstrap" rows={3} value={bootstrap} placeholder={translate('settings.upstreams.bootstrap.placeholder', language)} onChange={(event) => setBootstrap(event.target.value)} spellCheck={false} />
+        <span className="setup-label">{t('listenMode')}</span>
+        <Segmented label={t('listenMode')} value={listenMode} onChange={(value) => setListenMode(value as ListenMode)}
+          options={(['local', 'network'] as const).map((value) => ({ value, label: t(`listen_${value}`) }))} />
+        <small>{translate(`ui.listen_${listenMode}_help`, language, { address: listen })}</small>
+        <label htmlFor="setup-preset">{t('upstream')}</label>
+        <select id="setup-preset" value={preset} onChange={(event) => setPreset(event.target.value as Preset)}>
+          {(['cloudflare', 'google', 'quad9', 'alidns', 'custom'] as const).map((value) => <option key={value} value={value}>{t(`preset_${value}`)}</option>)}
+        </select>
+        {preset !== 'custom'
+          ? <small>{translate('ui.presetHelp', language, { servers: PRESETS[preset].servers.join(', '), bootstrap: PRESETS[preset].bootstrap.join(', ') })}</small>
+          : <>
+            <label htmlFor="setup-servers">{translate('settings.upstreams.servers.label', language)}</label><textarea id="setup-servers" rows={5} placeholder={translate('settings.upstreams.servers.placeholder', language)} value={servers} onChange={(event) => setServers(event.target.value)} required spellCheck={false} />
+            <span className="setup-label">{translate('settings.upstreams.mode.label', language)}</span>
+            <Segmented label={translate('settings.upstreams.mode.label', language)} value={mode} onChange={setMode}
+              options={(['weighted', 'parallel'] as const).map((value) => ({ value, label: translate(`settings.upstreams.mode.${value}`, language) }))} />
+            <small>{translate('settings.upstreams.mode.help', language)}</small>
+            <Switch checked={preferH3} onCheckedChange={setPreferH3} label={translate('settings.upstreams.prefer_h3.label', language)} />
+            <label htmlFor="setup-bootstrap">{translate('settings.upstreams.bootstrap.label', language)}</label><textarea id="setup-bootstrap" rows={3} value={bootstrap} placeholder={translate('settings.upstreams.bootstrap.placeholder', language)} onChange={(event) => setBootstrap(event.target.value)} spellCheck={false} />
+            <small>{translate('settings.upstreams.bootstrap.help', language)}</small>
+          </>}
       </>}
       {step === 2 && <><p className="muted small">{t('reviewIntro')}</p>
         {toml !== generated ? <p className="notice">{translate('shell.setupEdited', language)}</p> : <dl className="setup-summary">
-          <div className="detail-row"><span>{t('listen')}</span><strong className="transport-address">{listen.trim()}</strong></div>
-          <div className="detail-row"><span>{translate('settings.group.upstreams.title', language)}</span><strong className="transport-address">{servers.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => <span key={index} style={{ display: 'block' }}>{line}</span>)}</strong></div>
-          <div className="detail-row"><span>{translate('settings.upstreams.mode.label', language)}</span><strong>{translate(`settings.upstreams.mode.${mode}`, language)}</strong></div>
-          <div className="detail-row"><span>{translate('settings.upstreams.prefer_h3.label', language)}</span><strong>{translate(preferH3 ? 'shell.setupYes' : 'shell.setupNo', language)}</strong></div>
-          <div className="detail-row"><span>{translate('settings.upstreams.bootstrap.label', language)}</span><strong className="transport-address">{bootstrap.trim() ? bootstrap.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(', ') : translate('shell.setupNone', language)}</strong></div>
+          <div className="detail-row"><span>{t('listen')}</span><strong className="transport-address">{listen}</strong></div>
+          <div className="detail-row"><span>{translate('settings.group.upstreams.title', language)}</span><strong className="transport-address">{upstreams.servers.map((line, index) => <span key={index} style={{ display: 'block' }}>{line}</span>)}</strong></div>
+          <div className="detail-row"><span>{translate('settings.upstreams.mode.label', language)}</span><strong>{translate(`settings.upstreams.mode.${upstreams.mode}`, language)}</strong></div>
+          <div className="detail-row"><span>{translate('settings.upstreams.prefer_h3.label', language)}</span><strong>{translate(upstreams.prefer_h3 ? 'shell.setupYes' : 'shell.setupNo', language)}</strong></div>
+          <div className="detail-row"><span>{translate('settings.upstreams.bootstrap.label', language)}</span><strong className="transport-address">{upstreams.bootstrap.length ? upstreams.bootstrap.join(', ') : translate('shell.setupNone', language)}</strong></div>
         </dl>}
         <details className="setup-advanced"><summary>{translate('shell.setupFullConfig', language)}</summary>
           <p className="muted small">{translate('shell.setupFullConfigHelp', language)}</p>

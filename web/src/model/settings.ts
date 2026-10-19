@@ -66,33 +66,33 @@ export const settingPages = {
       field("upstreams.servers", "lines", true), { ...select("upstreams.mode", ["weighted", "parallel"]), helpKey: "settings.upstreams.mode.help" },
       field("upstreams.prefer_h3", "checkbox", true), field("upstreams.bootstrap", "lines", true),
       number("upstreams.max_parallel", 1, 32, true), advanced(number("upstreams.max_extra_inflight", 1, 65536, true)),
-      advanced(field("upstreams.ca_file", "nullable")), advanced(field("upstreams.dot_pool.enabled", "checkbox", true)),
+      advanced(field("upstreams.ca_file", "nullable", true)), advanced(field("upstreams.dot_pool.enabled", "checkbox", true)),
       advanced(number("upstreams.dot_pool.max_connections", 1, 256, true)),
       advanced(number("upstreams.dot_pool.idle_timeout_ms", 1, 600000)),
     ]),
     quiet(group("listeners", [visible(field("listen", "text", true)), number("query_timeout_ms", 1, 60000), advanced(number("tcp_io_timeout_ms", 1, 60000))])),
   ]),
   cache: page("cache", [
-    group("persistence", [field("cache.persistence.enabled", "checkbox", true), number("cache.persistence.max_bytes", 1048576, 536870912)]),
-    group("cache", [
+    group("persistence", [field("cache.persistence.enabled", "checkbox"), number("cache.persistence.max_bytes", 1048576, 536870912)]),
+    quiet(group("cache", [
       field("cache.enabled", "checkbox"), number("cache.max_entries", 1, 262144),
       number("cache.max_bytes", 512, 1073741824, true), advanced(number("cache.max_variants", 1, 256, true)),
       advanced(number("cache.shards", 1, 64, true)), advanced(number("cache.negative_percent", 0, 90, true)),
       number("cache.max_ttl_secs", 1, 86400), number("cache.negative_ttl_cap_secs", 1, 86400),
-    ]),
+    ])),
     group("prefetch", [
       field("cache.prefetch.enabled", "checkbox"), number("cache.prefetch.min_hits", 1, 1000000),
       number("cache.prefetch.remaining_percent", 1, 90), advanced(number("cache.prefetch.max_inflight", 1, 256)),
       advanced(number("cache.prefetch.rate_per_sec", 1, 10000)), advanced(number("cache.prefetch.backoff_secs", 1, 3600)),
     ]),
-    quiet(group("stale", [
+    group("stale", [
       field("cache.stale.enabled", "checkbox"), number("cache.stale.retention_secs", 1, 604800),
       number("cache.stale.reply_ttl_secs", 1, 300),
-    ])),
+    ]),
     group("ecs", [field("ecs.enabled", "checkbox"), number("ecs.ipv4_prefix", 0, 32, true), number("ecs.ipv6_prefix", 0, 128)]),
     group("ecsSharing", [
       field("cache.ecs_sharing.enabled", "checkbox"), number("cache.ecs_sharing.min_networks", 2, 8, true),
-      advanced(number("cache.ecs_sharing.revoke_cooldown_secs", 60, 604800)),
+      advanced(number("cache.ecs_sharing.revoke_cooldown_secs", 60, 604800, true)),
     ]),
   ]),
   filters: page("filters", [
@@ -131,7 +131,7 @@ export const settingPages = {
     group("metrics", [number("metrics.interval_secs", 0, 3600, true), visible(field("admin_listen", "nullable", true))]),
   ]),
   updates: page("updates", [
-    group("updates", [field("updates.auto_check", "checkbox", true), number("updates.check_interval_hours", 1, 168)]),
+    group("updates", [field("updates.auto_check", "checkbox"), number("updates.check_interval_hours", 1, 168)]),
   ]),
 } as const;
 

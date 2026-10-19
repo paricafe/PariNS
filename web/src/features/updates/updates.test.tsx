@@ -72,15 +72,15 @@ describe('software update presentation', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
     await waitFor(() => expect(mocks.request).toHaveBeenCalledWith('updates/apply', 'POST', { plan_id: 'plan-1', expected_version: '0.1.5', config_revision: 7 }));
-    await screen.findByText(/confirm the update request/);
+    await screen.findByText(/update request couldn't be confirmed/);
     expect(mocks.expectRestart).toHaveBeenCalledWith(true);
     expect(mocks.config.setUpdateLocked).toHaveBeenCalledWith(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
     await waitFor(() => expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1));
     // Actions are offered only while they can run; an unconfirmed apply hides Update now.
     expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
     current.last_operation = { operation_id: 'op-1', phase: 'failed', version: '0.1.5', reason: 'preflight_failed', downloaded_bytes: 0, total_bytes: 100 };
-    fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
     await screen.findByText("The update didn't finish");
     await waitFor(() => expect(mocks.expectRestart).toHaveBeenLastCalledWith(false));
     expect(mocks.reloadPage).not.toHaveBeenCalled();
@@ -89,8 +89,8 @@ describe('software update presentation', () => {
   it('keeps a check failure distinct from stale available results and shows rate limits', async () => {
     const current = fixture(); current.check.state = 'failed'; current.check.error = 'rate_limited'; current.check.retry_at_ms = Date.now() + 90_000;
     mocks.request.mockResolvedValue(current); mount();
-    await screen.findByText('This check failed. Showing the last result below.');
-    expect(screen.queryByText("You're on the latest stable release")).toBeNull();
+    await screen.findByText('The check failed; the last result is shown below.');
+    expect(screen.queryByText('Latest stable release installed')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Check for updates' })).toBeNull();
     expect(screen.getByText(/check again after/)).toBeTruthy();
   });
@@ -100,7 +100,7 @@ describe('software update presentation', () => {
     current.last_operation = { operation_id: 'op-3', phase: 'manual_required', version: '0.1.8', reason: 'readiness_failed', downloaded_bytes: 100, total_bytes: 100 };
     mocks.request.mockResolvedValue(current); mount();
     await screen.findByText(/reinstall the current or a newer version with the official installer/);
-    expect(screen.getByText("After starting, the new program's DNS or storage didn't work properly.")).toBeTruthy();
+    expect(screen.getByText("After the new version started, DNS or storage didn't work properly.")).toBeTruthy();
     expect(screen.queryByText(/update components aren't available/)).toBeNull();
     expect(screen.queryByText(/One-click updates work/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
@@ -114,7 +114,7 @@ describe('software update presentation', () => {
     mocks.request.mockResolvedValue(current); mount();
     await screen.findByText('Downloaded 1 KB');
     expect(screen.queryByRole('progressbar')).toBeNull();
-    expect(screen.getByText(/This kind of installation is updated by hand/)).toBeTruthy();
+    expect(screen.getByText(/This installation doesn't support online updates/)).toBeTruthy();
     expect(screen.getByRole('link', { name: 'How to update' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
     expect(mocks.expectRestart).not.toHaveBeenCalled();
@@ -134,7 +134,7 @@ describe('software update presentation', () => {
     expect(mocks.reloadPage).not.toHaveBeenCalled();
     offline = false;
     current.last_operation = { operation_id: 'op-2', phase: 'rolled_back', version: '0.1.5', reason: 'readiness_failed', downloaded_bytes: 100, total_bytes: 100 };
-    fireEvent.click(screen.getByRole('button', { name: 'Check update status' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
     await waitFor(() => expect(mocks.reloadPage).toHaveBeenCalledTimes(1));
     expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1);
   });
@@ -145,7 +145,7 @@ describe('software update presentation', () => {
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await screen.findByText('Your changes or the configuration just changed. Sort that out and confirm again.');
+    await screen.findByText('Your changes or the configuration just changed. Resolve them and confirm the update again.');
     expect(mocks.request.mock.calls.some(([path]) => path === 'updates/apply')).toBe(false);
   });
 
@@ -155,10 +155,10 @@ describe('software update presentation', () => {
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await screen.findByText('The configuration changed. Check again and confirm.');
+    await screen.findByText('The configuration changed. Check again, then confirm.');
     expect(mocks.expectRestart).toHaveBeenLastCalledWith(false);
     expect(mocks.config.setUpdateLocked).toHaveBeenLastCalledWith(false);
-    expect(screen.queryByText(/confirm the update request/)).toBeNull();
+    expect(screen.queryByText(/update request couldn't be confirmed/)).toBeNull();
     expect(mocks.reloadPage).not.toHaveBeenCalled();
   });
 });

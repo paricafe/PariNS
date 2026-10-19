@@ -120,9 +120,9 @@ describe('subscription draft and console', () => {
     await act(async () => { await config.reload(); });
     expect(next()).toBe('Manual updates only');
     view.rerender(<Console language="zh-CN" />);
-    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('只手动更新');
+    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('仅手动更新');
     fireEvent.click(screen.getByRole('switch', { name: '自动更新' }));
-    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('只手动更新');
+    expect(screen.getByText('下次更新').nextElementSibling?.textContent).toBe('仅手动更新');
     await act(async () => { prepared = await config.prepareSave(); });
     await act(async () => { await config.commitPrepared(prepared); });
     await waitFor(() => expect(screen.getByText('下次更新').nextElementSibling?.textContent)
@@ -131,7 +131,7 @@ describe('subscription draft and console', () => {
 
   it.each([
     { global: false, enabled: true, language: 'en' as const, label: 'Next update', expected: 'Off' },
-    { global: true, enabled: false, language: 'zh-CN' as const, label: '下次更新', expected: '未启用' },
+    { global: true, enabled: false, language: 'zh-CN' as const, label: '下次更新', expected: '未开启' },
   ])('hides retained dates when the saved global/source setting is disabled: $global/$enabled', async ({ global, enabled, language, label, expected }) => {
     const { wrapper } = fixture({ ...scheduled, enabled: global }, { ...source, enabled });
     let config!: ReturnType<typeof useConfig>;
@@ -173,11 +173,11 @@ describe('subscription draft and console', () => {
     view.rerender(<SubscriptionsPanel language="zh-CN" />);
     expect(screen.getByDisplayValue('My draft')).toBe(name);
     expect(document.activeElement).toBe(name);
-    fireEvent.click(screen.getByRole('button', { name: '使用 Natsuki List 示例' }));
+    fireEvent.click(screen.getByRole('button', { name: '填入 Natsuki List 示例' }));
     expect(screen.getByDisplayValue('https://raw.githubusercontent.com/Natsuki-Kaede/Natsuki-List/main/natsuki-list.list')).toBeTruthy();
-    expect(screen.getAllByRole('switch', { name: '启用这个订阅' }).every((item) => item.getAttribute('aria-checked') === 'false')).toBe(true);
+    expect(screen.getAllByRole('switch', { name: '开启' }).every((item) => item.getAttribute('aria-checked') === 'false')).toBe(true);
     expect(request.mock.calls.filter(([path]) => path.includes('/prepare') || path.includes('/refresh'))).toHaveLength(0);
-    fireEvent.click(screen.getAllByRole('button', { name: '验证并添加' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '验证并下载' })[0]);
     await screen.findByText(/规则格式不支持/);
     fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
     await waitFor(() => expect(request.mock.calls.filter(([path]) => path === 'filter/subscriptions').length).toBeGreaterThan(1));

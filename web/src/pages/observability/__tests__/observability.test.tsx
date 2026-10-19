@@ -104,11 +104,11 @@ describe("OverviewPage", () => {
       await waitFor(() => expect(screen.getByText('DNS is running')).toBeTruthy());
       operations += 10; failures += 8;
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-      await waitFor(() => expect(screen.getByText('Upstreams are not responding')).toBeTruthy());
+      await waitFor(() => expect(screen.getByText('Upstreams not responding')).toBeTruthy());
       // Once the failing samples leave the 65 s window, the warning clears.
       operations += 10;
       await act(async () => { await vi.advanceTimersByTimeAsync(70_000); });
-      await waitFor(() => expect(screen.getByText('Everything is running normally')).toBeTruthy());
+      await waitFor(() => expect(screen.getByText('Running normally')).toBeTruthy());
     } finally { vi.useRealTimers(); }
   });
   it('names recursive resolution, not upstreams, when recursion is failing', async () => {
@@ -122,16 +122,16 @@ describe("OverviewPage", () => {
       await waitFor(() => expect(screen.getByText('DNS is running')).toBeTruthy());
       operations += 10; failures += 8;
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-      await waitFor(() => expect(screen.getByText('Recursive resolution is failing')).toBeTruthy());
-      expect(screen.queryByText('Upstreams are not responding')).toBeNull();
+      await waitFor(() => expect(screen.getByText('Recursive resolution failing')).toBeTruthy());
+      expect(screen.queryByText('Upstreams not responding')).toBeNull();
     } finally { vi.useRealTimers(); }
   });
   it('distinguishes a failed runtime from an ordinary stop while retaining cumulative totals', async () => {
     const failed = { ...status, running: false, dns_health: { ...status.dns_health, state: 'failed', ready: false, code: 'task_panic' } };
     const api = fakeApi((path) => path === 'status' ? failed : stats);
     render(<OverviewPage api={api} language="en" onOpenDns={() => {}} />);
-    await waitFor(() => expect(screen.getByText('Service stopped unexpectedly')).toBeTruthy());
-    expect(screen.getByText('Not ready yet')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('Stopped unexpectedly')).toBeTruthy());
+    expect(screen.getByText('Not ready')).toBeTruthy();
     expect(screen.getByText('task_panic')).toBeTruthy();
     expect(screen.getByText('100')).toBeTruthy();
   });
@@ -142,13 +142,13 @@ describe("OverviewPage", () => {
     await waitFor(() => expect(screen.getByText('DNS is not running')).toBeTruthy());
     expect(screen.getByText('0.0.0.0:443 for DoH is used by another program.')).toBeTruthy();
     expect(screen.getByText(/Retrying automatically/)).toBeTruthy();
-    expect(screen.getByText('Could not start')).toBeTruthy();
+    expect(screen.getByText('Failed to start')).toBeTruthy();
     expect(screen.getByText(error)).toBeTruthy();
     view.unmount();
     // Another startup error keeps the generic explanation and the raw text.
     const other = { ...failed, last_error: 'DNS unavailable: subscription_material_missing: DNS policy unavailable' };
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? other : stats)} language="zh-CN" onOpenDns={() => {}} />);
-    await waitFor(() => expect(screen.getByText('DNS 没有运行')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('DNS 未运行')).toBeTruthy());
     expect(screen.queryByText(/被其他程序占用/)).toBeNull();
     expect(screen.getByText(/正在自动重试/)).toBeTruthy();
   });
@@ -158,16 +158,16 @@ describe("OverviewPage", () => {
       { kind: 'doh', address: '0.0.0.0:443', state: 'retrying', error: 'bind DoH 0.0.0.0:443: Address in use (os error 98)' },
     ] } as StatusView;
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? degraded : stats)} language="en" onOpenDns={() => {}} />);
-    await waitFor(() => expect(screen.getAllByText('Some listeners are unavailable').length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText('Some listeners unavailable').length).toBeGreaterThan(0));
     expect(screen.getByText('These listeners are unavailable')).toBeTruthy();
     expect(screen.getByText(/0.0.0.0:443 for DoH is used by another program./)).toBeTruthy();
     expect(screen.getByText('bind DoH 0.0.0.0:443: Address in use (os error 98)')).toBeTruthy();
     expect(screen.queryByText(/0.0.0.0:53 for DNS/)).toBeNull();
-    expect(screen.getByText('Some listeners unavailable')).toBeTruthy();
+    expect(screen.getByText('Degraded')).toBeTruthy();
   });
   it('shows the running resolution mode and recursion diagnostics without upstream diagnostics', async () => {
     const view = render(<OverviewPage api={fakeApi((path) => path === 'status' ? status : stats)} language="en" onOpenDns={() => {}} upstreamCount={2} />);
-    await waitFor(() => expect(screen.getByText('Forward')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Forwarding')).toBeTruthy());
     expect(screen.getByText('Upstreams')).toBeTruthy();
     expect(screen.queryByText('Recursive resolution diagnostics')).toBeNull();
     view.unmount();
@@ -188,7 +188,7 @@ describe("OverviewPage", () => {
   it('reports coalesced followers beside the unchanged hit rate', async () => {
     const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, flight_joined: 9 } } } };
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? status : totals)} language="en" onOpenDns={() => {}} />);
-    await waitFor(() => expect(screen.getByText(/Another 9% joined an identical query already in progress/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Another 9% joined an identical query in progress/)).toBeTruthy());
     expect(screen.getByText("30.0%")).toBeTruthy();
   });
   it("renders cumulative metrics separately from time-window trend", async () => {
@@ -235,7 +235,7 @@ describe("LogsPage", () => {
     const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getAllByText('fresh.test').length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole('button', { name: /Older queries/ }));
-    fireEvent.click(screen.getByRole('tab', { name: 'Stale cache' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Stale hit' }));
     await waitFor(() => expect(screen.getAllByText('stale.test').length).toBeGreaterThan(0));
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: 'stale', before_id: null, limit: 50 });
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });
@@ -301,7 +301,7 @@ describe("LogsPage", () => {
     const failed = render(<LogsPage api={failing} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain("Can't reach PariNS"));
     failed.rerender(<LogsPage api={failing} language="zh-CN" onOpenSettings={() => {}} />);
-    expect(screen.getByRole('alert').textContent).toContain('连接不上');
+    expect(screen.getByRole('alert').textContent).toContain('无法连接 PariNS');
     expect(failing.request).toHaveBeenCalledTimes(1);
   });
 
@@ -323,7 +323,7 @@ describe("LogsPage", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /Clear log/ })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /Clear log/ }));
     fireEvent.click(screen.getByRole("button", { name: "Clear log" }));
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("couldn't confirm"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("couldn't be confirmed"));
     expect(clearCalls).toBe(1);
     expect((screen.getByRole('button', { name: 'Clear log…' }) as HTMLButtonElement).disabled).toBe(true);
     epoch = 4;

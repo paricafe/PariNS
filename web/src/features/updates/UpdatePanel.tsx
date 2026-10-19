@@ -25,7 +25,7 @@ function reasonText(reason: string, language: Language): string {
   const key = `updates.${reason}`;
   return hasTranslation(key) ? translate(key, language) : translate('updates.reasonUnknown', language, { code: reason });
 }
-function phaseText(phase: string, language: Language) { return reasonText(phase === 'failed' ? 'operationFailed' : phase, language); }
+function phaseText(phase: string, language: Language) { return reasonText(phase === 'failed' ? 'operationFailed' : phase === 'aborted' ? 'operationAborted' : phase, language); }
 
 function Operation({ operation, language }: { operation: UpdateOperation; language: Language }) {
   const t = (key: string) => translate(`updates.${key}`, language);

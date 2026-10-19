@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Console fields with units (sizes and durations) reported an out-of-range value
+  as a whole number of bytes or seconds, such as "1048576 to 536870912", although
+  they accept exact decimals in any unit. The message now shows the bounds in
+  units, such as "1 MB to 512 MB". The unit choices no longer offer a unit larger
+  than the field's maximum, such as GB for the 512 MB cache snapshot limit.
+
 ## v0.1.20 — 2026-10-19
 
 ### Changed

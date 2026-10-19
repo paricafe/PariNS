@@ -63,6 +63,11 @@ export const shellMessages = {
   unit_minutes: ['分钟', 'minutes'],
   unit_hours: ['小时', 'hours'],
   unit_days: ['天', 'days'],
+  // Singular labels for an amount of exactly one, used in messages.
+  unit_one_seconds: ['秒', 'second'],
+  unit_one_minutes: ['分钟', 'minute'],
+  unit_one_hours: ['小时', 'hour'],
+  unit_one_days: ['天', 'day'],
   about: ["关于“{label}”", "About “{label}”"],
   moreOptions: ["更多选项", "More options"],
   more: ["更多", "More"],

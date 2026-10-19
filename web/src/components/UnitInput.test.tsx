@@ -44,6 +44,18 @@ describe('UnitInput', () => {
     expect(onChange).toHaveBeenLastCalledWith('1001');
   });
 
+  it('offers only units whose one unit fits under the maximum, keeping the unit in use', () => {
+    const units = () => screen.getAllByRole('radio').map((radio) => radio.textContent);
+    const view = render(<UnitInput id="snapshot" label="Snapshot" family="bytes" max={512 * 1024 ** 2} value={String(32 * 1024 ** 2)} language="en" onChange={() => {}} />);
+    expect(units()).toEqual(['B', 'KB', 'MB']);
+    // An out-of-range legacy value already in GB keeps its unit so the display stays correct.
+    view.rerender(<UnitInput id="snapshot" label="Snapshot" family="bytes" max={512 * 1024 ** 2} value={String(2 * 1024 ** 3)} language="en" onChange={() => {}} />);
+    expect(units()).toEqual(['B', 'KB', 'MB', 'GB']);
+    cleanup();
+    render(<UnitInput id="ttl" label="TTL" family="seconds" max={3600} value="60" language="en" onChange={() => {}} />);
+    expect(units()).toEqual(['seconds', 'minutes', 'hours']);
+  });
+
   it('only applies to byte, millisecond and second fields', () => {
     expect(unitFamily('cache.max_bytes')).toBe('bytes');
     expect(unitFamily('query_timeout_ms')).toBe('milliseconds');

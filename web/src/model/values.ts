@@ -1,6 +1,7 @@
 import { ModelError } from "./errors";
 import { joinListener, splitListener, type ListenerParts } from "./listener";
 import type { SettingField } from "./settings";
+import { unitFamily } from "./units";
 
 export type RawFieldValue = string | boolean | ListenerParts;
 
@@ -33,6 +34,9 @@ export function convertFieldValue(field: SettingField, draft: RawFieldValue): un
     }
     const value = Number(text);
     if ((field.min !== undefined && value < field.min) || (field.max !== undefined && value > field.max)) {
+      const family = unitFamily(field.path);
+      // Unit fields accept exact decimals in any unit, so their bounds are shown in units, not as whole base numbers.
+      if (family) throw new ModelError("settings.validation.rangeUnit", field.path, { min: field.min ?? 0, max: field.max ?? 0, family });
       throw new ModelError("settings.validation.range", field.path, { min: field.min ?? 0, max: field.max ?? 0 });
     }
     return value;

@@ -204,6 +204,7 @@ export const settingsMessages = {
   "validation.required": ["请填写这一项。", "Fill in this field."],
   "validation.integer": ["请填整数。", "Enter a whole number."],
   "validation.range": ["请填 {min} 到 {max} 之间的整数。", "Enter a whole number from {min} to {max}."],
+  "validation.rangeUnit": ["请填 {min} 到 {max} 之间的值。", "Enter a value from {min} to {max}."],
   "validation.check": ["请检查填写的内容。", "Check what you entered."],
   "upstreams.servers.placeholder": ["udp://192.0.2.53:53\ntls://dns.example:853\nhttps://dns.example/dns-query", "udp://192.0.2.53:53\ntls://dns.example:853\nhttps://dns.example/dns-query"],
   "upstreams.mode.help": ["加权：每次查询按权重选一个上游。并行：同时询问多个上游，采用最先返回的可用答案。", "Weighted: each query goes to one upstream chosen by weight. Parallel: several upstreams are asked at once and the first usable answer wins."],

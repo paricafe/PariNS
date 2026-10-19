@@ -9,6 +9,7 @@ import { accountMessages } from './account';
 import { shellMessages } from './shell';
 import { appearanceMessages } from './appearance';
 import { ModelError } from "../model/errors";
+import { UNITS, exactUnit, isUnitFamily, type UnitFamily } from "../model/units";
 import { ApiError } from "../session/client";
 
 export type Language = "zh-CN" | "en";
@@ -48,8 +49,20 @@ export function presentIssue(issue: string | ModelError | ApiError, language: La
     return hasTranslation(key) ? translate(key, language, { detail: issue.message, status: issue.status }) : issue.message;
   }
   const key = issue instanceof ModelError ? issue.key : issue;
-  const params = issue instanceof ModelError ? issue.params : {};
+  const raw = issue instanceof ModelError ? issue.params : {};
+  // Unit fields report their bounds in readable units in the current language.
+  const params = isUnitFamily(raw.family)
+    ? { ...raw, min: formatUnitAmount(Number(raw.min), raw.family, language), max: formatUnitAmount(Number(raw.max), raw.family, language) }
+    : raw;
   return hasTranslation(key) ? translate(key, language, params) : key;
+}
+
+/** A base-unit amount in its largest exact unit, such as 1048576 bytes as "1 MB" or 60 seconds as "1 minute". */
+export function formatUnitAmount(base: number, family: UnitFamily, language: Language): string {
+  const [key, factor] = base === 0 ? UNITS[family][0] : exactUnit(family, base);
+  const amount = base / factor;
+  const singular = `shell.unit_one_${key}`;
+  return `${formatNumber(amount, language)} ${translate(amount === 1 && hasTranslation(singular) ? singular : `shell.unit_${key}`, language)}`;
 }
 
 export function normalizeLanguage(value: string | null | undefined): Language | null {

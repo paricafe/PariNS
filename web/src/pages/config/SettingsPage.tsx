@@ -58,7 +58,7 @@ function FieldRow({ field, language, value, onChange, disabled }: { field: Setti
   </div>;
   const textValue = typeof value === 'string' ? value : '';
   const family = field.type === 'number' ? unitFamily(field.path) : null;
-  if (family) return row(<UnitInput id={id} label={label} family={family} value={textValue} disabled={disabled} language={language} onChange={onChange} describedBy={noteId} />);
+  if (family) return row(<UnitInput id={id} label={label} family={family} max={field.max} value={textValue} disabled={disabled} language={language} onChange={onChange} describedBy={noteId} />);
   if (field.type === 'number' && field.min !== undefined && field.max !== undefined && field.max - field.min <= 256)
     return row(<Stepper id={id} label={label} value={textValue} min={field.min} max={field.max} disabled={disabled} language={language} onChange={onChange} describedBy={noteId} />);
   if (field.type === 'select') {

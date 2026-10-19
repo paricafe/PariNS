@@ -201,6 +201,12 @@ pub(in crate::manage) async fn run(
         *coordinator.root.lock().unwrap() = status.clone();
         if let Ok(_permit) = shared.mutation.clone().try_acquire_owned() {
             let _ = reconcile(&coordinator, status.as_ref()).await;
+            // Reconcile is the only thaw. Subscriptions opened during a frozen
+            // start keep their Store closed until now; this is a no-op otherwise.
+            if !coordinator.frozen.load(Ordering::Acquire) {
+                let filters = shared.manager.lock().await.filters.clone();
+                filters.thaw().await;
+            }
         }
         if let Some(status) = &status
             && last_receipt

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- After an online software update, the new process left filter subscription
+  storage closed even once the update finished, so saving any configuration with
+  active subscriptions and refreshing subscriptions failed with
+  `subscription_storage_unavailable` until the next restart. Storage now opens when
+  the update completes. Filtering itself was not affected.
+
 ## v0.1.19 — 2026-10-19
 
 ### Changed

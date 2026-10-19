@@ -217,6 +217,9 @@ until preview/validation.
   durable catalog, never reconstructed by scanning objects. Status GETs do no IO;
   download/compile runs outside Manager and mutation locks and is never awaited under
   Manager. Details: `src/filter_subscriptions/mod.rs`.
+- A process started frozen never opens the subscription Store; reconcile is the only
+  thaw, and the update loop then opens it once (outside Manager, under the mutation
+  permit). Any other component that defers work during a freeze must resume after it.
 
 ## Verification
 

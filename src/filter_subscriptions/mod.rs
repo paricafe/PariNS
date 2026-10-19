@@ -22,6 +22,11 @@
 //! - Configuration candidates use try-admission under Manager and never await the
 //!   worker there. Config is persisted before its infallible policy swap; background
 //!   content selects the catalog before policy publication.
+//! - A process started while a software update is frozen serves read-only material
+//!   and leaves the Store (and its lock) closed. After the update coordinator's
+//!   reconcile thaws, management calls `Service::thaw`, which opens the Store once
+//!   and seeds the refresh schedule; a failure stays `subscription_storage_unavailable`
+//!   and the next thaw retries.
 pub(crate) mod download;
 pub mod handle;
 pub mod service;

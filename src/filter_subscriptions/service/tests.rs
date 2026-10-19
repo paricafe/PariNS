@@ -613,6 +613,57 @@ async fn frozen_start_is_read_only_and_bootstrap_downloads_all_new_sources_once(
 }
 
 #[tokio::test]
+async fn frozen_start_opens_the_store_once_thawed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sources");
+    let one = source("one");
+    let mut store = Store::open(&path, 256 * 1024 * 1024).unwrap();
+    install(&mut store, &one, b".one.test\n");
+    drop(store);
+    let settings = Settings {
+        sources: vec![one],
+        ..Default::default()
+    };
+    let service =
+        Service::open_frozen(path.clone(), Policy::default(), settings.clone(), 1, vec![])
+            .await
+            .unwrap();
+    // Frozen: the published policy comes from read-only material and the Store stays closed.
+    assert!(service.ready());
+    assert!(service.next_due(u64::MAX).is_none());
+    let error = service
+        .prepare_config(settings.clone(), Policy::default(), 1)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error_code(&error), "subscription_storage_unavailable");
+    drop(Store::open(&path, 256 * 1024 * 1024).unwrap());
+
+    service.thaw().await;
+    assert!(
+        Store::open(&path, 256 * 1024 * 1024).is_err(),
+        "the Store holds its lock"
+    );
+    assert_eq!(service.snapshot().unavailable_reason, None);
+    assert!(
+        service.next_due(u64::MAX).is_some(),
+        "the refresh schedule is seeded"
+    );
+    let candidate = service
+        .prepare_config(settings, Policy::default(), 1)
+        .await
+        .unwrap();
+    service.publish_config(candidate, 2);
+    respond(&service, &[b".one.test\n"]);
+    let begin = service.begin(refresh(&service)).await.unwrap();
+    let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+    service.commit(candidate).await.unwrap();
+    // Thawing again is a no-op.
+    service.thaw().await;
+    assert!(service.ready());
+}
+
+#[tokio::test]
 async fn metadata_schedule_changes_and_aggregate_failure_have_bounded_next_due() {
     let mut initial = source("one");
     initial.update_interval_hours = 168;

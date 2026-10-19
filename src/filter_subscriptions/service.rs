@@ -155,6 +155,8 @@ pub struct Service {
     handle: Arc<PolicyHandle>,
     state: Mutex<State>,
     store: Mutex<Option<Store>>,
+    /// Opened frozen: the Store waits for [`Service::thaw`].
+    deferred: AtomicBool,
     worker: Arc<Semaphore>,
     reader: SubscriptionReader,
     closed: AtomicBool,
@@ -246,6 +248,7 @@ impl Service {
                 index_pin: None,
             }),
             store: Mutex::new(store),
+            deferred: AtomicBool::new(frozen),
             worker: Arc::new(Semaphore::new(1)),
             reader: SubscriptionReader::new(),
             closed: AtomicBool::new(false),
@@ -313,6 +316,63 @@ impl Service {
             tokio::task::spawn_blocking(move || owner.seed_schedule()).await??;
         }
         Ok(service)
+    }
+
+    /// A Service opened while a software update froze the process published
+    /// read-only material and left its Store closed. Management calls this after
+    /// the update coordinator thaws; it opens the Store once and seeds the refresh
+    /// schedule. A failure keeps `subscription_storage_unavailable` and the next
+    /// call retries. Other Services return at once.
+    pub async fn thaw(self: &Arc<Self>) {
+        if !self.deferred.load(Ordering::Acquire) {
+            return;
+        }
+        let owner = self.clone();
+        if tokio::task::spawn_blocking(move || owner.open_deferred())
+            .await
+            .is_ok_and(|opened| opened)
+        {
+            let owner = self.clone();
+            // The Store is open; a failed schedule write is retried by later work.
+            let _ = tokio::task::spawn_blocking(move || owner.seed_schedule()).await;
+        }
+    }
+    fn open_deferred(&self) -> bool {
+        let mut locked = self.store.lock().unwrap();
+        if !self.deferred.load(Ordering::Acquire) || self.check_open().is_err() {
+            return false;
+        }
+        let (current, previous, quota) = {
+            let state = self.state.lock().unwrap();
+            let Ok(current) = state.settings.fingerprints() else {
+                return false;
+            };
+            (
+                current,
+                state.previous.clone(),
+                state.settings.max_disk_bytes,
+            )
+        };
+        let opened = Store::open(&self.path, quota).and_then(|mut store| {
+            store.set_references(current, previous)?;
+            Ok(store)
+        });
+        let Ok(store) = opened else {
+            self.state.lock().unwrap().unavailable =
+                Some("subscription_storage_unavailable".into());
+            return false;
+        };
+        // A frozen start that could not build its policy keeps that reason.
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.ready_policy {
+                state.unavailable = None;
+            }
+        }
+        self.observe_store(&store);
+        *locked = Some(store);
+        self.deferred.store(false, Ordering::Release);
+        true
     }
 
     pub fn handle(&self) -> Arc<PolicyHandle> {

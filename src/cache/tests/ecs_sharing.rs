@@ -253,7 +253,8 @@ fn sharing_never_crosses_family_no_ecs_privacy_or_query_flags() {
         now,
     );
     store(&cache, &q, &answer(&q, 4, 60), exact("2001:db8::/56"), now);
-    assert_eq!(state(&cache, &q, now), "shared");
+    // Inspection reports the most cautious family: IPv6 is still observing.
+    assert_eq!(state(&cache, &q, now), "observing");
     assert_eq!(
         scopes(&cache, &q, now),
         [
@@ -285,6 +286,20 @@ fn sharing_never_crosses_family_no_ecs_privacy_or_query_flags() {
             .answers[0]
             .data,
         RData::A(A::new(192, 0, 2, 5))
+    );
+}
+
+#[test]
+fn inspection_reports_expired_shared_evidence_as_observing() {
+    let cache = Cache::new(sharing_config(3));
+    let q = query("aged.test.");
+    let now = Instant::now();
+    learn(&cache, &q, &answer(&q, 1, 60), now);
+    assert_eq!(state(&cache, &q, now + Duration::from_secs(3599)), "shared");
+    // After an hour the next answer starts a new observation.
+    assert_eq!(
+        state(&cache, &q, now + Duration::from_secs(3600)),
+        "observing"
     );
 }
 

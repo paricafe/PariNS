@@ -48,11 +48,12 @@ pub(super) fn capacity(max_entries: usize, shards: usize) -> usize {
 
 pub(super) type Fingerprint = [u8; 16];
 
+/// Ordered from least to most cautious, so inspection can report the maximum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
-    Observing,
     Shared,
+    Observing,
     Revoked,
 }
 
@@ -286,6 +287,12 @@ impl Table {
             }
             match phase {
                 Phase::Observing { .. } => Some(State::Observing),
+                // Expired evidence: the next answer starts a new observation.
+                Phase::Shared { since, .. }
+                    if now.saturating_duration_since(*since) >= SHARED_MAX_AGE =>
+                {
+                    Some(State::Observing)
+                }
                 Phase::Shared { .. } => Some(State::Shared),
                 Phase::Revoked { until } if *until > now => Some(State::Revoked),
                 // An elapsed cooldown is equivalent to no record.

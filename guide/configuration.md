@@ -2,537 +2,477 @@
 
 [Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md)
 
-Start with [parins.example.toml](../parins.example.toml) or the managed setup wizard.
-The console and file mode share the same configuration schema. `[upstreams]` is
-required; obsolete single-upstream fields and unknown keys are rejected. The example
-uses a loopback test upstream on port 5354: replace it before sending real queries.
-See [Deployment](deployment.md#file-configured-mode) for validation and startup commands.
+The console and file mode use the same TOML schema. In managed mode you edit it in
+the console's settings pages or under **Advanced (TOML)**; in file mode, start from
+[parins.example.toml](../parins.example.toml). Unknown keys and invalid values are
+rejected before anything is applied. Relative file paths resolve against the
+configuration file's directory in file mode and against the state directory in
+managed mode.
 
-- [Upstreams](#upstream-dns-settings), [recursive resolution](#recursive-resolution) and [DoT connection reuse](#optional-dot-upstream-reuse)
-- [Encrypted listeners](#encrypted-listeners)
-- [Cache and ECS](#cache-policy) and [request coalescing](#request-coalescing)
-- [Filtering and subscriptions](#local-filtering)
-- [Source budgets](#optional-source-budgets) and [protocol limits](#behavior-and-limits)
+These keys have no default and must be present: `listen`, `query_timeout_ms`,
+`tcp_io_timeout_ms`, `shutdown_grace_ms`, `max_inflight`, `max_tcp_connections` and
+`upstreams.servers`. Every other key may be omitted and takes the default shown.
+Sizes are in bytes (MiB = 1,048,576 bytes).
 
-## Upstream DNS settings
+Sections: [Upstreams](#upstreams) · [Resolution mode and recursion](#resolution-mode-and-recursion)
+· [Listeners and encryption](#listeners-and-encryption) · [Cache and ECS sharing](#cache-and-ecs-sharing)
+· [Prefetch and serve stale](#prefetch-and-serve-stale) · [Query coalescing](#query-coalescing)
+· [Filtering and subscriptions](#filtering-and-subscriptions) · [Limits](#limits)
+· [Storage and logs](#storage-and-logs) · [Updates](#updates)
 
-**Upstream DNS settings** is the sole visual upstream editor, for one or more
-servers. Enter one endpoint per line. The first-run wizard uses the same
-list, query modes, explicit bootstrap and H3 preference.
-Supported syntax is IP with optional port, `udp://`, `tcp://`, `tls://`,
-`https://host/dns-query`, and `quic://`; bracket IPv6 literals. A trailing
-`weight=N` (1..1000) sets a static weight for smooth weighted round-robin, without
-adaptive latency/failure weighting. Parallel mode starts all
-configured endpoints when the global extra-operation budget allows, returning
-the first NOERROR/NXDOMAIN response and cancelling remaining requests. DNS errors
-are held as fallback while other requests remain pending; all share the caller's
-deadline. At saturation, fewer parallel requests run. Weighting selects one
-endpoint per operation; it does not promise retries/failover on failure.
+## Upstreams
 
-```toml
-[upstreams]
-servers = ["udp://192.0.2.53:53 weight=2", "tcp://192.0.2.54:53 weight=1"]
-mode = "weighted" # or "parallel"
-prefer_h3 = false # HTTPS only; opt in to HTTP/3 with verified HTTP/2 fallback
-bootstrap = [] # hostname endpoints require explicit DNS IP:port entries
-max_parallel = 32 # parallel mode must cover all configured servers (max 32)
-max_extra_inflight = 128
-# ca_file = "private-ca.pem" # otherwise built-in WebPKI roots
-```
-
-The example addresses are documentation-only: replace them with your actual
-resolvers. Hostnames require explicit bootstrap servers; system DNS is never
-used for bootstrap. Encrypted transports validate certificate identity and never
-downgrade to plaintext. DoH sends RFC 8484 GET requests over HTTP/2 by default. Enable **Prefer
-HTTP/3 for HTTPS upstreams** (`prefer_h3 = true`) to try QUIC on the same host,
-port and path first, then fall back to verified HTTP/2 on failure.
-Connecting and sending over H3 has a budget of at most 250 ms (half the remaining
-query time if shorter); once the query is sent, PariNS waits for the upstream's
-answer until the query deadline and does not resend it over HTTP/2. HTTP/3 and
-HTTP/2 each reuse one connection per endpoint. Failed H3 connections, transport
-or protocol errors trigger a 30-second per-endpoint cooldown before retrying H3;
-a slow answer does not. A definite client error such as 405 stops H3 for that
-endpoint until the upstream configuration is next applied. Because queries
-travel in the URL, an unusually large query (several KB of EDNS options) can
-exceed an upstream's header limits and fail with 414 or 431; that affects only
-that query. Normal
-DNS error replies still follow the selected upstream scheduling policy. This
-does not discover alternate ports through Alt-Svc or HTTPS/SVCB records. Direct
-HTTPS-origin probing and TCP fallback follow [RFC 9114 §3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-3.1).
-Unsupported schemes,
-credentials, URL query strings, fragments and duplicate endpoints are rejected.
-All pool endpoints should have equivalent resolution,
-filtering and ECS policies because they share the resolver cache. There is no
-domain-routing syntax or DNSCrypt support. Do not point endpoints/bootstrap back
-at PariNS (including NAT aliases); direct matching listeners are rejected, but
-arbitrary network hairpin routes cannot be inferred by local validation.
-
-### Client request forwarding
-
-Forwarding preserves the question and EDNS options, DO/CD/RD flags and payload
-advertisement, with deliberate exceptions: transaction IDs are hop-local; DoQ
-requires ID zero and removes TCP keepalive. ECS is policy-controlled, not blindly
-copied: disabled ECS removes the client subnet; enabled ECS validates it against
-the socket peer and caps the prefix (explicit /0 remains private). Invalid or
-spoofed subnets are rejected. ECS privacy retry and response normalization remain
-in effect; AD is cleared because PariNS does not validate forwarded answers. Requests with
-Cookie/unknown EDNS options bypass shared cache and request coalescing. Padding is
-regenerated only for encrypted hops: 128-byte upstream request blocks and 468-byte
-client response blocks when requested, bounded by the advertised payload limit.
-Plaintext hops remove Padding; non-EDNS requests do not gain an OPT record. These boundaries
-follow [RFC 6891](https://www.rfc-editor.org/rfc/rfc6891),
-[RFC 7871](https://www.rfc-editor.org/rfc/rfc7871) and
-[RFC 9250](https://www.rfc-editor.org/rfc/rfc9250); forwarding is not byte-for-byte
-packet replay.
-
-## Recursive resolution
-
-`[resolution] mode = "recursive"` resolves cache misses from the root servers
-instead of `[upstreams]`, which stays configured for switching back. The default is
-`"forward"`. Changing the mode restarts DNS, and the cache starts cold: forwarded
-and recursive answers never share a cache or snapshot.
-
-- **Filtering and privacy.** Only PariNS's local and subscription rules apply; a
-  forwarder's account policies do not. Queries to authoritative servers are
-  plaintext UDP/TCP on port 53, and with `[ecs] enabled = true` the client subnet
-  (capped to the configured prefixes) is sent only with queries for the answer
-  itself (the question and its CNAME targets), never with the delegation, name
-  server address or DNSSEC key lookups made to reach them.
-- **ECS scope.** Answers are cached by the scope the authoritative server returns.
-  An answer without an ECS option does not depend on the client network
-  ([RFC 7871](https://www.rfc-editor.org/rfc/rfc7871)) and is shared by all clients
-  of its address family. Learned sharing (`[cache.ecs_sharing]`) applies only to
-  forwarding.
-- **DNSSEC.** Answers are validated from the built-in root trust anchor. Bogus data
-  returns SERVFAIL with Extended DNS Error 6 (DNSSEC Bogus,
-  [RFC 8914](https://www.rfc-editor.org/rfc/rfc8914)); unsigned zones answer
-  normally. Positive answers omit the authority section, so unsigned delegation
-  records there never fail validation. AD is set only for validated (Secure) data
-  and only for clients that set DO or AD, and it is cleared when filtering
-  rewrites an answer. A client that
-  sets CD validates for itself: PariNS returns the data unchecked and without AD,
-  cached separately from validated answers.
-- **Failures.** Timeouts and unreachable authorities are upstream failures: stale
-  answers are served under the usual `[cache.stale]` rules, and every resolution
-  stays within `query_timeout_ms`. Each authoritative server gets at most 1.5 s
-  before the next one is tried. DNSSEC Bogus answers count as upstream failures in
-  the metrics but are never replaced by stale data.
-
-`[recursion]` (used only in recursive mode):
+`[upstreams]` lists the resolvers PariNS forwards to. All endpoints should give
+equivalent answers, because they share one cache.
 
 | Key | Default | Range | Meaning |
 | --- | --- | --- | --- |
-| `ipv6` | `false` | | Also query authoritative servers over IPv6; enable only with IPv6 egress. |
-| `max_outbound_per_second` | 500 | 1..=10000 | Sustained queries per second to all authoritative servers together. |
-| `max_outbound_inflight` | 256 | 1..=4096 | Authoritative queries admitted at once, waiting for a rate token or a response. |
-| `max_depth` | 24 | 4..=64 | Referral and CNAME depth for one resolution. |
-| `max_queries_per_request` | 200 | 1..=1000 | Authoritative queries one lookup may send, including delegations, name server addresses and CNAME targets. Each DS or DNSKEY lookup for DNSSEC validation has its own budget; the outbound limits above cap the total. |
-| `cache_entries` | 65536 | 1024..=1048576 | Delegation, name server and DNSSEC key responses kept by the recursor (entries, not bytes). |
+| `servers` | (required) | 1–32 entries | Upstream endpoints, one per entry (syntax below). |
+| `mode` | `"weighted"` | `weighted`, `parallel` | Weighted picks one endpoint per query by smooth weighted round-robin. Parallel sends to all endpoints and uses the first NOERROR or NXDOMAIN answer. |
+| `bootstrap` | `[]` | up to 8 `IP:port` | Plain DNS servers used only to resolve hostname endpoints. Required when any endpoint is a hostname. |
+| `prefer_h3` | `false` | | Try HTTP/3 first for `https://` endpoints, with verified HTTP/2 as fallback. |
+| `max_parallel` | `32` | 1–32 | Parallel mode only: endpoints queried at once; must be at least the number of servers. |
+| `max_extra_inflight` | `128` | 1–65536 | Parallel mode only: extra requests (beyond the first of each query) in flight across all queries. When used up, fewer endpoints are queried. |
+| `ca_file` | none | path | PEM roots that replace the built-in WebPKI roots for encrypted upstreams. |
 
-In recursive mode the loopback `/metrics` endpoint (`admin_listen`) adds
-`parins_recursion_*` counters: resolutions by outcome (including those cancelled
-before finishing, at the query deadline or by a cancelled request, and those ended
-by shutdown), failures by cause (timeout, unfollowed referral,
-query or depth budget, other), queries sent, rate-limit waits and queries in flight
-([operations](operations.md#recursive-resolution)). Root hints and the trust anchor are built in and change only
-with a PariNS release. QNAME minimisation is relaxed, because some authoritative servers answer
-NXDOMAIN for names that only have descendants.
+`[upstreams.dot_pool]` reuses authenticated connections to each `tls://` endpoint:
 
-## Optional DoT upstream reuse
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Reuse DoT connections instead of one connection per query. |
+| `max_connections` | `8` | 1–256 | Connections per DoT endpoint; each carries one query at a time. |
+| `idle_timeout_ms` | `30000` | 1–600000 | An idle connection older than this is not reused (checked when a query needs one). |
 
-For `tls://` endpoints, enable `[upstreams.dot_pool] enabled = true` to reuse
-authenticated connections, following the connection-lifecycle guidance in
-[RFC 7858 §3.4](https://www.rfc-editor.org/rfc/rfc7858.html#section-3.4).
-`max_connections` defaults to 8 (range 1..256), independently per DoT endpoint
-and shared by its concurrent queries. Connections never cross endpoints
-or authentication profiles. Each connection handles one query at a time; DNS
-pipelining is not implemented. Pool waiting, handshake, exchange and reconnect
-all remain inside the Resolver's original `query_timeout_ms` deadline.
+A reused connection that the server has already closed is the only case in which a
+sent query is tried again: once, on a new connection, within the query deadline.
 
-`idle_timeout_ms` defaults to 30000 (range 1..600000). Expiry is checked on checkout,
-not by a background reaper: without new traffic, idle sockets can remain until
-the owning upstream is dropped, still within the connection cap. Cancellation,
-partial responses and invalid replies discard the borrowed connection. A reused
-connection closed by the peer gets at most one authenticated reconnect; protocol
-and certificate errors do not trigger retries or plaintext fallback. A
-one-connection cap serializes queries to that endpoint.
+**Endpoint syntax.** One endpoint per entry, optionally followed by ` weight=N`
+(1–1000, default 1). IPv6 literals go in brackets.
 
-## Encrypted listeners
-
-Uncomment individual `[dot]`, `[doh]`, `[doq]` sections in the example.
-Set `[doh].http3 = true` for HTTP/3 on the same address and actual port as HTTP/2
-(UDP plus TCP, including port 0). Allow both protocols at your network boundary.
-DNS responses advertise `Alt-Svc: h3=":PORT"` when enabled and `clear` when disabled;
-the management HTTP listener does not advertise DNS H3. Outbound `prefer_h3` is independent.
-In file mode, certificate, key, CA and rule paths resolve relative to the
-configuration file; managed mode resolves them against the state directory.
-All sockets and certificates must initialize successfully before traffic is served;
-`--check` validates files without opening listeners. PEM private keys and local
-configuration are ignored by Git. Provision certificates outside this repository.
-
-- DoT uses length-prefixed DNS, TLS 1.2/1.3 and sequential connection reuse.
-- DoH uses `/dns-query`, GET with unpadded base64url `dns=`, or POST with
-  `application/dns-message`. HTTP/2 requires `h2` ALPN; HTTP/1 DNS is not supported.
-  Replies use `Cache-Control: no-store` to prevent shared HTTP cache subnet leaks.
-- DoQ uses TLS 1.3 / `doq` ALPN, one zero-ID DNS frame per bidirectional stream,
-  followed by FIN. HTTP/3 uses `h3` ALPN and the same DoH contract, not DoQ framing.
-  QUIC migration and 0-RTT are disabled. Peer identity always comes from the socket;
-  X-Forwarded-For/Forwarded headers are not trusted.
-- Connections/handshakes share `max_tcp_connections`; streams and bodies have
-  finite bounds. Per-connection streams are capped at `min(max_inflight, 1024)`.
-  `tcp_io_timeout_ms` also bounds encrypted handshakes
-  and complete HTTP/QUIC request work. HTTP/2 headers are limited to 8 KiB;
-  HTTP/3 field sections to 128 KiB; DNS payloads to 65535 bytes. Large DNS GET URLs
-  may exceed header limits; use POST.
-- H2 stream reset, DoQ response cancellation and H3 connection closure cancel
-  their active DNS waiter. H3 **single-stream** cancellation is currently observed
-  on response write or at the finite request deadline: the selected H3 library
-  does not expose an earlier response-stream cancellation notification.
-- Encrypted upstreams authenticate the hostname or IP in their URL.
-  `[upstreams].ca_file` replaces built-in WebPKI roots. Certificate failures never
-  downgrade to plaintext. DoT opens a fresh connection per transaction by default;
-  optional bounded reuse is configured under `[upstreams.dot_pool]`.
-
-See [certificate import and renewal](operations.md#certificates) for identity
-validation, atomic reload and managed HTTPS behavior.
-
-## Cache policy
-
-Caching is enabled by default; ECS remains opt-in (`[ecs] enabled = true`).
-The implementation is PariNS-owned Rust code, not an embedded resolver cache:
-Hickory decodes/encodes DNS, `ipnet` represents subnets, and `lru` manages eviction.
-Subnet reuse follows [RFC 7871](https://www.rfc-editor.org/rfc/rfc7871.html),
-and negative TTL calculation follows [RFC 2308](https://www.rfc-editor.org/rfc/rfc2308.html).
-
-- Each normalized name/type/class and DO/CD/RD/EDNS combination owns separate
-  subnet answers. The longest covering upstream **scope** wins, provided the
-  query's source prefix is sufficient. Disjoint subnets cannot overwrite one
-  another. Successful responses conservatively replace overlapping scopes so a
-  superseded broad answer cannot revive after a narrow answer expires, even when
-  the new response has TTL zero or cannot be admitted. This can cause neighboring
-  clients to miss a previously broad entry. IPv4, IPv6, no-ECS, and privacy `/0`
-  are isolated; a normal
-  scope `/0` answer may be shared across ordinary queries of its address family.
-  If an upstream omits ECS after a nonzero ECS request, `ExactSource` permits reuse
-  only for the identical actual outgoing family/network/source-prefix. It does
-  not invent broader scope or mix privacy and no-ECS namespaces, unless learned
-  sharing (below) has evidence that the answer does not depend on the subnet.
-- `[cache.ecs_sharing]` (disabled by default) learns which of those missing-ECS
-  answers are the same everywhere. For each name/type/class, DO/CD/RD/EDNS
-  combination and ECS family, PariNS compares a normalized answer: rcode, the
-  answer records as a set (including CNAME chains, ignoring TTL and order) and,
-  for NXDOMAIN/NODATA, the SOA owner. Once `min_networks` (default 3, 2–8)
-  disjoint outgoing networks, spanning at least two /16 (IPv6 /32) prefixes, got
-  the same answer while it was still valid, one copy is stored with scope
-  `learned_v4`/`learned_v6` and serves every nonzero ECS query of that family.
-  Nested prefixes a single client could send count as one network. Any different
-  answer — while observing, or when a shared entry is refreshed by any network —
-  or an explicit nonzero response scope revokes it immediately: the shared copy is
-  replaced, each network caches separately again, and the name is not relearned
-  for `revoke_cooldown_secs` (default 3600, 60–604800). Expired evidence is
-  dropped rather than treated as a contradiction. No-ECS, privacy `/0` and the
-  other family never share, and explicit upstream scopes keep RFC 7871 handling.
-  Shared evidence lasts one hour: after that the next answer starts a new
-  observation and `min_networks` networks must agree again, so a name whose
-  answers later diverge by region cannot stay shared because one network keeps
-  refreshing it first. The worst case of a wrong guess is that a client receives a
-  valid answer given to another network of its family until a different answer is
-  seen or the evidence renews; downstream ECS echoes still carry the client's own
-  source prefix as scope. Learned entries obey the
-  same negative budget, TTL, stale and prefetch rules as other entries.
-  Classification uses at most 65,536 records (twice `max_entries`, at least
-  1,024), evicted least-recently-used and not counted in cache bytes (roughly
-  tens of MB at the maximum); under heavy churn a revoked record can be evicted
-  before its cooldown ends. It is updated only when answers are stored, needs no
-  background task, is not saved in snapshots and is reset by clearing the name or
-  the whole cache; clearing one network of a name also clears the learned entry
-  that serves it. The cache
-  page shows `observing`, `shared` or `revoked` per name, and statistics count
-  `ecs_shared_hits`, `ecs_shared_entries` and `ecs_sharing_revocations`.
-  Changing only this section replaces the cache without restarting listeners.
-- Defaults: 32768 answers, 32 MiB charged bytes, 64 subnet variants per query,
-  four concurrent shards and a 20% negative-cache reservation. Each shard has
-  separate positive/negative entry and byte budgets; unused partitions are not
-  borrowed. Tiny capacities can round negative capacity down to zero. Eviction
-  removes individual variants, not entire query buckets. Negative churn cannot
-  evict positive entries. Serialized response decoding and TTL restoration run
-  outside the shard lock.
-- Byte charge includes serialized data and conservative per-entry metadata,
-  including entries temporarily retained by readers after eviction. It is not
-  process RSS: allocator slack and empty index capacity are not tracked. Fixed
-  shard partitions may reach capacity before the aggregate limit. Resolver/cache
-  generations never share entries across upstream configurations.
-- Cache storage grows on demand, not by reserving the full byte budget at startup.
-  Rust owns defaults for omitted settings; the setup template mirrors them, and
-  the console displays the server's parsed values. Existing explicit limits are
-  not changed by an upgrade. Tune entry and byte limits together using interval
-  hit/miss and eviction deltas: more capacity helps a capacity-bound working set,
-  but cannot make expired or ineligible answers reusable.
-- This is a whole-response cache, not an RRset cache. All section TTLs age;
-  the earliest RR expiry invalidates the answer. Positive TTLs are capped at
-  3600 seconds by default. NXDOMAIN/NODATA require a covering SOA and use the
-  minimum of SOA TTL, SOA MINIMUM, and the 300-second negative cap.
-  Negative answers remain query-type-specific. Since v0.1.7, PariNS also caches a strict
-  CNAME-only chain ending in NXDOMAIN/NODATA when it is continuous, unambiguous and
-  backed by equivalent, same-class SOAs covering the terminal name. Missing or
-  conflicting proof is not cached. Chain and all retained record TTLs also bound
-  the lifetime; these entries use the negative budget and never stale or prefetch.
-  Direct NOERROR CNAME answers and NOERROR CNAME plus the requested type remain positive.
-- Truncated answers, errors such as SERVFAIL/REFUSED, zero TTL, missing SOA for
-  negative answers, unusable ECS, and scope longer than source bypass caching.
-  Cookie/unknown EDNS options bypass caching to avoid replaying client-specific
-  state. Padding is allowed but removed from the stored canonical answer.
-- Hits restore the current request's ID/question and original ECS, with aged
-  TTLs and normalized EDNS. Forwarded answers are not validated locally; AD on
-  hits follows the [recursive resolution](#recursive-resolution) rules.
-  `[cache.persistence]` defaults to enabled with a 32 MiB snapshot budget: only
-  fresh entries are saved at terminal, quiescent shutdown. The snapshot budget
-  is independent of cache accounting; its serialized format can reach the limit
-  before every fresh entry is saved. Startup ages all TTLs
-  and consumes the file durably before serving. Incompatible/corrupt snapshots
-  are consumed and skipped; a failed consume prevents DNS startup. No periodic
-  snapshot can resurrect entries after clear, TTL0, EDE or a crash. Forced drain,
-  SIGKILL and abnormal exit start cold. Normal configuration apply is not restart
-  restoration; stale-only entries are never restored. A stop forced by requests
-  still running past `shutdown_grace_ms` logs
-  `cache snapshot not saved: shutdown not quiescent (<cause>)`. Idle DoH
-  clients get at most half the grace to acknowledge the close and do not force a stop.
-  Snapshots from a different cache semantic version are skipped, so the first start
-  after such an upgrade begins cold.
-- `[[cache.rules]]` selects exact names before suffixes, then most labels,
-  record-type-specific before wildcard type, then first declaration. DNS labels
-  (including escaped labels) determine boundaries; suffix includes the named
-  domain itself. Rules can bypass caching, set TTL caps and override prefetch/stale
-  defaults. No minimum TTL is forced. The global cache switch always wins.
-- Prefetch is disabled by default. Hot positive records near expiration may
-  trigger bounded, deduplicated background refresh. Limits cover concurrent work,
-  starts per second and failure backoff. Refresh tasks are cancelled on cache
-  replacement and shutdown; they do not survive their owning generation. With
-  coalescing enabled, foreground misses can join pending refreshes across expiry;
-  explicitly disabling coalescing permits independent foreground operations.
-- Stale serving is disabled by default. When enabled, normal upstream resolution
-  runs first; timeout, transport failure or SERVFAIL may fall back to a retained
-  positive answer. REFUSED, negative answers and ECS privacy-retry results are not
-  stale fallback sources. Retention and returned TTL are separate (defaults 300s
-  and 30s); this trades freshness for availability, as in
-  [RFC 8767](https://www.rfc-editor.org/rfc/rfc8767.html).
-- The cache page shows charged usage and fresh/stale/miss/bypass/eviction counters,
-  explains a name/type/outgoing-subnet/flag lookup without contacting upstream,
-  and clears all entries or an exact name/type/scope selection. Inspections are
-  bounded to 256 variants and do not affect recency or hit counts. Clearing
-  advances an epoch so older in-flight queries cannot refill cleared state;
-  new queries may repopulate it. These authenticated operations expose no query log.
-
-Example opt-in policy (also editable through the console):
+| Form | Transport | Default port |
+| --- | --- | --- |
+| `192.0.2.53` or `udp://HOST[:PORT]` | UDP, with TCP for truncated answers | 53 |
+| `tcp://HOST[:PORT]` | TCP | 53 |
+| `tls://HOST[:PORT]` | DNS-over-TLS | 853 |
+| `https://HOST[:PORT][/PATH]` | DNS-over-HTTPS (path defaults to `/dns-query`) | 443 |
+| `quic://HOST[:PORT]` | DNS-over-QUIC | 853 |
 
 ```toml
-[cache.prefetch]
-enabled = true
-min_hits = 1
-remaining_percent = 25
-max_inflight = 8
-rate_per_sec = 20
-backoff_secs = 5
-
-[cache.stale]
-enabled = false
-retention_secs = 300
-reply_ttl_secs = 30
-
-[cache.ecs_sharing]
-enabled = true
-min_networks = 3
-revoke_cooldown_secs = 3600
-
-[[cache.rules]]
-name = "dynamic.example"
-suffix = true
-max_ttl_secs = 60
-stale = false
-
-[[cache.rules]]
-name = "uncached.example"
-bypass = true
+[upstreams]
+servers = ["https://dns.example/dns-query weight=2", "tls://192.0.2.53"]
+bootstrap = ["192.0.2.1:53"]
 ```
 
-## Request coalescing
+Behavior:
 
-Identical eligible cache misses share one upstream operation, keyed by the actual
-outbound ECS subnet and DNS semantics (not the eventual response scope). `[coalescing]`
-defaults to enabled, 128 groups and 64 callers per group, including the first caller.
-At either limit, new requests return SERVFAIL without extra upstream IO. Requests
-with Cookie/unknown EDNS options or non-IN class bypass sharing; ingress budgets still apply.
-The shared flight/refresh key ignores Padding bytes and length, but preserves
-whether Padding was requested. Cache keys ignore that intent; each final client
-response independently restores ID/ECS and generates padding when appropriate.
-Waiters share the first operation's timeout. Cancelling one does not cancel others;
-cancelling the last releases IO without a detached background task. Each caller
-still receives independent policy checks, ID/question and ECS restoration.
+- Hostname endpoints are resolved only through `bootstrap`, never the host's system
+  resolver. Credentials, query strings, fragments and duplicate endpoints are
+  rejected, as is an endpoint or bootstrap address that points at a PariNS listener.
+  A loop through NAT or another alias cannot be detected; avoid it.
+- Encrypted transports verify the certificate for the hostname or IP in the URL and
+  never fall back to plaintext.
+- **A query that may have reached an upstream is never sent again**, with one
+  exception. A hostname endpoint moves to its next bootstrap address only when
+  nothing was sent (connect, TLS or QUIC handshake, or stream open failed). The
+  exception: when a reused DoT pool connection turns out to have been closed by the
+  server (end of stream, reset, aborted, broken pipe or not connected), the query is
+  retried once on a new connection within its deadline. Every other sent query
+  fails without a resend.
+- **HTTP/3** (`prefer_h3`): connecting and sending over HTTP/3 has a budget of
+  250 ms, or half the remaining query time if that is shorter. A failure before the
+  query was sent falls back to verified HTTP/2. A failure after sending is that
+  query's upstream failure, with no HTTP/2 resend. Any HTTP/3 failure pauses HTTP/3
+  for that endpoint for 30 seconds. A definite refusal such as 405 stops HTTP/3 for
+  that endpoint until the upstream pool is rebuilt by the next DNS restart. Alternate
+  ports from Alt-Svc or HTTPS/SVCB records are not used.
+- DoH sends RFC 8484 GET requests. An unusually large query can exceed an upstream's
+  URL or header limits and fail with 414 or 431; that affects only that query.
+- Queries to upstreams advertise an EDNS UDP size of at most 1232 bytes. The EDNS TCP
+  keepalive option is removed from client queries and from upstream answers on every
+  transport. Encrypted hops add EDNS padding when the client asked for it (128-byte
+  blocks upstream); plaintext hops carry none.
+- All upstream work of a query shares one deadline, `query_timeout_ms`. A failed or
+  timed-out exchange returns SERVFAIL, unless [serve stale](#prefetch-and-serve-stale)
+  applies.
 
-## Local filtering
+## Resolution mode and recursion
 
-Filtering is disabled by default. Opt in with local rules in the config:
+`[resolution] mode` chooses where answers come from: `"forward"` (default) uses
+`[upstreams]`; `"recursive"` resolves from the root servers with DNSSEC validation.
+`[upstreams]` stays configured in both modes. Changing the mode restarts DNS and
+starts with an empty cache, because forwarded and recursive answers never share a
+cache or snapshot.
+
+`[recursion]` applies only in recursive mode:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `ipv6` | `false` | | Also query authoritative servers over IPv6. Enable only with working IPv6 egress. |
+| `max_outbound_per_second` | `500` | 1–10000 | Queries per second to all authoritative servers together. |
+| `max_outbound_inflight` | `256` | 1–4096 | Authoritative queries admitted at once, including those waiting for a rate token. |
+| `max_depth` | `24` | 4–64 | Referral and CNAME depth of one resolution. |
+| `max_queries_per_request` | `200` | 1–1000 | Authoritative queries one lookup may send, including delegations, name server addresses and CNAME targets. Each DS or DNSKEY lookup has its own budget; the outbound limits cap the total. |
+| `cache_entries` | `65536` | 1024–1048576 | Delegation, name server and DNSSEC key responses kept by the recursor (entries, not bytes). |
+
+Behavior:
+
+- Only PariNS's own filtering applies. Queries to authoritative servers are plaintext
+  UDP and TCP on port 53. With ECS on, the client subnet is sent only with queries
+  for the answer itself (the question and its CNAME targets), never with delegation,
+  name server address or DNSSEC key lookups.
+- An authoritative answer without an ECS option does not depend on the client
+  network and is shared within its address family. Learned ECS sharing does not
+  apply in this mode.
+- Answers are validated from the built-in root trust anchor. DNSSEC Bogus data is
+  answered with SERVFAIL and Extended DNS Error 6, never with stale data. AD is set
+  only for Secure data, only for clients that set DO or AD, and never after filtering
+  rewrote the answer. A client that sets CD gets unchecked data without AD, cached
+  separately.
+- For clients that set DO, positive answers keep the NSEC or NSEC3 records and their
+  RRSIGs in the authority section, so the client can validate a wildcard answer.
+  Other authority records of positive answers are dropped.
+- Each authoritative server gets 1.5 seconds before the next one is tried, and every
+  resolution stays within `query_timeout_ms`. Timeouts and unreachable servers are
+  upstream failures for serve stale.
+- QNAME minimisation is relaxed, because some authoritative servers answer NXDOMAIN
+  for names that only have descendants. Root hints and the trust anchor are built in
+  and change only with a PariNS release.
+
+## Listeners and encryption
+
+PariNS listens for plain DNS on one address and, optionally, for DoT, DoH (HTTP/2
+and HTTP/3) and DoQ. Each listener needs its own address and port.
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `listen` | (required) | `IP:port` | Plain DNS over UDP and TCP on the same address and port. Port 0 picks a free port, printed at startup. |
+| `admin_listen` | none | loopback `IP:port` | Local `/metrics` and `/healthz` endpoint; see [Metrics](operations.md#metrics). |
+| `[dot]` `listen`, `cert_file`, `key_file` | off | | DNS-over-TLS (TCP). |
+| `[doh]` `listen`, `cert_file`, `key_file` | off | | DNS-over-HTTPS over HTTP/2 (TCP). Enables console HTTPS in managed mode. |
+| `[doh]` `http3` | `false` | | Also serve DoH over HTTP/3, on UDP at the same address and port. |
+| `[doq]` `listen`, `cert_file`, `key_file` | off | | DNS-over-QUIC (UDP). May share a port number with DoT, since one is TCP and the other UDP. |
+| `[web]` `public_host` | none | one domain or IP | The host name the browser uses for console HTTPS; required in managed mode when `[doh]` is set. See [Console HTTPS](deployment.md#console-https). |
 
 ```toml
-[filter]
-enabled = true
-block_exact = ["ads.example"]
-block_suffix = ["tracking.example"]
-allow_exact = ["status.tracking.example"]
-allow_suffix = []
+[doq]
+listen = "0.0.0.0:853"
+cert_file = "/path/to/fullchain.pem"
+key_file = "/path/to/privkey.pem"
 ```
 
-Exact rules match only that name; suffix rules include that name and subdomains
-at DNS label boundaries. ASCII case and a final dot are ignored. Any matching
-allow rule wins for that name, regardless of specificity. Names use ASCII
-letters, digits, underscores and hyphens; use punycode for IDNs. Wildcards,
-Adblock syntax, hosts lines, URLs and regex are rejected, including when disabled.
-Limits are 100000 rules and 8 MiB of rule text. Set the top-level `filter_file`
-to use a standalone TOML file with these same fields (without `[filter]`). It
-becomes authoritative instead of inline rules and is limited to 8 MiB total.
-In file-configured mode on Unix, SIGHUP reloads this file and configured listener certificates. Every
-candidate is checked before publication; errors retain the previous generation.
-Each DNS request keeps its starting policy snapshot. Inline configuration changes
-require restart in file mode. Managed rule-only changes retain listeners and the
-raw-answer cache.
+Behavior:
 
-Query-name filtering runs after protocol/ECS validation and before cache lookup
-for every supported query type (including AAAA, HTTPS and SVCB). Blocking returns
-NOERROR with empty RR sections, no AA/AD/TC flags and no synthetic SOA. These
-answers are not inserted into PariNS's cache and do not specify a downstream
-negative-cache TTL. Unsupported ANY/AXFR/IXFR queries still receive REFUSED.
+- UDP answers follow the client's EDNS payload size, capped at 1232 bytes (512
+  without EDNS); a larger answer returns a truncated reply so the client retries over
+  TCP. On Linux and macOS, UDP replies leave from the address and interface the query
+  arrived on, including on wildcard binds; other platforms need a specific address.
+- Only ordinary single-question queries are served. ANY, AXFR, IXFR and signed
+  queries get REFUSED, other opcodes NOTIMP, malformed queries FORMERR.
+- DoH serves `/dns-query` with GET (`dns=` parameter) or POST
+  (`application/dns-message`), over HTTP/2 or HTTP/3 only, with `Cache-Control:
+  no-store`. Responses advertise `Alt-Svc: h3` only while the DoH3 listener is
+  actually running.
+- DoQ and DoH3 answer a client whose address QUIC has not yet validated with a
+  stateless Retry (one extra round trip) before it takes a connection slot or source
+  budget. 0-RTT and connection migration are off.
+- Encrypted listeners add EDNS padding (468-byte blocks) when the client asked for
+  it, bounded only by the maximum DNS message size.
+- Client identity is always the socket peer; `X-Forwarded-For` and `Forwarded` are
+  ignored.
+- Each listener runs on its own. If one cannot bind or stops, the others keep serving
+  while it is retried; see [DNS degraded](operations.md#dns-degraded).
+- Certificates are checked before use and can be replaced without restarting; see
+  [Certificates](operations.md#certificates).
 
-Answer CNAME chains are followed from the original question by owner and class,
-independent of record order, with cycle detection. Allowing the query name does
-not exempt a different blocked target. Unrelated answer/additional names do not
-trigger a block. This check runs on both upstream responses and cache hits;
-the cache retains the original upstream answer, never a filtered replacement.
-DNAME and HTTPS/SVCB TargetName traversal are not implemented; query-name and
-CNAME checks alone are not a complete DNS/application firewall.
+## Cache and ECS sharing
 
-### Online subscriptions (v0.1.5)
+PariNS caches whole responses. With ECS (EDNS Client Subnet) on, answers are kept
+per client network so each network gets the answer the upstream gave for it.
 
-The console supports HTTPS rule subscriptions alongside local rules. No lists are
-bundled, and the default empty source list makes no network requests.
-The local filter switch controls only local rules; enabled local allow rules also
-take precedence over subscription blocks.
+`[ecs]`:
 
-Add a source in Filtering, choose its explicit format, verify the download, then
-enable it and save the configuration. Verification alone does not activate rules.
-Disabled sources can be saved before downloading. Update now uses the saved source;
-editing a URL or format requires verification of the new identity. An unknown
-operation result is reconciled through status, never silently retried.
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Send a client subnet derived from the socket peer to upstreams. Off: ECS is removed from queries. |
+| `ipv4_prefix` | `24` | 0–32 | Longest IPv4 prefix sent upstream. |
+| `ipv6_prefix` | `56` | 0–128 | Longest IPv6 prefix sent upstream. |
 
-```toml
-[filter_subscriptions]
-enabled = true
-max_rules = 1000000
-max_memory_bytes = 134217728
-max_disk_bytes = 268435456
+`[cache]`:
 
-[[filter_subscriptions.sources]]
-id = "example"
-name = "My domain list"
-url = "https://example.org/block.list"
-format = "domain_list"
-enabled = false
-auto_update = true
-update_interval_hours = 24
-```
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `true` | | Turn the cache on or off. Overrides every cache rule. |
+| `max_entries` | `32768` | 1–262144 | Cached answers (each ECS variant counts). |
+| `max_bytes` | `33554432` (32 MiB) | 512–1073741824 | Charged size of cached answers plus per-entry overhead. Not process memory. |
+| `max_variants` | `64` | 1–256, at most `max_entries` | ECS variants kept for one question. |
+| `max_ttl_secs` | `3600` | 1–86400 | Cap on positive answer TTLs. |
+| `negative_ttl_cap_secs` | `300` | 1–86400 | Cap on NXDOMAIN and NODATA TTLs. |
+| `shards` | `4` | 1–64 | Independently locked cache partitions. |
+| `negative_percent` | `20` | 0–90 | Share of entries and bytes reserved for negative answers. |
 
-`domain_list` accepts one ASCII domain per line: `example.org` matches exactly,
-while `.example.org` includes its root and subdomains. `hosts_blocklist` accepts
-standard sinkhole hosts entries with `0.0.0.0` or `127.0.0.1` addresses (and their
-supported IPv6 sinkholes). These are not ABP, wildcard or regex formats. For
-Natsuki List use its `.list` domain-list source, not the unsupported Legacy file.
-Third-party list licensing and content remain the administrator's responsibility.
+`[cache.persistence]`:
 
-At most 16 sources are configured. Rule counts are charged before deduplication;
-the memory budget includes construction and retained generations.
-Each source is bounded to 16 MiB, all source input to 32 MiB, and each line to
-4096 bytes. Automatic intervals are 1–168 hours with bounded jitter and failure
-backoff. Downloads use verified HTTPS and public pinned addresses; proxy environment
-variables and private/synthetic DNS results cannot bypass these restrictions.
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `true` | | Save fresh answers at a clean shutdown and restore them at the next start. |
+| `max_bytes` | `33554432` (32 MiB) | 1 MiB–512 MiB | Size limit of the snapshot file. |
 
-Private content and the authoritative catalog live under `filter-subscriptions/`
-in the managed state directory or file-mode data directory. A failed update keeps
-the accepted rules. An invalid derived index can be rebuilt from verified content;
-missing or corrupt selected content does not silently remove protection. Existing
-sources start offline from verified content. `--check` only reads material and
-fails when effective sources are unavailable; it never downloads or writes an index.
+`[cache.ecs_sharing]` (learned ECS sharing, forwarding mode only):
 
-If the catalog is corrupt or missing from an existing store, preserve the directory
-for diagnosis. Restore a verified backup of the catalog and its selected objects,
-or explicitly disable subscriptions before arranging a fresh store. Do not select
-objects by filename, edit the catalog to guess a version, or copy state into an
-older binary. The management console remains available to diagnose rule failures.
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Learn which answers are the same for every network and store them once per address family. |
+| `min_networks` | `3` | 2–8 | Disjoint networks that must receive the same answer. |
+| `revoke_cooldown_secs` | `3600` | 60–604800 | After a revocation, how long the name is not learned again. |
 
-## Optional source budgets
+`[[cache.rules]]` (up to 256) overrides cache behavior per name:
 
-`[source_limits] enabled = true` enables a token bucket and concurrent query/connection
-limits keyed only by the socket peer. Defaults: `rate_per_sec = 100`, `burst = 200`,
-`max_inflight = 32`, `max_connections = 8`, `max_sources = 4096`, `ipv4_prefix = 32`,
-`ipv6_prefix = 64`. IPv4-mapped IPv6 is normalized to IPv4. All six DNS listeners
-share these budgets within one Server; changing source ports, protocols, ECS or
-forwarding headers does not create a new identity. NAT/proxy users share a budget.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | (required) | Domain name. |
+| `suffix` | `false` | Also match subdomains. |
+| `qtype` | any | Record type, such as `"A"`. |
+| `bypass` | `false` | Do not cache matching answers. |
+| `max_ttl_secs`, `negative_ttl_cap_secs` | global value | TTL caps for matching answers (1–86400). |
+| `prefetch`, `stale` | global value | Turn prefetch or serve stale on or off for matching answers. |
 
-Cache hits, filtered queries and coalesced callers still consume query admission.
-UDP source rejection is silent; reliable transports return DNS SERVFAIL for an
-otherwise forwardable query (DoH keeps HTTP 200 with a DNS body). Existing invalid
-request handling is retained. Source connection caps include pending handshakes:
-TCP/TLS is closed and incoming QUIC refused before application handshake work.
-Normal completion, timeout and cancellation release concurrency, not rate tokens.
-Global query/connection limits remain separate and may reject earlier.
+The most specific rule wins: exact names before suffixes, then more labels, then a
+rule with `qtype` before one without, then the first declared.
 
-State has a hard source-count cap. At capacity, admission scans at most 16 entries
-and only reclaims inactive sources whose tokens have fully replenished. If no
-eligible entry is found, new sources are rejected rather than resetting existing
-token debt. This can conservatively reject a new source while another reclaimable
-entry is outside that scan. IP/subnet state stays in memory until reclamation or
-shutdown and is neither logged nor persisted. Disabled mode stores no source state.
-`source_queries_rejected`, `source_connections_rejected` and `source_table_full`
-are aggregate metrics; table-full is a subset of the corresponding rejections.
+Behavior:
 
-These are per-process DNS admission controls, not distributed limits, a bound on
-all HTTP/QUIC parsing work, handshake-attempt rate, bandwidth or a DDoS defense.
-They do not authenticate UDP source IPs. Keep infrastructure firewall/source
-validation and provider protection. Configuration changes require restart.
+- **Keys.** Each question (name, type, class) with its DO, CD and RD flags and EDNS
+  presence has its own entries. IPv4 ECS, IPv6 ECS, no-ECS queries and privacy `/0`
+  queries never share answers.
+- **ECS scope.** An answer is reused by clients inside the scope the upstream
+  returned. When an upstream omits ECS in its answer to a query that carried a
+  nonzero subnet, the answer is reused only for that exact outgoing subnet. A newer
+  answer replaces overlapping older ones, even if the newer one cannot be cached.
+- **Client ECS.** A client may send its own ECS option. A nonzero subnet must contain
+  the client's address, or the query is refused; `/0` keeps the client private. If an
+  upstream refuses a query with a nonzero subnet, PariNS retries once with `/0` and
+  does not cache that result.
+- **Learned ECS sharing.** For answers returned without ECS, PariNS compares the
+  normalized answer (response code and answer records, ignoring TTL and order) that
+  different networks receive. Once `min_networks` disjoint networks, spanning at
+  least two /16 (IPv6 /32) prefixes, received the same answer while it was valid,
+  one copy serves every nonzero-ECS query of that family. Any different answer, or
+  an answer with an explicit nonzero scope, revokes it at once: networks are cached
+  separately again and the name is not relearned for `revoke_cooldown_secs`. Shared
+  evidence lasts one hour, then must be confirmed again. The learning table holds at
+  most 65,536 names, is not saved in snapshots, and is cleared with the cache.
+  The **Cache** page shows each name as observing, shared or revoked.
+- **Eligibility.** Truncated answers, SERVFAIL and REFUSED, zero TTLs, negative
+  answers without a SOA, and queries with Cookie or unknown EDNS options are not
+  cached. Negative TTLs are the smallest of the SOA TTL, the SOA MINIMUM and
+  `negative_ttl_cap_secs`. A CNAME chain ending in NXDOMAIN or NODATA is cached only
+  when the chain is unambiguous and backed by a matching SOA. Lower TTLs are never
+  raised.
+- **Budgets.** Each shard has separate positive and negative budgets; negative
+  answers never evict positive ones. Memory grows with use; the budget is not
+  reserved at startup.
+- **Persistence.** The snapshot is written only at a clean, quiescent shutdown and is
+  consumed before DNS starts serving, so it is used once and a crash or forced stop
+  starts with an empty cache. Restored answers keep their remaining TTL. A snapshot from a build
+  with different cache semantics is skipped.
+- Changing only cache settings replaces the cache without restarting listeners.
 
-## Behavior and limits
+## Prefetch and serve stale
 
-- UDP upstream cache misses use a transaction with an independent socket and random
-  ID. Only responses matching the upstream endpoint, ID, opcode, and question
-  are accepted. Upstream truncation triggers TCP fallback under the same
-  `query_timeout_ms` deadline. Failures return SERVFAIL.
-- Linux/macOS UDP listeners retain the query's destination IP and interface for
-  replies, including wildcard and dual-stack binds. Other platforms require a
-  specific local listen address; wildcard UDP binds are rejected.
-- UDP replies respect the client's payload limit, capped at 1232 bytes (512
-  without EDNS). Larger replies return a question-only TC response; retry over
-  TCP for the complete answer. Downstream TCP connections support sequential
-  reuse; requests on the same connection are processed in order.
-- `max_inflight` is shared across all DNS transports. At capacity, new UDP
-  queries are dropped and valid TCP queries receive SERVFAIL. Excess TCP
-  connections are closed. `tcp_io_timeout_ms` bounds each complete frame read
-  or write, including idle and partial-frame reads.
-- Only ordinary single-question QUERY messages are supported. AXFR, IXFR, ANY,
-  and signed queries are refused; other opcodes return NOTIMP. Malformed queries
-  with a readable DNS header return FORMERR; unreadable packets and response
-  packets sent to the listener are dropped (TCP connections are closed).
-- EDNS/DO/CD are forwarded. ECS is stripped by default; enable `[ecs]` to derive
-  it from the socket peer, capped by `ipv4_prefix`/`ipv6_prefix`. Client `/0`
-  requests retain their privacy; nonzero client ECS must cover the peer or is
-  refused. Trusted forwarding of third-party subnets is not implemented.
-  Downstream ECS echoes the original client option and is omitted if the client
-  did not supply one. A nonzero ECS REFUSED triggers one anonymous `/0` retry
-  within the original deadline; that retry's result is not cached. In forward
-  mode PariNS does not validate DNSSEC or authenticate a plaintext upstream, and
-  clears the AD bit in client responses; only
-  [recursive mode](#recursive-resolution) validates and sets AD.
+Prefetch refreshes popular answers shortly before they expire. Serve stale answers
+from an expired entry when the upstream fails ([RFC 8767](https://www.rfc-editor.org/rfc/rfc8767)).
+Both are off by default.
 
-The example and setup wizard default to loopback **DNS**; the management console
-defaults separately to `0.0.0.0:3000` over HTTP until inbound DoH is enabled.
-Network-level abuse protection is not implemented; see
-[Deployment choices](deployment.md#deployment-choices). Process logs contain
-startup/shutdown/reload events and optional aggregate metrics, not query names
-or client IP addresses.
+`[cache.prefetch]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Refresh hot positive answers in the background. |
+| `min_hits` | `1` | 1–1000000 | Cache hits an entry needs before it is prefetched. |
+| `remaining_percent` | `25` | 1–90 | Refresh when less than this share of the TTL remains. |
+| `max_inflight` | `8` | 1–256 | Refreshes running at once. |
+| `rate_per_sec` | `20` | 1–10000 | Refreshes started per second. |
+| `backoff_secs` | `5` | 1–3600 | Wait before refreshing the same entry again after a failure. |
+
+`[cache.stale]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Answer from expired entries when the upstream fails. |
+| `retention_secs` | `300` | 1–604800 | How long after expiry an answer is kept for this. |
+| `reply_ttl_secs` | `30` | 1–300 | TTL of a stale answer. |
+
+Behavior:
+
+- Serve stale applies after a timeout, transport failure or SERVFAIL (in recursive
+  mode, any failure except DNSSEC Bogus). REFUSED, negative answers and ECS privacy
+  retries are never replaced by stale data, and stale data never crosses ECS
+  namespaces.
+- Refreshes are cancelled when the cache is replaced or DNS stops. With coalescing
+  on, a client query for an entry being refreshed joins that refresh.
+
+## Query coalescing
+
+Identical cache misses share one upstream request. Each caller still gets its own
+ID, ECS echo and filtering.
+
+`[coalescing]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `true` | | Share upstream work between identical queries. |
+| `max_groups` | `128` | 1–65536 | Distinct queries being shared at once. |
+| `max_waiters` | `64` | 1–65536 | Callers per group, including the first. |
+
+At either limit, new queries get SERVFAIL without upstream traffic. Queries with
+Cookie or unknown EDNS options, or a class other than IN, are not shared. Cancelling
+one caller does not cancel the others; the request ends when the last caller leaves.
+
+## Filtering and subscriptions
+
+Filtering blocks queries by name, from local rules and from online subscriptions.
+A blocked query gets NOERROR with an empty answer (no SOA). Blocked answers are never
+cached, and cached upstream answers are never altered by filtering.
+
+`[filter]` (local rules):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Apply the local rules below. |
+| `block_exact` | `[]` | Block exactly these names. |
+| `block_suffix` | `[]` | Block these names and their subdomains. |
+| `allow_exact` | `[]` | Never block exactly these names. |
+| `allow_suffix` | `[]` | Never block these names and their subdomains. |
+| `filter_file` (top level) | none | A TOML file with the same five keys; when set, it replaces the inline `[filter]`. |
+
+Rules are ASCII names (letters, digits, `_`, `-`; punycode for IDNs), matched by DNS
+labels, ignoring case and a final dot. Wildcards, Adblock syntax, hosts lines, URLs
+and regular expressions are rejected. Limits: 100,000 rules and 8 MiB of rule text
+(also for `filter_file`). A matching allow rule wins for that name. The answer's
+CNAME chain is checked too, so allowing a name does not allow a blocked CNAME target.
+
+If saved local rules cannot be compiled (for example, an unreadable `filter_file`),
+DNS stays stopped on every start path (startup, retry, and rollback after a failed
+apply) and the status shows the reason. Fix the rules and apply the configuration
+again.
+
+`[filter_subscriptions]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `true` | | Apply enabled subscription sources. With no sources, nothing is downloaded. |
+| `max_rules` | `1000000` | 1–5000000 | Rules across all sources, counted before deduplication. |
+| `max_memory_bytes` | `134217728` (128 MiB) | up to 512 MiB | Memory for building and holding rule sets. |
+| `max_disk_bytes` | `268435456` (256 MiB) | 256 KiB–2 GiB | Disk space for downloaded lists. |
+
+Each `[[filter_subscriptions.sources]]` (up to 16):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `id` | (required) | 1–32 lowercase letters, digits or `-`; unique. |
+| `name` | (required) | Display name, up to 80 characters. |
+| `url` | (required) | HTTPS URL of the list. |
+| `format` | (required) | `domain_list` or `hosts_blocklist`. |
+| `enabled` | `true` | Use this source. |
+| `auto_update` | `true` | Download updates on a schedule. |
+| `update_interval_hours` | `24` | 1–168. |
+
+- `domain_list`: one domain per line; `example.org` matches exactly and
+  `.example.org` also matches subdomains. `hosts_blocklist`: hosts lines with
+  `0.0.0.0` or `127.0.0.1` (or their IPv6 equivalents). Neither is Adblock syntax.
+- Each list may be 16 MiB, all lists together 32 MiB, and each line 4096 bytes.
+  Downloads use verified HTTPS to public addresses only and ignore proxy settings.
+- In the console, add a source, verify the download, then enable it and save.
+  Verification alone does not activate rules. A failed update keeps the previous
+  rules. Enabled local allow rules also override subscription blocks.
+- Downloaded lists and the catalog live under `filter-subscriptions/` in the state or
+  data directory. If the catalog is damaged, keep the directory for diagnosis and
+  restore it from a backup, or turn subscriptions off; do not edit it.
+
+## Limits
+
+Global limits and timeouts are top-level keys (all required):
+
+| Key | Example value | Range | Meaning |
+| --- | --- | --- | --- |
+| `query_timeout_ms` | `2000` | 1–60000 | Deadline of one query, including all upstream or recursive work. |
+| `tcp_io_timeout_ms` | `5000` | 1–60000 | Limit for each TCP frame read or write, idle time, and encrypted handshakes and requests. |
+| `shutdown_grace_ms` | `3000` | 1–60000 | Time active queries get to finish when DNS stops. |
+| `max_inflight` | `256` | 1–65536 | Queries in progress across all transports. At the limit, UDP queries are dropped and TCP queries get SERVFAIL. |
+| `max_tcp_connections` | `64` | 1–65536 | TCP, DoT, DoH and QUIC connections, including handshakes. |
+
+`[source_limits]` sets per-client limits, shared by all DNS listeners and keyed only
+by the socket peer address:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Turn per-client limits on. |
+| `rate_per_sec` | `100` | 1–1000000 | Sustained queries per second per client. |
+| `burst` | `200` | 1–1000000 | Queries a client may send at once. |
+| `max_inflight` | `32` | 1–65536 | Queries in progress per client. |
+| `max_connections` | `8` | 1–65536 | Connections per client, including pending handshakes. |
+| `max_sources` | `4096` | 1–65536 | Clients tracked at once; new clients are rejected when the table is full. |
+| `ipv4_prefix` | `32` | 0–32 | IPv4 addresses in one prefix share a budget. |
+| `ipv6_prefix` | `64` | 0–128 | IPv6 addresses in one prefix share a budget. |
+
+- Cache hits and blocked queries still count. Rejected UDP queries are dropped;
+  reliable transports answer SERVFAIL (DoH keeps HTTP 200 with a DNS body).
+- These are per-process admission limits, not a DDoS defense. Clients behind NAT
+  share a budget. Keep firewall and provider protection in place.
+- PariNS raises its soft open-file limit to the hard limit at startup.
+  `deploy/parins.service` sets `LimitNOFILE=524288`; the managed unit relies on
+  systemd's default hard limit. When descriptors run out, listeners pause accepting
+  briefly and keep serving, and the log says so at most once a minute (`raise the
+  open-file limit or lower max_tcp_connections`).
+
+## Storage and logs
+
+PariNS keeps statistics and the optional query log in a private SQLite database
+(`runtime/` in the managed state directory, or the file-mode data directory). See
+[Query log and storage](operations.md#query-log-and-storage).
+
+`[storage]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `max_database_bytes` | `134217728` (128 MiB) | 16 MiB–4 GiB | Database size limit, not counting its journal. |
+| `flush_interval_ms` | `1000` | 100–5000 | How often queued records are written. |
+| `cleanup_interval_secs` | `60` | 10–3600 | How often expired and over-limit data is removed. |
+| `queue_max_entries` | `4096` | 128–65536 | Records waiting to be written; more are dropped and counted. |
+| `queue_max_bytes` | `8388608` (8 MiB) | 1–64 MiB | Size of records waiting to be written. |
+
+`[query_log]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Record each query (client address, name, result, timing, upstream). |
+| `max_entries` | `100000` | 1–1000000 | Records kept. |
+| `max_bytes` | `67108864` (64 MiB) | 1 MiB–512 MiB, at most `max_database_bytes` | Space for records. |
+| `retention_secs` | `86400` | 60–2592000 | Maximum record age. |
+
+`[statistics]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `retention_secs` | `604800` (7 days) | 3600–31536000 | Age of the oldest trend point. |
+| `max_samples` | `10080` | 60–525600 | Trend points kept (one per minute). |
+| `reset_interval_days` | `0` | 0–3650 | Reset totals every N days; 0 never does. Trends are not affected. |
+
+`[metrics]`:
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `interval_secs` | `0` | 0–3600 | Print a JSON metrics snapshot to stderr every N seconds and at shutdown; 0 turns it off. |
+
+## Updates
+
+`[updates]` controls the software update check in managed mode. File mode never
+checks.
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `auto_check` | `true` | | Check the official GitHub releases for a newer version. Updates are never installed automatically. |
+| `check_interval_hours` | `6` | 1–168 | Time between checks. |
+
+Changing only `[updates]` keeps DNS, caches and certificates as they are, and a
+stopped DNS stays stopped. See [Online updates and recovery](operations.md#online-updates-and-recovery).

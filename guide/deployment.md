@@ -2,184 +2,280 @@
 
 [Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md)
 
-The [Quick start](../README.md#quick-start) is the shortest installation path. This
-guide covers installation choices, network access, managed mode and file mode.
+PariNS runs in one of two modes:
 
-## Deployment choices
+- **Managed mode** (recommended): the installer sets up `parins-managed.service`, and
+  you configure everything in the web console. Online updates are available.
+- **File mode**: PariNS reads a TOML file and has no console or online updates. See
+  [File mode](#file-mode).
 
-- **Local machine:** keep DNS and management bound to loopback.
-- **Home or private network:** bind DNS to a LAN address and allow only intended
-  clients through the firewall; configure those clients or your router to use it.
-- **VPS or remote clients:** configure encrypted DNS listeners and their
-  certificates, restrict DNS and management access at the network boundary, and
-  measure capacity on the target host. Installing PariNS does not automatically
-  make an unrestricted public resolver safe to operate.
+## Requirements
 
-## Install a Linux release
+- Linux on x86_64 or aarch64 (ARM64), with systemd as the service manager.
+- Root access (`sudo`).
+- `curl`, `tar` and `sha256sum` or `shasum`, plus common base tools the installer
+  uses (`flock`, `nsenter`, `setpriv`, `timeout`, `prlimit`, `getent`). The
+  installer stops and names any missing command.
 
-Requires a Linux x86_64 or ARM64 host running systemd, `curl`, `tar`, a SHA256
-utility (`sha256sum` or `shasum`), and root/sudo access. No Rust, Git, Node.js or
-container runtime is needed. Run the bootstrap command from the
-[Quick start](../README.md#1-install-on-linux); static binaries are also listed in
-[Releases](https://github.com/paricafe/PariNS/releases).
+No Rust, Node.js, Git or container runtime is needed on the host.
 
-The script detects the CPU architecture, downloads the release over HTTPS, checks
-the archive and its contents against SHA256 manifests, installs the binary, and
-starts `parins-managed.service`. SHA256 detects corruption; it is not an
-independent signature or a substitute for trusting the release publisher.
-Pin a version with `sudo sh parins-install.sh --version v0.1.20`, or use `--dry-run`
-to download, verify and inspect targets without installing a service.
-
-For offline installation, download the matching `.tar.gz` and `.tar.gz.sha256`
-from the release page, run `sha256sum --check FILE.tar.gz.sha256`, extract it,
-then run `sha256sum --check SHA256SUMS` and `sudo sh install.sh` inside the package.
-
-The installer enables and starts `parins-managed.service`, using
-`/opt/parins-managed/parins` and private state under `/var/lib/parins-managed`.
-It does not change host or router DNS, open firewall ports, configure NAT, stop
-`systemd-resolved` or other conflicting services, or modify a file-mode
-`parins.service` unit. Re-running it upgrades the managed binary and units while
-retaining state and a private backup of the prior binary/unit. An installation or
-startup failure restores the prior service only when its data contract permits;
-first updater enrollment has the limits described in
-[Software updates](operations.md#software-updates). If recovery fails, inspect the
-reported backup and `journalctl -u parins-managed.service`.
-
-## First setup
-
-This step is for an uninitialized installation, including a reinstall that only
-has a setup token. An initialized reinstall keeps its management address and
-administrator account; do not run setup again or infer a new HTTP/HTTPS URL from
-the server IP. The installer prints this distinction only after the saved
-configuration passes its preflight and readiness checks; it does not inspect the
-setup token to decide.
-
-The first start serves only the console; **DNS starts after successful setup**.
-The console listens on **`0.0.0.0:3000` over HTTP** until inbound DoH is enabled
-with a valid certificate and `[web].public_host` (see
-[Management HTTPS](#management-https)). HTTP carries passwords, configuration and
-pasted private keys in plaintext: allow inbound TCP 3000 in the host firewall and
-cloud security group only from administrator IPs, and prefer local access or an
-SSH tunnel for setup:
+## Install
 
 ```sh
-ssh -N -L 3000:127.0.0.1:3000 USER@HOST
+curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh
 ```
 
-Then open <http://127.0.0.1:3000>. Without a tunnel, open `http://SERVER_IP:3000`;
-the installer prints local interface URLs, and a VPS behind NAT may need its
-provider-assigned public IP. For IPv6 use `--web-listen '[::]:3000'` and
-`http://[SERVER_IPV6]:3000`; IPv4 acceptance on an IPv6 socket depends on the
-operating system. `--web-listen 127.0.0.1:3000` keeps management local-only.
+To read the script before running it:
 
-Read the one-time token on the server with
-`sudo cat /var/lib/parins-managed/setup-token`. Never share it or put it in a URL.
-Enter the token, choose an administrator name and a password of at least 12 bytes,
-and enter your upstream DNS servers, one per line. IP addresses and encrypted DNS
-URLs are supported; hostname URLs also need bootstrap DNS addresses. The wizard
-defaults to `127.0.0.1:5353` for local testing. For LAN clients choose the server's
-LAN IP on port 53; the service has only the capability needed to bind low ports.
-Port conflicts reject setup or apply, and no conflicting service is stopped.
+```sh
+curl -fsSL -o bootstrap.sh https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh
+less bootstrap.sh
+sudo sh bootstrap.sh
+```
+
+The script starts installing only after it has been downloaded completely. It
+downloads the release package for your CPU, checks the archive against its
+`.sha256` file and every packaged file against `SHA256SUMS`, then runs the bundled
+`install.sh`. SHA256 detects corruption; it is not a signature, so you still trust
+the GitHub release publisher.
+
+| Option | Effect |
+| --- | --- |
+| `--version vX.Y.Z` | Install that release instead of the one the script was published with. |
+| `--dry-run` | Download, verify and print the install targets without changing anything. |
+| `--root DIR` | Stage files into an existing private directory (mode 0700) for inspection; nothing is started. |
+
+When piping, pass options after `-s --`:
+
+```sh
+curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh -s -- --dry-run
+```
+
+**Offline install.** From the [releases page](https://github.com/paricafe/PariNS/releases),
+download `parins-VERSION-linux-ARCH.tar.gz` and its `.sha256` file, then:
+
+```sh
+sha256sum --check parins-VERSION-linux-ARCH.tar.gz.sha256
+tar -xzf parins-VERSION-linux-ARCH.tar.gz
+cd parins-VERSION-linux-ARCH
+sha256sum --check SHA256SUMS
+sudo sh install.sh
+```
+
+**What the installer changes.** It installs:
+
+| Path | Content |
+| --- | --- |
+| `/opt/parins-managed/parins` | The program. Backups of replaced files go to `/opt/parins-managed/.install-backup.*`. |
+| `/usr/libexec/parins-updater` | The root update helper. |
+| `/etc/systemd/system/` | `parins-managed.service`, `parins-updater.service`, `parins-updater.path`, `parins-update-recovery.service` |
+| `/var/lib/parins-managed` | Private state, created by systemd for the service's dynamic user (stored under `/var/lib/private/parins-managed`). |
+| `/var/lib/parins-updater` | The updater's journal and public status. |
+
+It then enables and starts `parins-managed.service` and `parins-updater.path`.
+It never changes host or router DNS, firewall rules or NAT, never stops
+systemd-resolved or another DNS service, and never touches a file-mode
+`parins.service`.
+
+**Fresh install output.** After the service passes its readiness check, the
+installer prints three steps:
+
+1. An SSH tunnel command filled in with your login and the host's detected address,
+   for example `ssh -N -L 3000:127.0.0.1:3000 admin@192.0.2.10`. Behind NAT, use
+   the server's public address instead.
+2. The local URL <http://127.0.0.1:3000>.
+3. The one-time setup token itself. If the installer cannot read it, it prints
+   `sudo cat /var/lib/parins-managed/setup-token` instead.
+
+Never put the token in a URL or share it.
+
+**Reinstall and upgrade.** Running the install command again installs the latest
+release over the current one. An initialized instance keeps its configuration,
+administrator account and management address; the installer says so and prints no
+setup steps. Before replacing anything it runs the new program, as the service
+user and read-only, against the saved configuration and its rollback copy, so the
+service must be running. If installation or startup fails, the previous program
+and units are restored. Routine upgrades can also use
+[online updates](operations.md#online-updates-and-recovery).
+
+**Older layouts are refused.** The installer accepts only the current managed unit.
+It stops before writing anything if it finds an older or modified
+`parins-managed.service`, a program without that unit, or old state in
+`/var/lib/parins`. It does not migrate data: back up and remove the old service and
+its data by hand, then install again.
+
+## First-run setup
+
+Until setup is done, the service serves only the console on `0.0.0.0:3000` over
+plain HTTP; DNS is not running. HTTP carries the token, passwords and configuration
+unencrypted, so use the SSH tunnel, or allow TCP 3000 in the host firewall and cloud
+security group only from your own address.
+
+The **First-run setup** wizard has three steps:
+
+1. **Admin account:** the setup token, an administrator name (1–64 ASCII letters,
+   digits, `-` or `_`) and a password of 12–256 bytes.
+2. **Listener & upstream:**
+   - **DNS listener:** **Local testing only** listens on `127.0.0.1:5353`;
+     **LAN & internet (:53)** listens on `0.0.0.0:53`. The service unit grants only
+     the capability to bind ports below 1024 (`CAP_NET_BIND_SERVICE`).
+   - **Upstream DNS:** a preset (Cloudflare, Google Public DNS, Quad9 or AliDNS, each
+     over DoH with its bootstrap addresses filled in) or **Custom**, where you list
+     endpoints, scheduling, bootstrap DNS and HTTP/3 preference. See
+     [Upstreams](configuration.md#upstreams).
+3. **Review:** a summary of the choices. **Full configuration** shows the complete
+   TOML for edits beyond the wizard; usually nothing needs to change.
+
+Setup binds every listener before it saves anything. If a listener address is
+taken, setup fails with `CONFIG_CONFLICT`, nothing is saved, and the console explains
+the conflict; see [Port 53 conflicts](#port-53-conflicts).
+
+Setup tries count against the sign-in attempt budget of 5 attempts per minute per
+client address. Each submit uses two attempts, because the console first validates
+the configuration (`/api/setup/preview`) and then sends the setup (`/api/setup`).
 
 ## Connect clients
 
-Point your devices or router to the DNS listen IP selected in the wizard. Most
-device DNS settings require port 53. To check the initial loopback setup:
-
-```sh
-dig @127.0.0.1 -p 5353 example.com A
-sudo systemctl status parins-managed.service
-```
-
-Use the dashboard to inspect traffic, then configure filtering, caching, ECS and
-encrypted DNS as needed. For a headless deployment without the console, use
-[File-configured mode](#file-configured-mode).
-
-## Build from source
-
-Install Rust with [rustup](https://rust-lang.org/tools/install/) and run:
-
-```sh
-git clone https://github.com/paricafe/PariNS.git
-cd PariNS
-cd web && npm ci --ignore-scripts && npm run build && cd ..
-cargo build --locked --release
-sudo sh scripts/install.sh
-```
-
-Alternatively, build a host-native package with `sh scripts/package.sh`, verify
-its adjacent `.sha256` and extracted `SHA256SUMS`, and run `sudo sh install.sh`
-inside the extracted Linux package. macOS packages cannot be installed as Linux
-services. Linux x86_64 and aarch64 ELF binaries are accepted, with architecture
-checked before installation. Then continue with [First setup](#first-setup).
-
-## Management HTTPS
-
-The console does not create a certificate. When inbound `[doh]` is enabled,
-PariNS verifies its certificate/key and the `[web].public_host` name, then serves
-HTTPS on the same management port with that identity. `[doh].http3` adds HTTP/3
-to the same DNS identity and port; a standalone `[doh3]` section is rejected. DoT, DoQ and encrypted upstreams do not change
-the console protocol. The DoH DNS listener and management listener keep separate
-ports, routes and ALPN. For example, DoH on 443 and the console on 3000 can use
-the same certificate for `dns.example.com`; the console URL becomes
-`https://dns.example.com:3000/`. The certificate must cover the chosen name;
-PariNS does not infer a public IP from `0.0.0.0`, configure DNS, or make a private
-CA trusted by clients.
-
-Saving a configuration that enables inbound DoH switches the existing management
-port to HTTPS and requires a new login. If setup itself enables DoH, open the
-returned HTTPS address and log in with the new administrator account. Disabling
-all inbound DoH switches to HTTP only after explicit downgrade confirmation. A
-failed candidate or TLS material fault never silently exposes the management API
-over HTTP. Renew external certificate files through your issuer, then use
-**Reload certificates** or the [managed SIGHUP hook](operations.md#certificate-renewal).
-There is no built-in ACME or certificate watcher. Reload preserves the management
-session and does not save configuration drafts. Old generated
-`https-identity.pem`/`https-cert.pem` files from earlier versions are unused and
-not removed automatically; check their purpose before deleting them.
-
-For authentication, configuration transactions and state ownership, see
-[Operations](operations.md#management-console).
-
-## File-configured mode
-
-Build `web/` first as shown in [Build from source](#build-from-source): the Rust
-binary embeds the management assets at compile time but does not start the
-console unless `--manage` is used.
-
-```sh
-cargo build --locked --release
-cp parins.example.toml parins.toml
-# Edit parins.toml and set upstreams.servers to your chosen resolver(s).
-./target/release/parins --check
-./target/release/parins
-```
-
-In another terminal:
+With **Local testing only**, test on the server:
 
 ```sh
 dig @127.0.0.1 -p 5353 example.com A
 dig @127.0.0.1 -p 5353 example.com A +tcp
 ```
 
-Use `--config PATH` to select a different configuration file and `--data-dir PATH`
-for private runtime storage (default `parins-data`, not shared with managed state).
-`--check` creates no runtime directory, database or cache snapshot. `listen` selects
-the same address and port for UDP and TCP; port zero selects a shared ephemeral
-port, printed on startup. Set `[upstreams].servers` to one or more endpoints
-(see [Upstream DNS settings](configuration.md#upstream-dns-settings)). UDP endpoints
-must also support TCP for truncated answers. Do not point them back at PariNS,
-including through a local interface alias that configuration validation cannot
-identify. `deploy/parins.service` is a systemd template for this mode.
+To serve other devices, listen on port 53 (most devices and routers cannot use
+another port), allow UDP and TCP 53 in the host firewall only from your own
+clients, and set the server's address as DNS on the devices or the router's DHCP
+settings. A DNS server open to everyone is abused for amplification attacks. To
+change the listener after setup, edit **Listen address** under
+**Upstreams & listeners**.
 
-Ctrl-C or SIGTERM (Unix) stops accepting traffic, closes idle TCP clients, and
-allows active queries up to `shutdown_grace_ms` to finish before cancellation.
+### Port 53 conflicts
 
-## Existing installations
+PariNS never stops other services or changes system DNS, so port 53 must be free
+for the address you choose. Find the current owner:
 
-The installer uses the exclusive `/var/lib/parins-managed` state directory.
-Reinstalling the current managed layout preserves the account and configuration.
-It rejects unsupported older layouts and unknown directories before making changes;
-it does not translate configuration or migrate data. Read the
-[upgrade notices](../CHANGELOG.md#v015--2026-10-08) and
-[updater enrollment requirements](operations.md#software-updates) before upgrading.
+```sh
+sudo ss -lntup 'sport = :53'
+```
+
+On many distributions this is the systemd-resolved stub, which listens on
+`127.0.0.53` and `127.0.0.54`. Two common choices, both your decision as the host
+administrator:
+
+- Listen on a specific address instead of all addresses, for example
+  `listen = "192.168.1.10:53"` (your LAN address). It does not collide with the
+  stub's loopback addresses.
+- Turn off the stub: set `DNSStubListener=no` in `/etc/systemd/resolved.conf`, run
+  `sudo systemctl restart systemd-resolved`, and make sure the host's own
+  `/etc/resolv.conf` still points to a working resolver.
+
+Then submit setup again, or apply the configuration again in the console.
+
+## Console HTTPS
+
+The console has no certificate of its own. It switches to HTTPS on the same port
+when inbound DoH is enabled with a valid certificate and `[web].public_host` names
+the host the browser uses, for example:
+
+```toml
+[doh]
+listen = "0.0.0.0:443"
+cert_file = "/path/to/fullchain.pem"
+key_file = "/path/to/privkey.pem"
+
+[web]
+public_host = "dns.example.com"
+```
+
+The console URL then becomes `https://dns.example.com:3000/`. The certificate must
+cover that name. DoH on 443 and the console on 3000 keep separate ports and routes.
+DoT, DoQ and encrypted upstreams do not change the console protocol.
+
+Saving such a configuration switches the management port to HTTPS and requires a
+new sign-in. Turning off inbound DoH returns to HTTP only after you confirm the
+downgrade. A rejected candidate or a certificate fault never falls back to HTTP.
+Certificates can be pasted in the console or referenced as files; see
+[Certificates](operations.md#certificates).
+
+## File mode
+
+File mode runs from a TOML file, without the console, online updates or accounts.
+Build the program as in [Build from source](#build-from-source) (the web console is
+embedded at build time even though file mode does not serve it), then:
+
+```sh
+cp parins.example.toml parins.toml
+# Set upstreams.servers to your resolvers.
+./target/release/parins --config parins.toml --check
+./target/release/parins --config parins.toml
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--config PATH` | `parins.toml` | Configuration file. Relative paths inside it resolve against its directory. |
+| `--data-dir DIR` | `parins-data` | Private runtime data: database, cache snapshot, subscription store. |
+| `--check` | | Validate the configuration and the files it references, then exit. Creates nothing. |
+
+The example configuration listens on `127.0.0.1:5353` and forwards to a test
+upstream on `127.0.0.1:5354`; replace that before real use. SIGHUP reloads
+`filter_file` and listener certificates; other changes need a restart. Ctrl-C or
+SIGTERM stops accepting traffic and lets active queries finish within
+`shutdown_grace_ms`.
+
+`deploy/parins.service` is a systemd template for file mode. It expects the program
+at `/opt/parins/parins` and the configuration at `/etc/parins/parins.toml`, keeps
+data in `/var/lib/parins-file-data`, and does not grant `CAP_NET_BIND_SERVICE`, so it
+suits ports above 1023 unless you add that capability. Review it before use:
+
+```sh
+sudo install -D -m 0755 target/release/parins /opt/parins/parins
+sudo install -D -m 0644 parins.toml /etc/parins/parins.toml
+sudo install -m 0644 deploy/parins.service /etc/systemd/system/parins.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now parins.service
+```
+
+## Build from source
+
+Install Rust with [rustup](https://rust-lang.org/tools/install/) and Node.js, then:
+
+```sh
+git clone https://github.com/paricafe/PariNS.git
+cd PariNS
+cd web && npm ci --ignore-scripts && npm run build && cd ..
+cargo build --locked --release
+```
+
+The first build fetches the pinned Hickory fork with Git. To install a source build
+as a managed service on Linux, build a package and install it like a release:
+
+```sh
+sh scripts/package.sh
+```
+
+The archive and its `.sha256` file land in `target/packages/`. Extract it, run
+`sha256sum --check SHA256SUMS` inside, then `sudo sh install.sh`. Online updates are
+offered only to official release installations.
+
+## Uninstall
+
+There is no uninstall script. These steps remove the managed installation. Back up
+`/var/lib/parins-managed` first if you may need the configuration, account or
+history again (see [Backups](operations.md#backups-and-the-state-directory)).
+
+```sh
+sudo systemctl disable --now parins-updater.path parins-managed.service
+sudo systemctl stop parins-update-recovery.service
+sudo rm -f /etc/systemd/system/parins-managed.service \
+  /etc/systemd/system/parins-updater.service \
+  /etc/systemd/system/parins-updater.path \
+  /etc/systemd/system/parins-update-recovery.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/parins-managed /usr/libexec/parins-updater /var/lib/parins-updater
+sudo rm -rf /var/lib/parins-managed /var/lib/private/parins-managed
+```
+
+If you added a drop-in under `/etc/systemd/system/parins-managed.service.d/`, remove
+it too. Undo any firewall, router or system DNS changes you made for PariNS
+yourself; the installer made none.

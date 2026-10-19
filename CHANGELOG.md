@@ -2,8 +2,64 @@
 
 ## Unreleased
 
+### Removed
+
+- The installer option `--enable-updater` and adoption of v0.1.4 installations.
+  An older layout is refused with instructions to back it up and remove it by
+  hand before installing.
+
+### Changed
+
+- One-command install: `curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh`.
+  A fresh install prints three steps: an SSH tunnel command, the local console
+  address and the one-time setup token itself.
+- First-run setup asks for the token, the administrator account, a listening
+  mode (local testing on 127.0.0.1:5353, or LAN and internet on 0.0.0.0:53) and an
+  upstream preset (Cloudflare, Google, Quad9 or AliDNS over DoH) or custom
+  upstreams. An address already in use is reported as such (`CONFIG_CONFLICT`).
+- Console text uses one set of standard terms with short help lines, in both
+  languages; update failure reasons are translated.
+- QUIC listeners (DoQ, DoH3) answer clients whose address is not yet validated
+  with a stateless Retry before taking connection slots, which costs such clients
+  one extra round trip.
+- An HTTP/3 upstream failure falls back to HTTP/2 only when the query was not
+  sent; once sent, the failure is that query's failure and the query is never
+  resent. A hostname upstream moves to its next address only when nothing was
+  sent. Upstream queries advertise an EDNS UDP size of at most 1232 bytes.
+- `/healthz` and `/metrics` have their own small connection budget.
+- PariNS raises its soft open-file limit to the hard limit at startup, and the
+  file-mode service sets `LimitNOFILE=524288`.
+- Storage cleanup runs on its interval or when a limit is exceeded instead of on
+  every flush. At shutdown the cache snapshot and the storage drain run in
+  parallel with separate time limits.
+- The setup preview counts against the sign-in attempt budget.
+- README and guides are rewritten for the current design.
+
 ### Fixed
 
+- Saved local rules that cannot be read no longer let DNS start with no local
+  rules after a failed configuration change rolled back; DNS stays stopped and
+  status shows the reason.
+- EDNS TCP keepalive is removed from client queries and upstream answers, so such
+  queries are cached and coalesced, UDP upstreams no longer reject them, and DoQ
+  clients receive answers that carried it.
+- A connection error or a temporary lack of file descriptors while accepting a
+  TCP, DoT, DoH or metrics connection no longer stops the listener for up to a
+  minute; exhaustion is logged at most once a minute.
+- Encrypted replies are padded up to the maximum DNS message size instead of the
+  client's UDP size.
+- In recursive mode, DNSSEC-aware clients receive the NSEC/NSEC3 proofs a
+  wildcard answer needs.
+- The cache snapshot keeps the most recently used entries across all shards.
+- A listener that recovers and fails again logs the new failure at once; one
+  listener's failure during shutdown no longer cuts short the others' drain.
+- DoH advertises HTTP/3 only while the DoH3 listener is running.
+- A new runtime database is created atomically, and opening it no longer holds
+  status locks during queries.
+- Managed `--check` also validates the saved rollback configuration, and an
+  update cancelled before installation is reported as cancelled.
+- Committing an update no longer blocks other console requests during the
+  preflight check.
 - Console fields with units (sizes and durations) reported an out-of-range value
   as a whole number of bytes or seconds, such as "1048576 to 536870912", although
   they accept exact decimals in any unit. The message now shows the bounds in
@@ -162,7 +218,7 @@
 ### Changed
 
 - Monitoring guidance: use `dns_health` from `GET /api/status`; see
-  [Operations](guide/operations.md#runtime-storage-and-diagnostics).
+  [Operations](guide/operations.md#query-log-and-storage).
 
 ## v0.1.14 — 2026-10-15
 

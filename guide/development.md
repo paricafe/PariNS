@@ -2,18 +2,29 @@
 
 [Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md)
 
-Commands below run from the repository root. Use the toolchain in
-[rust-toolchain.toml](../rust-toolchain.toml), locked dependencies and the current
-[contributor rules](../AGENTS.md). Module responsibilities are listed under
-[Ownership](../AGENTS.md#ownership); detailed invariants live in each module's `//!`
-documentation. The full CI gate is defined in [ci.yml](../.github/workflows/ci.yml).
+Commands run from the repository root. Use the toolchain pinned in
+[rust-toolchain.toml](../rust-toolchain.toml) and locked dependencies. Contributor
+rules and module ownership are in [AGENTS.md](../AGENTS.md); detailed invariants are
+in each module's `//!` documentation. [ci.yml](../.github/workflows/ci.yml) is the
+full CI gate.
 
 ## Build and test
 
-The management UI is a React 19/TypeScript application built into four fixed
-same-origin assets under `web/dist/`. Production runs only the Rust binary; it
-does not run Node.js. Build the UI before compiling Rust because the binary
-embeds the generated files:
+The console is a React and TypeScript app in `web/`. Its build output in `web/dist/`
+is embedded into the Rust binary, so build it before compiling Rust. Production runs
+only the Rust binary.
+
+Run the checks that match your change:
+
+| Change | Checks |
+| --- | --- |
+| Rust | `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked --all-targets` |
+| Build or configuration | `cargo build --locked --release`, `./target/release/parins --config parins.example.toml --check` |
+| Web | In `web/`: `npm ci --ignore-scripts`, `npm run typecheck`, `npm test`, `npm run build`; `npm audit --registry https://registry.npmjs.org --audit-level=high`. Test interaction changes in a real browser, including errors, session changes, keyboard use and small screens. |
+| Installer or bootstrap | `sh scripts/test-install.sh`, `sh scripts/test-bootstrap.sh` (see [below](#installer-and-bootstrap-checks)) |
+| Service, UDP, subscriptions, updates | The `--ephemeral-ci` suites in [Acceptance workflows](#acceptance-workflows), only on disposable runners |
+| Dependencies | `cargo install cargo-audit --version 0.22.2 --locked`, then `cargo audit --deny warnings` |
+| Documentation only | Check referenced paths, commands and links; review the diff; `git diff --check` |
 
 ```sh
 cd web
@@ -22,158 +33,130 @@ npm run typecheck
 npm test
 npm run build
 cd ..
-```
-
-```sh
-cargo run --locked -- --config parins.example.toml --check
-cargo test --locked --all-targets
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
 ```
 
-The frontend lockfile is pinned. `npm run build` rejects extra chunks, remote
-resources, and inline scripts so every referenced production asset has an exact
-Rust route. The repository's strict CSP is retained. The adapted beUI motion
-components are free MIT-licensed source with their notice shipped in release
-archives; see [the beUI notice](../web/src/components/beui/README.md).
+Tests use loopback upstreams and never depend on public DNS. `npm run build` rejects
+extra chunks, remote resources and inline scripts, so every production asset has a
+fixed Rust route under the strict CSP. To run the console locally without systemd or
+root:
 
-The example configuration uses a loopback test upstream; see
-[Configuration](configuration.md) before sending real queries. Tests use controlled
-loopback upstreams and do not rely on public DNS answers.
+```sh
+./target/release/parins --manage --state-dir parins-state --web-listen 127.0.0.1:3000
+```
 
-The binary uses Tokio's multi-thread runtime, normally one worker per available
-CPU; `TOKIO_WORKER_THREADS=2` can explicitly select two workers. This is not CPU
-affinity or a memory limit. Cache and coalescing state use short shared locks;
-UDP has one receive loop followed by spawned query tasks. More workers do not
-guarantee linear scaling.
+The binary uses Tokio's multi-threaded runtime with one worker per CPU by default;
+`TOKIO_WORKER_THREADS=2` selects two.
 
-## Benchmarks and packaging
+## Benchmarks
 
 ```sh
 cargo run --locked --release --example bench -- 1000 32
 cargo run --locked --release --example bench_dot -- 1000 8
 cargo run --locked --release --example bench_cache -- --seconds 1 --repeats 3
-cargo install cargo-audit --version 0.22.2 --locked
-cargo audit --deny warnings
+```
+
+- `bench`: resolver scenarios (warm cache, cold single upstream, cold parallel
+  upstreams) against synthetic loopback upstreams, as JSON.
+- `bench_dot`: fresh versus pooled DoT transactions against one loopback TLS peer.
+- `bench_cache`: cache operations with 1, 2 and 4 workers, with correctness checks.
+  `--case Multi --workers 2` picks one case; `PARINS_BENCH_SHARDS`,
+  `PARINS_BENCH_MAX_ENTRIES` and `PARINS_BENCH_MAX_BYTES` override the cache shape.
+
+These are microbenchmarks. Cache operations per second are not wire DNS QPS, and
+none of them measures network or TLS throughput, process memory or capacity on a
+deployment host. For a performance change, keep a baseline, repeat the same workload
+on a quiet host, and report variance and regressions.
+
+## Packaging and releases
+
+```sh
 sh scripts/package.sh
 ```
 
-- `bench` runs synthetic loopback upstreams and emits JSON for warm cache, cold
-  single-upstream and cold parallel-upstream Resolver scenarios.
-- `bench_dot` compares fresh and pooled authenticated DoT transactions against one
-  synthetic loopback TLS peer, without caching or artificial delay. JSON includes
-  checked answers, errors, connection/handshake counts (full handshakes separately
-  from session resumption) and latency percentiles.
-- `bench_cache` measures hot-key, multi-key, ECS and negative churn with 1/2/4 OS
-  workers; fixed workloads check IDs, questions, TTLs and scopes, and report sampled
-  p99 and correctness failures. `--case Multi --workers 2` selects a case and
-  `PARINS_BENCH_SHARDS=4` selects shards. `PARINS_BENCH_MAX_ENTRIES` and
-  `PARINS_BENCH_MAX_BYTES` override capacity for an interleaved old/new-budget
-  comparison with the same binary; the output records the selected budgets.
-  Positive/negative partition changes affect hit rates, so churn throughput alone
-  is not an equal-work comparison.
+Without options this builds a host-native development package,
+`target/packages/parins-REVISION-OS-ARCH.tar.gz` with its `.sha256`. It always builds
+the console from the checkout first. The archive holds `parins`, `parins-updater`,
+`install-build-info.json`, `install.sh`, the `deploy/` units, `parins.example.toml`,
+licenses, `README.md`, `CHANGELOG.md` and a `SHA256SUMS` manifest; no keys or private
+configuration.
 
-Compare repeated runs with the same workload on a quiet host. These are
-microbenchmarks: they do not measure network/TLS throughput, process RSS, wire DNS
-QPS or capacity on any deployment host.
+A release package is built on its native Linux architecture:
 
-Packaging creates a host-native archive under `target/packages`, containing no
-keys or private configuration. `deploy/parins.service` is a Linux systemd template
-for file-configured mode, not an installed service; review paths, file permissions,
-firewall and source limits before using it. The template defaults to unprivileged
-ports.
+```sh
+sh scripts/package.sh --version vX.Y.Z --target x86_64-unknown-linux-musl
+```
 
-CI runs the web checks, formatting, Clippy, tests, release build, configuration
-check, audit, installer fixtures, managed-service acceptance and packaging on Linux;
-macOS runs Clippy and the Rust tests. Check CI results separately from local runs.
+The version must match `Cargo.toml`, tracked files must be clean, and the binaries
+must be fully static.
+
+Releases come from [release.yml](../.github/workflows/release.yml). It runs on `v*`
+tags and on manual dispatch, but only a tag publishes. For each of x86_64 and aarch64
+it runs the web checks, formatting, Clippy and tests on the musl target, and the
+installer and bootstrap fixtures (plus the dependency audits on x86_64), then builds
+the package,
+stages it through the default bootstrap entry point and installs it with the managed
+service acceptance suite. It then verifies both packages, writes the update manifest
+`parins-update.json` (`scripts/update-manifest.mjs`), and publishes the archives,
+checksums, raw binaries, manifest and `scripts/bootstrap.sh`, with notes from
+`scripts/release-notes.mjs`. An existing release is never overwritten. Finally it
+downloads `releases/latest/download/bootstrap.sh` and checks that it installs the
+tagged version.
+
+To prepare a release, change the version in `Cargo.toml` and the default version in
+`scripts/bootstrap.sh` (its `version=` default and usage text) together;
+`sh scripts/test-bootstrap.sh` checks the usage text, and the package staging checks
+the default. Release notes come from the one `CHANGELOG.md` section headed with that
+version, so move the Unreleased entries there.
 
 ## Installer and bootstrap checks
 
-`sh scripts/test-install.sh` and `sh scripts/test-bootstrap.sh` run in staged roots
-without systemd. They cover these installer contracts:
+`sh scripts/test-install.sh` and `sh scripts/test-bootstrap.sh` run without root or
+systemd in staged directories (`--root`). They cover these contracts:
 
-- Bootstrap fixtures use the Cargo release version and exercise the default,
-  unpinned entry point. Each actual native release package is staged through that
-  entry point before publication, and the public quick-start check asserts the exact
-  published version.
-- Success guidance distinguishes first setup from an initialized installation only
-  after the existing identity-preserving preflight succeeds. It never parses private
-  state or infers initialization from a token file. Staging and `--dry-run` start no
-  service.
-- Unknown, legacy and symlinked target layouts are rejected before any write.
+- The bootstrap uses the Cargo version and the default, unpinned entry point.
+  `sh scripts/test-bootstrap.sh --package ARCHIVE.tar.gz` stages a real native package
+  the same way.
+- Archives with unexpected paths, links, special files or checksum mismatches are
+  rejected before anything is extracted or installed.
+- Older, modified, symlinked or unknown layouts are rejected before any write, with a
+  hint to handle them by hand; the removed enrollment option is refused.
+- Fresh-install output prints the tunnel command, the local URL and the exact token,
+  and never prints a token from a symlinked, hard-linked or malformed file. An
+  initialized reinstall is recognized only after its read-only preflight succeeds.
+- Staging and `--dry-run` start no service and run no candidate binary.
+- A failed replacement restores the previous files.
 
 ## Acceptance workflows
 
-Suites that install or change a real system refuse to run without `--ephemeral-ci`
-on a disposable GitHub-hosted Linux runner. Never run them on a developer host or
-an existing installation, and keep their guards intact. Release and public DNS
-acceptance do not change the host. Each result proves only its declared fixture.
+Suites that install software or change a system refuse to run without
+`--ephemeral-ci` on a disposable GitHub-hosted Linux runner. Never run them on a
+developer machine or an existing installation, and keep their guards. Each result
+proves only its own fixture.
 
-- **Managed service** (`ci.yml`, `release.yml`): `scripts/test-systemd.sh
-  --ephemeral-ci` installs native musl binaries or a release package through the real
-  installer and systemd, including the managed updater's installation contract.
-- **UDP source address** (`ci.yml`): `sh scripts/test-udp.sh --ephemeral-ci` checks
-  IPv4/IPv6 reply source addresses in isolated network namespaces.
-- **Release** (`release.yml`): runs on version tags and manual dispatch. It builds
-  and verifies both native packages and the update manifest; only a tag publishes.
-- **Filter acceptance** (`filter-acceptance.yml`): `scripts/test-systemd.sh
-  --ephemeral-ci --package DIR --filter-subscriptions` runs the isolated
-  subscription service suite against a real HTTPS fixture, including offline
-  restart, update freeze and ENOSPC recovery.
-- **Filter lifecycle** (`filter-lifecycle.yml`, manual): the real managed service
-  runs in a verified 2 CPU/2 GiB, no-swap cgroup with a separately pinned load
-  generator. Its synthetic HTTPS source branch changes only fixture domains; keep CI
-  read-only and public certificate validation normal. Fix the workload and SLO
-  before running, retain all three rounds, distinguish CDN propagation from the
-  measured refresh window, and prove request-held old-generation release separately
-  from latency samples. Measure restart with derived indexes and rebuild from
-  unchanged selected source objects separately; preserve the catalog and record CPU,
-  RSS and disk IO without claiming that the host page cache was cold.
-- **Official update check** (`update-check.yml`, manual): installs the actual
-  published first updater-capable release; never rebuild with a forged official
-  identity. Pin the installed version/source to its tag and independently require
-  latest to equal it. Three fixed idle/check wire rounds use the authenticated
-  managed check endpoint, honor cooldown, and observe a new success without
-  replaying POST. Same-version checks do not download an update or prove A-to-B
-  replacement.
-- **Public DNS acceptance** (`public-dns-acceptance.yml`, manual): takes an
-  explicitly selected public address, certificate hostname and DoQ port, sends one
-  `example.com. A` query within one deadline, and verifies the public CA, hostname,
-  ALPN and response with normal certificate verification. Never hardcode deployment
-  targets or add production credentials to CI; ordinary CI does not contact your
-  deployment. A pass covers that address family and network path at that time.
-- **Update boot recovery** (`update-recovery.yml`): a hosted runner controls a
-  disposable QEMU guest. Keep the host guard, pinned image digest, pinned guest SSH
-  identity and private cleanup; never reboot the runner or fake hosted-runner flags
-  inside a guest. Normal reboot, virtual hard reset and bounded journal-volume ENOSPC
-  are separate fresh-guest scenarios. Disk-fault acceptance must observe the real
-  helper's failed journal write and recovery on that same volume after space is
-  freed, preserving the installed binary and managed configuration. This uses a
-  development package: it does not cover official upgrade/rollback, physical
-  power loss or full update-disk faults.
+| Workflow | Command | What it covers |
+| --- | --- | --- |
+| `ci.yml`, `release.yml` | `sh scripts/test-systemd.sh --ephemeral-ci` (`--binary-path` or `--package`) | Installs through the real installer and systemd, including the updater contract and certificate renewal. |
+| `ci.yml` | `sh scripts/test-udp.sh --ephemeral-ci` | IPv4 and IPv6 UDP reply source addresses in isolated network namespaces. |
+| `filter-acceptance.yml` (manual, or on harness changes) | `scripts/test-systemd.sh --ephemeral-ci --package DIR --filter-subscriptions` | Subscriptions against a real HTTPS fixture, including offline restart, update freeze and disk-full recovery. |
+| `filter-lifecycle.yml` (manual) | `scripts/test-systemd.sh --ephemeral-ci --package DIR --filter-lifecycle` | Subscription refresh and restart under a fixed 2 CPU / 2 GiB cgroup with a pinned load generator. Fix the workload and targets before running and keep all rounds. |
+| `update-check.yml` (manual) | `scripts/test-systemd.sh --ephemeral-ci --package DIR --official-updater-check` | The update check of a real published release. Never rebuild with a forged official identity. |
+| `update-recovery.yml` (manual, or on harness changes) | `python3 -B scripts/test-update-reboot.py --ephemeral-ci ...` | Update recovery across normal reboot, hard reset and journal-volume disk-full in a disposable QEMU guest. Uses a development package; does not cover official upgrades or power loss. |
+| `public-dns-acceptance.yml` (manual) | `scripts/test-public-doq.py` | One verified DoQ query to an operator-chosen public address, host name and port. Never hardcode deployment targets or add production credentials. |
 
-### Deployment acceptance
+These suites never change the host's DNS, firewall, certificate trust or system
+services outside the disposable runner. Local, CI and development-build results do
+not prove production capacity, public reachability or official upgrade and rollback
+on a particular host.
 
-Before deployment, choose management/DNS network access rules, provision readable
-external certificates, review backups, measure capacity on the target host, and
-validate independent encrypted clients. Use **Public DNS acceptance** for an
-independent public DoQ check; local loopback results do not prove public
-reachability.
+## Hickory fork
 
-## Planned scope
-
-- Explicit emergency-profile product policy and health-driven scheduling.
-- Licensed third-party rule import and additional filtering response modes.
-- DoT pipelining and alternate HTTP/3 endpoint discovery.
-- Measured public-service capacity, network abuse protection and deployment/rollback acceptance.
-- Zero-downtime replacement for changes that currently restart DNS (anything outside
-  the [listener-preserving settings](operations.md#configuration-changes-and-statistics)).
-
-PariNS forwards to existing resolvers by default; optional recursive resolution
-is a validating resolver for its own clients, not a general recursive server
-(no RPZ, DNS64, local zones or mixed forward/recursive resolution). The
-implementation uses Rust, Tokio for asynchronous IO, and Hickory for DNS message
-parsing and encoding. Recursion uses the Hickory recursor from a fork
-(`Natsuki-Kaede/hickory-dns`, branch `parins-ecs`) pinned by revision in
-`Cargo.toml`, with `hickory-proto` patched to the same revision; the first build
-fetches it with Git, and updating it means changing both revisions together.
+DNS messages use Hickory. Recursive resolution uses the Hickory recursor from a
+fork, `Natsuki-Kaede/hickory-dns` (branch `parins-ecs`, which adds per-request ECS
+and CNAME and DNSSEC fixes). `Cargo.toml` pins `hickory-resolver` to a Git revision
+and patches `hickory-proto` from crates.io to the same revision under
+`[patch.crates-io]`. The first build fetches it with Git. To update it, change both
+revisions together, commit the resulting `Cargo.lock` change, and run the full Rust
+checks, including the recursion tests (`tests/recursion.rs`).

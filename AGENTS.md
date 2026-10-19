@@ -48,7 +48,7 @@ explicit design decision.
 | `src/tls.rs`, `src/tls/` | Verified TLS configuration, DoT adapters and pool, the inbound CertificateSet. |
 | `src/doh.rs`, `src/quic.rs`, `src/quic/` | DoH (HTTP/2), DoQ and HTTP/3 listeners, including Quinn driver and socket lifecycle. |
 | `src/policy.rs`, `src/policy/`, `src/limits.rs` | Filtering decisions, rule parsing and the radix index; source budgets keyed by peer subnet. |
-| `src/metrics.rs`, `src/admin.rs` | Fixed-cardinality process metrics; read-only loopback `/metrics` and `/healthz`. |
+| `src/metrics.rs`, `src/admin.rs` | Fixed-cardinality process metrics; read-only loopback `/metrics` and `/healthz` with their own small connection budget. |
 | `src/runtime_services.rs`, `src/runtime_health.rs`, `src/runtime_lifecycle.rs` | Metrics and storage across DNS generations, generation-scoped DNS health, startup/terminal boundaries for both modes. |
 | `src/storage/`, `src/query_log.rs` | Private runtime SQLite with one owner worker: statistics and opt-in bounded per-request history with clear epochs; never an aggregate metrics label store. |
 | `src/manage/` | Authenticated management APIs, sessions and accounts, configuration transactions, persistence, managed runtime ownership. |
@@ -98,8 +98,10 @@ until preview/validation.
 - Invalidation and replacement stop older in-flight work from refilling invalidated
   state. A newer successful answer, even uncacheable or carrying known EDE
   diagnostics (not admitted for replay), supersedes older overlapping answers.
-- Padding is stripped from cache and regenerated at the final encrypted hop.
-  Cookie/unknown options stay nonshared. Flight and refresh share one canonical key
+- Padding is stripped from cache and regenerated at the final encrypted hop, bounded
+  by the maximum DNS message size, never the EDNS UDP size. EDNS TCP keepalive is
+  hop-local: ingress removes it from queries and the pool from answers. Upstream
+  queries advertise at most 1232 bytes. Cookie/unknown options stay nonshared. Flight and refresh share one canonical key
   that ignores Padding bytes but preserves request intent.
 - Inspection and explanation are read-only: no upstream requests, recency or
   hit-counter changes. Filtering never contaminates cached upstream answers.
@@ -135,9 +137,14 @@ until preview/validation.
   Resolver deadline.
   Recursion failures are upstream failures for stale fallback, except DNSSEC Bogus,
   which is always answered as SERVFAIL with EDE 6.
-- H3 preference applies only to HTTPS endpoints within the resolver deadline, with
-  verified H2 fallback and bounded cooldown. A sent query is never resent or
-  replayed; cancelling a request releases only its stream. DoH transports normalize
+- H3 preference applies only to HTTPS endpoints within the resolver deadline. Only
+  an H3 failure before the query was sent falls back to verified H2; a failure after
+  sending is that query's upstream failure. Any H3 failure starts a bounded cooldown.
+  A hostname endpoint tries its next address only when nothing was sent. A sent
+  query is never resent or replayed, with one exception: when a reused idle DoT pool
+  connection turns out to be closed by the server (EOF, reset, aborted, broken pipe
+  or not connected), the query is retried once on a new connection within its
+  deadline; cancelling a request releases only its stream. DoH transports normalize
   HTTP Age into RR TTLs; cache code has no HTTP policy. Details:
   `src/upstreams/h3.rs`, `src/upstreams/transport.rs`.
 - DNS terminal health is published once per generation to readiness and storage
@@ -148,11 +155,17 @@ until preview/validation.
   while the others, the cache and the upstream pool keep serving. Health is ready
   only with every listener up, otherwise degraded and not ready; an adapter's drain
   forces a stop (and the upstream pool down) only when the generation is stopping.
+  Per-connection accept errors keep a listener serving, and descriptor exhaustion
+  pauses it briefly. QUIC answers unvalidated Initials with a stateless Retry; only
+  validated connections take the global slot and source budget. DoH advertises
+  Alt-Svc h3 only while DoH3 serves.
   Supervisors belong to the generation and stop with it. An applied configuration
   must bind every listener before it is persisted; only (re)starts of the saved
   configuration run degraded. A generation that fails
   to start for another reason is retried by one process-owned managed task that
-  yields to mutations and restarts only the saved revision. Details:
+  yields to mutations and restarts only the saved revision. Saved local rules that
+  fail to compile keep DNS stopped on every start path (startup, retry, apply
+  rollback); only an applied configuration whose rules compile starts it. Details:
   `src/server.rs`, `src/manage/dns_retry.rs`.
 
 ## Management, runtime and security
@@ -186,6 +199,10 @@ until preview/validation.
   publish candidate certificate changes. The worker opens and integrity-checks an
   existing database in the background (`checking`), so DNS startup never waits for
   it; only shutdown interrupts the check, and writes meanwhile use the bounded queue.
+  Cleanup runs per `storage.cleanup_interval_secs`, after a write over a capacity
+  bound, and on explicit flush or shutdown. At terminal shutdown the cache save and
+  the storage drain run in parallel with separate budgets; storage closes (releasing
+  the runtime lock) only after the save.
 - Management uses HTTP on its one listener until inbound DoH is enabled, which
   selects the validated DoH identity for HTTPS; `[doh].http3` shares the DoH address
   and actual port over UDP. Management and DNS keep separate ports, ALPN and routes.
@@ -206,9 +223,10 @@ until preview/validation.
 - Update commit intent is persisted before a freeze and the fixed inbox request. The
   freeze is checked under the existing mutation permit, released before root waits
   for normal SIGTERM. Unknown helper outcomes never unlock by timeout. The root
-  journal is the sole installed anchor. Details: `src/update/executor/mod.rs`.
+  journal is the sole installed anchor. Root records an application-initiated Abort
+  as `aborted`; the application keeps its own abort reason. Details: `src/update/executor/mod.rs`.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
-  persistence or listeners. Candidate preflight runs as the app user; root never
+  persistence or listeners; it also validates the saved rollback copy. Candidate preflight runs as the app user; root never
   executes the candidate.
 - The installer stops an active `parins-updater.path` right after taking its lock and
   restores it on rollback or enables it after commit; a post-commit enable failure

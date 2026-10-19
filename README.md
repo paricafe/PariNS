@@ -1,97 +1,88 @@
 # PariNS
 
-PariNS is a self-hosted DNS forwarder written in Rust, with subnet-aware caching,
-filtering, encrypted DNS and a built-in web console. It forwards to your own
-upstream resolvers, or can optionally resolve from the root servers itself with
-DNSSEC validation. Run it on a local machine, home network or VPS.
+PariNS is a self-hosted DNS server for a computer, a home or office network, or a
+VPS. It forwards queries to upstream resolvers you choose, or optionally resolves
+from the root servers with DNSSEC validation. It caches answers per client network,
+blocks domains with local rules and online lists, and serves plain and encrypted
+DNS. A built-in web console covers setup, settings, statistics and software
+updates. PariNS is written in Rust and ships as a static Linux binary.
 
 ## Features
 
-- **DNS transports:** UDP, TCP, DoT, DoH over HTTP/2 and HTTP/3, and DoQ.
-- **Upstream pools:** weighted selection or parallel queries across plaintext
-  and authenticated encrypted resolvers.
-- **Optional recursive resolution:** `[resolution] mode = "recursive"` resolves
-  from the root servers with DNSSEC validation instead of forwarding. Forwarding
-  stays the default.
-- **Subnet-aware cache:** ECS isolation, positive and negative caching, optional
-  prefetch, stale answers and request coalescing. ECS is opt-in. Optional learned
-  sharing (`[cache.ecs_sharing]`) caches an answer once per address family only
-  after several networks received the identical answer, and stops sharing as soon
-  as answers differ.
-- **Filtering:** local rules and HTTPS subscriptions, allow exceptions and CNAME
-  checks.
-- **Web console:** guided setup, Chinese/English UI, light/dark themes, statistics,
-  optional query logs and configuration editing.
-- **Deployment:** prebuilt Linux binaries, systemd installation, managed software
-  update checks, or standalone TOML configuration.
+- **Forwarding and optional validating recursion:** forward to UDP, TCP, DoT, DoH
+  (HTTP/2 or HTTP/3) and DoQ upstreams, with weighted or parallel scheduling. Or set
+  `[resolution] mode = "recursive"` to resolve from the root servers with DNSSEC
+  validation.
+- **Per-network ECS cache with learned sharing:** with ECS on, answers are cached per
+  client subnet, so each network keeps the answers meant for it. Learned ECS sharing
+  stores one copy per address family only after several networks got the same
+  answer, and stops at the first difference. Prefetch, serve stale and query
+  coalescing are built in.
+- **Filtering and online subscriptions:** exact and subdomain block and allow rules,
+  CNAME checks, and HTTPS subscriptions in domain-list or hosts format.
+- **Encrypted DNS inbound and upstream:** DoT, DoH over HTTP/2 and HTTP/3, and DoQ
+  listeners with certificate reload without restart. Upstream TLS is always verified
+  and never falls back to plaintext.
+- **Console:** guided first-run setup, Chinese and English, light and dark themes,
+  statistics, an opt-in query log, and a TOML editor with preview and rollback.
+- **Online updates:** an installed instance checks for official releases and
+  installs them through a restricted updater with automatic rollback.
 
-PariNS is not an authoritative DNS server. Its recursive mode is a validating
-resolver for PariNS's own clients, not a general recursive server: it has no RPZ,
-DNS64 or local zones, and one instance either forwards or resolves recursively,
-never both.
+PariNS is not an authoritative DNS server. Recursive mode serves PariNS's own
+clients: it has no RPZ, DNS64 or local zones, and one instance either forwards or
+resolves recursively, never both.
 
 ## Quick start
 
-### 1. Install on Linux
+You need a Linux x86_64 or ARM64 host running systemd, and root access.
 
-Requires Linux x86_64 or ARM64, systemd, `curl`, `tar`, a SHA256 utility and
-root/sudo access. No Rust, Node.js or container runtime is needed.
+1. **Install.**
 
-```sh
-curl --proto '=https' --proto-redir '=https' -fL \
-  https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh \
-  -o parins-install.sh && sudo sh parins-install.sh
-```
+   ```sh
+   curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh
+   ```
 
-The script downloads and verifies the release package, then starts the management
-service. You can inspect the script before running it. For an existing
-installation, read the [upgrade guide](https://github.com/paricafe/PariNS/blob/main/guide/operations.md#software-updates)
-first; there is no automatic migration of older layouts.
+   The script verifies the release checksums, installs and starts the managed
+   service, and prints the next steps with the one-time setup token. To read the
+   script before running it, see
+   [Install](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md#install).
 
-### 2. Complete setup
+2. **Open the console and enter the token.** The console uses plain HTTP on port
+   3000. On your computer, run the SSH tunnel command the installer printed and keep
+   it open:
 
-The new console listens on `0.0.0.0:3000` over **unencrypted HTTP**. Restrict TCP
-3000 to administrators and use local access or an SSH tunnel for initial setup
-([details](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md#first-setup)).
-Read the one-time token on the server:
+   ```sh
+   ssh -N -L 3000:127.0.0.1:3000 USER@SERVER
+   ```
 
-```sh
-sudo cat /var/lib/parins-managed/setup-token
-```
+   Open <http://127.0.0.1:3000>, enter the setup token, create the administrator,
+   and choose an upstream and a listening mode. DNS starts when setup finishes.
 
-For a remote server, run this on your computer and keep it open:
+3. **Connect clients.** With **Local testing only**, test on the server:
 
-```sh
-ssh -N -L 3000:127.0.0.1:3000 USER@SERVER
-```
+   ```sh
+   dig @127.0.0.1 -p 5353 example.com A
+   ```
 
-Open <http://127.0.0.1:3000>, enter the token, create an administrator and choose
-your upstream DNS servers. DNS starts only after setup succeeds. An initialized
-reinstall keeps its original management address and account; do not set it up again.
-
-### 3. Connect clients
-
-The wizard defaults to `127.0.0.1:5353` for local testing. Check it on the server:
-
-```sh
-dig @127.0.0.1 -p 5353 example.com A
-```
-
-For LAN use, select the server's LAN IP and port 53 in the console, allow your
-intended clients through the firewall, and point their DNS settings to that IP.
-Port 53 must be free; the installer leaves host DNS, firewall rules and other DNS
-services unchanged ([details](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md#install-a-linux-release)).
+   With **LAN & internet (:53)**, point your devices or router at the server's
+   address, and allow port 53 only from your own clients. If port 53 is already in
+   use (often by systemd-resolved), see
+   [Port 53 conflicts](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md#port-53-conflicts).
 
 ## Documentation
 
-- [Deployment](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md) — offline/source installation, file mode and HTTPS setup.
-- [Configuration](https://github.com/paricafe/PariNS/blob/main/guide/configuration.md) — upstreams, recursive resolution, ECS, cache, filters and resource limits.
-- [Operations](https://github.com/paricafe/PariNS/blob/main/guide/operations.md) — accounts, updates, backups, certificates and diagnostics.
-- [Development](https://github.com/paricafe/PariNS/blob/main/guide/development.md) — build, test, benchmark and package.
-- [Releases](https://github.com/paricafe/PariNS/releases) · [Changelog](CHANGELOG.md)
+- [Deployment](https://github.com/paricafe/PariNS/blob/main/guide/deployment.md):
+  installation, first-run setup, clients, console HTTPS, file mode, uninstall.
+- [Configuration](https://github.com/paricafe/PariNS/blob/main/guide/configuration.md):
+  every configuration section and field.
+- [Operations](https://github.com/paricafe/PariNS/blob/main/guide/operations.md):
+  accounts, updates, certificates, backups, query log, metrics, troubleshooting.
+- [Development](https://github.com/paricafe/PariNS/blob/main/guide/development.md):
+  build and test gates, packaging, acceptance workflows.
+- [Releases](https://github.com/paricafe/PariNS/releases) and the [changelog](CHANGELOG.md).
 
-Guides describe the current main branch; unreleased features are marked.
-For an installed release, also check its version notes.
+The guides describe the current main branch. For an installed release, also read
+its changelog entry.
 
 ## License
 

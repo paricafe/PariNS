@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type FormEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
-import { useReducedMotion } from "motion/react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
+import { AnimatePresence, useReducedMotion } from "motion/react";
 import { ApiError, StaleRequest, type ApiClient } from "../../session/client";
 import { formatDate, formatNumber, hasTranslation, translate, type Language } from "../../i18n";
 import { pathLabel, statusLabel, type CacheFilter, type LogEntry, type LogFilter, type LogListResponse } from "./logs";
@@ -9,9 +9,10 @@ import { Drawer, Tabs } from '../../components/beui';
 import { isUnknownStorageMutation } from './storage';
 import { decisionLabel, diagnosticLabel } from './diagnostics';
 import { UpstreamAttempts } from './TransportDiagnostics';
-import { CloudOff, Inbox, RefreshCw, Search, Settings2 } from 'lucide-react';
+import { CloudOff, Inbox, Info, RefreshCw, Search, Settings2 } from 'lucide-react';
 import { Select } from '../../components/Popover';
 import { Segmented } from '../../components/Segmented';
+import { DetailPopover } from './DetailPopover';
 
 export interface LogsPageProps {
   api: ApiClient;
@@ -94,11 +95,13 @@ const PAGE_SIZE = 50;
 /** Live insertion keeps the head list bounded; older rows stay reachable through the cursor. */
 const MAX_ROWS = 200;
 const HOVER_DELAY_MS = 150;
+const detailId = (id: number) => `log-detail-${id}`;
 const intervals = ['manual', '1', '3', '5', '10'] as const;
 
 interface Pending { entries: LogEntry[]; count: number; overflow: boolean; more: boolean }
 const noPending: Pending = { entries: [], count: 0, overflow: false, more: false };
-interface Expanded { id: number; source: 'hover' | 'focus' | 'tap' }
+/** The open detail card: hover cards close when the pointer leaves, pinned ones only on request. */
+interface Detail { id: number; pinned: boolean; anchor: HTMLButtonElement; keyboard: boolean }
 
 const isFiltered = (filter: LogFilter) => filter.search !== '' || filter.status !== null || filter.cache !== null;
 const liveFilter = (filter: LogFilter) => ({ search: filter.search || null, status: filter.status, cache: filter.cache });
@@ -128,24 +131,21 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [liveLog, setLiveLog] = useState<LiveLogState | null>(null);
   const [pending, setPending] = useState<Pending>(noPending);
   const [enterAfter, setEnterAfter] = useState(Infinity);
-  const [expanded, setExpanded] = useState<Expanded | null>(null);
+  const [detail, setDetail] = useState<Detail | null>(null);
   const client = useRef<LiveLogClient | null>(null);
   const refreshRequested = useRef(false);
   /** Newest id this page has seen at the head, shown or pending. */
   const known = useRef(0);
   const epoch = useRef<number | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** The last pointer press, so focus caused by a click or tap is not mistaken for keyboard focus. */
-  const pointer = useRef<{ type: string; at: number }>({ type: '', at: -Infinity });
-  const rows = useRef(new Map<string, HTMLElement>());
-  const anchor = useRef<{ element: HTMLElement; top: number } | null>(null);
   const listTop = useRef<HTMLDivElement>(null);
   const reducedMotion = useReducedMotion();
 
   const page = result?.page ?? null;
   const entries = page?.entries ?? [];
-  const expandedId = expanded && entries.some((entry) => entry.id === expanded.id) ? expanded.id : null;
-  const paused = expandedId !== null || !atHead || isFiltered(applied);
+  const detailEntry = detail ? entries.find((entry) => entry.id === detail.id) : undefined;
+  const openId = detailEntry && detail?.anchor.isConnected ? detailEntry.id : null;
+  const paused = openId !== null || !atHead || isFiltered(applied);
   const view = useRef({ atHead, paused, pending, interval, top: 0 });
   view.current = { atHead, paused, pending, interval, top: newest(entries) };
 
@@ -225,7 +225,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
           // The log was cleared elsewhere: drop everything shown and start from the new head.
           epoch.current = state.log_epoch;
           known.current = 0;
-          setExpanded(null);
+          setDetail(null);
           setPending(noPending);
           void load(null, appliedRef.current);
         }
@@ -270,70 +270,73 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       setUnknownEpoch(null); setNotice('app.logsCleared');
     }
   }, [unknownEpoch, result]);
-  // Insertion resumes when the hovered row closes.
+  // Insertion resumes when the detail card closes.
   useEffect(() => {
-    if (expandedId === null && atHead && !isFiltered(applied) && pending.count) showPending();
-  }, [expandedId, atHead, applied, pending.count, showPending]);
+    if (openId === null && atHead && !isFiltered(applied) && pending.count) showPending();
+  }, [openId, atHead, applied, pending.count, showPending]);
   useEffect(() => () => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }, []);
-  // Opening or closing a row above keeps the row being opened where it was on screen.
-  useLayoutEffect(() => {
-    const held = anchor.current;
-    anchor.current = null;
-    if (!held) return;
-    const delta = held.element.getBoundingClientRect().top - held.top;
-    if (Math.abs(delta) >= 1) window.scrollBy(0, delta);
-  }, [expanded]);
+  // A card whose record left the list (cap, filter, clear) closes instead of reopening later.
+  useEffect(() => { if (detail && openId === null) setDetail(null); }, [detail, openId]);
+  useEffect(() => {
+    if (!detail) return;
+    const anchor = detail.anchor;
+    const owned = (node: Node | null) => !!node && (anchor.contains(node) || !!document.getElementById(detailId(detail.id))?.contains(node));
+    const down = (event: globalThis.PointerEvent) => {
+      if (owned(event.target as Node)) return;
+      closeDetail(owned(document.activeElement) && !anchor.contains(document.activeElement));
+    };
+    // Escape returns focus only when the card or its button has it; elsewhere it just closes the card.
+    const key = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (owned(document.activeElement)) { event.preventDefault(); closeDetail(true); } else closeDetail(false);
+    };
+    document.addEventListener('pointerdown', down);
+    document.addEventListener('keydown', key);
+    return () => { document.removeEventListener('pointerdown', down); document.removeEventListener('keydown', key); };
+  }, [detail]);
 
-  function rowFor(id: number): HTMLElement | undefined {
-    const table = rows.current.get(`row-${id}`);
-    const card = rows.current.get(`card-${id}`);
-    return table && table.getBoundingClientRect().height > 0 ? table : card?.getBoundingClientRect().height ? card : table ?? card;
-  }
-  function expand(next: Expanded | null) {
+  function cancelTimer() {
     if (hoverTimer.current) { clearTimeout(hoverTimer.current); hoverTimer.current = null; }
-    setExpanded((current) => {
-      if (current?.id === next?.id && current?.source === next?.source) return current;
-      const element = next ? rowFor(next.id) : undefined;
-      anchor.current = element ? { element, top: element.getBoundingClientRect().top } : null;
-      return next;
-    });
   }
-  function hover(id: number | null, event: PointerEvent) {
+  function closeDetail(refocus: boolean) {
+    cancelTimer();
+    if (refocus) detail?.anchor.focus();
+    setDetail(null);
+  }
+  function hoverClose(event: PointerEvent) {
     if (event.pointerType !== 'mouse') return;
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    cancelTimer();
     hoverTimer.current = setTimeout(() => {
       hoverTimer.current = null;
-      if (id !== null) expand({ id, source: 'hover' });
-      else setExpanded((current) => current?.source === 'hover' ? null : current);
+      setDetail((current) => current?.pinned ? current : null);
     }, HOVER_DELAY_MS);
   }
-  function rowEvents(id: number) {
+  function detailEvents(id: number) {
     return {
-      'data-log-id': id,
-      onPointerEnter: (event: PointerEvent) => hover(id, event),
-      onPointerLeave: (event: PointerEvent) => hover(null, event),
-      onPointerDown: (event: PointerEvent) => { pointer.current = { type: event.pointerType, at: event.timeStamp }; },
-      onKeyDown: (event: KeyboardEvent) => {
-        if (event.key === 'Escape' && expandedId === id) { event.preventDefault(); expand(null); }
+      onPointerEnter: (event: PointerEvent<HTMLButtonElement>) => {
+        if (event.pointerType !== 'mouse') return;
+        cancelTimer();
+        const anchor = event.currentTarget;
+        hoverTimer.current = setTimeout(() => {
+          hoverTimer.current = null;
+          // Hover never replaces a pinned card.
+          setDetail((current) => current?.pinned || current?.id === id ? current : { id, pinned: false, anchor, keyboard: false });
+        }, HOVER_DELAY_MS);
+      },
+      onPointerLeave: hoverClose,
+      // Click, tap, Enter and Space pin the card; pressing a pinned card's button closes it.
+      onClick: (event: MouseEvent<HTMLButtonElement>) => {
+        cancelTimer();
+        const anchor = event.currentTarget;
+        if (detail?.id === id && detail.pinned) { setDetail(null); return; }
+        setDetail({ id, pinned: true, anchor, keyboard: event.detail === 0 });
       },
     };
   }
-  function controlEvents(id: number) {
-    const open = expandedId === id;
-    return {
-      onFocus: (event: FocusEvent) => { if (event.timeStamp - pointer.current.at > 1000) expand({ id, source: 'focus' }); },
-      onBlur: (event: FocusEvent) => {
-        const next = event.relatedTarget instanceof Element ? event.relatedTarget.closest('[data-log-id]') : null;
-        if (expanded?.id === id && expanded.source === 'focus' && next?.getAttribute('data-log-id') !== String(id)) expand(null);
-      },
-      onClick: (event: MouseEvent) => {
-        const mouse = event.detail > 0 && pointer.current.type === 'mouse';
-        pointer.current = { type: '', at: pointer.current.at };
-        // A mouse click opens at once; a tap, Enter or Space toggles.
-        if (mouse) expand({ id, source: 'hover' });
-        else expand(open ? null : { id, source: 'tap' });
-      },
-    };
+  /** Pressing inside a hover card pins it, so selecting text never closes it. */
+  function cardKey(event: KeyboardEvent<HTMLElement>) {
+    // The card lives in a body portal; Tab returns to its button instead of the end of the page.
+    if (event.key === 'Tab') { event.preventDefault(); closeDetail(true); }
   }
 
   function submitFilter(event: FormEvent<HTMLFormElement>) {
@@ -369,7 +372,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
     setNotice("");
     try {
       await api.request("query-log/clear", "POST", { revision, log_epoch: listed });
-      setExpanded(null);
+      setDetail(null);
       setNotice("app.logsCleared");
       await load(null, applied);
     } catch (error) {
@@ -387,8 +390,10 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
     : liveStatus === 'reconnecting' ? 'views.liveReconnecting'
       : liveLog?.log === 'unavailable' ? 'views.liveUnavailable' : liveLog?.log === 'checking' ? 'views.liveChecking' : null;
   const disabled = (page && !page.enabled) || liveLog?.log === 'disabled';
-  const detailId = (scope: string, id: number) => `log-expansion-${scope}-${id}`;
-  return <div className="page-stack logs-page">
+  const detailButton = (id: number) => <button type="button" className="icon-button log-detail-button" aria-label={translate("views.queryDetails", language)}
+    aria-haspopup="dialog" aria-expanded={openId === id} aria-controls={openId === id ? detailId(id) : undefined} {...detailEvents(id)}>
+    <Info size={17} aria-hidden="true" /></button>;
+    return <div className="page-stack logs-page">
     <header className="page-head log-head large-title">
       <div><h1>{translate("ui.logs", language)}</h1></div>
       <button type="button" onClick={onOpenSettings} className="button secondary"><Settings2 size={16} aria-hidden="true" />{translate("ui.logSettings", language)}</button>
@@ -405,7 +410,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       </form>
       <Tabs label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} items={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
         const filter = { search: search.trim(), status: statusFilter || null, cache: cache === 'all' ? null : cache as CacheFilter };
-        appliedRef.current = filter; setApplied(filter); setNotice(''); setExpanded(null); void load(null, filter);
+        appliedRef.current = filter; setApplied(filter); setNotice(''); setDetail(null); void load(null, filter);
       }} />
     </div>
     {disabled && <p className="notice">{translate('app.logsDisabled', language)}</p>}
@@ -437,36 +442,31 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       : <div className="panel skeleton-stack" aria-hidden="true">{[0, 1, 2, 3, 4].map((index) => <div key={index} className="skeleton" style={{ height: 22 }} />)}</div>)
       : entries.length === 0 ? <div className="panel empty-state"><Inbox size={28} aria-hidden="true" /><p>{translate("views.logsEmpty", language)}</p></div>
         : <>
-          <div className="log-cards">{entries.map((entry) => {
-            const open = expandedId === entry.id;
-            return <article key={entry.id} ref={(node) => { if (node) rows.current.set(`card-${entry.id}`, node); else rows.current.delete(`card-${entry.id}`); }}
-              className="panel log-card" data-open={open || undefined} data-enter={entry.id > enterAfter || undefined} {...rowEvents(entry.id)}>
-              <div className="log-card-head"><button type="button" className="log-expand" aria-expanded={open} aria-controls={open ? detailId('card', entry.id) : undefined} {...controlEvents(entry.id)}>
-                <span className="mono log-name">{queryName(entry)}</span><span className="muted small">{entry.qtype || "—"} · {formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "short" })}</span></button></div>
-              <p className="muted small log-meta"><span className="badge" data-status={entry.status}>{translate(statusLabel(entry.status), language)}</span> {entry.client} · {translate(pathLabel(entry.cache), language)} · {formatNumber(entry.duration_ms, language, { maximumFractionDigits: 2 })} ms</p>
-              {open && <div id={detailId('card', entry.id)} className="log-expansion"><LogDetail entry={entry} language={language} /></div>}
-            </article>;
-          })}</div>
+          <div className="log-cards">{entries.map((entry) => <article key={entry.id} className="panel log-card" data-enter={entry.id > enterAfter || undefined}>
+            <div className="log-card-head"><div><span className="mono log-name">{queryName(entry)}</span><span className="muted small">{entry.qtype || "—"} · {formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "short" })}</span></div>
+              {detailButton(entry.id)}</div>
+            <p className="muted small log-meta"><span className="badge" data-status={entry.status}>{translate(statusLabel(entry.status), language)}</span> {entry.client} · {translate(pathLabel(entry.cache), language)} · {formatNumber(entry.duration_ms, language, { maximumFractionDigits: 2 })} ms</p>
+          </article>)}</div>
           <div tabIndex={0} role="region" aria-label={translate("views.logsRegion", language)} className="panel log-table table-scroll">
             <table className="data-table"><caption className="sr-only">{translate("views.logsCaption", language)}</caption>
               <thead><tr>
                 {(["time", "query", "clientTransport", "resultPath", "duration"] as const).map((key) => <th key={key} scope="col">{translate(`views.${key}`, language)}</th>)}
-              </tr></thead><tbody>{entries.map((entry) => {
-                const open = expandedId === entry.id;
-                const events = rowEvents(entry.id);
-                return [<tr key={entry.id} ref={(node) => { if (node) rows.current.set(`row-${entry.id}`, node); else rows.current.delete(`row-${entry.id}`); }}
-                  className="log-row" data-open={open || undefined} data-enter={entry.id > enterAfter || undefined} {...events}>
-                  <td className="num nowrap"><div className="log-cell">{formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "medium" })}</div></td>
-                  <td><div className="log-cell"><button type="button" className="log-expand mono log-name" aria-expanded={open} aria-controls={open ? detailId('row', entry.id) : undefined} {...controlEvents(entry.id)}>{queryName(entry)}</button><span className="muted small">{entry.qtype || "—"}</span></div></td>
-                  <td><div className="log-cell"><span className="mono">{entry.client}</span><span className="muted small">{entry.transport}</span></div></td>
-                  <td><div className="log-cell"><span className="badge" data-status={entry.status}>{translate(statusLabel(entry.status), language)}</span><span className="muted small">{translate(pathLabel(entry.cache), language)}</span></div></td>
-                  <td className="num nowrap"><div className="log-cell">{formatNumber(entry.duration_ms, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms</div></td>
-                </tr>, open && <tr key={`${entry.id}-detail`} className="log-expansion-row" {...events}>
-                  <td colSpan={5}><div id={detailId('row', entry.id)} className="log-expansion"><LogDetail entry={entry} language={language} /></div></td>
-                </tr>];
-              })}</tbody></table>
+                <th scope="col"><span className="sr-only">{translate("views.details", language)}</span></th>
+              </tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="log-row" data-open={openId === entry.id || undefined} data-enter={entry.id > enterAfter || undefined}>
+                <td className="num nowrap"><div className="log-cell">{formatDate(entry.time_ms, language, { dateStyle: "short", timeStyle: "medium" })}</div></td>
+                <td><div className="log-cell"><span className="mono log-name">{queryName(entry)}</span><span className="muted small">{entry.qtype || "—"}</span></div></td>
+                <td><div className="log-cell"><span className="mono">{entry.client}</span><span className="muted small">{entry.transport}</span></div></td>
+                <td><div className="log-cell"><span className="badge" data-status={entry.status}>{translate(statusLabel(entry.status), language)}</span><span className="muted small">{translate(pathLabel(entry.cache), language)}</span></div></td>
+                <td className="num nowrap"><div className="log-cell">{formatNumber(entry.duration_ms, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms</div></td>
+                <td className="log-detail-cell"><div className="log-cell">{detailButton(entry.id)}</div></td>
+              </tr>)}</tbody></table>
           </div>
         </>}
+    <AnimatePresence>{detail && detailEntry && openId !== null && <DetailPopover key={detail.id} id={detailId(detail.id)} label={translate("views.queryDetails", language)} anchor={detail.anchor} focus={detail.keyboard}
+      onPointerEnter={(event) => { if (event.pointerType === 'mouse') cancelTimer(); }} onPointerLeave={hoverClose}
+      onPointerDown={() => setDetail((current) => current && { ...current, pinned: true })} onKeyDown={cardKey}>
+      <LogDetail entry={detailEntry} language={language} />
+    </DetailPopover>}</AnimatePresence>
 
     {page?.next_cursor && <button type="button" onClick={() => void load(page.next_cursor, applied)} disabled={loading}
       className="button secondary load-more">{translate("ui.earlier", language)}</button>}

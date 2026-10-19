@@ -240,7 +240,7 @@ describe("LogsPage", () => {
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: 'stale', before_id: null, limit: 50 });
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });
     expect(screen.queryByText('late.test')).toBeNull();
-    fireEvent.click(screen.getAllByRole('button', { name: /stale.test/ })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Query details' })[0]);
     expect(screen.getAllByText('exact_ecs:192.0.2.0/24').length).toBeGreaterThan(0);
     // The raw scope code stays verbatim, with a plain-language note beside it.
     expect(screen.getAllByText('Only for requests from exactly 192.0.2.0/24').length).toBeGreaterThan(0);
@@ -249,7 +249,7 @@ describe("LogsPage", () => {
     expect(screen.queryByText('192.0.2.0/24')).toBeNull();
   });
 
-  it("uses server filters/cursor, expands details inline, and clears with the listed revision", async () => {
+  it("uses server filters/cursor, shows details in a card, and clears with the listed revision", async () => {
     const requests: { path: string; body: unknown }[] = [];
     let entries = [entry];
     const api = fakeApi((path, body) => {
@@ -269,10 +269,10 @@ describe("LogsPage", () => {
       && (request.body as { status: string }).status === "success")).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: /Older queries/ }));
     await waitFor(() => expect(requests.some((request) => (request.body as { before_id: number })?.before_id === 20)).toBe(true));
-    const control = screen.getAllByRole("button", { name: /example.test/ })[0];
+    const control = screen.getAllByRole("button", { name: "Query details" })[0];
     fireEvent.click(control);
     expect(control.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getAllByText(/example.test 60 A 192.0.2.1/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("dialog", { name: "Query details" }).textContent).toContain("example.test 60 A 192.0.2.1");
     expect(screen.getAllByText("192.0.2.0/24").length).toBeGreaterThan(0);
     fireEvent.click(control);
     expect(control.getAttribute("aria-expanded")).toBe("false");

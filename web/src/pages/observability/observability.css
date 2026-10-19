@@ -60,24 +60,19 @@
 .log-table, .log-cards { overflow-anchor: none; }
 .log-cell > span { display: block; }
 .log-cell > .badge { display: inline-flex; margin-bottom: 2px; }
-.log-expand {
-  display: block; width: 100%; padding: 0; border: 0; background: none; color: inherit;
-  font: inherit; text-align: left; cursor: pointer; border-radius: 6px;
-}
-.log-card-head .log-expand > span { display: block; }
-/* Collapsed table borders cannot round cells, so the rounded surface is the inner block. */
-.log-row[data-open] > td { border-bottom-color: transparent; }
-.log-expansion-row > td { padding-top: 0; }
-.log-expansion {
-  padding: 14px 16px; border-radius: var(--radius-sm); background: var(--raised);
-  animation: log-expand .22s var(--ease-out) both;
-}
-.log-expansion .log-detail { grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr)); gap: 16px 24px; }
-.log-card .log-expansion { margin-top: 12px; padding: 12px; }
+.log-card-head .log-name, .log-card-head .muted { display: block; }
+.log-detail-cell { width: 1%; }
+.log-detail-button { width: 34px; min-height: 34px; padding: 0; color: var(--link); }
+.log-detail-button[aria-expanded="true"] { background: var(--hover); }
+.log-row[data-open] > td { background: var(--hover); }
+/* The card is fixed in a body portal; the inner body scrolls so the rim stays on the outer edge. */
+.popover.log-popover { position: fixed; top: auto; left: auto; display: flex; flex-direction: column; max-width: none; padding: 0; }
+.log-popover-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 14px 16px; border-radius: inherit; outline: none; }
+.log-popover .log-detail { gap: 16px; }
+.log-popover .log-detail-row { grid-template-columns: 7.5rem minmax(0, 1fr); }
 .log-row[data-enter] > td { animation: log-insert-cell .36s var(--ease-out) backwards; }
 .log-row[data-enter] .log-cell { overflow: hidden; animation: log-insert .36s var(--ease-out) backwards; }
 .log-card[data-enter] { overflow: hidden; animation: log-insert-card .36s var(--ease-out) backwards; }
 @keyframes log-insert-cell { from { padding-block: 0; border-bottom-color: transparent; } }
 @keyframes log-insert { from { max-height: 0; opacity: 0; transform: translateY(-6px); } to { max-height: 6rem; opacity: 1; transform: none; } }
 @keyframes log-insert-card { from { max-height: 0; padding-block: 0; opacity: 0; transform: translateY(-6px); } to { max-height: 12rem; opacity: 1; transform: none; } }
-@keyframes log-expand { from { opacity: 0; transform: translateY(-4px); } }

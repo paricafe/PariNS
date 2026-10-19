@@ -171,8 +171,10 @@ async function mount(list: Parameters<typeof liveApi>[0] = () => page([entry], 3
   act(() => { socket.open(); socket.push({ type: 'state', log: 'ok', log_epoch: 3 }); });
   return { api, socket };
 }
-const tableControl = (name: string) => screen.getAllByRole('button', { name })[0] as HTMLButtonElement;
-const tableRow = (name: string) => tableControl(name).closest('tr')!;
+const tableRow = (name: string) => [...document.querySelectorAll('tr.log-row')].find((row) => row.querySelector('.log-name')?.textContent === name) as HTMLTableRowElement;
+const detailButton = (name: string) => tableRow(name).querySelector('.log-detail-button') as HTMLButtonElement;
+const card = () => screen.queryByRole('dialog', { name: 'Query details' });
+const wait = (ms: number) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
 
 describe('LogsPage live updates', () => {
   it('subscribes with the default 3 s interval, resubscribes on change and inserts batches at the head', async () => {
@@ -186,7 +188,7 @@ describe('LogsPage live updates', () => {
     act(() => socket.push({ type: 'entries', entries: [row(44, 'b.test'), row(43, 'a.test')], cursor: 44, more: false }));
     expect(tableRow('b.test').hasAttribute('data-enter')).toBe(true);
     expect(tableRow('example.test').hasAttribute('data-enter')).toBe(false);
-    const names = [...document.querySelectorAll('tr.log-row .log-expand')].map((node) => node.textContent);
+    const names = [...document.querySelectorAll('tr.log-row .log-name')].map((node) => node.textContent);
     expect(names).toEqual(['b.test', 'a.test', 'example.test']);
     expect(api.request).toHaveBeenCalledTimes(1);
   });
@@ -203,10 +205,10 @@ describe('LogsPage live updates', () => {
     expect(api.request).toHaveBeenCalledTimes(1);
   });
 
-  it('pauses while a row is expanded and shows a pill that inserts on click', async () => {
+  it('pauses while a detail card is open and shows a pill that inserts on click', async () => {
     const { socket } = await mount();
-    fireEvent.pointerEnter(tableRow('example.test'), { pointerType: 'mouse' });
-    await waitFor(() => expect(tableControl('example.test').getAttribute('aria-expanded')).toBe('true'));
+    fireEvent.pointerEnter(detailButton('example.test'), { pointerType: 'mouse' });
+    await waitFor(() => expect(detailButton('example.test').getAttribute('aria-expanded')).toBe('true'));
     act(() => socket.push({ type: 'entries', entries: [row(44, 'b.test'), row(43, 'a.test')], cursor: 44, more: false }));
     expect(screen.queryByText('b.test')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '2 new queries' }));
@@ -265,43 +267,85 @@ describe('LogsPage live updates', () => {
   });
 });
 
-describe('LogsPage inline details', () => {
-  it('expands after a hover delay, collapses on leave and keeps one row open', async () => {
+describe('LogsPage detail card', () => {
+  it('opens on hover after a delay, stays while the pointer is inside, and closes after leaving', async () => {
     const { socket } = await mount(() => page([entry, row(41, 'second.test')]));
     act(() => socket.push({ type: 'entries', entries: [], cursor: 42, more: false }));
-    fireEvent.pointerEnter(tableRow('example.test'), { pointerType: 'mouse' });
-    expect(tableControl('example.test').getAttribute('aria-expanded')).toBe('false');
-    await waitFor(() => expect(tableControl('example.test').getAttribute('aria-expanded')).toBe('true'));
-    expect(screen.getAllByText(/example.test 60 A 192.0.2.1/).length).toBeGreaterThan(0);
-    // Moving into the details keeps them open.
-    fireEvent.pointerLeave(tableRow('example.test'), { pointerType: 'mouse' });
-    fireEvent.pointerEnter(document.querySelector('.log-expansion-row')!, { pointerType: 'mouse' });
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(tableControl('example.test').getAttribute('aria-expanded')).toBe('true');
-    fireEvent.pointerEnter(tableRow('second.test'), { pointerType: 'mouse' });
-    await waitFor(() => expect(tableControl('second.test').getAttribute('aria-expanded')).toBe('true'));
-    expect(tableControl('example.test').getAttribute('aria-expanded')).toBe('false');
-    expect(document.querySelectorAll('.log-expansion-row')).toHaveLength(1);
-    fireEvent.pointerLeave(tableRow('second.test'), { pointerType: 'mouse' });
-    await waitFor(() => expect(document.querySelector('.log-expansion-row')).toBeNull());
+    const button = detailButton('example.test');
+    expect(button.getAttribute('aria-haspopup')).toBe('dialog');
+    fireEvent.pointerEnter(button, { pointerType: 'mouse' });
+    expect(card()).toBeNull();
+    await waitFor(() => expect(card()).toBeTruthy());
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(button.getAttribute('aria-controls')).toBe(card()!.id);
+    expect(card()!.textContent).toContain('example.test 60 A 192.0.2.1');
+    // Moving from the button into the card keeps it open.
+    fireEvent.pointerLeave(button, { pointerType: 'mouse' });
+    fireEvent.pointerEnter(card()!, { pointerType: 'mouse' });
+    await wait(200);
+    expect(card()).toBeTruthy();
+    // Hovering another button replaces the hover card, so only one is open.
+    fireEvent.pointerLeave(card()!, { pointerType: 'mouse' });
+    fireEvent.pointerEnter(detailButton('second.test'), { pointerType: 'mouse' });
+    await waitFor(() => expect(detailButton('second.test').getAttribute('aria-expanded')).toBe('true'));
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    await waitFor(() => expect(screen.getAllByRole('dialog', { name: 'Query details' })).toHaveLength(1));
+    fireEvent.pointerLeave(detailButton('second.test'), { pointerType: 'mouse' });
+    await waitFor(() => expect(card()).toBeNull());
   });
 
-  it('expands on keyboard focus, collapses on Escape, and toggles on touch', async () => {
+  it('pins on click, closes on a second click or outside press, and ignores touch hover', async () => {
     await mount();
-    const control = tableControl('example.test');
-    fireEvent.focus(control);
-    expect(control.getAttribute('aria-expanded')).toBe('true');
-    expect(control.getAttribute('aria-controls')).toBe(document.querySelector('.log-expansion-row .log-expansion')!.id);
-    fireEvent.keyDown(control, { key: 'Escape' });
-    expect(control.getAttribute('aria-expanded')).toBe('false');
+    const button = detailButton('example.test');
+    fireEvent.pointerEnter(button, { pointerType: 'touch' });
+    await wait(200);
+    expect(card()).toBeNull();
+    fireEvent.click(button, { detail: 1 });
+    expect(card()).toBeTruthy();
+    fireEvent.pointerLeave(button, { pointerType: 'mouse' });
+    await wait(200);
+    expect(card()).toBeTruthy();
+    fireEvent.click(button, { detail: 1 });
+    await waitFor(() => expect(card()).toBeNull());
+    fireEvent.click(button, { detail: 1 });
+    expect(card()).toBeTruthy();
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => expect(card()).toBeNull());
+  });
 
-    fireEvent.pointerEnter(tableRow('example.test'), { pointerType: 'touch' });
-    fireEvent.pointerDown(control, { pointerType: 'touch' });
-    fireEvent.focus(control);
-    fireEvent.click(control, { detail: 1 });
-    expect(control.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.pointerDown(control, { pointerType: 'touch' });
-    fireEvent.click(control, { detail: 1 });
-    expect(control.getAttribute('aria-expanded')).toBe('false');
+  it('moves focus into a keyboard-opened card and returns it to the button on Escape', async () => {
+    await mount();
+    const button = detailButton('example.test');
+    button.focus();
+    fireEvent.click(button, { detail: 0 });
+    // The scrolling body inside the dialog takes focus, so arrow keys scroll long details.
+    expect(card()!.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(button);
+    fireEvent.keyDown(card()!, { key: 'Escape' });
+    await waitFor(() => expect(card()).toBeNull());
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('closes on Escape without taking focus from an unrelated control', async () => {
+    await mount();
+    fireEvent.click(detailButton('example.test'), { detail: 1 });
+    const search = screen.getByRole('searchbox');
+    search.focus();
+    fireEvent.keyDown(search, { key: 'Escape' });
+    await waitFor(() => expect(detailButton('example.test').getAttribute('aria-expanded')).toBe('false'));
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('closes when its record leaves the list', async () => {
+    let entries = [entry];
+    await mount(() => page(entries, 3));
+    fireEvent.click(detailButton('example.test'), { detail: 1 });
+    expect(card()).toBeTruthy();
+    // A new list without the record (here a filtered reload) closes the card.
+    entries = [row(50, 'replaced.test')];
+    fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
+    await waitFor(() => expect(screen.getAllByText('replaced.test').length).toBeGreaterThan(0));
+    await waitFor(() => expect(card()).toBeNull());
   });
 });

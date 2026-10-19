@@ -224,7 +224,7 @@ describe('LogsPage live updates', () => {
     await waitFor(() => expect(screen.getAllByText('example.test').length).toBeGreaterThan(0));
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', expect.objectContaining({ before_id: null }));
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Old-answer fallback' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Stale cache' }));
     await waitFor(() => expect(socket.ofType('subscribe').at(-1)).toMatchObject({ filter: { search: null, status: null, cache: 'stale' } }));
     act(() => socket.push({ type: 'entries', entries: [row(45, 'stale.test')], cursor: 45, more: false }));
     expect(screen.queryByText('stale.test')).toBeNull();

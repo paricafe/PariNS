@@ -32,7 +32,7 @@ export const shellMessages = {
   statusListening: ['正在监听 {address}', 'Listening on {address}'],
   statusUp: ['已运行 {duration}', 'Up {duration}'],
   stripInflight: ['当前请求', 'In progress'],
-  stripResolution: ['解析方式', 'Resolution'],
+  stripResolution: ["解析模式", "Resolution mode"],
   stripUpstreams: ['上游', 'Upstreams'],
   upstreamCount: ['{count} 个', '{count}'],
   stripSettings: ['设置', 'Settings'],

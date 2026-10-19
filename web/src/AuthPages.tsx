@@ -93,7 +93,7 @@ export function SetupPage({ language }: { language: Language }) {
           options={(['weighted', 'parallel'] as const).map((value) => ({ value, label: translate(`settings.upstreams.mode.${value}`, language) }))} />
         <small>{translate('settings.upstreams.mode.help', language)}</small>
         <Switch checked={preferH3} onCheckedChange={setPreferH3} label={translate('settings.upstreams.prefer_h3.label', language)} />
-        <label htmlFor="setup-bootstrap">{translate('settings.upstreams.bootstrap.label', language)}</label><textarea id="setup-bootstrap" rows={3} value={bootstrap} onChange={(event) => setBootstrap(event.target.value)} spellCheck={false} />
+        <label htmlFor="setup-bootstrap">{translate('settings.upstreams.bootstrap.label', language)}</label><textarea id="setup-bootstrap" rows={3} value={bootstrap} placeholder={translate('settings.upstreams.bootstrap.placeholder', language)} onChange={(event) => setBootstrap(event.target.value)} spellCheck={false} />
       </>}
       {step === 2 && <><p className="muted small">{t('reviewIntro')}</p>
         {toml !== generated ? <p className="notice">{translate('shell.setupEdited', language)}</p> : <dl className="setup-summary">

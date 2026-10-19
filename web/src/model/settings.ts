@@ -65,7 +65,7 @@ export const settingPages = {
     group("upstreams", [
       field("upstreams.servers", "lines", true), { ...select("upstreams.mode", ["weighted", "parallel"]), helpKey: "settings.upstreams.mode.help" },
       field("upstreams.prefer_h3", "checkbox", true), field("upstreams.bootstrap", "lines", true),
-      number("upstreams.max_parallel", 1, 32, true), advanced(number("upstreams.max_extra_inflight", 1, 65536)),
+      number("upstreams.max_parallel", 1, 32, true), advanced(number("upstreams.max_extra_inflight", 1, 65536, true)),
       advanced(field("upstreams.ca_file", "nullable")), advanced(field("upstreams.dot_pool.enabled", "checkbox", true)),
       advanced(number("upstreams.dot_pool.max_connections", 1, 256, true)),
       advanced(number("upstreams.dot_pool.idle_timeout_ms", 1, 600000)),
@@ -76,7 +76,7 @@ export const settingPages = {
     group("persistence", [field("cache.persistence.enabled", "checkbox", true), number("cache.persistence.max_bytes", 1048576, 536870912)]),
     group("cache", [
       field("cache.enabled", "checkbox"), number("cache.max_entries", 1, 262144),
-      number("cache.max_bytes", 512, 1073741824, true), advanced(number("cache.max_variants", 1, 256)),
+      number("cache.max_bytes", 512, 1073741824, true), advanced(number("cache.max_variants", 1, 256, true)),
       advanced(number("cache.shards", 1, 64, true)), advanced(number("cache.negative_percent", 0, 90, true)),
       number("cache.max_ttl_secs", 1, 86400), number("cache.negative_ttl_cap_secs", 1, 86400),
     ]),
@@ -91,7 +91,7 @@ export const settingPages = {
     ])),
     group("ecs", [field("ecs.enabled", "checkbox"), number("ecs.ipv4_prefix", 0, 32, true), number("ecs.ipv6_prefix", 0, 128)]),
     group("ecsSharing", [
-      field("cache.ecs_sharing.enabled", "checkbox"), number("cache.ecs_sharing.min_networks", 2, 8),
+      field("cache.ecs_sharing.enabled", "checkbox"), number("cache.ecs_sharing.min_networks", 2, 8, true),
       advanced(number("cache.ecs_sharing.revoke_cooldown_secs", 60, 604800)),
     ]),
   ]),

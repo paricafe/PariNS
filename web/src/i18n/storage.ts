@@ -47,7 +47,7 @@ export const storageMessages = {
   cacheAll: ['全部', 'All'],
   cached: ['来自缓存', 'From cache'],
   fresh: ['有效缓存', 'Valid cache'],
-  stale: ['旧答案备用', 'Old-answer fallback'],
+  stale: ["过期缓存", "Stale cache"],
   non_cached: ['不是来自缓存', 'Not from cache'],
   cacheFilter: ['答案来源', 'Answer source'],
   filterPending: ['正在按新条件加载，下面暂时还是之前的结果。', 'Loading your new filter; the previous results are shown for now.'],

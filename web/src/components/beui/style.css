@@ -31,9 +31,9 @@
   transition: background-color 180ms, border-color 180ms, color 180ms, box-shadow 180ms;
 }
 .beui-button:disabled { cursor: not-allowed; opacity: .55; }
-.beui-button--primary { background: linear-gradient(135deg, var(--primary, #5b4dff), color-mix(in srgb, var(--primary-2, #0e9f92) 70%, var(--primary, #5b4dff))); color: var(--on-primary, #fff); box-shadow: 0 8px 20px -10px var(--primary, #5b4dff); }
-.beui-button--primary:not(:disabled):hover { box-shadow: 0 12px 26px -10px var(--primary, #5b4dff); }
-.beui-button--secondary { background: var(--surface-strong, #fff); color: var(--text, #121528); border-color: var(--edge-soft, #e4e4e7); }
+.beui-button--primary { background: var(--primary, #5b4dff); color: var(--on-primary, #fff); }
+.beui-button--primary:not(:disabled):hover { background: color-mix(in srgb, var(--primary, #5b4dff) 88%, var(--text, #121528)); }
+.beui-button--secondary { background: color-mix(in srgb, var(--surface-strong, #fff) 72%, transparent); color: var(--text, #121528); border-color: transparent; box-shadow: var(--glass-highlight, none); }
 .beui-button--secondary:not(:disabled):hover { background: var(--hover, #f2f2f3); }
 .beui-button--ghost { background: transparent; color: var(--text, #121528); }
 .beui-button--ghost:not(:disabled):hover { background: var(--hover, #f2f2f3); }
@@ -80,7 +80,8 @@
   z-index: -1;
   border-radius: inherit;
   background: var(--segment-thumb, #fff);
-  box-shadow: 0 3px 8px rgb(0 0 0 / .12), 0 3px 1px rgb(0 0 0 / .04), 0 0 0 .5px rgb(0 0 0 / .04);
+  /* A glass capsule: a uniform hairline, no drop shadow. */
+  box-shadow: var(--glass-highlight, none), 0 0 0 .5px rgb(0 0 0 / .06);
 }
 
 .beui-switch-wrap { display: inline-flex; align-items: center; gap: 12px; }

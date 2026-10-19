@@ -182,8 +182,8 @@ describe("OverviewPage", () => {
   it('shows no resolution mode while DNS is not running', async () => {
     const stopped = { ...status, running: false, resolution_mode: null, dns_health: { ...status.dns_health, state: 'stopped', ready: false } } as StatusView;
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? stopped : stats)} language="en" onOpenDns={() => {}} />);
-    await waitFor(() => expect(screen.getByText('Resolution')).toBeTruthy());
-    expect(screen.getByText('Resolution').nextElementSibling?.textContent).toBe('—');
+    await waitFor(() => expect(screen.getByText('Resolution mode')).toBeTruthy());
+    expect(screen.getByText('Resolution mode').nextElementSibling?.textContent).toBe('—');
   });
   it('reports coalesced followers beside the unchanged hit rate', async () => {
     const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, flight_joined: 9 } } } };
@@ -235,7 +235,7 @@ describe("LogsPage", () => {
     const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getAllByText('fresh.test').length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole('button', { name: /Older queries/ }));
-    fireEvent.click(screen.getByRole('tab', { name: 'Old-answer fallback' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Stale cache' }));
     await waitFor(() => expect(screen.getAllByText('stale.test').length).toBeGreaterThan(0));
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: 'stale', before_id: null, limit: 50 });
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });

@@ -42,27 +42,6 @@ function upstreamServers(settings: unknown): number | null {
   return Array.isArray(servers) ? servers.length : null;
 }
 
-/** One delegated, rAF-throttled listener lights the glass surface under the pointer (low intensity on large panels). */
-const LIT_SURFACES = '.panel, .kpi-card, .grouped, .auth-card, .state-card';
-function useCardLight() {
-  const reduced = useReducedMotion();
-  useEffect(() => {
-    if (reduced || !matchMedia('(hover: hover)').matches) return;
-    let frame = 0; let lit: HTMLElement | null = null; let x = 0; let y = 0;
-    const move = (event: PointerEvent) => {
-      const card = (event.target as Element | null)?.closest?.(LIT_SURFACES) as HTMLElement | null;
-      if (card !== lit) { lit?.removeAttribute('data-lit'); lit = card; lit?.setAttribute('data-lit', ''); }
-      if (!card) return;
-      const box = card.getBoundingClientRect(); x = event.clientX - box.left; y = event.clientY - box.top;
-      if (!frame) frame = requestAnimationFrame(() => { frame = 0; card.style.setProperty('--mx', `${x}px`); card.style.setProperty('--my', `${y}px`); });
-    };
-    const leave = () => { lit?.removeAttribute('data-lit'); lit = null; };
-    document.addEventListener('pointermove', move, { passive: true });
-    document.addEventListener('pointerleave', leave);
-    return () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerleave', leave); cancelAnimationFrame(frame); leave(); };
-  }, [reduced]);
-}
-
 function Preferences({ appearance }: { appearance: Appearance }) {
   const { language } = appearance;
   return <div className="preferences">
@@ -213,7 +192,6 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
 
 function RootView() {
   const appearance = useAppearance();
-  useCardLight();
   const { state, recheck, retryLogout, api } = useSession();
   const t = (key: string) => translate(key, appearance.language);
   return <>

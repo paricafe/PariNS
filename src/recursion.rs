@@ -58,11 +58,14 @@ pub struct Settings {
     pub ipv6: bool,
     /// Sustained queries per second to all authoritative servers together.
     pub max_outbound_per_second: u32,
-    /// Queries to authoritative servers awaiting a response at once.
+    /// Queries to authoritative servers admitted at once, while waiting for a rate
+    /// token or a response.
     pub max_outbound_inflight: usize,
     /// Referral and CNAME depth for one resolution.
     pub max_depth: u8,
-    /// Queries to authoritative servers one resolution may send.
+    /// Queries to authoritative servers one lookup may send, including delegations,
+    /// name server addresses and CNAME targets. Each DS or DNSKEY lookup for DNSSEC
+    /// validation has a budget of its own; the outbound bounds cap the total.
     pub max_queries_per_request: u16,
     /// Delegation, name server and DNSSEC key responses kept by the recursor.
     pub cache_entries: u64,
@@ -212,7 +215,7 @@ impl Recursion {
         // CD: the client validates; return data unchecked (RFC 4035 §3.2.2).
         options.checking_disabled = query.checking_disabled;
         self.counts.started.fetch_add(1, Ordering::Relaxed);
-        // Counts a resolution the Resolver drops at its deadline (or at shutdown).
+        // Counts a resolution dropped unfinished: at the deadline, by a cancelled request or at shutdown.
         let mut pending = Pending(Some(self));
         let resolution = self
             .recursor
@@ -262,7 +265,7 @@ impl Recursion {
             ),
             (
                 "recursion_deadline",
-                "Recursive resolutions cancelled at the query deadline.",
+                "Recursive resolutions cancelled before finishing (query deadline or cancelled request).",
                 load(&c.deadline),
                 false,
             ),
@@ -316,7 +319,7 @@ impl Recursion {
             ),
             (
                 "recursion_outbound_inflight",
-                "Authoritative queries awaiting a response.",
+                "Authoritative queries admitted and not finished, including those waiting for a rate token.",
                 self.bounds.inflight(self.inflight_limit) as u64,
                 true,
             ),

@@ -73,7 +73,7 @@ ipv6 = false # also query authoritative servers over IPv6
 max_outbound_per_second = 500 # all authoritative queries together
 max_outbound_inflight = 256
 max_depth = 24 # referrals and CNAMEs for one resolution
-max_queries_per_request = 200 # authoritative queries one resolution may send
+max_queries_per_request = 200 # authoritative queries per lookup; each DNSSEC key lookup has its own
 cache_entries = 65536 # delegation, name server and DNSSEC key responses
 
 # Opt in only when the upstream supports ECS and this privacy policy is desired.

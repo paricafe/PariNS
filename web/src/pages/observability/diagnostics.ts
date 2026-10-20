@@ -5,7 +5,8 @@ export interface CacheDecision { outcome: string; reason: string | null }
 export interface UpstreamResult { protocol: string | null; stage: string; outcome: string; reason: string | null }
 export interface UpstreamAttempt extends UpstreamResult { pool_generation: number; slot: number; code: number | null; elapsed_ms: number; connection?: 'new' | 'reused' }
 export interface UpstreamTrace { attempts: UpstreamAttempt[]; omitted: number }
-export interface UpstreamDiagnostics { scope: string; pool_generation: number; since_ms: number | null; slots: { slot: number; counts: (UpstreamResult & { count: number })[] }[] }
+export interface UpstreamEndpoint { slot: number; label: string; address: string }
+export interface UpstreamDiagnostics { scope: string; pool_generation: number; since_ms: number | null; slots: { slot: number; counts: (UpstreamResult & { count: number })[] }[]; endpoints: UpstreamEndpoint[] }
 /** Counters since the DNS generation started; `outbound.inflight` is a current gauge. */
 export interface RecursionDiagnostics {
   scope: string;
@@ -33,4 +34,15 @@ export function protocolLabel(protocol: string | null, language: Language): stri
 export function decisionLabel(kind: 'lookup' | 'store', decision: CacheDecision | null, language: Language): string {
   if (!decision) return translate('reliability.noDecision', language);
   return `${diagnosticLabel(`${kind}_${decision.outcome}`, language)}${decision.reason ? ` · ${diagnosticLabel(`reason_${decision.reason}`, language)}` : ''}`;
+}
+
+/** A cache scope tag (`no_ecs`, `exact_ecs:…`, a network, …) in plain language. */
+export function scopeNote(scope: string, language: Language): string {
+  if (scope === 'no_ecs') return translate('reliability.scopeNoEcs', language);
+  if (scope === 'privacy_v4') return translate('reliability.scopePrivacyV4', language);
+  if (scope === 'privacy_v6') return translate('reliability.scopePrivacyV6', language);
+  if (scope === 'learned_v4') return translate('reliability.scopeLearnedV4', language);
+  if (scope === 'learned_v6') return translate('reliability.scopeLearnedV6', language);
+  if (scope.startsWith('exact_ecs:')) return translate('reliability.scopeExact', language, { network: scope.slice('exact_ecs:'.length) });
+  return translate('reliability.scopeNetwork', language, { network: scope });
 }

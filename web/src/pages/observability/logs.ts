@@ -46,7 +46,7 @@ export interface LogPage {
   next_cursor: number | null;
 }
 
-export interface LogListResponse { revision: number; page: LogPage }
+export interface LogListResponse { page: LogPage }
 export type CacheFilter = 'cached' | 'fresh' | 'stale' | 'non_cached' | null;
 export interface LogFilter { search: string; status: string | null; cache: CacheFilter }
 

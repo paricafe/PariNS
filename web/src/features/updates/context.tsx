@@ -15,7 +15,7 @@ interface UpdatesContextValue {
   disconnected: boolean;
   refresh(): Promise<void>;
   check(): Promise<void>;
-  apply(candidate: UpdateCandidate, revision: number): Promise<void>;
+  apply(candidate: UpdateCandidate): Promise<void>;
 }
 const UpdatesContext = createContext<UpdatesContextValue | null>(null);
 interface Attempt { version: string; operationId: string | null; previousOperation: string | null }
@@ -108,10 +108,11 @@ export function UpdatesProvider({ active, children }: { active: boolean; childre
     finally { acting.current = false; setAction(null); await refresh(); }
   }, [api, refresh]);
 
-  const apply = useCallback(async (candidate: UpdateCandidate, revision: number) => {
+  const apply = useCallback(async (candidate: UpdateCandidate) => {
     const current = configRef.current;
     if (acting.current || attempt.current || !canApply(viewRef.current)) return;
-    if (current.dirty || current.locked || current.busy || current.draft?.revision !== revision
+    // The update restarts PariNS and reloads the console, which would lose unsaved changes.
+    if (current.dirty || current.locked || current.busy
       || viewRef.current?.candidate?.plan_id !== candidate.plan_id) { setError('draftChanged'); return; }
     acting.current = true; setAction('apply'); setError(null); setUnknown(false); setPending(true);
     unknownRef.current = false;
@@ -120,7 +121,7 @@ export function UpdatesProvider({ active, children }: { active: boolean; childre
     expectUpdateRestart(true);
     try {
       const accepted = await api.request<{ operation_id: string }>('updates/apply', 'POST', {
-        plan_id: candidate.plan_id, expected_version: candidate.version, config_revision: revision,
+        plan_id: candidate.plan_id, expected_version: candidate.version,
       });
       if (attempt.current) attempt.current.operationId = accepted.operation_id;
     } catch (reason) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react';
 import { DURATION, SPRING_IOS, SPRING_IOS_FAST } from './components/beui/motion';
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -18,10 +18,10 @@ import { Select } from './components/Popover';
 import { ThemeButton } from './components/ThemeButton';
 import { AppearanceSheet } from './components/AppearanceSheet';
 import { Backdrop } from './components/Backdrop';
-import { lineDiff } from './pages/config/lineDiff';
 import { UpdatesProvider } from './features/updates/context';
 import { UpdateHint } from './features/updates/UpdatePanel';
 import { AccountControls } from './features/account/AccountControls';
+import { useAutoConfirm } from './components/useAutoConfirm';
 import { getPath } from './model/config';
 
 const navigation = [
@@ -51,57 +51,59 @@ function Preferences({ appearance }: { appearance: Appearance }) {
   </div>;
 }
 
-function DiffSheet({ open, onClose, language }: { open: boolean; onClose(): void; language: Language }) {
-  const { draft } = useConfig();
-  const t = (key: string) => translate(key, language);
-  const diff = useMemo(() => open && draft ? lineDiff(draft.original, draft.toml) : [], [open, draft?.original, draft?.toml]);
-  return <Drawer open={open} variant="sheet" className="diff-sheet" title={t('app.diffTitle')} closeLabel={t('ui.closeDialog')} onClose={onClose}>
-    <p className="muted small">{t('app.diffHelp')}</p>
-    {draft?.previewTransportChange && <TransportHint change={draft.previewTransportChange} language={language} />}
-    {diff.some((line) => line.kind !== 'same') ? <pre className="diff-lines"><code>{diff.map((line, index) => <span className={`diff-${line.kind}`} key={index}>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text || ' '}</span>)}</code></pre>
-      : <p className="muted">{t('app.noChanges')}</p>}
-  </Drawer>;
-}
-
-function SaveBar({ language }: { language: Language }) {
+export function SaveBar({ language }: { language: Language }) {
   const reduced = useReducedMotion();
-  const { draft, dirty, changes, busy, preview, prepareSave, commitPrepared, reload, resolveUnknown, setError, discard } = useConfig();
+  const { draft, dirty, changes, busy, progress, prepareSave, commitPrepared, reload, resolveUnknown, resolveConflict, setError, discard } = useConfig();
   const { transportChanged } = useSession();
   const confirmAction = useConfirm();
   const banner = useBanner();
-  const [previewOpen, setPreviewOpen] = useState(false);
-  // The trigger is disabled while the preview request runs, so the sheet cannot capture it; return focus here.
-  const previewTrigger = useRef<HTMLButtonElement>(null);
-  if (!draft || (!dirty && !draft.unknownApply)) return null;
   const t = (key: string) => translate(key, language);
+  // A save or undo whose response was lost is confirmed by reading the configuration, never by sending it again.
+  const rollbackPending = Boolean(draft?.pendingRollback);
+  const [changedElsewhere, setChangedElsewhere] = useState(false);
+  useEffect(() => { if (!draft?.unknownApply) setChangedElsewhere(false); }, [draft?.unknownApply]);
+  const confirmation = useAutoConfirm(Boolean(draft?.unknownApply), async () => {
+    const result = await resolveUnknown();
+    return result === 'pending' ? undefined : result;
+  }, (result) => {
+    if (result === 'applied') banner(t(rollbackPending ? 'app.rollbackComplete' : 'app.configSaved'));
+    else setChangedElsewhere(true);
+  });
+  if (!draft || (!dirty && !draft.unknownApply && !draft.conflict)) return null;
   // The bar unmounts once the draft is settled; keep keyboard focus inside the page rather than on <body>.
   const settleFocus = () => requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) document.getElementById('main-content')?.focus({ preventScroll: true }); });
+  // Saving applies at once. Only a change of the console's own address or protocol asks first,
+  // because it ends this session (and an HTTPS to HTTP switch also removes encryption).
   const runSave = async (trigger: HTMLElement) => {
     try {
       const prepared = await prepareSave();
-      const impact = prepared.restart_required ? t('app.saveRestartHelp') : t('app.saveCacheHelp');
       const change = prepared.transportChange;
-      const message = change ? `${impact} ${transportChangeText(change, language)} ${change.requires_http_confirmation ? t('app.confirmHttpDowngrade') : ''}` : impact;
-      if (!await confirmAction(message, 'app.save', trigger)) return;
+      if (change && !await confirmAction(`${transportChangeText(change, language)} ${t(change.requires_http_confirmation ? 'app.confirmHttpDowngrade' : 'app.confirmTransportChange')}`, 'app.save', trigger)) return;
       const result = await commitPrepared(prepared);
       if (result.transportChange) { discard(); transportChanged(result.transportChange); return; }
-      if (result.refreshed) banner(t('app.configSaved'));
-      settleFocus();
+      if (result.refreshed) { banner(t(result.restartRequired ? 'app.savedRestarted' : 'app.savedApplied')); settleFocus(); }
     } catch (reason) { setError(toConfigIssue(reason)); }
   };
   const discardChanges = () => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().then(settleFocus).catch(() => {}); });
+  const conflict = draft.conflict;
+  const status = draft.unknownApply ? t(changedElsewhere ? 'api.REVISION' : confirmation.state === 'unresolved' ? 'app.saveStillUnknown' : confirmation.state === 'failed'
+    ? draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown' : 'shell.confirming')
+    : conflict ? t('app.changedElsewhere') : progress ? t(progress) : changes === 1 ? t('shell.unsavedOne') : translate('shell.unsavedMany', language, { count: changes });
+  const detail = conflict ? conflict.paths.length ? translate('app.conflictFields', language, { fields: conflict.paths.join(', ') }) : t('app.conflictToml')
+    : draft.merged && !draft.unknownApply ? t('app.mergedElsewhere') : null;
   return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 40, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={reduced ? { duration: 0 } : SPRING_IOS}>
-    <div className="save-bar-content"><div><strong>{draft.unknownApply ? t(draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown') : changes === 1 ? t('shell.unsavedOne') : translate('shell.unsavedMany', language, { count: changes })}</strong>
+    <div className="save-bar-content"><div><strong role={conflict || draft.merged || progress || draft.unknownApply ? 'status' : undefined}>{status}</strong>
+      {detail && <p className="small muted save-bar-detail">{detail}</p>}
       {draft.unknownApply && draft.pendingTransportChange && <TransportHint change={draft.pendingTransportChange} language={language} link />}</div>
-      <div className="button-group">{draft.unknownApply ? <><button type="button" className="button secondary" disabled={busy} onClick={discardChanges}>{t('app.discard')}</button><button type="button" className="button primary" disabled={busy} onClick={() => void resolveUnknown().then((result) => {
-          if (result === 'applied') { banner(t(draft.pendingRollback ? 'app.rollbackComplete' : 'app.configSaved')); settleFocus(); }
-          else setError(result === 'pending' ? 'app.saveStillUnknown' : 'api.REVISION');
-        }).catch((reason) => setError(toConfigIssue(reason)))}>{t(draft.pendingRollback ? 'app.checkRollback' : 'app.checkSave')}</button></> : <>
+      <div className="button-group">{draft.unknownApply ? <><button type="button" className="button secondary" disabled={busy} onClick={discardChanges}>{t('app.discard')}</button>
+        {(confirmation.state === 'unresolved' || confirmation.state === 'failed') && <button type="button" className="button primary" disabled={busy} onClick={confirmation.check}>{t(draft.pendingRollback ? 'app.checkRollback' : 'app.checkSave')}</button>}</>
+        : conflict ? <>
+          <button type="button" className="button secondary" disabled={busy} onClick={() => void resolveConflict('theirs').then(settleFocus).catch(() => {})}>{t('app.keepTheirs')}</button>
+          <Button variant="primary" disabled={busy} onClick={() => void resolveConflict('mine').catch(() => {})}>{t('app.keepMine')}</Button></>
+        : <>
         <button type="button" className="button quiet" disabled={busy} onClick={discardChanges}>{t('app.discard')}</button>
-        <button ref={previewTrigger} type="button" className="button secondary" disabled={busy} onClick={() => void preview().then(() => setPreviewOpen(true)).catch(() => {})}>{t('ui.preview')}</button>
         <Button variant="primary" disabled={busy} onClick={(event) => void runSave(event.currentTarget)}>{t('app.save')}</Button></>}</div>
     </div>
-    <DiffSheet open={previewOpen} onClose={() => { setPreviewOpen(false); requestAnimationFrame(() => previewTrigger.current?.focus()); }} language={language} />
   </motion.div>;
 }
 
@@ -181,7 +183,7 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
       {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
       <div ref={routeContent} className="route-content"><Routes>
-        <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} settingsState={config.draft?.unknownApply ? 'unknown' : config.dirty ? 'unsaved' : 'saved'} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
+        <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
         <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} />} />
         {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'updates', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />
@@ -192,8 +194,14 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
 
 function RootView() {
   const appearance = useAppearance();
-  const { state, recheck, retryLogout, api } = useSession();
+  const { state, recheck, retryLogout, confirmLogout, api } = useSession();
   const t = (key: string) => translate(key, appearance.language);
+  // An unconfirmed sign-out is settled by reading the session; only a session known to remain offers Sign out again.
+  const logoutCheck = useAutoConfirm(state.phase === 'logout-unknown' && state.logout === 'unconfirmed', confirmLogout, () => {});
+  const stateText = state.phase === 'logout-unknown'
+    ? state.logout === 'signed-in' ? 'app.stillSignedIn' : state.logout === 'unconfirmed' && logoutCheck.state === 'failed' ? 'app.logoutUnknown'
+      : state.logout === 'unconfirmed' ? 'shell.confirming' : 'app.working'
+    : state.phase === 'checking' ? 'ui.connecting' : state.phase === 'cookie-unavailable' ? 'app.cookieUnavailable' : state.phase === 'transport-change' ? 'app.transportChanged' : state.phase === 'setup-unknown' ? 'app.setupUnknown' : 'app.startFailed';
   return <>
     <Backdrop background={appearance.background} image={appearance.image} overlay={appearance.overlay} dark={appearance.dark} />
     <a href="#main-content" className="skip-link" onClick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>{t('ui.skip')}</a>
@@ -202,11 +210,12 @@ function RootView() {
       : state.phase === 'setup' ? <main id="main-content" tabIndex={-1}><SetupPage language={appearance.language} /></main>
         : state.phase === 'login' ? <main id="main-content" tabIndex={-1}><LoginPage language={appearance.language} /></main>
           : <main id="main-content" tabIndex={-1} className="state-page"><div className="state-card"><h1>{t('ui.title')}</h1>
-            <p>{state.phase === 'checking' ? t('ui.connecting') : state.phase === 'cookie-unavailable' ? t('app.cookieUnavailable') : state.phase === 'transport-change' ? t('app.transportChanged') : state.phase === 'setup-unknown' ? t('app.setupUnknown') : state.phase === 'logout-unknown' ? t('app.logoutUnknown') : t('app.startFailed')}</p>
+            <p role="status">{t(stateText)}</p>
             {state.phase === 'setup-unknown' && state.nextOrigin && <a href={`${state.nextOrigin}${window.location.pathname}${window.location.hash}`}>{t('app.openNewAddress')} · {state.nextOrigin}</a>}
             {state.phase === 'transport-change' && (state.nextOrigin ? <a href={`${state.nextOrigin}${window.location.pathname}${window.location.hash}`}>{t('app.openNewAddress')} · {state.nextOrigin}</a> : <p>{t('app.transportAddressUnknown')}</p>)}
             {state.error && <p className="muted small">{state.error}</p>}
-            {state.phase === 'logout-unknown' ? <button className="button primary" type="button" onClick={() => void retryLogout().catch(() => {})}>{t('app.logout')}</button>
+            {state.phase === 'logout-unknown' ? state.logout === 'signed-in' ? <button className="button primary" type="button" onClick={() => void retryLogout().catch(() => {})}>{t('app.logout')}</button>
+              : logoutCheck.state === 'failed' && <button className="button secondary" type="button" onClick={logoutCheck.check}>{t('storage.checkResult')}</button>
               : state.phase !== 'checking' && state.phase !== 'transport-change' && <button className="button secondary" type="button" onClick={() => void recheck()}>{t('ui.reconnect')}</button>}
           </div></main>}</UpdatesProvider></ConfigProvider>
   </>;

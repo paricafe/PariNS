@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "../../session/client";
 import { formatDate, formatNumber, translate, type Language } from "../../i18n";
 import { TrendChart } from "./TrendChart";
-import { averageLatencyMillis, cacheHitRate, coalescedShare, histogramRows, type ListenerStatus, type StatsView, type StatusView } from "./metrics";
+import { averageLatencyMillis, cacheHitRate, histogramRows, type ListenerStatus, type StatsView, type StatusView } from "./metrics";
 import "./observability.css";
 import { Tabs } from '../../components/beui';
 import { Odometer } from '../../components/Odometer';
 import { Disclosure } from '../../components/Disclosure';
+import { InfoTip } from '../../components/InfoTip';
 import { StorageStatusPanel } from './StorageStatusPanel';
 import { CacheDiagnosticsPanel } from './CacheDiagnosticsPanel';
 import { TransportDiagnostics } from './TransportDiagnostics';
@@ -16,8 +17,6 @@ export interface OverviewPageProps {
   api: ApiClient;
   language: Language;
   onOpenDns: () => void;
-  /** Presentation only: whether the console holds unsaved settings changes. */
-  settingsState?: 'saved' | 'unsaved' | 'unknown';
   /** Presentation only: number of configured upstream servers, when known. */
   upstreamCount?: number | null;
 }
@@ -88,7 +87,7 @@ function Distribution({ rows, language }: { rows: readonly { label: string; coun
   </div>;
 }
 
-export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved', upstreamCount = null }: OverviewPageProps) {
+export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }: OverviewPageProps) {
   const [status, setStatus] = useState<StatusView | null>(null);
   const [stats, setStats] = useState<StatsView | null>(null);
   const [updated, setUpdated] = useState<number | null>(null);
@@ -155,9 +154,6 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
   const latency = stats?.totals.metrics.request_latency;
   const hours = query.range === 'custom' ? (Number(query.to_ms) - Number(query.from_ms)) / 3_600_000 : query.range === '7d' ? 168 : query.range === '24h' ? 24 : 1;
   const hitRate = cacheHitRate(counters);
-  // Shown only once it rounds to a visible share; "another 0%" says nothing.
-  const joined = coalescedShare(counters);
-  const coalesced = joined !== null && joined >= 0.05 ? joined : null;
   const average = averageLatencyMillis(latency);
   const blocked = counters ? (counters.query_blocked ?? 0) + (counters.response_blocked ?? 0) : null;
   const health = status?.dns_health.state;
@@ -179,7 +175,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
               : t('shell.summaryQueries', { count: value(counters.requests, language), percent: formatNumber(hitRate, language, { maximumFractionDigits: 0 }) }) : null;
   const kpis = [
     { key: "requests", icon: Search, label: t("ui.requests"), raw: counters?.requests ?? null, format: (n: number) => formatNumber(Math.round(n), language) },
-    { key: "cache", icon: Zap, label: t("ui.hitRate"), help: coalesced === null ? null : t('shell.coalescedShare', { percent: formatNumber(coalesced, language, { maximumFractionDigits: 1 }) }), raw: hitRate, format: (n: number) => `${formatNumber(n, language, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` },
+    { key: "cache", icon: Zap, label: t("ui.hitRate"), tip: t('shell.hitRateHelp'), raw: hitRate, format: (n: number) => `${formatNumber(n, language, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` },
     { key: "latency", icon: Gauge, label: t("ui.latency"), raw: average, format: (n: number) => `${formatNumber(n, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms` },
     { key: "blocked", icon: Ban, label: t("ui.blocked"), raw: blocked, format: (n: number) => formatNumber(Math.round(n), language) },
   ];
@@ -214,7 +210,6 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
         <div><dt>{t('shell.stripInflight')}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>
         <div><dt>{t('shell.stripResolution')}</dt><dd>{status?.resolution_mode ? t(`settings.resolution.mode.${status.resolution_mode}`) : "—"}</dd></div>
         {status?.resolution_mode !== 'recursive' && <div><dt>{t('shell.stripUpstreams')}</dt><dd>{upstreamCount === null ? "—" : t('shell.upstreamCount', { count: upstreamCount })}</dd></div>}
-        <div><dt>{t('shell.stripSettings')}</dt><dd>{t({ saved: 'shell.settingsSaved', unsaved: 'shell.settingsUnsaved', unknown: 'shell.settingsUnknown' }[settingsState])}</dd></div>
       </dl>
     </section>
     {statusFailed && <p role="alert" className="notice error">{t("app.statusUnavailable")}{updated !== null && <> {t('shell.lastUpdated', { time: formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })}</>}</p>}
@@ -225,9 +220,8 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
 
     <section aria-label={t("ui.statsScope")} className="kpi-grid">
       {kpis.map((item) => <div key={item.key} className="kpi-card glass">
-        <p className="kpi-label"><item.icon size={15} aria-hidden="true" />{item.label}</p>
+        <p className="kpi-label"><item.icon size={15} aria-hidden="true" />{item.label}{"tip" in item && item.tip && <InfoTip text={item.tip} label={t('shell.about', { label: item.label })} />}</p>
         <p className="kpi-value num">{item.raw === null ? (stats || statsFailed ? "—" : <span className="skeleton" style={{ display: 'inline-block', width: 96, height: 30 }} aria-hidden="true" />) : <Odometer text={item.format(item.raw)} />}</p>
-        {"help" in item && item.help && <p className="kpi-help">{item.help}</p>}
       </div>)}
     </section>
 
@@ -258,7 +252,7 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
 
     <Disclosure title={t('shell.advanced')} help={t('shell.advancedHelp')}>
       <div className="advanced-stack">
-        {status && <p className="small muted">{t('reliability.runtimeGeneration', { generation: status.dns_health.generation, time: formatDate(status.dns_health.changed_at_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}{status.dns_health.code && <> · <code>{status.dns_health.code}</code></>}</p>}
+        {status && <p className="small muted">{t('reliability.runtimeGeneration', { time: formatDate(status.dns_health.changed_at_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}{status.dns_health.code && <> · <code>{status.dns_health.code}</code></>}</p>}
         <p className="small muted">{t("ui.statsHelp")}{stats && <> {t('storage.totalsSince', { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</>}</p>
         {status?.storage && <StorageStatusPanel status={status.storage} language={language} compact />}
         <section className="panel" aria-labelledby="parins-latency-title">
@@ -276,7 +270,6 @@ export function OverviewPage({ api, language, onOpenDns, settingsState = 'saved'
             <div><dt>{t("ui.uptime")}</dt><dd className="num">{running ? uptime(status?.uptime_seconds ?? null, language) : "—"}</dd></div>
             <div><dt>{t("ui.inflight")}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>
             <div><dt>{t("ui.failures")}</dt><dd className="num">{value(counters?.upstream_failures, language)}</dd></div>
-            <div><dt>{t("ui.revision")}</dt><dd className="num">{status?.revision ?? "—"}</dd></div>
             <div><dt>{t("ui.updated")}</dt><dd className="num">{updated === null ? "—" : formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" })} <span className="muted small">{t("ui.statusInterval")}</span></dd></div>
           </dl>
         </section>

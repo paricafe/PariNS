@@ -54,6 +54,6 @@ export function StorageStatusPanel({ status, language, compact = false }: { stat
     {disk.low_space && <p className="notice error" role="alert">{r('lowSpace')}</p>}
     {disk.stale && <p className="notice">{r('staleFilesystem')}</p>}
     {disk.error && <p className="notice">{r('filesystemUnavailable')} · <code>{disk.error}</code></p>}
-    {status.configured_revision !== status.applied_revision && <p className="group-footer">{translate('storage.revisions', language, { configured: status.configured_revision, applied: status.applied_revision })}</p>}
+    {status.configured_revision !== status.applied_revision && <p className="group-footer">{t('settingsPending')}</p>}
   </section>;
 }

@@ -3,16 +3,27 @@ import { ApiClient, ApiError, CookieUnavailable, StaleRequest, type SessionView,
 import { reloadConsole } from '../features/updates/reload';
 
 export type SessionPhase = 'checking' | 'setup' | 'setup-unknown' | 'login' | 'ready' | 'connection-error' | 'cookie-unavailable' | 'logout-unknown' | 'transport-change';
-export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string; transport?: TransportView; nextOrigin?: string | null; credentials?: 'changed' | 'unknown' }
+/** `logout`: for `logout-unknown`, whether the sign-out request is still running, its result is being confirmed, or the session is known to remain. */
+/** `credentials`: the outcome of an account or Turnstile change that ended every session. */
+export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string; transport?: TransportView; nextOrigin?: string | null; credentials?: CredentialOutcome; logout?: 'sending' | 'unconfirmed' | 'signed-in' }
+export type CredentialOutcome = 'changed' | 'unknown' | 'turnstileChanged' | 'turnstileUnknown';
 
 interface SessionContextValue {
   state: SessionState;
   api: ApiClient;
-  login(username: string, password: string): Promise<void>;
+  /** `reload`: reload the document after signing in, which drops the sign-in page's Turnstile allowance. */
+  login(username: string, password: string, options?: { turnstileToken?: string | null; reload?: boolean }): Promise<void>;
   rotateCredentials(currentPassword: string, username: string, newPassword: string): Promise<void>;
+  /** Sets or clears the Turnstile keys; every session ends. */
+  changeTurnstile(body: unknown): Promise<void>;
+  /** Whether this document was loaded while signed in (its policy then blocks the Turnstile widget). */
+  /** Records the first login options this document saw; returns whether it may show the Turnstile widget. */
+  turnstileAllowed(optionsHaveTurnstile: boolean): boolean;
   setup(username: string, password: string, toml: string, token: string): Promise<void>;
   logout(): Promise<void>;
   retryLogout(): Promise<void>;
+  /** Reads the session after an unconfirmed sign-out; never sends the sign-out again. */
+  confirmLogout(): Promise<'signed-out' | 'signed-in' | 'other'>;
   recheck(): Promise<void>;
   transportChanged(change: TransportChange): void;
   expectUpdateRestart(expected: boolean): void;
@@ -28,6 +39,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const mounted = useRef(true);
   const bootId = useRef(0);
   const logoutBinding = useRef<string | null>(null);
+  const firstView = useRef<boolean | null>(null);
   const logoutIntent = useRef(false);
   const authInFlight = useRef(false);
   const updateRestart = useRef(false);
@@ -40,6 +52,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const applySession = useCallback((view: SessionView) => {
     if (!mounted.current) return;
+    if (firstView.current === null) firstView.current = view.authenticated;
     if (!view.authenticated && updateRestart.current && !logoutIntent.current) {
       updateRestart.current = false;
       api.replaceBinding(null);
@@ -139,23 +152,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     announce();
   }, [api, applySession]);
 
-  const login = useCallback(async (username: string, password: string) => {
+  // A sign-in on a document that showed Turnstile reloads, so the signed-in console keeps the strict policy.
+  const finishSignIn = useCallback(async (reload: boolean) => {
+    if (!reload) { await confirmLogin(); return; }
+    const view = await api.session();
+    if (!view.authenticated || !view.session) throw new CookieUnavailable();
+    announce();
+    reloadConsole();
+  }, [api, confirmLogin]);
+
+  const login = useCallback(async (username: string, password: string, options?: { turnstileToken?: string | null; reload?: boolean }) => {
     try {
       await authAction(async () => {
         const view = await api.session();
         if (view.authenticated && !needsCredentialLogin()) { applySession(view); return; }
-        await api.request('login', 'POST', { username, password }, undefined, { unauthenticated: true });
-        await confirmLogin();
+        await api.request('login', 'POST', { username, password, turnstile_token: options?.turnstileToken ?? undefined }, undefined, { unauthenticated: true });
+        await finishSignIn(Boolean(options?.reload));
       });
     } catch (error) {
       if (error instanceof CookieUnavailable) setState({ phase: 'cookie-unavailable' });
       throw error;
     }
-  }, [api, applySession, authAction, confirmLogin, needsCredentialLogin]);
+  }, [api, applySession, authAction, finishSignIn, needsCredentialLogin]);
 
-  const rotateCredentials = useCallback(async (currentPassword: string, username: string, newPassword: string) => {
+  const credentialChange = useCallback(async (path: 'account/credentials' | 'account/turnstile', body: unknown, outcome: { changed: CredentialOutcome; unknown: CredentialOutcome }) => {
     const owner = api.currentEpoch;
-    const requireLogin = (result: 'changed' | 'unknown') => {
+    const requireLogin = (result: CredentialOutcome) => {
       if (!mounted.current || owner !== api.currentEpoch) return;
       bootId.current += 1;
       updateRestart.current = false;
@@ -166,17 +188,29 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     };
     await authAction(async () => {
       try {
-        const result = await api.request<{ reauthentication_required: true }>('account/credentials', 'POST', {
-          current_password: currentPassword, username, new_password: newPassword,
-        });
+        const result = await api.request<{ reauthentication_required: true }>(path, 'POST', body);
         if (result?.reauthentication_required !== true) throw new ApiError(200, 'BAD_RESPONSE', 'Invalid credential response');
-        requireLogin('changed');
+        requireLogin(outcome.changed);
       } catch (error) {
-        if (error instanceof ApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) requireLogin('unknown');
+        if (error instanceof ApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) requireLogin(outcome.unknown);
         throw error;
       }
     });
   }, [api, authAction]);
+
+  const rotateCredentials = useCallback((currentPassword: string, username: string, newPassword: string) =>
+    credentialChange('account/credentials', { current_password: currentPassword, username, new_password: newPassword },
+      { changed: 'changed', unknown: 'unknown' }), [credentialChange]);
+
+  const changeTurnstile = useCallback((body: unknown) => credentialChange('account/turnstile', body,
+    { changed: 'turnstileChanged', unknown: 'turnstileUnknown' }), [credentialChange]);
+  // The server relaxes this document's script policy for the widget only if it was served
+  // signed out while Turnstile was on; the first login options of a signed-out document tell.
+  const documentTurnstile = useRef<boolean | null>(null);
+  const turnstileAllowed = useCallback((optionsHaveTurnstile: boolean) => {
+    if (documentTurnstile.current === null) documentTurnstile.current = firstView.current === false && optionsHaveTurnstile;
+    return documentTurnstile.current;
+  }, []);
 
   const setup = useCallback(async (username: string, password: string, toml: string, token: string) => {
     let sent = false;
@@ -225,7 +259,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         announce();
       });
     } catch (error) {
-      if (!(error instanceof ApiError && error.code === 'SESSION_CHANGED')) setState({ phase: 'logout-unknown' });
+      if (!(error instanceof ApiError && error.code === 'SESSION_CHANGED')) setState({ phase: 'logout-unknown', logout: 'unconfirmed' });
       throw error;
     }
   }, [api, applySession, authAction]);
@@ -237,16 +271,40 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     logoutIntent.current = true;
     bootId.current += 1;
     api.replaceBinding(null);
-    setState({ phase: 'logout-unknown' }); // Mask private UI before touching the network.
+    setState({ phase: 'logout-unknown', logout: 'sending' }); // Mask private UI before touching the network.
     await performLogout(logoutBinding.current);
   }, [api, performLogout]);
 
   const retryLogout = useCallback(async () => {
     if (state.phase !== 'logout-unknown') return;
+    setState({ phase: 'logout-unknown', logout: 'sending' });
     await performLogout(logoutBinding.current);
   }, [performLogout, state.phase]);
 
-  const value = useMemo<SessionContextValue>(() => ({ state, api, login, rotateCredentials, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart }), [state, api, login, rotateCredentials, setup, logout, retryLogout, recheck, transportChanged, expectUpdateRestart]);
+  const confirmLogout = useCallback(async (): Promise<'signed-out' | 'signed-in' | 'other'> => {
+    const view = await api.session();
+    if (!mounted.current || phase.current !== 'logout-unknown' || authInFlight.current) return 'other';
+    const actual = view.session?.binding ?? null;
+    if (!actual) {
+      api.replaceBinding(null);
+      logoutBinding.current = null;
+      logoutIntent.current = false;
+      setState({ phase: 'login', transport: view.transport });
+      announce();
+      return 'signed-out';
+    }
+    if (actual !== logoutBinding.current) {
+      // A newer sign-in in another tab is not this page's to end.
+      logoutIntent.current = false;
+      applySession(view);
+      return 'other';
+    }
+    setState({ phase: 'logout-unknown', logout: 'signed-in' });
+    return 'signed-in';
+  }, [api, applySession]);
+
+  const value = useMemo<SessionContextValue>(() => ({ state, api, login, rotateCredentials, changeTurnstile, turnstileAllowed, setup, logout, retryLogout, confirmLogout, recheck, transportChanged, expectUpdateRestart }),
+    [state, api, login, rotateCredentials, changeTurnstile, turnstileAllowed, setup, logout, retryLogout, confirmLogout, recheck, transportChanged, expectUpdateRestart]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 

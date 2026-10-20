@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, StaleRequest, type ApiClient } from '../../session/client';
-import type { SubscriptionDraft } from '../../model/subscriptions';
 import { pollDelay, type Failure, type SubscriptionState } from './types';
 
-export function useSubscriptions(api: ApiClient, revision: number | undefined) {
+/** `savedKey` changes whenever a configuration save lands, so status is re-read at once. */
+export function useSubscriptions(api: ApiClient, savedKey: unknown) {
   const [state, setState] = useState<SubscriptionState | null>(null);
   const [error, setError] = useState<Failure | null>(null);
   const [readError, setReadError] = useState<Failure | null>(null);
@@ -48,17 +48,17 @@ export function useSubscriptions(api: ApiClient, revision: number | undefined) {
       stopped = true; window.clearTimeout(timer); reschedule.current = () => {};
       document.removeEventListener('visibilitychange', visibility);
     };
-  }, [load, revision]);
+  }, [load, savedKey]);
   const visibleDelay = pollDelay(state, pending, unknown, false);
   useEffect(() => { reschedule.current(); }, [visibleDelay]);
-  const start = async (kind: 'prepare' | 'refresh', source: SubscriptionDraft | string | null) => {
-    if (sending.current || revision === undefined) return;
+  /** Updates one saved source (or all with `null`); new sources are downloaded by Save. */
+  const start = async (kind: 'refresh', sourceId: string | null) => {
+    if (sending.current) return;
     sending.current = true; setPending(true); setError(null); setUnknown(false); setOperationId(null);
     const token = owner.current;
     try {
-      const body = kind === 'prepare' && source && typeof source !== 'string'
-        ? { config_revision: revision, source: { id: source.id, url: source.url, format: source.format } }
-        : { config_revision: revision, source_id: source };
+      // The server works against its current saved configuration; no client revision is sent.
+      const body = { source_id: sourceId };
       const result = await api.request<{ operation_id: string }>(`filter/subscriptions/${kind}`, 'POST', body);
       if (token !== owner.current) return;
       setOperationId(result.operation_id);
@@ -70,5 +70,5 @@ export function useSubscriptions(api: ApiClient, revision: number | undefined) {
     } finally { if (token === owner.current) { sending.current = false; setPending(false); } }
   };
   const operation = [state?.operation, state?.recent_operation].find((item) => item && item.id === operationId) ?? null;
-  return { state, error: error ?? readError, pending, unknown, operation, replaced: operationId !== null && state !== null && !operation, load, start };
+  return { state, error: error ?? readError, pending, unknown, operation, load, start };
 }

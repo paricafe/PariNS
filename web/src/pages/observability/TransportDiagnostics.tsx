@@ -9,7 +9,7 @@ export function UpstreamAttempts({ trace, language }: { trace: UpstreamTrace; la
   return <section><h3>{translate('reliability.attempts', language)}</h3>
     {!trace.attempts.length && <p className="muted">{translate('reliability.noAttempts', language)}</p>}
     <ol className="attempt-list">{trace.attempts.map((attempt, index) => <li key={index}>
-      <p>{translate('reliability.slot', language, { slot: attempt.slot })} · <code>#{attempt.pool_generation}</code> · {formatNumber(attempt.elapsed_ms, language, { maximumFractionDigits: 2 })} ms{attempt.connection && <> · {translate(`reliability.connection_${attempt.connection}`, language)}</>}</p>
+      <p>{translate('reliability.slot', language, { slot: attempt.slot + 1 })} · {formatNumber(attempt.elapsed_ms, language, { maximumFractionDigits: 2 })} ms{attempt.connection && <> · {translate(`reliability.connection_${attempt.connection}`, language)}</>}</p>
       <p><Result value={attempt} language={language} /></p>
       {attempt.code && <p className="small"><span>{translate('reliability.code', language)}: </span><code>{attempt.code}</code></p>}
     </li>)}</ol>
@@ -28,7 +28,7 @@ const RECURSION_GROUPS = [
 
 export function RecursionDiagnosticsPanel({ value, language }: { value: RecursionDiagnostics; language: Language }) {
   return <section className="panel"><h2>{translate('reliability.recursion', language)}</h2>
-    <p className="small muted">{translate('reliability.recursionScope', language)} <code>{value.scope}</code></p>
+    <p className="small muted">{translate('reliability.recursionScope', language)}</p>
     <div className="storage-grid">{RECURSION_GROUPS.map(([group, prefix, known]) => {
       const counts = value[group];
       const names = [...known.filter((name) => name in counts), ...Object.keys(counts).filter((name) => !(known as readonly string[]).includes(name))];
@@ -43,13 +43,18 @@ export function TransportDiagnostics({ upstreams, recursion, quic, language }: {
   return <div className="settings-stack">
     {recursion && <RecursionDiagnosticsPanel value={recursion} language={language} />}
     {upstreams && <section className="panel"><h2>{translate('reliability.upstreams', language)}</h2>
-      <p className="small muted">{translate('reliability.upstreamScope', language, { generation: upstreams.pool_generation, time: upstreams.since_ms === null ? translate('reliability.unknownTime', language) : formatDate(upstreams.since_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })} <code>{upstreams.scope}</code></p>
-      {upstreams.slots.map((slot) => <details key={slot.slot}><summary>{translate('reliability.slot', language, { slot: slot.slot })}</summary>
+      <p className="small muted">{translate('reliability.upstreamScope', language, { time: upstreams.since_ms === null ? translate('reliability.unknownTime', language) : formatDate(upstreams.since_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}</p>
+      {upstreams.slots.map((slot) => {
+        const endpoint = upstreams.endpoints.find((item) => item.slot === slot.slot);
+        return <details key={slot.slot}><summary>{endpoint
+          ? <><span className="mono">{endpoint.label}</span>{endpoint.address !== endpoint.label && <span className="muted"> · {translate('reliability.reachedAt', language, { address: endpoint.address })}</span>}</>
+          : translate('reliability.slot', language, { slot: slot.slot + 1 })}</summary>
         {!slot.counts.length && <p className="muted">{translate('reliability.noAttempts', language)}</p>}
         <dl className="diagnostic-counts">{slot.counts.map((count, index) => <div key={index}><dt><Result value={count} language={language} /></dt><dd>{formatNumber(count.count, language)}</dd></div>)}</dl>
-      </details>)}
+      </details>;
+      })}
     </section>}
-    <section className="panel"><h2>{translate('reliability.quic', language)}</h2><p className="small muted">{translate('reliability.processScope', language)} <code>{quic.scope}</code></p>
+    <section className="panel"><h2>{translate('reliability.quic', language)}</h2><p className="small muted">{translate('reliability.processScope', language)}</p>
       <p className="small muted">{translate('reliability.quicHelp', language)}</p>
       <div className="storage-grid">{(['doq', 'doh3'] as const).map((protocol) => <section key={protocol}><h3>{protocol === 'doq' ? 'DoQ' : 'DoH / HTTP/3'}</h3>
         <dl className="diagnostic-counts">{['handshake_inflight', 'handshake_established', 'stream_inflight', 'stream_response_handed_to_transport'].map((name) => <div key={name}><dt>{diagnosticLabel(name, language)}</dt><dd>{formatNumber(quic[protocol][name], language)}</dd></div>)}</dl>

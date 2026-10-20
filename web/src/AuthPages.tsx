@@ -3,6 +3,9 @@ import { networkTemplate } from './model';
 import { hasTranslation, translate, type Language } from './i18n';
 import { ApiError, CookieUnavailable } from './session/client';
 import { useSession } from './session/context';
+import { TurnstileWidget } from './features/account/Turnstile';
+import { passwordProblem } from './features/account/password';
+import { reloadConsole } from './features/updates/reload';
 import { Segmented } from './components/Segmented';
 import { Switch } from './components/beui';
 
@@ -12,16 +15,39 @@ function present(error: unknown, language: Language): string {
   return error instanceof Error ? error.message : translate('app.offline', language);
 }
 
+interface LoginOptions { turnstile: { site_key: string; action: string } | null; turnstile_skipped: boolean }
+const NO_OPTIONS: LoginOptions = { turnstile: null, turnstile_skipped: false };
+
 export function LoginPage({ language }: { language: Language }) {
-  const { login, state } = useSession();
+  const { api, login, state, turnstileAllowed } = useSession();
+  const [options, setOptions] = useState<LoginOptions | null>(null);
   const [username, setUsername] = useState(''); const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  const [token, setToken] = useState<string | null>(null); const [resetSignal, setResetSignal] = useState(0);
   const t = (key: string) => translate(`ui.${key}`, language);
+  useEffect(() => {
+    let live = true;
+    api.request<LoginOptions>('login/options', 'GET', undefined, undefined, { unauthenticated: true })
+      .then((value) => { if (live) setOptions(value); }, () => { if (live) setOptions(NO_OPTIONS); });
+    return () => { live = false; };
+  }, [api]);
+  const turnstile = options?.turnstile ?? null;
+  // Only a document served signed out while Turnstile was on may load the widget (its script
+  // policy is relaxed for it); any other document reloads once to get that policy.
+  const widgetAllowed = options !== null && turnstileAllowed(Boolean(turnstile));
+  useEffect(() => { if (turnstile && !widgetAllowed) reloadConsole(); }, [turnstile, widgetAllowed]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError(null);
-    try { await login(username.trim(), password); setPassword(''); }
-    catch (reason) { setError(present(reason, language)); }
-    finally { setBusy(false); }
+    try {
+      if (turnstile && !token) throw new ApiError(403, 'TURNSTILE_REQUIRED', 'Complete the human verification');
+      await login(username.trim(), password, { turnstileToken: token, reload: Boolean(turnstile) });
+      setPassword('');
+    } catch (reason) { setError(present(reason, language)); }
+    finally {
+      setBusy(false);
+      // Each Turnstile token is single-use.
+      if (turnstile) setResetSignal((value) => value + 1);
+    }
   };
   return <section className="auth-wrap"><div className="auth-card">
     <h1>{t('loginTitle')}</h1>
@@ -29,8 +55,10 @@ export function LoginPage({ language }: { language: Language }) {
     <form onSubmit={(event) => void submit(event)} className="auth-form">
       <label htmlFor="login-username">{t('username')}</label><input id="login-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required maxLength={64} />
       <label htmlFor="login-password">{t('password')}</label><input id="login-password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required />
+      {turnstile && widgetAllowed && <TurnstileWidget siteKey={turnstile.site_key} action={turnstile.action} language={language} resetSignal={resetSignal} onToken={setToken} />}
+      {options?.turnstile_skipped && <small className="muted">{translate('turnstile.loopbackLogin', language)}</small>}
       {error && <p className="error" role="alert">{error}</p>}
-      <button className="button primary" type="submit" disabled={busy}>{busy ? translate('app.working', language) : t('login')}</button>
+      <button className="button primary" type="submit" disabled={busy || options === null}>{busy ? translate('app.working', language) : t('login')}</button>
     </form>
   </div></section>;
 }
@@ -72,7 +100,12 @@ export function SetupPage({ language }: { language: Language }) {
     : { ...PRESETS[preset], mode: 'weighted', prefer_h3: false };
   const next = () => {
     setError(null);
-    if (step === 0 && (password !== confirmPassword || password.length < 12 || !token.trim() || !username.trim())) { setError(translate('app.passwordMismatch', language)); return; }
+    if (step === 0) {
+      // These match Rust's byte limits and name the first missing step.
+      const problem = !token.trim() ? 'app.setupTokenRequired' : !username.trim() ? 'app.usernameRequired'
+        : passwordProblem(password) ?? (password !== confirmPassword ? 'account.mismatch' : null);
+      if (problem) { setError(translate(problem, language)); return; }
+    }
     if (step === 1) {
       if (!upstreams.servers.length) { setError(translate('settings.validation.required', language)); return; }
       if (!template) { setError(translate('app.startFailed', language)); return; }
@@ -99,7 +132,8 @@ export function SetupPage({ language }: { language: Language }) {
         <p className="muted small">{t('tokenIntro')}</p>
         <label htmlFor="setup-token">{t('token')}</label><input id="setup-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} required autoComplete="off" />
         <label htmlFor="setup-username">{t('adminUsername')}</label><input id="setup-username" value={username} onChange={(event) => setUsername(event.target.value)} required maxLength={64} autoComplete="username" />
-        <label htmlFor="setup-password">{t('adminPassword')}</label><input id="setup-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={12} autoComplete="new-password" />
+        <label htmlFor="setup-password">{t('adminPassword')}</label><input id="setup-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={12} autoComplete="new-password" aria-describedby="setup-password-help" />
+        <small id="setup-password-help" className="muted">{translate('account.passwordHelp', language)}</small>
         <label htmlFor="setup-confirm">{t('confirmPassword')}</label><input id="setup-confirm" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required minLength={12} autoComplete="new-password" />
       </>}
       {step === 1 && <>

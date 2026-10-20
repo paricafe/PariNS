@@ -65,10 +65,9 @@ export function UpdatePanel({ language }: { language: Language }) {
   const begin = async (trigger: HTMLElement) => {
     if (config.dirty || config.draft?.unknownApply) { setDraftPrompt(true); return; }
     if (!candidate || !config.draft || config.busy || config.locked) return;
-    const revision = config.draft.revision;
     if (await confirm(translate('updates.confirm', language, { current: view.current.version, next: candidate.version }), 'updates.updateNow', trigger)) {
       holdFocus();
-      await updates.apply(candidate, revision);
+      await updates.apply(candidate);
     }
   };
   // Recovery states need the installer, not a different release.

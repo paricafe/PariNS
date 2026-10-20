@@ -11,7 +11,7 @@ describe('DoH runtime summary', () => {
     expect(screen.getByText('[::1]:45678 · /dns-query')).toBeTruthy();
     expect(screen.getByText('HTTP/2 · TCP 45678 / HTTP/3 · UDP 45678')).toBeTruthy();
     view.rerender(<DohRuntime status={status} failed={false} language="zh-CN" />);
-    expect(screen.getByRole('heading', { name: '运行中的 DoH' })).toBeTruthy();
+    expect(screen.getByText('运行中的 DoH')).toBeTruthy();
   });
   it('never presents a stopped DNS listener as running', () => {
     render(<DohRuntime status={{ running: false, doh_listen: null, doh_http3: false }} failed={false} language="en" />);

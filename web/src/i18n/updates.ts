@@ -45,7 +45,7 @@ export const updatesMessages = {
   config_changed: ['配置已变化，请重新检查后再确认。', 'The configuration changed. Check again, then confirm.'],
   insufficient_space: ['磁盘空间不足，请先清理磁盘。', 'Not enough disk space. Free some up first.'],
   verification_failed: ['下载的程序未通过校验，当前程序没有改动。', 'The downloaded program failed verification; nothing was changed.'],
-  preflight_failed: ['已保存的配置或回滚副本未通过新版本的检查。请检查配置和证书；若当前配置正常，保存一次任意修改以替换回滚副本后再更新。', "The saved configuration or its rollback copy didn't pass the new version's check. Review your configuration and certificates; if the current one is fine, save any change to replace the rollback copy, then update again."],
+  preflight_failed: ['新版本无法使用当前配置或上一次保存前的配置。请检查配置和证书；如果当前配置没有问题，修改并保存一次设置后再更新。', "The new version can't use the current configuration or the one from before your last save. Check the configuration and certificates; if the current one is fine, change and save a setting once, then update again."],
   update_in_progress: ['已有更新正在进行，请查看其进度。', 'An update is already in progress. Follow its progress.'],
   unclean_shutdown: ['原来的程序没有正常退出，请检查服务状态。', "The previous program didn't stop cleanly. Check the service status."],
   readiness_failed: ['新版本启动后 DNS 或存储未能正常工作。', "After the new version started, DNS or storage didn't work properly."],

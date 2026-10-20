@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@t
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type ApiClient } from '../../session/client';
 import { ConfigProvider, useConfig } from '../../config/context';
-import { defaultSubscriptions, subscriptionDraft } from '../../model/subscriptions';
+import { defaultSubscriptions, subscriptionDraft, subscriptionId } from '../../model/subscriptions';
 import { formatDate, type Language } from '../../i18n';
 import { SubscriptionsPanel } from './SubscriptionsPanel';
 import { useSubscriptions } from './useSubscriptions';
@@ -13,30 +13,28 @@ import { pollDelay, type SubscriptionState, type Operation } from './types';
 let currentApi: ApiClient;
 vi.mock('../../session/context', () => ({ useSession: () => ({ api: currentApi }) }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
-const initial: SubscriptionState = { config_revision: 1, enabled: true, sources: [], generation: 2, content_revision: 1, input_rules: 20, index_rules: 10, index_bytes: 256, retained_bytes: 0, disk_bytes: 500, operation: null, recent_operation: null, unavailable_reason: null };
+const initial: SubscriptionState = { enabled: true, sources: [], generation: 2, content_revision: 1, input_rules: 20, index_rules: 10, index_bytes: 256, retained_bytes: 0, disk_bytes: 500, operation: null, recent_operation: null, unavailable_reason: null };
 const operation: Operation = { id: 'op1', kind: 'prepare', source_id: 'example', fingerprint: 'hash', status: 'succeeded', started_at: 1, finished_at: 2, error: null, sha256: 'sha', rules: 20 };
 const source = { id: 'example', name: 'Example', url: 'https://example.com/list', format: 'domain_list' as const, enabled: false, auto_update: true, update_interval_hours: 24 };
 
 describe('subscription operations', () => {
-  it('polls acknowledged operations and reports replaced history without replaying POST', async () => {
+  it('polls an acknowledged update without replaying POST', async () => {
     let state = initial;
+    const refresh = { ...operation, kind: 'refresh' as const };
     const request = vi.fn(async (path: string) => {
-      if (path.endsWith('/prepare')) { state = { ...initial, operation: { ...operation, status: 'running', finished_at: null } }; return { operation_id: 'op1' }; }
+      if (path.endsWith('/refresh')) { state = { ...initial, operation: { ...refresh, status: 'running', finished_at: null } }; return { operation_id: 'op1' }; }
       return state;
     });
     const api = { request } as unknown as ApiClient;
     const hook = renderHook(() => useSubscriptions(api, 1));
     await waitFor(() => expect(hook.result.current.state).toEqual(initial));
-    await act(async () => { await hook.result.current.start('prepare', subscriptionDraft(source)); });
-    expect(request.mock.calls.find(([path]) => path.endsWith('/prepare'))).toBeTruthy();
+    await act(async () => { await hook.result.current.start('refresh', 'example'); });
+    expect(request).toHaveBeenCalledWith('filter/subscriptions/refresh', 'POST', { source_id: 'example' });
     expect(hook.result.current.operation?.status).toBe('running');
-    state = { ...initial, recent_operation: operation };
+    state = { ...initial, recent_operation: refresh };
     await act(async () => { await hook.result.current.load(); });
     expect(hook.result.current.operation?.status).toBe('succeeded');
-    state = initial;
-    await act(async () => { await hook.result.current.load(); });
-    expect(hook.result.current.replaced).toBe(true);
-    expect(request.mock.calls.filter(([path]) => path.endsWith('/prepare'))).toHaveLength(1);
+    expect(request.mock.calls.filter(([path]) => path.endsWith('/refresh'))).toHaveLength(1);
   });
 
   it('reconciles a disconnected POST using GET and preserves unknown instead of claiming success', async () => {
@@ -72,8 +70,7 @@ describe('subscription draft and console', () => {
       if (path === 'config' && method === 'PUT') {
         settings = previewSettings;
         revision += 1;
-        state = { ...state, config_revision: revision };
-        return { revision, transport_change: null };
+        return { revision, restart_required: false, transport_change: null };
       }
       if (path === 'config') return { toml: 'original', revision, has_backup: false };
       if (path === 'config/parse') return { toml: 'original', settings };
@@ -86,6 +83,7 @@ describe('subscription draft and console', () => {
       if (path === 'config/validate') return { restart_required: false, transport_change: null };
       if (path === 'filter/subscriptions') return state;
       if (path === 'filter/subscriptions/prepare') throw new ApiError(400, 'subscription_parse', '<img src=x onerror=alert(1)>');
+      if (path === 'filter/subscriptions/refresh') return { operation_id: 'op-refresh' };
       throw new Error(path);
     });
     const api = { request } as unknown as ApiClient; currentApi = api;
@@ -162,7 +160,7 @@ describe('subscription draft and console', () => {
     expect(hook.result.current.draft?.sources).toBeNull();
   });
 
-  it('fills a disabled Natsuki draft without network, retains controls during language/theme change, and localizes safe errors', async () => {
+  it('fills a disabled Natsuki draft without network, keeps controls across language and theme changes, and derives its ID from the name', async () => {
     vi.spyOn(crypto, 'randomUUID').mockImplementation(() => { throw new Error('unavailable on HTTP'); });
     const { request, wrapper } = fixture();
     const view = render(<SubscriptionsPanel language="en" />, { wrapper });
@@ -177,26 +175,31 @@ describe('subscription draft and console', () => {
     expect(screen.getByDisplayValue('https://raw.githubusercontent.com/Natsuki-Kaede/Natsuki-List/main/natsuki-list.list')).toBeTruthy();
     expect(screen.getAllByRole('switch', { name: '开启' }).every((item) => item.getAttribute('aria-checked') === 'false')).toBe(true);
     expect(request.mock.calls.filter(([path]) => path.includes('/prepare') || path.includes('/refresh'))).toHaveLength(0);
-    fireEvent.click(screen.getAllByRole('button', { name: '验证并下载' })[0]);
-    await screen.findByText(/规则格式不支持/);
-    fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
-    await waitFor(() => expect(request.mock.calls.filter(([path]) => path === 'filter/subscriptions').length).toBeGreaterThan(1));
-    expect(screen.getByText(/规则格式不支持/)).toBeTruthy();
-    expect(screen.queryByText(/onerror/)).toBeNull();
+    // The ID follows the name until it is edited under More options.
+    expect(screen.getByDisplayValue('natsuki-list')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '验证并下载' })).toBeNull();
+    fireEvent.change(screen.getByDisplayValue('Natsuki List'), { target: { value: 'Natsuki 主列表' } });
+    expect(screen.getByDisplayValue('natsuki')).toBeTruthy();
+    fireEvent.change(screen.getByDisplayValue('natsuki'), { target: { value: 'mine' } });
+    fireEvent.change(screen.getByDisplayValue('Natsuki 主列表'), { target: { value: 'Renamed' } });
+    expect(screen.getByDisplayValue('mine')).toBeTruthy();
     expect(screen.getByDisplayValue('My draft')).toBeTruthy();
-    view.rerender(<SubscriptionsPanel language="en" />);
-    expect(screen.getByText(/rules are malformed/)).toBeTruthy();
     delete document.documentElement.dataset.theme;
   });
 
-  it('keeps stale drafts but does not attribute a new revision source status to them', async () => {
-    const { wrapper } = fixture({ ...initial, config_revision: 2, sources: [{ id: source.id,
-      fingerprint: 'replacement', active: true, ready: true, input_rules: 12, bytes: 50,
-      last_success: 1, last_attempt: 1, next_update: null, failures: 0, error: null }] });
-    render(<SubscriptionsPanel language="en" />, { wrapper });
-    await screen.findByText(/saved configuration changed/);
-    expect(screen.getByDisplayValue(source.url)).toBeTruthy();
-    expect(screen.queryByText('Active')).toBeNull();
+  it('updates a saved source without a client revision while an unrelated draft is unsaved', async () => {
+    const { request, wrapper } = fixture(scheduled, { ...source, enabled: true });
+    let config!: ReturnType<typeof useConfig>;
+    function Console() { config = useConfig(); return <SubscriptionsPanel language="en" />; }
+    render(<Console />, { wrapper });
+    await screen.findByText('In use');
+    act(() => config.updateField('max_inflight', '50'));
+    expect(config.dirty).toBe(true);
+    const update = screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement;
+    expect(update.disabled).toBe(false);
+    fireEvent.click(update);
+    await waitFor(() => expect(request).toHaveBeenCalledWith('filter/subscriptions/refresh', 'POST', { source_id: source.id }));
+    expect(screen.queryByText(/saved again/)).toBeNull();
   });
 
   it('shows local null witnesses separately from a subscription whose ID is local', async () => {
@@ -210,5 +213,79 @@ describe('subscription draft and console', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Test' }));
     await screen.findByText(/My online list/);
     expect(request.mock.calls).toHaveLength(2);
+  });
+});
+
+describe('save downloads new sources first', () => {
+  const list = 'https://example.org/new.list';
+  function saveFixture(outcome: 'succeeded' | 'failed') {
+    const saved = { filter_subscriptions: { ...defaultSubscriptions, sources: [] as unknown[] }, cache: { rules: [] } };
+    let state: SubscriptionState = initial;
+    let preview = saved;
+    const request = vi.fn(async (path: string, method?: string, body?: unknown) => {
+      if (path === 'config' && method === 'PUT') return { revision: 2, restart_required: false, transport_change: null };
+      if (path === 'config') return { toml: 'original', revision: 1, has_backup: false };
+      if (path === 'config/parse') return { toml: 'original', settings: saved };
+      if (path === 'config/preview') {
+        const changes = (body as { changes: { filter_subscriptions: object } }).changes;
+        preview = { ...saved, filter_subscriptions: { ...saved.filter_subscriptions, ...changes.filter_subscriptions } };
+        return { toml: 'edited', settings: preview };
+      }
+      if (path === 'filter/subscriptions/prepare') {
+        state = { ...initial, operation: { ...operation, id: 'op-new', status: 'running', finished_at: null } };
+        return { operation_id: 'op-new' };
+      }
+      if (path === 'filter/subscriptions') {
+        const current = state;
+        if (current.operation?.status === 'running') state = { ...initial, recent_operation: { ...operation, id: 'op-new', status: outcome,
+          error: outcome === 'failed' ? { code: 'subscription_parse', line: 3 } : null } };
+        return current;
+      }
+      if (path === 'config/validate') return { restart_required: false, transport_change: null };
+      throw new Error(`Unexpected ${method} ${path}`);
+    });
+    const api = { request } as unknown as ApiClient; currentApi = api;
+    const wrapper = ({ children }: { children: React.ReactNode }) => <ConfigProvider api={api} active refreshSession={async () => {}}>{children}</ConfigProvider>;
+    return { request, wrapper };
+  }
+  async function draftSource(wrapper: ReturnType<typeof saveFixture>['wrapper']) {
+    let config!: ReturnType<typeof useConfig>;
+    function Console() { config = useConfig(); return <SubscriptionsPanel language="en" />; }
+    render(<Console />, { wrapper });
+    fireEvent.click(await screen.findByRole('button', { name: 'Add source' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'My List' } });
+    fireEvent.change(screen.getByLabelText('HTTPS URL'), { target: { value: list } });
+    fireEvent.click(screen.getByRole('switch', { name: 'On' }));
+    expect(screen.getByText('Add an HTTPS rule list and save; PariNS downloads and checks it first, then starts using it.')).toBeTruthy();
+    return () => config;
+  }
+
+  it('downloads an enabled new source, waits for it, then validates and saves', async () => {
+    const { request, wrapper } = saveFixture('succeeded');
+    const config = await draftSource(wrapper);
+    let prepared!: Awaited<ReturnType<ReturnType<typeof config>['prepareSave']>>;
+    await act(async () => { prepared = await config().prepareSave(); });
+    const paths = request.mock.calls.map(([path, method]) => `${method ?? 'GET'} ${path}`);
+    expect(request).toHaveBeenCalledWith('filter/subscriptions/prepare', 'POST', { source: { id: 'my-list', url: list, format: 'domain_list' } });
+    expect(paths.indexOf('POST filter/subscriptions/prepare')).toBeLessThan(paths.indexOf('POST config/validate'));
+    await act(async () => { await config().commitPrepared(prepared); });
+    expect(request.mock.calls.filter(([path]) => path === 'filter/subscriptions/prepare')).toHaveLength(1);
+    expect(request.mock.calls.some(([path, method]) => path === 'config' && method === 'PUT')).toBe(true);
+  });
+
+  it('stops before saving when the download fails and points at the source', async () => {
+    const { request, wrapper } = saveFixture('failed');
+    const config = await draftSource(wrapper);
+    await act(async () => { await expect(config().prepareSave()).rejects.toMatchObject({ key: 'subscriptions.subscription_parse', path: 'filter_subscriptions.sources.0.url' }); });
+    expect(request.mock.calls.some(([path]) => path === 'config/validate')).toBe(false);
+    expect(request.mock.calls.some(([path, method]) => path === 'config' && method === 'PUT')).toBe(false);
+    expect(config().draft?.toml).toBe('edited');
+  });
+
+  it('generates unique, valid IDs from names', () => {
+    expect(subscriptionId('My List!', [])).toBe('my-list');
+    expect(subscriptionId('My List', ['my-list', 'my-list-2'])).toBe('my-list-3');
+    expect(subscriptionId('中文名称', [])).toBe('source');
+    expect(subscriptionId('a'.repeat(40), ['a'.repeat(32)])).toBe(`${'a'.repeat(30)}-2`);
   });
 });

@@ -149,7 +149,7 @@ describe('LiveLogClient', () => {
 });
 
 function page(entries: LogEntry[], epoch = 3, next: number | null = null): LogListResponse {
-  return { revision: 7, page: { log_epoch: epoch, storage, enabled: true, total: entries.length, entries, next_cursor: next } };
+  return { page: { log_epoch: epoch, storage, enabled: true, total: entries.length, entries, next_cursor: next } };
 }
 
 function liveApi(list: (body: { before_id: number | null; status: string | null }) => LogListResponse) {

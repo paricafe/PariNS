@@ -3,7 +3,7 @@ import { translate, type Language } from '../i18n';
 import { Drawer } from './beui';
 
 // Actions that discard or remove data get the red action-sheet button.
-const DESTRUCTIVE = new Set(['app.discard', 'ui.rollback', 'views.clearAll', 'views.clearSelected', 'shell.discardPem',
+const DESTRUCTIVE = new Set(['app.discard', 'ui.rollback', 'views.clearAll', 'views.clearEntry', 'shell.discardPem',
   'storage.clearLogs', 'storage.resetTotals', 'storage.clearHistory']);
 
 type ConfirmAction = (messageKey: string, actionKey: string, returnFocus?: HTMLElement) => Promise<boolean>;

@@ -127,7 +127,7 @@ export const settingPages = {
       advanced(number("source_limits.ipv4_prefix", 0, 32)), advanced(number("source_limits.ipv6_prefix", 0, 128)),
       number("source_limits.max_inflight", 1, 65536), number("source_limits.max_connections", 1, 65536),
     ]),
-    group("coalescing", [field("coalescing.enabled", "checkbox"), number("coalescing.max_groups", 1, 65536), number("coalescing.max_waiters", 1, 65536)]),
+    group("coalescing", [field("coalescing.enabled", "checkbox"), advanced(number("coalescing.max_groups", 1, 65536)), advanced(number("coalescing.max_waiters", 1, 65536))]),
     group("metrics", [number("metrics.interval_secs", 0, 3600, true), visible(field("admin_listen", "nullable", true))]),
   ]),
   updates: page("updates", [

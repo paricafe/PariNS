@@ -11,7 +11,7 @@ export interface SourceStatus {
   last_attempt: number | null; next_update: number | null; failures: number; error: Failure | null;
 }
 export interface SubscriptionState {
-  config_revision: number; enabled: boolean; sources: SourceStatus[];
+  enabled: boolean; sources: SourceStatus[];
   generation: number; content_revision: number; input_rules: number;
   index_rules: number; index_bytes: number; retained_bytes: number; disk_bytes: number;
   operation: Operation | null; recent_operation: Operation | null; unavailable_reason: string | null;

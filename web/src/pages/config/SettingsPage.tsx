@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Ellipsis } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { SPRING_IOS } from '../../components/beui/motion';
@@ -16,13 +16,17 @@ import { Segmented } from '../../components/Segmented';
 import { Menu, Select } from '../../components/Popover';
 import { useBanner } from '../../components/Banner';
 import { useConfirm } from '../../components/ConfirmProvider';
-import { transportChangeText } from '../../components/TransportHint';
+import { TransportHint, transportChangeText } from '../../components/TransportHint';
+import { lineDiff } from './lineDiff';
 import { StorageTools } from './StorageTools';
 import { SecurityRuntime } from './SecurityRuntime';
+import { DohRuntimeRow } from './DohRuntime';
 import type { SnapshotReport } from '../observability/storage';
 import { UpdatePanel } from '../../features/updates/UpdatePanel';
 import { SubscriptionsPanel } from '../../features/subscriptions/SubscriptionsPanel';
 import { UnitInput, unitFamily } from '../../components/UnitInput';
+import { cacheBreakdown, cacheHitRate } from '../observability/metrics';
+import { scopeNote } from '../observability/diagnostics';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
 type CacheTab = typeof cacheTabs[number];
@@ -93,9 +97,6 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
     const enabled = group.optional ? draft.optional[group.optional] ?? getPath(draft.settings, group.optional) !== null : true;
     const filterExternal = group.id === 'filterRules' && Boolean(draft.fields.filter_file ?? getPath(draft.settings, 'filter_file'));
     const disabled = locked || !enabled || filterExternal;
-    const h3 = draft.fields['doh.http3'] ?? getPath(draft.settings, 'doh.http3');
-    const endpoint = draft.fields['doh.listen'] ?? fieldDisplayValue(getPath(draft.settings, 'doh.listen'), settingPages.security.groups.find((candidate) => candidate.id === 'doh')!.fields[0]);
-    const port = typeof endpoint === 'object' ? endpoint.port : '';
     const main = group.fields.filter((field) => !field.advanced);
     const more = group.fields.filter((field) => field.advanced);
     const open = moreOpen.has(group.id);
@@ -106,16 +107,35 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
       <div className="grouped">
         {group.optional && <div className="row" data-layout="inline"><div className="row-label"><label htmlFor={`enable-${group.id}`}>{t(group.enableKey)}</label></div>
           <div className="row-control"><Switch id={`enable-${group.id}`} checked={enabled} disabled={locked} onCheckedChange={(next) => setOptional(group.optional!, next)} /></div></div>}
+        {group.id === 'doh' && <DohRuntimeRow language={language} />}
         <div className="settings-expand" data-open={enabled} inert={!enabled}><div>
           {rows(main)}
           {more.length > 0 && <ExpandRow label={t('shell.moreOptions')} open={open} onToggle={(next) => setMoreOpen((current) => { const set = new Set(current); if (next) set.add(group.id); else set.delete(group.id); return set; })}>{rows(more)}</ExpandRow>}
         </div></div>
       </div>
-      {group.id === 'doh' && enabled && <p className="group-footer notice-footer">{translate(h3 === true ? 'storage.draftDoh3' : 'storage.draftDoh', language, { port: /^0+$/.test(port.trim()) ? t('storage.automaticPort') : port || '—' })}</p>}
       {group.id === 'upstreams' && recursive && <p className="group-footer notice-footer">{t('settings.group.upstreams.recursiveHint')}</p>}
       {(filterExternal || group.helpKey) && <p className={group.id === 'resolution' && recursive ? 'group-footer notice-footer' : 'group-footer'}>{t(filterExternal ? 'settings.filter_file.help' : group.helpKey!)}</p>}
     </section>;
   })}</div>;
+}
+
+/** Optional comparison of the TOML being edited with the saved configuration. */
+function TomlChanges({ language }: { language: Language }) {
+  const { draft } = useConfig();
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const t = (key: string) => translate(key, language);
+  const diff = useMemo(() => open && draft ? lineDiff(draft.original, draft.toml) : [], [open, draft?.original, draft?.toml]);
+  if (!draft) return null;
+  return <>
+    <button ref={trigger} type="button" className="button secondary" disabled={draft.toml === draft.original} onClick={() => setOpen(true)}>{t('app.showChanges')}</button>
+    <Drawer open={open} variant="sheet" className="diff-sheet" title={t('app.diffTitle')} closeLabel={t('ui.closeDialog')} onClose={() => { setOpen(false); requestAnimationFrame(() => trigger.current?.focus()); }}>
+      <p className="muted small">{t('app.diffHelp')}</p>
+      {draft.previewTransportChange && <TransportHint change={draft.previewTransportChange} language={language} />}
+      {diff.some((line) => line.kind !== 'same') ? <pre className="diff-lines"><code>{diff.map((line, index) => <span className={`diff-${line.kind}`} key={index}>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text || ' '}</span>)}</code></pre>
+        : <p className="muted">{t('app.noChanges')}</p>}
+    </Drawer>
+  </>;
 }
 
 function CacheRules({ language }: { language: Language }) {
@@ -149,8 +169,8 @@ function CacheRules({ language }: { language: Language }) {
   </section>;
 }
 
-interface CacheStatus { revision: number; running: boolean; cache?: Record<string, number>; refresh?: Record<string, number>; cache_persistence?: SnapshotReport }
-interface Inspection { revision: number; epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
+interface CacheStatus { running: boolean; metrics?: { counters: Record<string, number> } | null; cache?: Record<string, number>; refresh?: Record<string, number>; cache_persistence?: SnapshotReport }
+interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
 /** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
 function restoreSummary(report: SnapshotReport, language: Language): string {
@@ -172,7 +192,9 @@ function CacheUsage({ language }: { language: Language }) {
   const load = async () => { try { setStatus(await api.request<CacheStatus>('status')); setError(null); } catch (reason) { setError(toConfigIssue(reason)); } };
   useEffect(() => { void load(); }, [api]);
   const cache = status?.running ? status.cache : null;
-  const lookups = cache ? (cache.hits ?? 0) + (cache.stale_hits ?? 0) + (cache.misses ?? 0) : 0;
+  const lookups = cacheBreakdown(status?.metrics?.counters);
+  const hitRate = cacheHitRate(status?.metrics?.counters);
+  const count = (value: number) => formatNumber(value, language);
   const details: [string, number | undefined, number | undefined][] = [
     ['positiveNegative', cache?.positive_entries, cache?.negative_entries], ['freshStale', cache?.hits, cache?.stale_hits],
     ['missBypass', cache?.misses, cache?.bypasses], ['evictionRejection', cache?.evictions, cache?.rejections],
@@ -190,7 +212,9 @@ function CacheUsage({ language }: { language: Language }) {
             ['byteBudget', cache.bytes, cache.max_bytes, formatBytes(cache.bytes, language), formatBytes(cache.max_bytes, language)]] as const).map(([key, used, max, usedText, maxText]) =>
             <div className="usage-meter" key={key}><span className="small muted">{t(key)}</span><strong className="num">{usedText} <span className="muted">/ {maxText}</span></strong>
               <div className="usage-track" role="meter" aria-valuemin={0} aria-valuemax={max || 1} aria-valuenow={used} aria-label={t(key)}><i style={{ transform: `scaleX(${max ? Math.min(1, used / max) : 0})` }} /></div></div>)}</div>
-          {row(translate('shell.hitRate', language), lookups ? translate('shell.hitRateValue', language, { percent: formatNumber(((cache.hits ?? 0) + (cache.stale_hits ?? 0)) / lookups * 100, language, { maximumFractionDigits: 0 }), hits: formatNumber((cache.hits ?? 0) + (cache.stale_hits ?? 0), language), misses: formatNumber(cache.misses ?? 0, language) }) : '—')}
+          <div className="row" data-layout="inline"><div className="row-label"><span>{translate('shell.hitRate', language)}</span><InfoTip text={translate('shell.hitRateHelp', language)} label={translate('shell.about', language, { label: translate('shell.hitRate', language) })} /></div>
+            <div className="row-control"><span className="row-value num">{hitRate === null ? '—' : `${formatNumber(hitRate, language, { maximumFractionDigits: 1 })}%`}</span></div>
+            {lookups && <small className="row-note">{translate('shell.cacheLookups', language, { hits: count(lookups.hits), stale: count(lookups.stale), joined: count(lookups.joined), misses: count(lookups.misses) })}</small>}</div>
           <ExpandRow label={translate('storage.detailedCounts', language)}>{details.map(([key, first, second]) => <div key={key}>{row(t(key), `${formatNumber(first ?? 0, language)} / ${formatNumber(second ?? 0, language)}`)}</div>)}
             {row(t('ecsSharingRevocations'), formatNumber(cache.ecs_sharing_revocations ?? 0, language))}</ExpandRow>
         </>}
@@ -199,7 +223,7 @@ function CacheUsage({ language }: { language: Language }) {
         {cache && <button type="button" className="button danger" disabled={working} onClick={async (event) => {
           const trigger = event.currentTarget;
           if (!status?.cache || !await confirmAction('views.clearAllConfirm', 'views.clearAll', trigger)) return;
-          setWorking(true); try { await api.request('cache/invalidate', 'POST', { all: true, revision: status.revision, epoch: status.cache.epoch }); await load(); banner(t('cleared')); } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
+          setWorking(true); try { await api.request('cache/invalidate', 'POST', { all: true, epoch: status.cache.epoch }); await load(); banner(t('cleared')); } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
         }}>{t('clearAll')}</button>}</div>
     </section>
     {persistence && <section className="settings-group" aria-labelledby="cache-restore-title">
@@ -211,43 +235,54 @@ function CacheUsage({ language }: { language: Language }) {
   </>;
 }
 
-function CacheInspect({ language, dirty }: { language: Language; dirty: boolean }) {
+interface Variant { name: string; qtype: string; scope: string; state: 'fresh' | 'stale' | 'expired' }
+
+export function CacheInspect({ language, dirty }: { language: Language; dirty: boolean }) {
   const { api } = useSession();
   const confirmAction = useConfirm();
   const [name, setName] = useState(''); const [qtype, setQtype] = useState('A'); const [subnet, setSubnet] = useState('');
   const [edns, setEdns] = useState(true); const [dnssec, setDnssec] = useState(false); const [cd, setCd] = useState(false); const [rd, setRd] = useState(true);
-  const [scope, setScope] = useState(''); const [result, setResult] = useState<Inspection | null>(null); const [error, setError] = useState<ConfigIssue | null>(null);
+  const [result, setResult] = useState<Inspection | null>(null); const [error, setError] = useState<ConfigIssue | null>(null);
   const [working, setWorking] = useState(false);
   const t = (key: string) => translate(`views.${key}`, language);
+  const request = () => api.request<Inspection>('cache/inspect', 'POST', { name: name.trim(), qtype, subnet: subnet.trim() || null, edns, dnssec_ok: dnssec, checking_disabled: cd, recursion_desired: rd });
   const inspect = async (event: FormEvent) => {
     event.preventDefault(); setWorking(true); setResult(null); setError(null);
-    try { setResult(await api.request<Inspection>('cache/inspect', 'POST', { name: name.trim(), qtype, subnet: subnet.trim() || null, edns, dnssec_ok: dnssec, checking_disabled: cd, recursion_desired: rd })); }
+    try { setResult(await request()); }
     catch (reason) { setError(toConfigIssue(reason)); }
     finally { setWorking(false); }
   };
+  /** Clears the listed entry's name, type and scope against the inspected epoch, then shows the cache again. */
+  const clear = async (variant: Variant, trigger: HTMLElement) => {
+    if (!result || !await confirmAction('views.clearEntryConfirm', 'views.clearEntry', trigger)) return;
+    setWorking(true); setError(null);
+    try {
+      await api.request('cache/invalidate', 'POST', { name: variant.name, qtype: variant.qtype, scope: variant.scope, epoch: result.epoch });
+      setResult(await request());
+    } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
+  };
+  const variants = (result?.inspection.variants ?? []) as unknown as Variant[];
   return <section className="panel"><h2>{t('inspectTitle')}</h2>{dirty && <p className="notice">{t('inspectActiveConfig')}</p>}
     <form onSubmit={(event) => void inspect(event)} className="fields-grid">
       <label className="field">{t('name')}<input value={name} onChange={(event) => setName(event.target.value)} required spellCheck={false} /></label>
-      <label className="field">{t('qtype')}<input value={qtype} onChange={(event) => setQtype(event.target.value)} required spellCheck={false} /></label>
+      <label className="field">{t('inspectQtype')}<input value={qtype} onChange={(event) => setQtype(event.target.value)} required spellCheck={false} /></label>
       <label className="field">{t('subnet')}<input value={subnet} onChange={(event) => setSubnet(event.target.value)} spellCheck={false} /></label>
-      <div className="checkbox-row wide">{[['EDNS', edns, setEdns], ['DO', dnssec, setDnssec], ['CD', cd, setCd], ['RD', rd, setRd]].map(([label, checked, setter]) =>
-        <label key={label as string}><input type="checkbox" checked={checked as boolean} onChange={(event) => (setter as (value: boolean) => void)(event.target.checked)} />{label as string}</label>)}</div>
+      <details className="more-options wide"><summary>{translate('shell.moreOptions', language)}</summary>
+        <div className="checkbox-row">{[['EDNS', edns, setEdns], ['DO', dnssec, setDnssec], ['CD', cd, setCd], ['RD', rd, setRd]].map(([label, checked, setter]) =>
+          <label key={label as string}><input type="checkbox" checked={checked as boolean} onChange={(event) => (setter as (value: boolean) => void)(event.target.checked)} />{label as string}</label>)}</div>
+      </details>
       <button className="button primary" disabled={working} type="submit">{t('inspect')}</button>
     </form>
     {error && <p className="error" role="alert">{presentIssue(error, language)}</p>}
     {result && <div className="inspection-result"><h3>{t(`explain${result.explanation.state[0].toUpperCase()}${result.explanation.state.slice(1)}`)}</h3>
       <p>{t('explanation').replace('{reason}', t(result.explanation.reason)).replace('{scope}', (result.explanation.scope === null ? t('none') : hasTranslation(`views.${result.explanation.scope}`) ? t(result.explanation.scope) : result.explanation.scope))}</p>
       {result.inspection.ecs_sharing && <p>{t(`ecsSharing${result.inspection.ecs_sharing[0].toUpperCase()}${result.inspection.ecs_sharing.slice(1)}`)}</p>}
-      <p className="muted small">{t('variants')}: {result.inspection.variants.length}</p>
-      <div className="variant-list">{result.inspection.variants.map((variant, index) => <details key={index}><summary>{String(variant.scope)} · {String(variant.state)}</summary><pre>{JSON.stringify(variant, null, 2)}</pre></details>)}</div>
+      <p className="muted small">{t('variants')}: {variants.length}</p>
+      <ul className="variant-list">{variants.map((variant, index) => <li key={index} className="variant-row">
+        <span>{scopeNote(variant.scope, language)} · {t(`entry_${variant.state}`)}</span>
+        <button type="button" className="button danger" disabled={working} onClick={(event) => void clear(variant, event.currentTarget)}>{t('clearEntry')}</button>
+      </li>)}</ul>
       {result.inspection.truncated && <p>{t('variantsTruncated')}</p>}
-      <div className="danger-zone"><label className="field">{t('scope')}<input value={scope} onChange={(event) => setScope(event.target.value)} /></label>
-        <button type="button" className="button danger" disabled={working} onClick={async () => {
-          if (!await confirmAction('views.clearSelectedConfirm', 'views.clearSelected')) return;
-          setWorking(true);
-          try { await api.request('cache/invalidate', 'POST', { name: name.trim(), qtype, scope: scope.trim() || null, revision: result.revision, epoch: result.epoch }); setResult(null); }
-          catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
-        }}>{t('clearSelected')}</button></div>
     </div>}
   </section>;
 }
@@ -272,7 +307,6 @@ function CertificateImport({ language }: { language: Language }) {
       disabled={locked || configBusy} onClick={() => { setTarget(protocol); setError(null); }}>{t('ui.importCertificate')} · {protocol === 'doh' ? 'DoH' : protocol === 'dot' ? 'DoT' : 'DoQ'}</button>)}</div>
       : <p className="muted small">{t('shell.enableProtocolFirst')}</p>}
     <Drawer open={target !== null} variant="sheet" title={`${t('ui.pasteCertificate')} · ${target === 'doh' ? 'DoH' : target === 'dot' ? 'DoT' : target === 'doq' ? 'DoQ' : ''}`} closeLabel={t('ui.closeDialog')} onClose={() => void close()}>
-    <p className="muted small">{t('app.importFillsDraft')}</p>
     <form className="fields-grid" onSubmit={async (event) => {
       event.preventDefault(); if (!target) return;
       if (locked || configBusy || busy) return;
@@ -292,7 +326,7 @@ function CertificateImport({ language }: { language: Language }) {
       <fieldset className="fields-grid wide" disabled={busy || locked || configBusy}>
         <label className="field wide">{t('ui.certificate')}<textarea rows={5} value={certificate} onChange={(event) => setCertificate(event.target.value)} required spellCheck={false} autoComplete="off" /></label>
         <label className="field wide">{t('ui.privateKey')}<textarea rows={5} value={privateKey} onChange={(event) => setPrivateKey(event.target.value)} required spellCheck={false} autoComplete="off" /></label>
-        <button type="submit" className="button primary">{t('app.importAndFill')}</button>
+        <button type="submit" className="button primary">{t('app.importCertificate')}</button>
       </fieldset>
     </form>{error && <p className="error" role="alert">{presentIssue(error, language)}</p>}</Drawer>
   </div><p className="group-footer">{t('ui.certificateHelp')}</p></section>;
@@ -329,21 +363,23 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   const intro = pageId === 'advanced' ? t('app.advancedIntro') : t(settingPages[pageId].introKey);
   const title = pageId === 'advanced' ? t('app.advanced') : t(settingPages[pageId].titleKey);
   if (pageId !== 'advanced' && needsParse) return <div className="page-stack"><h1>{title}</h1><p className="notice" role="status">{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate('/advanced')}>{t('app.returnToToml')}</button></div>;
+  // A check without saving belongs with the raw TOML editor; settings pages simply save.
+  const check = () => void validate().then((result) => {
+    if (result.transport_change) setNotice(transportChangeText(result.transport_change, language));
+    else banner(t(dirty ? result.restart_required ? 'app.validRestart' : 'app.validCache' : 'shell.validSaved'));
+  }).catch(() => {});
   const actions = [
-    { label: t('ui.validate'), disabled: !draft || busy, onSelect: () => void validate().then((result) => {
-      if (result.transport_change) setNotice(transportChangeText(result.transport_change, language));
-      else banner(t(dirty ? result.restart_required ? 'app.validRestart' : 'app.validCache' : 'shell.validSaved'));
-    }).catch(() => {}) },
     { label: t(dirty ? 'ui.export' : 'shell.exportConfig'), disabled: !draft || busy, onSelect: () => void exportDraft().then(() => banner(t('app.exported'))).catch((reason) => setError(toConfigIssue(reason))) },
     { label: t('ui.rollback'), destructive: true, disabled: !draft?.hasBackup || busy, onSelect: (trigger: HTMLElement) => void (async () => {
       try {
         const prepared = await previewRollback();
+        if (!prepared) return;
         const change = prepared.transportChange;
         const message = change ? `${t('app.rollbackHelp')} ${transportChangeText(change, language)} ${change.requires_http_confirmation ? t('app.confirmHttpDowngrade') : ''}` : t('app.rollbackHelp');
         if (!await confirmAction(message, 'ui.rollback', trigger)) return;
         const result = await rollback(prepared);
         if (result.transportChange) { discard(); transportChanged(result.transportChange); }
-        else if (result.refreshed) banner(t('app.restored'));
+        else if (result.refreshed) banner(t(result.restartRequired ? 'app.restoredRestarted' : 'app.restored'));
       } catch (reason) { setError(toConfigIssue(reason)); }
     })() },
   ];
@@ -351,7 +387,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
       <Menu label={t('shell.more')} icon={<Ellipsis size={17} aria-hidden="true" />} actions={actions} /></header>
     {error && <div className="notice error" role="alert">{presentIssue(error, language)}<button type="button" onClick={() => setError(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
     {notice && <div className="notice" role="status">{notice}<button type="button" onClick={() => setNotice(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
-    {pageId === 'advanced' ? needsFormFlush ? <div className="notice"><p>{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate(`/${errorPage}`)}>{t('app.returnToEdit')}</button></div> : <section className="panel"><label htmlFor="advanced-toml" className="sr-only">TOML</label><textarea id="advanced-toml" className="toml-editor" value={draft?.toml ?? ''} disabled={busy || draft?.unknownApply} spellCheck={false} onChange={(event) => setToml(event.target.value)} /></section>
+    {pageId === 'advanced' ? needsFormFlush ? <div className="notice"><p>{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate(`/${errorPage}`)}>{t('app.returnToEdit')}</button></div> : <section className="panel"><div className="toml-tools button-group"><button type="button" className="button secondary" disabled={!draft || busy} onClick={check}>{t('ui.validate')}</button><TomlChanges language={language} /></div><label htmlFor="advanced-toml" className="sr-only">TOML</label><textarea id="advanced-toml" className="toml-editor" value={draft?.toml ?? ''} disabled={busy || draft?.unknownApply} spellCheck={false} onChange={(event) => setToml(event.target.value)} /></section>
       : pageId === 'cache' ? <>
         <Tabs label={title} items={cacheTabs.map((tab) => ({ value: tab, label: t(`views.cacheTab${tab[0].toUpperCase()}${tab.slice(1)}`) }))} value={cacheTab} onChange={(value) => setCacheTab(value as CacheTab)} />
         {cacheTab === 'usage' && <CacheUsage language={language} />}
@@ -364,6 +400,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
           <div className="row-control"><span className="row-value transport-address">{state.transport?.origin ?? window.location.origin}</span></div></div></div>
         <p className="group-footer">{t(state.transport?.scheme === 'https' ? 'app.transportHttpsHelp' : 'app.transportHttpHelp')}</p>
       </section>}
-      {pageId === 'security' && <SecurityRuntime language={language} />}{pageId === 'storage' && <StorageTools language={language} />}{pageId === 'updates' && <UpdatePanel language={language} />}<GenericSettings pageId={pageId} language={language} />{pageId === 'filters' && <SubscriptionsPanel language={language} />}{pageId === 'security' && <CertificateImport language={language} />}</>}
+      {pageId === 'security' ? <SecurityRuntime language={language}><GenericSettings pageId={pageId} language={language} /></SecurityRuntime> : <>
+        {pageId === 'storage' && <StorageTools language={language} />}{pageId === 'updates' && <UpdatePanel language={language} />}<GenericSettings pageId={pageId} language={language} /></>}{pageId === 'filters' && <SubscriptionsPanel language={language} />}{pageId === 'security' && <CertificateImport language={language} />}</>}
   </div>;
 }

@@ -71,7 +71,7 @@ describe('software update presentation', () => {
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await waitFor(() => expect(mocks.request).toHaveBeenCalledWith('updates/apply', 'POST', { plan_id: 'plan-1', expected_version: '0.1.5', config_revision: 7 }));
+    await waitFor(() => expect(mocks.request).toHaveBeenCalledWith('updates/apply', 'POST', { plan_id: 'plan-1', expected_version: '0.1.5' }));
     await screen.findByText(/update request couldn't be confirmed/);
     expect(mocks.expectRestart).toHaveBeenCalledWith(true);
     expect(mocks.config.setUpdateLocked).toHaveBeenCalledWith(true);

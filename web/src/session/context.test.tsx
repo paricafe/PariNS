@@ -257,4 +257,36 @@ describe('session transition', () => {
     await act(async () => { finishLogout(jsonResponse({ setup_required: false, authenticated: false, session: null, transport: session.transport })); await logout; });
     expect(hook.result.current.state.phase).toBe('login');
   });
+
+  it('confirms an unconfirmed sign-out by reading the session, never by sending it again', async () => {
+    let signedOut = false;
+    let logouts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/session') return jsonResponse(signedOut ? { setup_required: false, authenticated: false, session: null, transport: session.transport } : session);
+      if (url === '/api/logout') { logouts += 1; signedOut = true; throw new TypeError('connection lost'); }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    await act(async () => { await hook.result.current.logout().catch(() => {}); });
+    expect(hook.result.current.state).toMatchObject({ phase: 'logout-unknown', logout: 'unconfirmed' });
+    let outcome = '';
+    await act(async () => { outcome = await hook.result.current.confirmLogout(); });
+    expect(outcome).toBe('signed-out');
+    expect(hook.result.current.state.phase).toBe('login');
+    expect(logouts).toBe(1);
+  });
+
+  it('reports a session that is still signed in after an unconfirmed sign-out', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/session') return jsonResponse(session);
+      if (url === '/api/logout') throw new TypeError('connection lost');
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    await act(async () => { await hook.result.current.logout().catch(() => {}); });
+    await act(async () => { await hook.result.current.confirmLogout(); });
+    expect(hook.result.current.state).toMatchObject({ phase: 'logout-unknown', logout: 'signed-in' });
+  });
 });

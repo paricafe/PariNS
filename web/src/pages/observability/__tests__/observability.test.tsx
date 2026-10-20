@@ -5,7 +5,7 @@ import { ApiError } from "../../../session/client";
 import type { ApiClient } from "../../../session/client";
 import { LogsPage } from "../LogsPage";
 import { OverviewPage } from "../OverviewPage";
-import { averageLatencyMillis, cacheHitRate, coalescedShare, histogramRows, isolatedPoints, trendSeries, type HistorySample, type StatusView } from "../metrics";
+import { averageLatencyMillis, cacheBreakdown, cacheHitRate, histogramRows, isolatedPoints, trendSeries, type HistorySample, type StatusView } from "../metrics";
 import type { LogEntry, LogListResponse } from "../logs";
 import { storage } from './fixtures';
 
@@ -20,7 +20,7 @@ function fakeApi(handler: (path: string, body?: unknown) => unknown): ApiClient 
 }
 
 const status: StatusView = {
-  running: true, revision: 7, last_error: null, listen: "127.0.0.1:5353", uptime_seconds: 3600, generation: 2,
+  running: true, last_error: null, listen: "127.0.0.1:5353", uptime_seconds: 3600, generation: 2,
   dns_health: { state: 'running', ready: true, generation: 2, changed_at_ms: Date.now(), code: null }, resolution_mode: 'forward', diagnostics: { cache: null, upstreams: null, recursion: null, quic: { scope: 'process', doq: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 }, doh3: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 } } },
   metrics: {
     counters: { requests: 100, cache_hits: 30, cache_misses: 70, query_blocked: 2, response_blocked: 3,
@@ -49,10 +49,12 @@ describe("observability data math", () => {
   it("uses cache lookups and request timer counts as denominators", () => {
     expect(cacheHitRate(status.metrics?.counters)).toBe(30);
     expect(cacheHitRate({ cache_hits: 0, cache_misses: 0 })).toBeNull();
-    // Coalesced followers are reported beside the hit rate, never folded into it.
-    expect(coalescedShare({ cache_hits: 30, cache_misses: 70, flight_joined: 8 })).toBe(8);
-    expect(coalescedShare({ cache_hits: 30, cache_misses: 70, flight_joined: 0 })).toBeNull();
-    expect(cacheHitRate({ cache_hits: 30, cache_misses: 70, flight_joined: 8 })).toBe(30);
+    // Hit rate = (fresh hits + stale hits + coalesced) / cache lookups: queries with no upstream request of their own.
+    expect(cacheHitRate({ cache_hits: 30, cache_misses: 70, cache_lookup_stale: 2, flight_joined: 8 })).toBe(40);
+    expect(cacheBreakdown({ cache_hits: 30, cache_misses: 70, cache_lookup_stale: 2, flight_joined: 8 }))
+      .toEqual({ lookups: 100, hits: 30, stale: 2, joined: 8, misses: 60 });
+    // A follower that also fell back to a stale answer is never counted past the lookups.
+    expect(cacheHitRate({ cache_hits: 1, cache_misses: 2, cache_lookup_stale: 2, flight_joined: 2 })).toBe(100);
     expect(averageLatencyMillis(status.metrics?.request_latency)).toBe(2.5);
     expect(averageLatencyMillis({ count: 0, sum_micros: 0, buckets: [] })).toBeNull();
   });
@@ -185,11 +187,14 @@ describe("OverviewPage", () => {
     await waitFor(() => expect(screen.getByText('Resolution mode')).toBeTruthy());
     expect(screen.getByText('Resolution mode').nextElementSibling?.textContent).toBe('—');
   });
-  it('reports coalesced followers beside the unchanged hit rate', async () => {
-    const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, flight_joined: 9 } } } };
+  it('shows one hit rate that includes stale hits and coalesced queries, with the definition behind ⓘ', async () => {
+    const totals = { ...stats, totals: { ...stats.totals, metrics: { ...status.metrics!, counters: { ...status.metrics!.counters, cache_lookup_stale: 1, flight_joined: 9 } } } };
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? status : totals)} language="en" onOpenDns={() => {}} />);
-    await waitFor(() => expect(screen.getByText(/Another 9% joined an identical query in progress/)).toBeTruthy());
-    expect(screen.getByText("30.0%")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("40.0%")).toBeTruthy());
+    expect(screen.queryByText(/joined an identical query in progress without/)).toBeNull();
+    expect(screen.getByText(/cache hit rate 40%/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'About “Cache hit rate”' }));
+    expect(screen.getByRole('note').textContent).toContain('joining an identical query in progress');
   });
   it("renders cumulative metrics separately from time-window trend", async () => {
     const api = fakeApi((path) => path === "status" ? status : stats);
@@ -198,6 +203,7 @@ describe("OverviewPage", () => {
     await waitFor(() => expect(screen.getByText("100")).toBeTruthy());
     expect(screen.getByText("30.0%")).toBeTruthy();
     expect(screen.getByText("Cache hit rate")).toBeTruthy();
+    expect(screen.queryByText('Settings')).toBeNull();
     expect(screen.getByText("2.50 ms")).toBeTruthy();
     expect(screen.getAllByText("5").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("tab", { name: "Last 7 days" }));
@@ -226,7 +232,7 @@ describe("OverviewPage", () => {
 describe("LogsPage", () => {
   it('resets cursors for cache filters and ignores late pages while keeping current content', async () => {
     let finishOld!: (value: unknown) => void;
-    const page = (entries: LogEntry[]) => ({ revision: 7, page: { log_epoch: 3, storage, enabled: true, total: 2, entries, next_cursor: 20 } });
+    const page = (entries: LogEntry[]) => ({ page: { log_epoch: 3, storage, enabled: true, total: 2, entries, next_cursor: 20 } });
     const api = fakeApi((_path, body) => {
       const input = body as { cache: string | null; before_id: number | null };
       if (input.before_id) return new Promise((resolve) => { finishOld = resolve; });
@@ -241,21 +247,24 @@ describe("LogsPage", () => {
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });
     expect(screen.queryByText('late.test')).toBeNull();
     fireEvent.click(screen.getAllByRole('button', { name: 'Query details' })[0]);
-    expect(screen.getAllByText('exact_ecs:192.0.2.0/24').length).toBeGreaterThan(0);
-    // The raw scope code stays verbatim, with a plain-language note beside it.
-    expect(screen.getAllByText('Only for requests from exactly 192.0.2.0/24').length).toBeGreaterThan(0);
+    // The scope reads in plain language; the raw code stays verbatim behind ⓘ, and the record ID is gone.
+    expect(screen.getAllByText(/Only for requests from exactly 192.0.2.0\/24/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Raw scope code' })[0]);
+    expect(screen.getAllByRole('note').some((note) => note.textContent === 'exact_ecs:192.0.2.0/24')).toBe(true);
+    expect(screen.queryByText('Record ID')).toBeNull();
+    expect(screen.getAllByText('ECS & query flags').length).toBeGreaterThan(0);
     view.unmount();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByText('192.0.2.0/24')).toBeNull();
   });
 
-  it("uses server filters/cursor, shows details in a card, and clears with the listed revision", async () => {
+  it("uses server filters/cursor, shows details in a card, and clears with the listed epoch", async () => {
     const requests: { path: string; body: unknown }[] = [];
     let entries = [entry];
     const api = fakeApi((path, body) => {
       requests.push({ path, body });
-      if (path === "query-log/clear") { entries = []; return { removed: 1, revision: 7 }; }
-      const response: LogListResponse = { revision: 7, page: { log_epoch: 3, storage, enabled: true, total: entries.length, entries, next_cursor: entries.length ? 20 : null } };
+      if (path === "query-log/clear") { entries = []; return { removed: 1, epoch: 4 }; }
+      const response: LogListResponse = { page: { log_epoch: 3, storage, enabled: true, total: entries.length, entries, next_cursor: entries.length ? 20 : null } };
       return response;
     });
     render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
@@ -279,14 +288,14 @@ describe("LogsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Clear log/ }));
     fireEvent.click(screen.getByRole("button", { name: "Clear log" }));
     await waitFor(() => expect(requests.some((request) => request.path === "query-log/clear"
-      && (request.body as { revision: number; log_epoch: number }).revision === 7 && (request.body as { log_epoch: number }).log_epoch === 3)).toBe(true));
+      && JSON.stringify(request.body) === JSON.stringify({ log_epoch: 3 }))).toBe(true));
     expect(screen.getByText("Query log cleared.")).toBeTruthy();
   });
 
   it("switches language without re-requesting or losing the older page and translates failures at render time", async () => {
     const api = fakeApi((_path, body) => {
       const before = (body as { before_id: number | null }).before_id;
-      return { revision: 7, page: { log_epoch: 3, storage, enabled: true, total: 2, entries: [{ ...entry, name: before ? 'older.test' : 'latest.test' }], next_cursor: before ? null : 20 } };
+      return { page: { log_epoch: 3, storage, enabled: true, total: 2, entries: [{ ...entry, name: before ? 'older.test' : 'latest.test' }], next_cursor: before ? null : 20 } };
     });
     const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getAllByText('latest.test').length).toBeGreaterThan(0));
@@ -306,29 +315,29 @@ describe("LogsPage", () => {
   });
 
   it("distinguishes disabled logs from an empty enabled page", async () => {
-    const api = fakeApi(() => ({ revision: 7, page: { log_epoch: 3, storage, enabled: false, total: 1, entries: [entry], next_cursor: null } }));
+    const api = fakeApi(() => ({ page: { log_epoch: 3, storage, enabled: false, total: 1, entries: [entry], next_cursor: null } }));
     render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getByText(/query log is off/)).toBeTruthy());
     expect(screen.getAllByText('example.test').length).toBeGreaterThan(0);
   });
 
-  it.each([[0, 'NETWORK'], [200, 'BAD_RESPONSE'], [503, 'STORAGE_UNAVAILABLE']])("marks clear failure (%s %s) as unknown without repeating the mutation", async (status, code) => {
+  it.each([[0, 'NETWORK'], [200, 'BAD_RESPONSE'], [503, 'STORAGE_UNAVAILABLE']])("confirms an unknown clear (%s %s) from the log epoch without repeating it", async (status, code) => {
     let clearCalls = 0;
     let epoch = 3;
     const api = fakeApi((path) => {
       if (path === "query-log/clear") { clearCalls += 1; throw new ApiError(status as number, code as string, "Connection lost"); }
-      return { revision: 9, page: { log_epoch: epoch, storage, enabled: true, total: 1, entries: [entry], next_cursor: null } };
+      return { page: { log_epoch: epoch, storage, enabled: true, total: 1, entries: [entry], next_cursor: null } };
     });
     render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getByRole("button", { name: /Clear log/ })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /Clear log/ }));
+    expect(screen.getByText(/Deletes the saved query records/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Clear log" }));
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("couldn't be confirmed"));
-    expect(clearCalls).toBe(1);
+    await waitFor(() => expect(screen.getByText("Confirming the result…")).toBeTruthy());
     expect((screen.getByRole('button', { name: 'Clear log…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Check result' })).toBeNull();
     epoch = 4;
-    fireEvent.click(screen.getByRole('button', { name: 'Check result' }));
-    await waitFor(() => expect(screen.getByText('Query log cleared.')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Query log cleared.')).toBeTruthy(), { timeout: 5000 });
     expect(clearCalls).toBe(1);
   });
 });

@@ -7,12 +7,14 @@ import { LiveLogClient, type LiveInterval, type LiveLogState, type LiveStatus, t
 import "./observability.css";
 import { Drawer, Tabs } from '../../components/beui';
 import { isUnknownStorageMutation } from './storage';
-import { decisionLabel, diagnosticLabel } from './diagnostics';
+import { decisionLabel, diagnosticLabel, scopeNote } from './diagnostics';
 import { UpstreamAttempts } from './TransportDiagnostics';
 import { CloudOff, Inbox, Info, RefreshCw, Search, Settings2 } from 'lucide-react';
 import { Select } from '../../components/Popover';
 import { Segmented } from '../../components/Segmented';
 import { DetailPopover } from './DetailPopover';
+import { InfoTip } from '../../components/InfoTip';
+import { useAutoConfirm } from '../../components/useAutoConfirm';
 
 export interface LogsPageProps {
   api: ApiClient;
@@ -33,17 +35,6 @@ function localizedError(failure: Failure, language: Language): string {
   return translate("app.loadFailed", language);
 }
 
-/** A plain-language line beside the raw cache scope code, which stays verbatim. */
-function scopeNote(scope: string, language: Language): string {
-  if (scope === 'no_ecs') return translate('reliability.scopeNoEcs', language);
-  if (scope === 'privacy_v4') return translate('reliability.scopePrivacyV4', language);
-  if (scope === 'privacy_v6') return translate('reliability.scopePrivacyV6', language);
-  if (scope === 'learned_v4') return translate('reliability.scopeLearnedV4', language);
-  if (scope === 'learned_v6') return translate('reliability.scopeLearnedV6', language);
-  if (scope.startsWith('exact_ecs:')) return translate('reliability.scopeExact', language, { network: scope.slice('exact_ecs:'.length) });
-  return translate('reliability.scopeNetwork', language, { network: scope });
-}
-
 function DetailRow({ label, children }: { label: string; children: ReactNode }) {
   return <div className="log-detail-row">
     <dt>{label}</dt><dd>{children}</dd>
@@ -57,7 +48,6 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
   return <div className="log-detail">
     <section aria-labelledby={`${id}-summary`}><h3 id={`${id}-summary`}>{translate("views.query", language)}</h3>
       <dl>
-        <DetailRow label={translate("views.recordId", language)}>{formatNumber(entry.id, language)}</DetailRow>
         <DetailRow label={translate("views.time", language)}>{formatDate(entry.time_ms, language, { dateStyle: "medium", timeStyle: "medium" })}</DetailRow>
         <DetailRow label={translate("views.name", language)}>{entry.name || translate("views.unreadableQuery", language)}</DetailRow>
         <DetailRow label={translate("views.detailQtype", language)}>{entry.qtype || "—"}</DetailRow>
@@ -70,7 +60,7 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
         <DetailRow label={translate("views.path", language)}>{translate(pathLabel(entry.cache), language)}</DetailRow>
         <DetailRow label={translate('reliability.lookup', language)}>{decisionLabel('lookup', entry.cache_lookup, language)}</DetailRow>
         <DetailRow label={translate('reliability.store', language)}>{decisionLabel('store', entry.cache_store, language)}</DetailRow>
-        <DetailRow label={translate('reliability.cacheScope', language)}>{entry.cache_scope ? <><span className="mono">{entry.cache_scope}</span><p className="muted small">{scopeNote(entry.cache_scope, language)}</p></> : none}</DetailRow>
+        <DetailRow label={translate('reliability.cacheScope', language)}>{entry.cache_scope ? <>{scopeNote(entry.cache_scope, language)} <InfoTip text={entry.cache_scope} label={translate('reliability.rawScope', language)} /></> : none}</DetailRow>
         <DetailRow label={translate("views.upstream", language)}>{entry.upstream || none}</DetailRow>
         <DetailRow label={translate('reliability.relation', language)}>{entry.upstream_relation ? diagnosticLabel(`relation_${entry.upstream_relation}`, language) : none}</DetailRow>
         {entry.failure_stage && <DetailRow label={translate('reliability.operationFailure', language)}>{diagnosticLabel(`stage_${entry.failure_stage}`, language)}{entry.failure_reason && ` · ${diagnosticLabel(`upstream_reason_${entry.failure_reason}`, language)}`}</DetailRow>}
@@ -78,7 +68,7 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
         <DetailRow label={translate("views.duration", language)}>{formatNumber(entry.duration_ms, language, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms</DetailRow>
       </dl></section>
     {entry.upstream_attempts && <UpstreamAttempts trace={{ attempts: entry.upstream_attempts, omitted: entry.upstream_attempts_omitted ?? 0 }} language={language} />}
-    <section aria-labelledby={`${id}-dns`}><h3 id={`${id}-dns`}>{translate("views.flags", language)}</h3>
+    <section aria-labelledby={`${id}-dns`}><h3 id={`${id}-dns`}>{translate("views.ecsAndFlags", language)}</h3>
       <dl>
         <DetailRow label={translate("views.incomingEcs", language)}>{entry.incoming_ecs || none}</DetailRow>
         <DetailRow label={translate("views.outgoingEcs", language)}>{entry.outgoing_ecs || none}</DetailRow>
@@ -118,7 +108,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [loading, setLoading] = useState(false);
   const [failure, setFailure] = useState<Failure | null>(null);
   const [notice, setNotice] = useState("");
-  const [confirmation, setConfirmation] = useState<{ revision: number; epoch: number } | null>(null);
+  const [confirmation, setConfirmation] = useState<{ epoch: number } | null>(null);
   const [unknownEpoch, setUnknownEpoch] = useState<number | null>(null);
   const [clearing, setClearing] = useState(false);
   const requestId = useRef(0);
@@ -267,9 +257,14 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   }, [load]);
   useEffect(() => {
     if (unknownEpoch !== null && result && result.page.log_epoch > unknownEpoch) {
-      setUnknownEpoch(null); setNotice('app.logsCleared');
+      setUnknownEpoch(null); setFailure(null); setNotice('app.logsCleared');
     }
   }, [unknownEpoch, result]);
+  // A lost clear response is settled by reading the log epoch; the clear is never sent again.
+  const clearCheck = useAutoConfirm(unknownEpoch !== null, async () => {
+    const next = await api.request<LogListResponse>("query-log/list", "POST", { ...appliedRef.current, before_id: null, limit: PAGE_SIZE });
+    return unknownEpoch !== null && next.page.log_epoch > unknownEpoch ? true : undefined;
+  }, () => { void load(null, appliedRef.current); });
   // Insertion resumes when the detail card closes.
   useEffect(() => {
     if (openId === null && atHead && !isFiltered(applied) && pending.count) showPending();
@@ -366,12 +361,12 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
 
   async function clearLogs() {
     if (confirmation === null || unknownEpoch !== null) return;
-    const { revision, epoch: listed } = confirmation;
+    const { epoch: listed } = confirmation;
     setConfirmation(null);
     setClearing(true);
     setNotice("");
     try {
-      await api.request("query-log/clear", "POST", { revision, log_epoch: listed });
+      await api.request("query-log/clear", "POST", { log_epoch: listed });
       setDetail(null);
       setNotice("app.logsCleared");
       await load(null, applied);
@@ -379,7 +374,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       if (!(error instanceof StaleRequest)) {
         const unknown = isUnknownStorageMutation(error);
         if (unknown) setUnknownEpoch(listed);
-        setFailure(unknown ? { key: "app.clearLogsUnknown" } : { error });
+        else setFailure({ error });
       }
     } finally { setClearing(false); }
   }
@@ -424,14 +419,15 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
         <Segmented className="log-interval" label={translate('views.liveRefresh', language)} value={interval === null ? 'manual' : String(interval)} onChange={chooseInterval}
           options={intervals.map((value) => ({ value, label: value === 'manual' ? translate('views.liveManual', language) : translate('views.liveSeconds', language, { seconds: value }) }))} />
         <button type="button" onClick={refreshNow} disabled={loading} className="button secondary"><RefreshCw size={15} aria-hidden="true" className={loading ? 'spin' : undefined} />{translate("ui.refreshLatest", language)}</button>
-        <button type="button" onClick={() => result && setConfirmation({ revision: result.revision, epoch: result.page.log_epoch })} disabled={!page?.total || clearing || unknownEpoch !== null}
+        <button type="button" onClick={() => result && setConfirmation({ epoch: result.page.log_epoch })} disabled={!page?.total || clearing || unknownEpoch !== null}
           className="button danger">{translate("ui.clearLogs", language)}</button>
       </div>
     </div>
     {liveMessage && <p role="status" className="muted small log-live-note">{translate(liveMessage, language)}</p>}
     {failure && <p role="alert" className="notice error">{localizedError(failure, language)}</p>}
     {notice && <p role="status" className="notice">{translate(notice, language)}</p>}
-    {unknownEpoch !== null && <button type="button" className="button secondary" disabled={loading} onClick={() => void load(null, applied)}>{translate('storage.checkResult', language)}</button>}
+    {unknownEpoch !== null && <p role="status" className="notice">{translate(clearCheck.state === 'failed' ? 'app.clearLogsUnknown' : clearCheck.state === 'unresolved' ? 'storage.stillUnknown' : 'shell.confirming', language)}</p>}
+    {unknownEpoch !== null && (clearCheck.state === 'failed' || clearCheck.state === 'unresolved') && <button type="button" className="button secondary" disabled={loading} onClick={clearCheck.check}>{translate('storage.checkResult', language)}</button>}
 
     <div ref={listTop} className="log-list-top" />
     {pending.count > 0 && <div className="log-new-wrap"><button type="button" className="log-new-pill" onClick={revealPending}>
@@ -472,7 +468,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       className="button secondary load-more">{translate("ui.earlier", language)}</button>}
 
     <Drawer open={confirmation !== null} title={translate('app.clearLogsTitle', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => setConfirmation(null)}>
-      <p id="log-clear-help" className="muted">{translate("app.clearLogsHelp", language)}</p>
+      <p id="log-clear-help" className="muted">{translate("storage.confirmLogs", language)}</p>
       <div className="button-group confirm-actions">
         <button type="button" onClick={() => setConfirmation(null)} className="button secondary">{translate("ui.cancel", language)}</button>
         <button type="button" onClick={() => void clearLogs()} className="button danger">{translate("app.clearLogs", language)}</button>

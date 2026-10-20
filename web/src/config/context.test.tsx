@@ -131,7 +131,7 @@ describe('single configuration draft', () => {
     await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
     let prepared!: Awaited<ReturnType<typeof hook.result.current.previewRollback>>;
     await act(async () => { prepared = await hook.result.current.previewRollback(); });
-    await act(async () => { await hook.result.current.rollback(prepared); });
+    await act(async () => { await hook.result.current.rollback(prepared!); });
     expect(request.mock.calls.find(([path]) => path === 'config/rollback')?.[2])
       .toMatchObject({ revision: 1, allow_http_downgrade: true });
   });
@@ -175,7 +175,7 @@ describe('single configuration draft', () => {
     await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
     let prepared!: Awaited<ReturnType<typeof hook.result.current.previewRollback>>;
     await act(async () => { prepared = await hook.result.current.previewRollback(); });
-    await act(async () => { await hook.result.current.rollback(prepared); });
+    await act(async () => { await hook.result.current.rollback(prepared!); });
     expect(refreshSession).toHaveBeenCalledTimes(1);
     expect(hook.result.current.draft?.revision).toBe(2);
   });
@@ -316,7 +316,7 @@ describe('single configuration draft', () => {
     await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
     let prepared!: Awaited<ReturnType<typeof hook.result.current.previewRollback>>;
     await act(async () => { prepared = await hook.result.current.previewRollback(); });
-    await act(async () => { await expect(hook.result.current.rollback(prepared)).rejects.toMatchObject({ code: 'NETWORK' }); });
+    await act(async () => { await expect(hook.result.current.rollback(prepared!)).rejects.toMatchObject({ code: 'NETWORK' }); });
     expect(hook.result.current.draft?.pendingRollback).toEqual({ revision: 1 });
     expect(hook.result.current.locked).toBe(true);
     let outcome = '';
@@ -344,7 +344,7 @@ describe('single configuration draft', () => {
     await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
     let prepared!: Awaited<ReturnType<typeof hook.result.current.previewRollback>>;
     await act(async () => { prepared = await hook.result.current.previewRollback(); });
-    await act(async () => { await hook.result.current.rollback(prepared); });
+    await act(async () => { await hook.result.current.rollback(prepared!); });
     expect(hook.result.current.draft?.unknownApply).toBe(true);
     expect(refreshSession).toHaveBeenCalledTimes(1);
     let outcome = '';
@@ -352,5 +352,78 @@ describe('single configuration draft', () => {
     expect(outcome).toBe('applied');
     expect(refreshSession).toHaveBeenCalledTimes(2);
     expect(request.mock.calls.filter(([path]) => path === 'config/rollback')).toHaveLength(1);
+  });
+
+  describe('a save that meets a configuration saved elsewhere', () => {
+    const remoteToml = 'max_inflight = 10\nmax_tcp_connections = 5\n';
+    function conflictFixture(remoteSettings: Record<string, unknown>) {
+      let remote = false;
+      return fixture(async (path, method, body) => {
+        if (path === 'config' && method === 'GET') return remote
+          ? { toml: remoteToml, revision: 2, has_backup: true }
+          : { toml: original, revision: 1, has_backup: false };
+        if (path === 'config/parse') return { toml: (body as { toml: string }).toml, settings: (body as { toml: string }).toml === remoteToml ? remoteSettings : baseSettings };
+        if (path === 'config/preview') {
+          const { toml, changes } = body as { toml: string; changes: Record<string, unknown> };
+          return toml === remoteToml
+            ? { toml: 'merged', settings: { ...remoteSettings, ...changes } }
+            : { toml: edited, settings: { ...baseSettings, max_inflight: 11 } };
+        }
+        if (path === 'config/validate') return { restart_required: false, transport_change: null };
+        if (path === 'config' && method === 'PUT') {
+          if ((body as { revision: number }).revision === 1) { remote = true; throw new ApiError(409, 'REVISION', 'Configuration changed; reload before saving'); }
+          return { revision: 3, restart_required: false, transport_change: null };
+        }
+        throw new Error(`Unexpected ${method} ${path}`);
+      });
+    }
+    async function saveEdit(hook: ReturnType<typeof mount>) {
+      await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+      act(() => hook.result.current.updateField('max_inflight', '11'));
+      let prepared!: Awaited<ReturnType<typeof hook.result.current.prepareSave>>;
+      await act(async () => { prepared = await hook.result.current.prepareSave(); });
+      let result!: Awaited<ReturnType<typeof hook.result.current.commitPrepared>>;
+      await act(async () => { result = await hook.result.current.commitPrepared(prepared); });
+      return result;
+    }
+
+    it('reloads and merges non-overlapping edits, keeping the draft for another save', async () => {
+      const { api, request } = conflictFixture({ ...baseSettings, max_tcp_connections: 5 });
+      const hook = mount(api);
+      const result = await saveEdit(hook);
+      expect(result.reconciled).toBe('merged');
+      expect(request.mock.calls.filter(([path]) => path === 'config/preview').at(-1)?.[2]).toEqual({ toml: remoteToml, changes: { max_inflight: 11 } });
+      const draft = hook.result.current.draft!;
+      expect([draft.revision, draft.original, draft.toml, draft.merged, draft.conflict]).toEqual([2, remoteToml, 'merged', true, null]);
+      expect(draft.settings).toMatchObject({ max_inflight: 11, max_tcp_connections: 5 });
+      expect(hook.result.current.dirty).toBe(true);
+      expect(hook.result.current.error).toBeNull();
+      // The next save carries the new revision.
+      let prepared!: Awaited<ReturnType<typeof hook.result.current.prepareSave>>;
+      await act(async () => { prepared = await hook.result.current.prepareSave(); });
+      expect(prepared.revision).toBe(2);
+    });
+
+    it('keeps overlapping edits and lets the administrator keep their own', async () => {
+      const { api, request } = conflictFixture({ ...baseSettings, max_inflight: 20 });
+      const hook = mount(api);
+      const result = await saveEdit(hook);
+      expect(result.reconciled).toBe('conflict');
+      expect(hook.result.current.draft?.conflict?.paths).toEqual(['max_inflight']);
+      expect(hook.result.current.draft?.toml).toBe(edited);
+      await expect(hook.result.current.prepareSave()).rejects.toThrow();
+      await act(async () => { await hook.result.current.resolveConflict('mine'); });
+      expect(request.mock.calls.filter(([path]) => path === 'config/preview').at(-1)?.[2]).toEqual({ toml: remoteToml, changes: { max_inflight: 11 } });
+      expect(hook.result.current.draft).toMatchObject({ revision: 2, original: remoteToml, toml: 'merged', conflict: null, merged: true });
+    });
+
+    it('can take the other change instead, discarding the draft', async () => {
+      const { api } = conflictFixture({ ...baseSettings, max_inflight: 20 });
+      const hook = mount(api);
+      await saveEdit(hook);
+      await act(async () => { await hook.result.current.resolveConflict('theirs'); });
+      expect(hook.result.current.draft).toMatchObject({ revision: 2, original: remoteToml, toml: remoteToml, conflict: null });
+      expect(hook.result.current.dirty).toBe(false);
+    });
   });
 });

@@ -25,7 +25,6 @@ export interface ListenerStatus {
 
 export interface StatusView {
   running: boolean;
-  revision: number;
   last_error: string | null;
   listen: string | null;
   uptime_seconds: number | null;
@@ -108,21 +107,28 @@ export function histogramRows(buckets: readonly HistogramBucket[]): { lowerMilli
   });
 }
 
-export function cacheHitRate(counters: Record<string, number> | null | undefined): number | null {
+/**
+ * Cache lookups by how they were answered. `misses` are the lookups that needed
+ * their own upstream request; the others were answered from the cache, from a
+ * stale entry, or by joining an identical query already in flight.
+ */
+export interface CacheBreakdown { lookups: number; hits: number; stale: number; joined: number; misses: number }
+
+export function cacheBreakdown(counters: Record<string, number> | null | undefined): CacheBreakdown | null {
   if (!counters) return null;
   const hits = counters.cache_hits ?? 0;
   const lookups = hits + (counters.cache_misses ?? 0);
-  return lookups > 0 ? hits / lookups * 100 : null;
+  if (lookups <= 0) return null;
+  const stale = counters.cache_lookup_stale ?? 0;
+  const joined = counters.flight_joined ?? 0;
+  // A joined query whose shared exchange failed can also be answered stale; never count past the lookups.
+  return { lookups, hits, stale, joined, misses: Math.max(0, lookups - hits - stale - joined) };
 }
 
-/**
- * Share of cache lookups that missed but joined an identical query already in
- * flight, so no extra upstream request was made. Not part of the hit rate.
- */
-export function coalescedShare(counters: Record<string, number> | null | undefined): number | null {
-  if (!counters) return null;
-  const lookups = (counters.cache_hits ?? 0) + (counters.cache_misses ?? 0);
-  return lookups > 0 && (counters.flight_joined ?? 0) > 0 ? (counters.flight_joined ?? 0) / lookups * 100 : null;
+/** Hit rate: share of cache lookups that needed no separate upstream request. */
+export function cacheHitRate(counters: Record<string, number> | null | undefined): number | null {
+  const breakdown = cacheBreakdown(counters);
+  return breakdown ? (breakdown.lookups - breakdown.misses) / breakdown.lookups * 100 : null;
 }
 
 export function averageLatencyMillis(latency: RequestLatency | null | undefined): number | null {

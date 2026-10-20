@@ -85,4 +85,23 @@ describe('first-run setup wizard', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     expect(((await screen.findByLabelText(/^上游 DNS/)) as HTMLSelectElement).value).toBe('alidns');
   });
+
+  it('names the first missing or invalid account detail', async () => {
+    requests(() => json({}));
+    render(<SessionProvider><Harness language="en" /></SessionProvider>);
+    const token = await screen.findByLabelText('Setup token');
+    const form = token.closest('form')!;
+    const submitted = async (message: string) => { fireEvent.submit(form); expect((await screen.findByRole('alert')).textContent).toBe(message); };
+    expect(screen.getByText('At least 12 characters.')).toBeTruthy();
+    await submitted('Enter the setup token.');
+    fireEvent.change(token, { target: { value: 'a'.repeat(64) } });
+    fireEvent.change(screen.getByLabelText('Admin username'), { target: { value: ' ' } });
+    await submitted('Enter a username.');
+    fireEvent.change(screen.getByLabelText('Admin username'), { target: { value: 'admin' } });
+    fireEvent.change(screen.getByLabelText('Admin password'), { target: { value: 'short' } });
+    await submitted('The password needs at least 12 characters.');
+    fireEvent.change(screen.getByLabelText('Admin password'), { target: { value: 'long-admin-password' } });
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'other-admin-password' } });
+    await submitted("The new passwords don't match.");
+  });
 });

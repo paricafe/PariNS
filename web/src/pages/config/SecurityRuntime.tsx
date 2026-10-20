@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useConfig } from '../../config/context';
 import { useSession } from '../../session/context';
 import { ApiError, StaleRequest } from '../../session/client';
 import type { Language } from '../../i18n';
-import { DohRuntime, type DohStatus } from './DohRuntime';
+import { DohStatusContext, type DohStatus } from './DohRuntime';
 import { CertificateTools, type CertificateView } from './CertificateTools';
 
 export type SecurityStatus = DohStatus & CertificateView;
 
-/** Owns the security page's single /status read and its one 5-second poll, shared by the DoH and certificate panels. */
-export function SecurityRuntime({ language }: { language: Language }) {
+/** Owns the security page's single /status read and its one 5-second poll, shared by the certificate panel and the DoH group in `children`. */
+export function SecurityRuntime({ language, children }: { language: Language; children?: ReactNode }) {
   const { api } = useSession();
   const revision = useConfig().draft?.revision;
   const [status, setStatus] = useState<SecurityStatus | null>(null);
@@ -36,8 +36,9 @@ export function SecurityRuntime({ language }: { language: Language }) {
   /** A certificate action pauses the poll and discards reads already in flight. */
   const hold = useCallback((active: boolean) => { held.current = active; if (active) request.current += 1; }, []);
   const publish = useCallback((view: CertificateView) => setStatus((current) => current && { ...current, ...view }), []);
-  return <>
-    <DohRuntime status={status} failed={failure !== null} language={language} />
+  const doh = useMemo(() => ({ status, failed: failure !== null }), [status, failure]);
+  return <DohStatusContext.Provider value={doh}>
     <CertificateTools language={language} view={status} readFailure={failure} read={read} hold={hold} publish={publish} />
-  </>;
+    {children}
+  </DohStatusContext.Provider>;
 }

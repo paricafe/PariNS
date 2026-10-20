@@ -5,6 +5,7 @@ import { useConfig } from '../../config/context';
 import { useConfirm } from '../../components/ConfirmProvider';
 import { useBanner } from '../../components/Banner';
 import { Button } from '../../components/beui';
+import { useAutoConfirm } from '../../components/useAutoConfirm';
 import { formatDate, presentIssue, translate, type Language } from '../../i18n';
 import { StorageStatusPanel } from '../observability/StorageStatusPanel';
 import { isUnknownStorageMutation, storageActions, type StorageAction, type StorageStatus } from '../observability/storage';
@@ -15,7 +16,7 @@ export function StorageTools({ language }: { language: Language }) {
   const { locked, busy: configBusy } = useConfig();
   const confirm = useConfirm();
   const banner = useBanner();
-  const [view, setView] = useState<{ revision: number; storage: StorageStatus } | null>(null);
+  const [view, setView] = useState<{ storage: StorageStatus } | null>(null);
   const [stats, setStats] = useState<StatsView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | ApiError | null>(null);
@@ -27,7 +28,7 @@ export function StorageTools({ language }: { language: Language }) {
   // Statistics totals change only through the totals reset, so they are read on mount and after that reset rather than polled.
   const load = useCallback(async (includeStats: boolean) => {
     const owner = ++requestId.current;
-    const current = await api.request<{ revision: number; storage: StorageStatus }>('status');
+    const current = await api.request<{ storage: StorageStatus }>('status');
     if (owner !== requestId.current) throw new StaleRequest();
     setView(current);
     if (!includeStats) return current;
@@ -45,37 +46,33 @@ export function StorageTools({ language }: { language: Language }) {
     if (!view || busy || unknown || locked || configBusy) return;
     const spec = storageActions[action];
     const epoch = view.storage[spec.epoch];
-    const revision = view.revision;
     if (!await confirm(`storage.${spec.confirm}`, `storage.${spec.label}`, trigger)) return;
     setBusy(true); setError(null); setNotice(null);
     try {
-      await api.request(spec.path, 'POST', { revision, [spec.epoch]: epoch });
+      await api.request(spec.path, 'POST', { [spec.epoch]: epoch });
       setNotice('actionDone'); banner(t('actionDone'));
       void load(action === 'totals').catch(fail);
     } catch (reason) {
       if (!(reason instanceof StaleRequest)) {
-        if (isUnknownStorageMutation(reason)) { setUnknown({ action, epoch }); setNotice('actionUnknown'); }
+        if (isUnknownStorageMutation(reason)) setUnknown({ action, epoch });
         else fail(reason);
       }
     } finally { setBusy(false); }
   };
-  const reconcile = async () => {
-    if (!unknown) return;
-    setBusy(true);
-    try {
-      const current = await load(unknown.action === 'totals');
-      if (current.storage[storageActions[unknown.action].epoch] > unknown.epoch) { setUnknown(null); setNotice('actionDone'); banner(t('actionDone')); }
-      else setNotice('stillUnknown');
-    } catch (reason) { fail(reason); }
-    finally { setBusy(false); }
-  };
+  // A lost response is settled by the epoch on later status reads; the action is never sent again.
+  const confirmation = useAutoConfirm(unknown !== null, async () => {
+    if (!unknown) return undefined;
+    const current = await load(unknown.action === 'totals');
+    return current.storage[storageActions[unknown.action].epoch] > unknown.epoch ? true : undefined;
+  }, () => { setUnknown(null); setNotice('actionDone'); banner(t('actionDone')); });
   return <div className="settings-stack">
     {view && <StorageStatusPanel status={view.storage} language={language} />}
     <section className="settings-group" aria-labelledby="storage-clear-title"><h2 id="storage-clear-title" className="group-title">{t('clearTitle')}</h2>
       <div className="grouped">{(Object.keys(storageActions) as StorageAction[]).map((action) => <button type="button" key={action} className="row row-action" data-destructive=""
         disabled={!view || busy || Boolean(unknown) || locked || configBusy || view.storage.health === 'unavailable'} onClick={(event) => void act(action, event.currentTarget)}>{t(storageActions[action].label)}</button>)}</div>
       {stats && <p className="group-footer">{translate('storage.totalsSince', language, { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</p>}
-      {unknown && <Button variant="secondary" disabled={busy} onClick={() => void reconcile()}>{t('checkResult')}</Button>}
+      {unknown && <p className="notice" role="status">{confirmation.state === 'failed' ? t('actionUnknown') : confirmation.state === 'unresolved' ? t('stillUnknown') : translate('shell.confirming', language)}</p>}
+      {unknown && (confirmation.state === 'failed' || confirmation.state === 'unresolved') && <Button variant="secondary" disabled={busy} onClick={confirmation.check}>{t('checkResult')}</Button>}
       {notice && notice !== 'actionDone' && <p className="notice" role="status">{t(notice)}</p>}
       {error && <p className="notice error" role="alert">{presentIssue(error, language)}</p>}
     </section>

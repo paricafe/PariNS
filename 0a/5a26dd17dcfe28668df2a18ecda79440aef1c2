@@ -1,0 +1,39 @@
+guide/operations.md
+  s_cffe143f0c5c88::t_b4d9f991362876 247-252
+  s_cffe143f0c5c88::t_c4134dc59b8873 122-127
+  s_cffe143f0c5c88::t_6d88d832c70e0a 32-33,57-59
+  s_cffe143f0c5c88::t_13342a1fad0c95 28-30,93
+  s_cffe143f0c5c88::t_a932104fc27f55 45-56,60,197
+  s_cffe143f0c5c88::t_cc516fc4f770b6 94-108
+  s_cffe143f0c5c88::t_b56eb580213ce1 25-27,31,77-92,211
+  s_cffe143f0c5c88::t_07283c6773d975 74-75
+  s_cffe143f0c5c88::t_93374fc677029b 76
+AGENTS.md
+  s_cffe143f0c5c88::t_b56eb580213ce1 54,192-201
+  s_cffe143f0c5c88::t_2d033c08418b5f 187-189
+  s_cffe143f0c5c88::t_a932104fc27f55 175-183
+  s_cffe143f0c5c88::t_9f52b27ca52036 151-153
+guide/configuration.md
+  s_cffe143f0c5c88::t_6d88d832c70e0a 385-388
+README.md
+  s_cffe143f0c5c88::t_b56eb580213ce1 28
+CHANGELOG.md
+  s_cffe143f0c5c88::t_4c0da928bda274 7-12
+  s_cffe143f0c5c88::t_b5c11f599d65a4 3-6,13-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0a5a26dd17dcfe28668df2a18ecda79440aef1c2",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+tests/upstream_diagnostics.rs
+  s_cffe143f0c5c88::t_72982392ce4263 195
+  s_cffe143f0c5c88::t_867753e7d9a7ee 160,162,189-194,196-203
+src/upstreams.rs
+  s_cffe143f0c5c88::t_d2771b6834721d 306-308,310-319
+src/upstreams/transport.rs
+  s_cffe143f0c5c88::t_5645689a8111d2 245-246,295,299-314,480-483
+  s_cffe143f0c5c88::t_140b66fe75e8cf 484
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e2b9c822de9f6801d9b35e1ff6c16744a10f262e",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

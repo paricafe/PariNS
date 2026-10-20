@@ -1,0 +1,218 @@
+web/src/features/subscriptions/subscriptions.test.tsx
+  s_cffe143f0c5c88::t_f41c5a5749d98a 16,73,86,190-202
+  s_cffe143f0c5c88::t_df5cd717163727 21,23,25,31-32,34,37
+  s_cffe143f0c5c88::t_d365097340faa8 163
+  s_cffe143f0c5c88::t_e08244be418744 6,178-185,218-290
+  s_cffe143f0c5c88::t_0422f4509bbe81 291
+web/src/i18n/storage.ts
+  s_cffe143f0c5c88::t_99cb714c18df68 25
+  s_cffe143f0c5c88::t_886c813f65cc71 36
+web/src/pages/observability/TransportDiagnostics.tsx
+  s_cffe143f0c5c88::t_46d42d465ff89f 12,31,46,57
+  s_cffe143f0c5c88::t_825ccc61c5fc83 47-51,54-55
+web/src/components/ConfirmProvider.tsx
+  s_cffe143f0c5c88::t_c39037b24a77fa 6
+web/src/AuthPages.test.tsx
+  s_cffe143f0c5c88::t_7463fda58eebd2 88-106
+web/src/config/context.test.tsx
+  s_cffe143f0c5c88::t_20ebb1c14b9723 134,178,319,347
+  s_cffe143f0c5c88::t_9e9b206296a315 356-427
+  s_cffe143f0c5c88::t_1c2e380ed0a2e2 428
+web/src/pages/config/CacheInspect.test.tsx
+  s_cffe143f0c5c88::t_2e88174cb71b2f 1-35
+web/src/i18n/account.ts
+  s_cffe143f0c5c88::t_3ca0de2e4863a7 18-19
+  s_cffe143f0c5c88::t_f6a46f7050a893 9,11,17,20-21
+  s_cffe143f0c5c88::t_30eda82281d54a 2,12
+web/src/features/subscriptions/useSubscriptions.ts
+  s_cffe143f0c5c88::t_8929715b55f320 5-6,51,56,60
+  s_cffe143f0c5c88::t_47b57bdc6a70c6 54-55,61,73
+web/src/i18n/views.ts
+  s_cffe143f0c5c88::t_c39037b24a77fa 16-19,72
+web/src/features/account/turnstile.test.tsx
+  s_cffe143f0c5c88::t_d0bc9c47f6a566 8-68,121,125,132-207
+  s_cffe143f0c5c88::t_dcaaff3f7edc3f 70-71,73,75-77,80-81,83,85-114,120,122,127,129,208
+  s_cffe143f0c5c88::t_b5d5383c644283 1-7,69,72,74,78-79,82,84,115-119,123-124,126,128,130-131,209
+web/src/pages/config/StorageTools.test.tsx
+  s_cffe143f0c5c88::t_b2dd6addff9227 11,18,21,34-36,51,89
+  s_cffe143f0c5c88::t_ef14f7ed1f69da 48,59,61,63-64,68-85
+  s_cffe143f0c5c88::t_69540e1733b87c 86
+web/src/pages/observability/metrics.ts
+  s_cffe143f0c5c88::t_757c6a9721c2a0 110-117,121-125,128-131
+web/src/session/context.tsx
+  s_cffe143f0c5c88::t_bec0cec01bf5f5 20-21,207-213,306-307
+  s_cffe143f0c5c88::t_48255f6d1ff709 6,25-26,262,274,280,284-304
+  s_cffe143f0c5c88::t_1bc02d82f95751 8-9,14-15,17-19,42,55,155-164,169-170,176,178,180,191,193,195,201-204
+  s_cffe143f0c5c88::t_e395a908a1b366 7,205-206,214,305
+web/src/i18n/settings.ts
+  s_cffe143f0c5c88::t_760845ea269024 63,87,108
+web/src/config/context.tsx
+  s_cffe143f0c5c88::t_46d2ee869f2d40 5,66-67,138,353-358,531,533
+  s_cffe143f0c5c88::t_897657781556fb 54-56,83-84,294-312,465,468-478,489,494-496,502,506-509,519
+  s_cffe143f0c5c88::t_183986db43df98 228
+  s_cffe143f0c5c88::t_efa21e2170217e 8,12-25,29,32-33,46-48,51,53,87,110,112-131,163-181,183-186,240,284,291,317,326,346,350,361,375,383-387,390-395,404-426,523,532
+  s_cffe143f0c5c88::t_ca1e3d2b1b5651 187,313
+web/src/App.tsx
+  s_cffe143f0c5c88::t_9e9b206296a315 54
+  s_cffe143f0c5c88::t_6a5d0e4483ead4 24,61-62,65-69,71-72,95,98-99
+  s_cffe143f0c5c88::t_760845ea269024 186
+  s_cffe143f0c5c88::t_5fd88fd2d97b8b 63-64,70,89
+  s_cffe143f0c5c88::t_c0891f4e5d2825 90
+  s_cffe143f0c5c88::t_ad870eca2f9e1e 1,75-76,81,84,88,92-93,96,100-103
+  s_cffe143f0c5c88::t_d809fc2d3d26bc 56,91
+  s_cffe143f0c5c88::t_48255f6d1ff709 197,199-204,213,217-218
+web/src/session/context.test.tsx
+  s_cffe143f0c5c88::t_7463fda58eebd2 260-291
+web/src/features/updates/context.tsx
+  s_cffe143f0c5c88::t_e3f049b93901ba 18,111,114-115,124
+web/src/pages/observability/OverviewPage.tsx
+  s_cffe143f0c5c88::t_757c6a9721c2a0 5,10,178,223
+  s_cffe143f0c5c88::t_760845ea269024 90
+  s_cffe143f0c5c88::t_46d42d465ff89f 255
+web/src/SaveBar.test.tsx
+  s_cffe143f0c5c88::t_06ee3fa5cc49fc 4,97-118
+  s_cffe143f0c5c88::t_63bd1724f068df 1-3,5-96,119-120
+web/src/features/account/AccountControls.tsx
+  s_cffe143f0c5c88::t_d9a561c72db139 86,89-91
+  s_cffe143f0c5c88::t_22c814f22a7dff 10,47,56,78,82,88
+  s_cffe143f0c5c88::t_197c1d7eb03ede 9,40-42,55,57,73-77,79-81,83-85,87,103,107
+  s_cffe143f0c5c88::t_f6a46f7050a893 15,36-37,44-45,71
+web/src/features/updates/UpdatePanel.tsx
+  s_cffe143f0c5c88::t_e3f049b93901ba 70
+web/src/model/subscriptions.ts
+  s_cffe143f0c5c88::t_87c5e8c0715b86 12-13,21,24-36
+  s_cffe143f0c5c88::t_4724b5d5af96ea 37
+web/src/features/subscriptions/SourceCard.tsx
+  s_cffe143f0c5c88::t_c4928aea7f3ef1 4,11-20,23-25,29-34,38,44-48,50,60
+web/src/pages/config/DohRuntime.tsx
+  s_cffe143f0c5c88::t_5bea4711fd6c35 1,7-10,13-26
+web/src/features/account/TurnstilePanel.tsx
+  s_cffe143f0c5c88::t_22c814f22a7dff 1-85
+web/src/features/account/password.ts
+  s_cffe143f0c5c88::t_c67355cb26f148 1-5
+web/src/features/subscriptions/types.ts
+  s_cffe143f0c5c88::t_8929715b55f320 14
+web/src/pages/observability/StorageStatusPanel.tsx
+  s_cffe143f0c5c88::t_e3f049b93901ba 57
+web/src/features/account/Turnstile.tsx
+  s_cffe143f0c5c88::t_c67355cb26f148 1-62,64-65
+  s_cffe143f0c5c88::t_3ca0de2e4863a7 63
+web/src/pages/observability/__tests__/live.test.tsx
+  s_cffe143f0c5c88::t_58e62baff39334 152
+web/src/pages/config/DohRuntime.test.tsx
+  s_cffe143f0c5c88::t_5bea4711fd6c35 14
+web/src/i18n/shell.ts
+  s_cffe143f0c5c88::t_2125388ec5023e 68
+  s_cffe143f0c5c88::t_0aeda8af1dbed9 15,83-84
+web/src/i18n/subscriptions.ts
+  s_cffe143f0c5c88::t_f9e463c3b1810d 3,7-8,11-14,29
+  s_cffe143f0c5c88::t_99cb714c18df68 27
+web/src/i18n/reliability.ts
+  s_cffe143f0c5c88::t_825ccc61c5fc83 50
+  s_cffe143f0c5c88::t_c39037b24a77fa 27
+  s_cffe143f0c5c88::t_c1a3ff044eab0e 4,10-14,17,49
+web/src/pages/config/CertificateTools.tsx
+  s_cffe143f0c5c88::t_a4604425f3924b 6-8,28-29,32,34-35,44-49,51-52,59-60,64-65,69,71-72,75,79-80,83-84
+  s_cffe143f0c5c88::t_183986db43df98 16-17,55-56
+web/src/components/useAutoConfirm.ts
+  s_cffe143f0c5c88::t_3b9bb99883db01 1-49
+web/src/pages/observability/LogsPage.tsx
+  s_cffe143f0c5c88::t_183986db43df98 111,364,369,422
+  s_cffe143f0c5c88::t_5ee2280afb9c75 471
+  s_cffe143f0c5c88::t_0c3b8a8d237a4a 260,263-267,377,429-430
+  s_cffe143f0c5c88::t_752f86e17118d2 17
+  s_cffe143f0c5c88::t_821fa681c8e6e5 10,16
+  s_cffe143f0c5c88::t_364eb4b44f3e9f 63,71
+web/src/model/settings.ts
+  s_cffe143f0c5c88::t_760845ea269024 130
+web/src/pages/observability/__tests__/diagnostics.test.tsx
+  s_cffe143f0c5c88::t_2083903bb50606 53-55
+  s_cffe143f0c5c88::t_da18f21ded1395 39-43
+  s_cffe143f0c5c88::t_6a3e95b246b192 75-76
+  s_cffe143f0c5c88::t_b59e73c71a0bc7 59-63
+web/src/i18n/updates.ts
+  s_cffe143f0c5c88::t_760845ea269024 48
+web/src/pages/config/SettingsPage.tsx
+  s_cffe143f0c5c88::t_be98b3dae19750 23,110,403-404
+  s_cffe143f0c5c88::t_b67179ed77699b 283
+  s_cffe143f0c5c88::t_c39037b24a77fa 29,238-239,245,248,251,255-264,268,270-273,280-282,284
+  s_cffe143f0c5c88::t_c76461c111ae2b 329,366-370,390
+  s_cffe143f0c5c88::t_a04b196e54d31c 1,19-20,122-140,376,382
+  s_cffe143f0c5c88::t_dd3a90b530bf4a 28,172-173,195-197,215-217,226
+  s_cffe143f0c5c88::t_2e88174cb71b2f 240
+web/src/pages/config/StorageTools.tsx
+  s_cffe143f0c5c88::t_1c187d0a1bc828 8,57,62-67,75
+  s_cffe143f0c5c88::t_c0891f4e5d2825 74
+  s_cffe143f0c5c88::t_183986db43df98 19,31,52
+web/src/i18n/index.ts
+  s_cffe143f0c5c88::t_3ca0de2e4863a7 9,24
+web/src/features/updates/updates.test.tsx
+  s_cffe143f0c5c88::t_cf5617c950147b 74
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_cffe143f0c5c88::t_58e62baff39334 8,23,52-57,190-191,193-197,261,266-267,291,298
+  s_cffe143f0c5c88::t_556fdf4fbf2804 235,318,329
+  s_cffe143f0c5c88::t_e107ab41a76d17 324,334,336,338,340
+  s_cffe143f0c5c88::t_2083903bb50606 206
+  s_cffe143f0c5c88::t_6a3e95b246b192 250-255
+web/src/i18n/turnstile.ts
+  s_cffe143f0c5c88::t_3ca0de2e4863a7 1-26
+web/src/features/account/account.test.tsx
+  s_cffe143f0c5c88::t_11c0cb69b63118 10,34,40,48,51,55,99,101-104,106-112
+  s_cffe143f0c5c88::t_3c007cac58e6a3 22,52-53,56-58,68,85,90,118,131
+  s_cffe143f0c5c88::t_ec1b361f4660d2 15
+web/src/pages/observability/CacheDiagnosticsPanel.tsx
+  s_cffe143f0c5c88::t_46d42d465ff89f 7
+web/src/pages/config/SecurityRuntime.tsx
+  s_cffe143f0c5c88::t_5bea4711fd6c35 1,6,11-12,39-40,42-43
+web/src/features/subscriptions/download.ts
+  s_cffe143f0c5c88::t_46d2ee869f2d40 2-3,23
+  s_cffe143f0c5c88::t_26bd37bbbcd9e0 1,4-22,24-53
+web/src/AuthPages.tsx
+  s_cffe143f0c5c88::t_f6a46f7050a893 103,105,107-108,135-136
+  s_cffe143f0c5c88::t_e1e2f6ecfa95ff 6-8,20,23,26,28-34,47-50,61,104,106
+  s_cffe143f0c5c88::t_bec0cec01bf5f5 35-38,58
+  s_cffe143f0c5c88::t_517d862eb716e7 18-19,41-46,59
+  s_cffe143f0c5c88::t_e5594636b101cc 22
+web/src/pages/config/CertificateTools.test.tsx
+  s_cffe143f0c5c88::t_6333506feacdd5 7,18-22,24-28,35-41,47,49,51,59,62-63,67,69-70,72,76,78,81-88,90-94,97,101,105,114-115
+  s_cffe143f0c5c88::t_8407f97fb9a800 77,79-80,89
+  s_cffe143f0c5c88::t_2f7b4d1d6a43bd 11-12,14,29
+  s_cffe143f0c5c88::t_f5c90f21e4b16a 32
+web/src/pages/observability/logs.ts
+  s_cffe143f0c5c88::t_183986db43df98 49
+web/src/features/subscriptions/SubscriptionsPanel.tsx
+  s_cffe143f0c5c88::t_155cfa598329f4 7,26,30-31,33,42-43,54,56
+  s_cffe143f0c5c88::t_8929715b55f320 19,51,61
+web/src/style.css
+  s_cffe143f0c5c88::t_92b026ab73c239 308-314
+  s_cffe143f0c5c88::t_a54ec53a1ed892 272,295
+  s_cffe143f0c5c88::t_b67179ed77699b 260,285-288,372,700-703
+web/src/pages/observability/diagnostics.ts
+  s_cffe143f0c5c88::t_825ccc61c5fc83 8-9
+  s_cffe143f0c5c88::t_821fa681c8e6e5 38-47
+  s_cffe143f0c5c88::t_ff0f7c8be99f9a 48
+web/src/i18n/console.ts
+  s_cffe143f0c5c88::t_760896fcb6586b 21
+  s_cffe143f0c5c88::t_99cb714c18df68 9,27,137,157,179,186-192,206,211-222
+  s_cffe143f0c5c88::t_30eda82281d54a 18-20
+  s_cffe143f0c5c88::t_752f86e17118d2 232
+  s_cffe143f0c5c88::t_c76461c111ae2b 133,183,193
+  s_cffe143f0c5c88::t_48255f6d1ff709 165-166
+  s_cffe143f0c5c88::t_f6a46f7050a893 161-162
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dee8a9939733c5a122a88f4a29644ab7a8de06be",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

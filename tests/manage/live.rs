@@ -254,7 +254,7 @@ async fn live_interval_and_manual_modes_push_filtered_entries_after_the_cursor()
             "POST",
             "/api/query-log/clear",
             Some(&token),
-            Some(json!({"revision":1,"log_epoch":0})),
+            Some(json!({"log_epoch":0})),
         )
         .await
         .expect(200);

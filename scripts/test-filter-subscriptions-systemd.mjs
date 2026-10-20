@@ -177,7 +177,7 @@ if (stage === 'activate') {
   const installation_reconciliation = await waitForInstallationReconciliation();
   const config = await request('GET', '/api/config');
   assert(!config.toml.includes('[filter_subscriptions]') && !config.toml.includes('[updates]'), 'fresh fixture configuration');
-  const prepared = await operation('/api/filter/subscriptions/prepare', { config_revision: config.revision, source }, 'succeeded');
+  const prepared = await operation('/api/filter/subscriptions/prepare', { source }, 'succeeded');
   assert.match(prepared.sha256, /^[a-f0-9]{64}$/);
   assert(prepared.rules > 0);
   const bytes = privilegedRead(`${directory}/objects/${prepared.sha256}.txt`, 16 * 1024 * 1024);
@@ -237,7 +237,7 @@ if (stage === 'activate') {
     // New URL identity has no validator, so the real reader must consume a 200
     // body. A 304 or network failure cannot produce the required write trace.
     const result = await operation('/api/filter/subscriptions/prepare',
-      { config_revision: evidence.config_revision, source: draft }, stage === 'enospc' ? 'failed' : 'succeeded');
+      { source: draft }, stage === 'enospc' ? 'failed' : 'succeeded');
     assert.notEqual(result.fingerprint, evidence.fingerprint);
     const after = await snapshot();
     assert.equal(after.generation, before.generation);
@@ -270,8 +270,8 @@ if (stage === 'activate') {
     assert.equal(before.operation, null);
     const catalog = privilegedRead(`${directory}/catalog.json`);
     for (const [endpoint, body] of [
-      ['/api/filter/subscriptions/prepare', { config_revision: evidence.config_revision, source: { ...source, id: 'fs-unconfigured' } }],
-      ['/api/filter/subscriptions/refresh', { config_revision: evidence.config_revision, source_id: source.id }],
+      ['/api/filter/subscriptions/prepare', { source: { ...source, id: 'fs-unconfigured' } }],
+      ['/api/filter/subscriptions/refresh', { source_id: source.id }],
     ]) {
       const rejected = await request('POST', endpoint, body, 409);
       assert.equal(rejected.error?.code, 'update_in_progress');
@@ -285,7 +285,7 @@ if (stage === 'activate') {
     assert(due <= Date.now() + 62000, 'fixture source clock is not in the future');
     while (Date.now() < due) await delay(Math.min(1000, due - Date.now()));
     const result = await operation('/api/filter/subscriptions/refresh',
-      { config_revision: evidence.config_revision, source_id: source.id }, stage === 'offline' ? 'failed' : 'succeeded');
+      { source_id: source.id }, stage === 'offline' ? 'failed' : 'succeeded');
     if (stage === 'offline') assert.match(result.error?.code ?? '', /^subscription_(download|timeout)$/);
     const after = await snapshot();
     assert.equal(after.content_revision, before.content_revision);

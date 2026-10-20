@@ -545,3 +545,108 @@ async fn credential_rotation_keeps_admitted_filter_work_and_manual_update_reques
     assert_eq!(filters.snapshot().config_revision, 2);
     shared.manager.lock().await.terminal_shutdown().await;
 }
+
+/// Only configuration saves carry a client revision. Other operations act on
+/// the server's current saved state and reject an obsolete `revision` field;
+/// epochs still guard data the administrator saw.
+#[tokio::test]
+async fn operations_other_than_configuration_saves_need_no_client_revision() {
+    let (_temp, shared, headers) = fixture().await;
+    let post = |path: &'static str, body: Value| {
+        let shared = shared.clone();
+        let headers = headers.clone();
+        async move { request(&shared, &headers, "POST", path, body).await }
+    };
+    for (path, body) in [
+        ("/api/certificates/reload", json!({"revision":2})),
+        (
+            "/api/certificates/import",
+            json!({"revision":2,"certificate_pem":"","private_key_pem":""}),
+        ),
+        (
+            "/api/cache/invalidate",
+            json!({"revision":2,"epoch":0,"all":true}),
+        ),
+        ("/api/query-log/clear", json!({"revision":2,"log_epoch":0})),
+        ("/api/stats/reset", json!({"revision":2,"totals_epoch":0})),
+        (
+            "/api/stats/history/clear",
+            json!({"revision":2,"history_epoch":0}),
+        ),
+        (
+            "/api/updates/apply",
+            json!({"plan_id":"p","expected_version":"9.0.0","config_revision":2}),
+        ),
+        (
+            "/api/filter/subscriptions/refresh",
+            json!({"config_revision":2,"source_id":null}),
+        ),
+    ] {
+        assert_eq!(post(path, body).await.unwrap_err().1, "BAD_JSON", "{path}");
+    }
+
+    assert_eq!(
+        post("/api/certificates/reload", json!({})).await.unwrap()["outcome"],
+        "unchanged"
+    );
+    // Import is a private store write that fills the draft; bad PEM is the
+    // only rejection, never a configuration conflict.
+    let import = post(
+        "/api/certificates/import",
+        json!({"certificate_pem":"x","private_key_pem":"y"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(import.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let status = request(&shared, &headers, "GET", "/api/status", json!(null))
+        .await
+        .unwrap();
+    let epoch = status["cache"]["epoch"].as_u64().unwrap();
+    assert_eq!(
+        post(
+            "/api/cache/invalidate",
+            json!({"epoch":epoch + 1,"all":true})
+        )
+        .await
+        .unwrap_err()
+        .1,
+        "CACHE_EPOCH"
+    );
+    post("/api/cache/invalidate", json!({"epoch":epoch,"all":true}))
+        .await
+        .unwrap();
+    let storage = &status["storage"];
+    for (path, field) in [
+        ("/api/query-log/clear", "log_epoch"),
+        ("/api/stats/reset", "totals_epoch"),
+        ("/api/stats/history/clear", "history_epoch"),
+    ] {
+        let cleared = post(path, json!({ field: storage[field] })).await.unwrap();
+        assert!(cleared.get("revision").is_none(), "{path}");
+    }
+    // Apply reaches the update coordinator instead of a revision check.
+    let apply = post(
+        "/api/updates/apply",
+        json!({"plan_id":"p","expected_version":"9.0.0"}),
+    )
+    .await
+    .unwrap_err();
+    assert_ne!(apply.1, "BAD_JSON");
+    assert_ne!(apply.1, "REVISION");
+
+    // Configuration saves keep the optimistic revision check.
+    let saved = request(&shared, &headers, "GET", "/api/config", json!(null))
+        .await
+        .unwrap();
+    let stale = request(
+        &shared,
+        &headers,
+        "PUT",
+        "/api/config",
+        json!({"toml":saved["toml"],"revision":1}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!((stale.0, stale.1), (StatusCode::CONFLICT, "REVISION"));
+    shared.manager.lock().await.terminal_shutdown().await;
+}

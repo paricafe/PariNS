@@ -20,6 +20,8 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     ensure!(metadata.is_dir(), "management path must be a directory");
     store::private_permissions(&metadata, 0o700)?;
     let saved = store::read_stored(&dir)?.context("management is not initialized")?;
+    // Startup reads the Turnstile keys as well; reject a file this version cannot.
+    super::turnstile::read(&dir)?;
     let config = Config::parse_in(&saved.toml, &dir)?;
     // Startup reads the rollback copy too; a copy this version rejects would
     // keep the candidate's management from opening.

@@ -17,7 +17,6 @@ use std::{
 pub(in crate::manage) struct Apply {
     plan_id: String,
     expected_version: String,
-    config_revision: u64,
 }
 
 impl Coordinator {
@@ -50,8 +49,7 @@ impl Coordinator {
                 if let Some(op) = &s.operation {
                     if op.plan_id == input.plan_id {
                         ensure!(
-                            op.expected_version == input.expected_version
-                                && op.config_revision == input.config_revision,
+                            op.expected_version == input.expected_version,
                             "plan_conflict"
                         );
                         return Ok(op.operation_id.clone());
@@ -61,7 +59,6 @@ impl Coordinator {
                 self.supported().map_err(anyhow::Error::msg)?;
                 ensure!(!self.frozen.load(Ordering::Acquire), "update_in_progress");
                 ensure!(ready, "readiness_failed");
-                ensure!(revision == input.config_revision, "config_changed");
                 let plan = s
                     .plan
                     .as_ref()
@@ -70,10 +67,10 @@ impl Coordinator {
                     plan.plan_id == input.plan_id && plan.expires_at_ms > now(),
                     "plan_expired"
                 );
-                ensure!(
-                    plan.config_revision == revision && plan.current_sha256 == identity.sha256,
-                    "config_changed"
-                );
+                // A save after the check does not invalidate the plan: commit
+                // preflight validates the configuration saved at that moment, and
+                // the operation pins the revision it was accepted under.
+                ensure!(plan.current_sha256 == identity.sha256, "plan_expired");
                 let candidate = s
                     .candidate
                     .as_ref()
@@ -922,7 +919,6 @@ mod tests {
                     Apply {
                         plan_id: op.plan_id,
                         expected_version: op.expected_version,
-                        config_revision: op.config_revision,
                     },
                     999,
                     false
@@ -976,7 +972,6 @@ mod tests {
             Apply {
                 plan_id: state.plan.as_ref().unwrap().plan_id.clone(),
                 expected_version: candidate.version.clone(),
-                config_revision: 2,
             }
         };
         coordinator.accept(accept_plan(), 2, true).await.unwrap();
@@ -1020,7 +1015,6 @@ mod tests {
                 Apply {
                     plan_id: b.plan_id.clone(),
                     expected_version: b.expected_version.clone(),
-                    config_revision: b.config_revision,
                 },
                 2,
                 true,
@@ -1226,7 +1220,6 @@ mod tests {
         let request = || Apply {
             plan_id: op.plan_id.clone(),
             expected_version: op.expected_version.clone(),
-            config_revision: op.config_revision,
         };
         assert_eq!(
             coordinator.accept(request(), 999, false).await.unwrap(),

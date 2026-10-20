@@ -642,7 +642,7 @@ binding=$(jq -er '.session.binding' "$fixture/response.json")
 reload_status=$(curl --silent --show-error --noproxy '*' --max-time 5 \
     --cookie "$fixture/cookies.txt" -H 'Origin: http://127.0.0.1:3000' \
     -H "X-PariNS-Session: $binding" -H 'Content-Type: application/json' \
-    --data "{\"revision\":$revision}" --output "$fixture/response.json" --write-out '%{http_code}' \
+    --data '{}' --output "$fixture/response.json" --write-out '%{http_code}' \
     http://127.0.0.1:3000/api/certificates/reload)
 [ "$reload_status" = 409 ]
 jq -e '.error.code == "update_in_progress"' "$fixture/response.json" >/dev/null
@@ -659,7 +659,7 @@ done
 sudo jq -e '.operation.status.operation_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .operation.status.phase_nonce == "cccccccccccccccccccccccccccccccc" and .operation.status.phase == "aborted" and .last_operation == .operation.status and .installed == .operation.old' /var/lib/parins-updater/private/journal.json >/dev/null
 ! sudo test -e /var/lib/parins-managed/update-request.json
 http --max-time 5 -H 'Origin: http://127.0.0.1:3000' -H "X-PariNS-Session: $binding" \
-    -H 'Content-Type: application/json' --data "{\"revision\":$revision}" \
+    -H 'Content-Type: application/json' --data '{}' \
     http://127.0.0.1:3000/api/certificates/reload | jq -e '.outcome == "unchanged"' >/dev/null
 sudo cmp "$binary" /opt/parins-managed/parins
 sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json

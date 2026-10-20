@@ -10,16 +10,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+// Manual work acts on the saved configuration current at admission; the
+// service still rejects a result whose configuration changed meanwhile.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepare {
-    config_revision: u64,
     source: DraftSource,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Refresh {
-    config_revision: u64,
     source_id: Option<String>,
 }
 #[derive(Deserialize)]
@@ -51,8 +51,8 @@ pub(super) async fn api(
             let input: Prepare = decode(body)?;
             start(
                 shared,
-                WorkRequest::Prepare {
-                    config_revision: input.config_revision,
+                move |config_revision| WorkRequest::Prepare {
+                    config_revision,
                     source: input.source,
                 },
                 Some((headers, &transport)),
@@ -63,8 +63,8 @@ pub(super) async fn api(
             let input: Refresh = decode(body)?;
             start(
                 shared,
-                WorkRequest::Refresh {
-                    config_revision: input.config_revision,
+                move |config_revision| WorkRequest::Refresh {
+                    config_revision,
                     source_id: input.source_id,
                     automatic: false,
                 },
@@ -76,9 +76,11 @@ pub(super) async fn api(
     }
 }
 
+/// `request` receives the saved configuration revision read under the
+/// mutation permit, which excludes configuration changes until admission.
 async fn start(
     shared: Arc<Shared>,
-    request: WorkRequest,
+    request: impl FnOnce(u64) -> WorkRequest + Send + 'static,
     authorization: Option<(&HeaderMap, &Snapshot)>,
 ) -> Result<Value, ApiError> {
     let permit = match authorization {
@@ -90,6 +92,7 @@ async fn start(
     tokio::spawn(async move {
         let _permit = permit;
         let filters = shared.manager.lock().await.filters.clone();
+        let request = request(filters.config_revision());
         let mut tasks = shared.filter_tasks.lock().await;
         while tasks.try_join_next().is_some() {}
         let begin = filters.begin(request).await.map_err(api_error)?;
@@ -151,7 +154,9 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
             }
         };
         if let Some(request) = request {
-            let _ = start(shared.clone(), request, None).await;
+            // A configuration saved since `next_due` makes this a revision
+            // conflict; the next tick schedules against the new one.
+            let _ = start(shared.clone(), move |_| request, None).await;
         }
         tokio::select! {
             _ = stop.changed() => {},
@@ -169,7 +174,7 @@ mod tests {
     use tokio::{sync::Semaphore, task::JoinSet};
 
     #[tokio::test]
-    async fn read_only_routes_require_session_and_mutations_obey_revision_and_freeze() {
+    async fn read_only_routes_require_session_and_mutations_obey_freeze() {
         let temp = tempfile::tempdir().unwrap();
         let address = "127.0.0.1:3000".parse().unwrap();
         let active = Arc::new(Mutex::new(Active {
@@ -252,8 +257,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(checked["decision"], "unmatched");
-        let input = br#"{"config_revision":99,"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#;
-        let conflict = api(
+        // Manual work no longer accepts a client configuration revision.
+        let input = br#"{"config_revision":0,"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#;
+        let obsolete = api(
             shared.clone(),
             transport.clone(),
             ApiRequest {
@@ -267,7 +273,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(conflict.1, "revision_conflict");
+        assert_eq!(obsolete.1, "BAD_JSON");
         let catalog = temp.path().join("state/filter-subscriptions/catalog.json");
         let before = std::fs::read(&catalog).unwrap();
         shared
@@ -285,7 +291,7 @@ mod tests {
                 method: "POST",
                 path: "/api/filter/subscriptions/prepare",
                 headers: &headers,
-                body: br#"{"config_revision":0,"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#,
+                body: br#"{"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#,
             },
             &mut cookie,
         )
@@ -319,7 +325,7 @@ mod tests {
         let caller = tokio::spawn(async move {
             start(
                 caller_shared,
-                WorkRequest::Refresh {
+                |_| WorkRequest::Refresh {
                     config_revision: 99,
                     source_id: None,
                     automatic: false,
@@ -347,13 +353,39 @@ mod tests {
         .await
         .unwrap();
         assert!(shared.filter_tasks.lock().await.is_empty());
+        // A manual refresh needs no client revision: it uses the saved one.
+        let accepted = api(
+            shared.clone(),
+            transport.clone(),
+            ApiRequest {
+                peer: address,
+                method: "POST",
+                path: "/api/filter/subscriptions/refresh",
+                headers: &headers,
+                body: br#"{"source_id":null}"#,
+            },
+            &mut cookie,
+        )
+        .await
+        .unwrap();
+        while shared.filter_tasks.lock().await.join_next().await.is_some() {}
+        let recent = shared
+            .manager
+            .lock()
+            .await
+            .filters
+            .snapshot()
+            .recent_operation
+            .unwrap();
+        assert_eq!(accepted["operation_id"], recent.id);
+        assert_eq!(recent.status, "succeeded");
         // Revocation blocks manual admission but leaves the process scheduler
         // able to own and finish work without any administrator session.
         active.lock().unwrap().sessions.clear();
         let manual = start(
             shared.clone(),
-            WorkRequest::Refresh {
-                config_revision: 0,
+            |config_revision| WorkRequest::Refresh {
+                config_revision,
                 source_id: None,
                 automatic: false,
             },
@@ -364,8 +396,8 @@ mod tests {
         assert_eq!(manual.1, "UNAUTHORIZED");
         start(
             shared.clone(),
-            WorkRequest::Refresh {
-                config_revision: 0,
+            |config_revision| WorkRequest::Refresh {
+                config_revision,
                 source_id: None,
                 automatic: true,
             },

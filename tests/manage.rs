@@ -388,6 +388,8 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         assert!(response.headers.contains(content_type));
         assert!(response.headers.contains("cache-control: no-store"));
         assert!(response.headers.contains("script-src 'self'"));
+        // Only a signed-out remote sign-in page with Turnstile allows Cloudflare.
+        assert!(!response.headers.contains("challenges.cloudflare.com"));
         assert!(response.headers.contains("x-frame-options: deny"));
     }
     server
@@ -873,15 +875,16 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
         "inspection is non-touching"
     );
     for body in [
-        json!({"revision":1,"epoch":inspection["epoch"]}),
-        json!({"revision":1,"epoch":inspection["epoch"],"all":true,"name":"cache.test"}),
+        json!({"epoch":inspection["epoch"]}),
+        json!({"epoch":inspection["epoch"],"all":true,"name":"cache.test"}),
     ] {
         server
             .request("POST", "/api/cache/invalidate", Some(&token), Some(body))
             .await
             .expect(422);
     }
-    let selected = json!({"revision":1,"epoch":inspection["epoch"],"name":"cache.test", "qtype":"A", "scope":"no_ecs"});
+    let selected =
+        json!({"epoch":inspection["epoch"],"name":"cache.test", "qtype":"A", "scope":"no_ecs"});
     let removed = server
         .request(
             "POST",
@@ -958,10 +961,10 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
             "POST",
             "/api/cache/invalidate",
             Some(&token),
-            Some(json!({"revision":1,"epoch":0,"all":true})),
+            Some(json!({"revision":2,"epoch":0,"all":true})),
         )
         .await
-        .expect(409);
+        .expect(400);
     let rollback = server
         .request(
             "POST",
@@ -2015,7 +2018,7 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
         )
         .await
         .expect(200);
-    assert_eq!(page["revision"], 1);
+    assert!(page.get("revision").is_none());
     assert_eq!(page["page"]["total"], 2);
     assert_eq!(page["page"]["entries"][0]["name"], "example.test.");
     assert_eq!(page["page"]["entries"][0]["status"], "blocked");
@@ -2053,7 +2056,7 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
             "POST",
             "/api/query-log/clear",
             None,
-            Some(json!({"revision":1})),
+            Some(json!({"log_epoch":page["page"]["log_epoch"]})),
         )
         .await
         .expect(401);
@@ -2062,7 +2065,7 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
             "POST",
             "/api/query-log/clear",
             Some(&token),
-            Some(json!({"revision":0,"log_epoch":page["page"]["log_epoch"]})),
+            Some(json!({"log_epoch":page["page"]["log_epoch"].as_u64().unwrap() + 1})),
         )
         .await
         .expect(409);
@@ -2071,7 +2074,7 @@ async fn query_logs_are_authenticated_bounded_and_revision_checked() {
             "POST",
             "/api/query-log/clear",
             Some(&token),
-            Some(json!({"revision":1,"log_epoch":page["page"]["log_epoch"]})),
+            Some(json!({"log_epoch":page["page"]["log_epoch"]})),
         )
         .await
         .expect(200);
@@ -2092,22 +2095,23 @@ async fn pasted_certificate_is_private_and_applies_via_existing_config_transacti
     let token = server.setup(&directory, &configuration()).await;
     let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let key = identity.signing_key.serialize_pem();
-    let body = json!({"revision":1,"certificate_pem":identity.cert.pem(),"private_key_pem":key});
+    let body = json!({"certificate_pem":identity.cert.pem(),"private_key_pem":key});
     server
         .request("POST", "/api/certificates/import", None, Some(body.clone()))
         .await
         .expect(401);
-    let mut stale = body.clone();
-    stale["revision"] = json!(0);
+    // Import only stores the identity privately; it takes no configuration revision.
+    let mut obsolete = body.clone();
+    obsolete["revision"] = json!(1);
     server
         .request(
             "POST",
             "/api/certificates/import",
             Some(&token),
-            Some(stale),
+            Some(obsolete),
         )
         .await
-        .expect(409);
+        .expect(400);
     let imported = server
         .request("POST", "/api/certificates/import", Some(&token), Some(body))
         .await

@@ -62,6 +62,19 @@ impl HttpsReader {
         uri: Uri,
         headers: HeaderMap,
     ) -> Result<WireResponse, ReaderError> {
+        self.send(http::Method::GET, uri, headers, Bytes::new())
+            .await
+    }
+
+    /// One request with a body to a public HTTPS destination, within the same
+    /// connect/header deadline as `request`.
+    pub(crate) async fn send(
+        &self,
+        method: http::Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Result<WireResponse, ReaderError> {
         let host = validate_https_uri(&uri)?.to_owned();
         let port = uri.port_u16().unwrap_or(443);
         timeout(CONNECT_TIMEOUT, async {
@@ -87,59 +100,7 @@ impl HttpsReader {
             }
             let socket = connected.ok_or_else(|| ReaderError::new("network_error"))?;
             let stream = self.tls_connect(host, socket).await?;
-            let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
-                .max_buf_size(32 * 1024)
-                .handshake(hyper_util::rt::TokioIo::new(stream))
-                .await
-                .map_err(|_| ReaderError::new("network_error"))?;
-            let task = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            let guard = Connection(task.abort_handle());
-            let mut request = http::Request::builder()
-                .method("GET")
-                .uri(uri.path_and_query().map_or("/", |p| p.as_str()))
-                .header(
-                    header::HOST,
-                    uri.authority().expect("validated URI").as_str(),
-                )
-                .header(header::CONNECTION, "close");
-            for (name, value) in &headers {
-                request = request.header(name, value);
-            }
-            let request = request
-                .body(axum::body::Body::empty())
-                .map_err(|_| ReaderError::new("invalid_request"))?;
-            let response = sender
-                .send_request(request)
-                .await
-                .map_err(|_| ReaderError::new("network_error"))?;
-            let (parts, mut body) = response.into_parts();
-            let stream = futures_util::stream::poll_fn(move |cx| {
-                loop {
-                    match Pin::new(&mut body).poll_frame(cx) {
-                        std::task::Poll::Ready(Some(Ok(frame))) => {
-                            if let Ok(data) = frame.into_data() {
-                                return std::task::Poll::Ready(Some(Ok(data)));
-                            }
-                        }
-                        std::task::Poll::Ready(Some(Err(_))) => {
-                            return std::task::Poll::Ready(Some(Err(ReaderError::new(
-                                "network_error",
-                            ))));
-                        }
-                        std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
-                        std::task::Poll::Pending => return std::task::Poll::Pending,
-                    }
-                }
-            });
-            validate_headers(&parts.headers)?;
-            Ok(WireResponse {
-                status: parts.status,
-                headers: parts.headers,
-                body: Box::pin(stream),
-                _connection: Some(guard),
-            })
+            exchange(stream, method, &uri, headers, body).await
         })
         .await
         .map_err(|_| ReaderError::new("connect_timeout"))?
@@ -158,6 +119,92 @@ impl HttpsReader {
             .map_err(|_| ReaderError::new("tls_error"))
     }
 }
+/// HTTP/1.1 exchange on an established stream; the body streams afterwards.
+async fn exchange<S>(
+    stream: S,
+    method: http::Method,
+    uri: &Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<WireResponse, ReaderError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+        .max_buf_size(32 * 1024)
+        .handshake(hyper_util::rt::TokioIo::new(stream))
+        .await
+        .map_err(|_| ReaderError::new("network_error"))?;
+    let task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let guard = Connection(task.abort_handle());
+    let mut request = http::Request::builder()
+        .method(method)
+        .uri(uri.path_and_query().map_or("/", |p| p.as_str()))
+        .header(
+            header::HOST,
+            uri.authority()
+                .ok_or_else(|| ReaderError::new("invalid_request"))?
+                .as_str(),
+        )
+        .header(header::CONNECTION, "close");
+    for (name, value) in &headers {
+        request = request.header(name, value);
+    }
+    let request = request
+        .body(axum::body::Body::from(body))
+        .map_err(|_| ReaderError::new("invalid_request"))?;
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(|_| ReaderError::new("network_error"))?;
+    let (parts, mut body) = response.into_parts();
+    let stream = futures_util::stream::poll_fn(move |cx| {
+        loop {
+            match Pin::new(&mut body).poll_frame(cx) {
+                std::task::Poll::Ready(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        return std::task::Poll::Ready(Some(Ok(data)));
+                    }
+                }
+                std::task::Poll::Ready(Some(Err(_))) => {
+                    return std::task::Poll::Ready(Some(Err(ReaderError::new("network_error"))));
+                }
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    });
+    validate_headers(&parts.headers)?;
+    Ok(WireResponse {
+        status: parts.status,
+        headers: parts.headers,
+        body: Box::pin(stream),
+        _connection: Some(guard),
+    })
+}
+
+/// Plain HTTP to a local test server: no TLS, address pinning or public-address
+/// check. Only tests that fake a remote service may use it.
+#[cfg(test)]
+pub(crate) async fn send_plain(
+    address: SocketAddr,
+    method: http::Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<WireResponse, ReaderError> {
+    timeout(CONNECT_TIMEOUT, async {
+        let socket = TcpStream::connect(address)
+            .await
+            .map_err(|_| ReaderError::new("network_error"))?;
+        exchange(socket, method, &uri, headers, body).await
+    })
+    .await
+    .map_err(|_| ReaderError::new("connect_timeout"))?
+}
+
 pub(crate) struct Connection(tokio::task::AbortHandle);
 impl Drop for Connection {
     fn drop(&mut self) {

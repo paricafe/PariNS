@@ -38,6 +38,9 @@ pub(super) struct Candidate {
 pub(super) struct Plan {
     pub plan_id: String,
     pub expires_at_ms: u64,
+    /// The revision saved when the check made this plan; diagnostic only, since
+    /// accepting the plan does not require it to match (it stays in the
+    /// persisted shape so existing state files keep loading).
     pub config_revision: u64,
     pub current_sha256: String,
 }

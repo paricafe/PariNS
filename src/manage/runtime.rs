@@ -157,6 +157,8 @@ pub(super) struct Manager {
     cache_ready: bool,
     pub store: Arc<Store>,
     pub saved: Option<Stored>,
+    /// Turnstile keys, published after their own Store write.
+    pub turnstile: super::turnstile::State,
     running: Option<Running>,
     pub last_error: Option<String>,
     generation: u64,
@@ -203,6 +205,7 @@ impl Manager {
                 .await?,
         );
         let saved = store.read()?;
+        let turnstile = super::turnstile::State::load(&store.dir)?;
         let config = saved
             .as_ref()
             .map(|saved| Config::parse_in(&saved.toml, &store.dir))
@@ -292,6 +295,7 @@ impl Manager {
             cache_ready,
             store: Arc::new(store),
             saved,
+            turnstile,
             running: None,
             last_error: None,
             generation: 0,
@@ -369,7 +373,6 @@ impl Manager {
     /// Serialized by the existing mutation permit and Manager lock, including
     /// while DNS is stopped. The management listener owns the same active set.
     pub async fn reload_certificates(&mut self, source: &'static str) -> Result<Value> {
-        let revision = self.saved.as_ref().map_or(0, |saved| saved.revision);
         self.reload_attempt = self.reload_attempt.saturating_add(1);
         let now = || {
             std::time::SystemTime::now()
@@ -414,7 +417,7 @@ impl Manager {
         })?;
         let status = self.certificate_status();
         Ok(
-            serde_json::json!({"outcome":outcome,"revision":revision,"certificate_generation":status["certificate_generation"],"certificates":status}),
+            serde_json::json!({"outcome":outcome,"certificate_generation":status["certificate_generation"],"certificates":status}),
         )
     }
 

@@ -497,7 +497,7 @@ async function updateEvidence({ round, current, next, runtime, upstream, evidenc
     await Promise.race([hold.arrived, delay(1000).then(() => { throw fail('held_upstream_not_reached'); })]);
     const started = performance.now();
     const refreshed = await operation('/api/filter/subscriptions/refresh',
-      { config_revision: runtime.revision, source_id: SOURCES[1].id }, SLO.server_deadline_ms - 1000,
+      { source_id: SOURCES[1].id }, SLO.server_deadline_ms - 1000,
       (op, state) => {
         attempt.operation_id = op.id; attempt.operation_status = op.status;
         attempt.actual_sha256 = op.sha256 ?? null;
@@ -512,7 +512,7 @@ async function updateEvidence({ round, current, next, runtime, upstream, evidenc
     const readyMs = performance.now() - started;
     assert(pinned.retained_bytes > before.retained_bytes, 'old generation retained during publication');
     const refused = await request('POST', '/api/filter/subscriptions/refresh',
-      { config_revision: runtime.revision, source_id: SOURCES[0].id }, 409);
+      { source_id: SOURCES[0].id }, 409);
     assert.equal(refused.error?.code, 'busy', 'no second compilation while old reader is held');
     hold.release(); released = true; await held;
     if (heldFailure) throw heldFailure;
@@ -577,7 +577,7 @@ async function run(fixture, output) {
       if (!prepared) {
         await sourceReady(0, 'A', null, summary.readiness);
         for (const source of SOURCES) {
-          const result = await operation('/api/filter/subscriptions/prepare', { config_revision: runtime.revision, source });
+          const result = await operation('/api/filter/subscriptions/prepare', { source });
           assert.equal(result.op.sha256, source.id === SOURCES[0].id ? CORPUS_SHA : digest(CONTENT.A));
           assert.equal(result.op.rules, source.id === SOURCES[0].id ? 201337 : 2);
         }

@@ -1,5 +1,8 @@
 //! Authentication attempts are charged to socket peers, independently of the
 //! global CPU budget for password hashing. No forwarding headers are identities.
+//! An IPv6 peer is charged to its /64, which one host or site usually holds
+//! whole, so rotating addresses within it buys no extra attempts; IPv4-mapped
+//! peers count as their IPv4 address.
 //!
 //! Source state is bounded and reclaimed separately from the global hash
 //! concurrency. Blocking hash work owns its permit until it finishes, even after
@@ -57,7 +60,11 @@ impl Budget {
 
     fn attempt_at(&self, peer: IpAddr, now: Instant) -> Result<(), ApiError> {
         let peer = match peer {
-            IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(peer),
+            IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or_else(|| {
+                IpAddr::V6(std::net::Ipv6Addr::from(
+                    u128::from(ip) & !u128::from(u64::MAX),
+                ))
+            }),
             _ => peer,
         };
         let mut sources = self.sources.lock().unwrap();
@@ -181,6 +188,20 @@ mod tests {
         );
         budget
             .attempt_at("192.0.2.2".parse().unwrap(), now + Duration::from_secs(5))
+            .unwrap();
+        // Addresses within one IPv6 /64 share a budget; another /64 does not.
+        for i in 0..ATTEMPTS {
+            budget
+                .attempt_at(format!("2001:db8:0:1::{:x}", i + 1).parse().unwrap(), now)
+                .unwrap();
+        }
+        assert!(
+            budget
+                .attempt_at("2001:db8:0:1:ffff::1".parse().unwrap(), now)
+                .is_err()
+        );
+        budget
+            .attempt_at("2001:db8:0:2::1".parse().unwrap(), now)
             .unwrap();
         budget.attempt_at(peer, now + WINDOW).unwrap();
         assert!(budget.attempt_at(peer, now + WINDOW).is_err());

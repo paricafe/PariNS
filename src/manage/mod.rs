@@ -13,6 +13,7 @@ mod runtime;
 mod settings;
 pub(crate) mod store;
 mod transport;
+mod turnstile;
 mod update_checks;
 mod updates;
 
@@ -474,6 +475,8 @@ fn with_transport(mut view: Value, transport: &Snapshot) -> Value {
 struct Credentials {
     username: String,
     password: String,
+    #[serde(default)]
+    turnstile_token: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -506,27 +509,25 @@ struct Revision {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CertificateImport {
-    revision: u64,
     certificate_pem: String,
     private_key_pem: String,
 }
 
+// Storage clears act on the server's current data. Their epochs protect
+// against clearing records newer than the ones the administrator saw.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LogClear {
-    revision: u64,
     log_epoch: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TotalsReset {
-    revision: u64,
     totals_epoch: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HistoryClear {
-    revision: u64,
     history_epoch: u64,
 }
 
@@ -608,6 +609,9 @@ async fn api(
             manager.validate(document.toml).await.map_err(invalid)?;
             return Ok(json!({"valid":true,"transport_change":change}));
         }
+        ("GET", "/api/login/options") => {
+            return Ok(turnstile::options(&shared, peer).await);
+        }
         ("POST", "/api/login") => {
             shared.auth.attempt(peer.ip())?;
             let credentials: Credentials = decode(body)?;
@@ -632,6 +636,16 @@ async fn api(
                         "Complete setup first",
                     )
                 })?;
+            // Turnstile precedes the password check; its failure keeps the attempt.
+            let admission = turnstile::admission(&shared).await;
+            admission
+                .check(
+                    &transport,
+                    peer,
+                    host,
+                    credentials.turnstile_token.as_deref(),
+                )
+                .await?;
             let verified = saved.clone();
             let valid = shared
                 .auth
@@ -649,7 +663,10 @@ async fn api(
                 ));
             }
             let manager = shared.manager.lock().await;
-            if !verified.matches(manager.saved.as_ref()) {
+            // A Turnstile change meanwhile ended every session; so does this attempt.
+            if !verified.matches(manager.saved.as_ref())
+                || manager.turnstile.generation != admission.generation
+            {
                 return Err(error(
                     StatusCode::UNAUTHORIZED,
                     "LOGIN_FAILED",
@@ -745,6 +762,10 @@ async fn api(
         ("POST", "/api/account/credentials") => {
             account::rotate(shared, transport, peer, headers, body).await
         }
+        ("GET", "/api/account/turnstile") => Ok(turnstile::view(&shared, peer).await),
+        ("POST", "/api/account/turnstile") => {
+            turnstile::change(shared, transport, peer, headers, body).await
+        }
         ("GET", "/api/filter/subscriptions") => {
             Ok(json!(shared.manager.lock().await.filters.snapshot()))
         }
@@ -825,75 +846,44 @@ async fn api(
         ("POST", "/api/query-log/list") => {
             let input: crate::query_log::ListOptions = decode(body)?;
             input.validate().map_err(invalid)?;
-            let manager = shared.manager.lock().await;
-            let revision = manager.saved.as_ref().map_or(0, |s| s.revision);
-            let services = manager.services.clone();
-            drop(manager);
-            Ok(
-                json!({"revision":revision,"page":services.storage.list_logs(input).await.map_err(storage_error)?}),
-            )
+            let services = shared.manager.lock().await.services.clone();
+            Ok(json!({"page":services.storage.list_logs(input).await.map_err(storage_error)?}))
         }
         ("POST", "/api/query-log/clear" | "/api/stats/reset" | "/api/stats/history/clear") => {
-            let (revision, epoch, action) = match path {
-                "/api/query-log/clear" => {
-                    let v: LogClear = decode(body)?;
-                    (v.revision, v.log_epoch, 0)
-                }
-                "/api/stats/reset" => {
-                    let v: TotalsReset = decode(body)?;
-                    (v.revision, v.totals_epoch, 1)
-                }
-                _ => {
-                    let v: HistoryClear = decode(body)?;
-                    (v.revision, v.history_epoch, 2)
-                }
+            let (epoch, action) = match path {
+                "/api/query-log/clear" => (decode::<LogClear>(body)?.log_epoch, 0),
+                "/api/stats/reset" => (decode::<TotalsReset>(body)?.totals_epoch, 1),
+                _ => (decode::<HistoryClear>(body)?.history_epoch, 2),
             };
             let permit = shared
                 .protected_mutation_permit(headers, &transport)
                 .await?;
             tokio::spawn(async move {
                 let _permit = permit;
-                let manager = shared.manager.lock().await;
-                if manager.saved.as_ref().map(|s| s.revision) != Some(revision) {
-                    return Err(error(
-                        StatusCode::CONFLICT,
-                        "REVISION",
-                        "Configuration changed; refresh before clearing",
-                    ));
-                }
-                let services = manager.services.clone();
-                drop(manager);
+                let services = shared.manager.lock().await.services.clone();
                 let result = match action {
                     0 => services.storage.clear_logs(epoch).await,
                     1 => services.storage.reset_totals(epoch).await,
                     _ => services.storage.clear_history(epoch).await,
                 }
                 .map_err(storage_error)?;
-                Ok(json!({"removed":result.removed,"epoch":result.epoch,"revision":revision}))
+                Ok(json!({"removed":result.removed,"epoch":result.epoch}))
             })
             .await
             .map_err(|_| internal())?
         }
         ("POST", "/api/certificates/reload") => {
+            // Reloads the files named by the saved configuration.
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
-            struct Reload {
-                revision: u64,
-            }
-            let input: Reload = decode(body)?;
+            struct Reload {}
+            let _: Reload = decode(body)?;
             let permit = shared
                 .protected_mutation_permit(headers, &transport)
                 .await?;
             tokio::spawn(async move {
                 let _permit = permit;
                 let mut manager = shared.manager.lock().await;
-                if manager.saved.as_ref().map_or(0, |s| s.revision) != input.revision {
-                    return Err(error(
-                        StatusCode::CONFLICT,
-                        "REVISION",
-                        "Configuration changed; refresh before reloading",
-                    ));
-                }
                 manager.reload_certificates("api").await.map_err(invalid)
             })
             .await
@@ -906,22 +896,16 @@ async fn api(
                 .await?;
             tokio::spawn(async move {
                 let _permit = permit;
-                let manager = shared.manager.lock().await;
-                if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
-                    return Err(error(
-                        StatusCode::CONFLICT,
-                        "REVISION",
-                        "Configuration changed; reload before importing",
-                    ));
-                }
-                let store = manager.store.clone();
+                // Import only stores the identity privately; the caller's draft
+                // references it, and saving that draft is checked as usual.
+                let store = shared.manager.lock().await.store.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     certificates::import(&store.dir, &input.certificate_pem, &input.private_key_pem)
                 })
                 .await
                 .map_err(|_| internal())?
                 .map_err(invalid)?;
-                Ok(json!({"identity": result, "revision": input.revision}))
+                Ok(json!({"identity": result}))
             })
             .await
             .map_err(|_| internal())?
@@ -936,7 +920,6 @@ async fn api(
             let cache = resolver.cache();
             let now = Instant::now();
             Ok(json!({
-                "revision": manager.saved.as_ref().map_or(0, |s| s.revision),
                 "epoch": cache.epoch(),
                 "inspection": cache.inspect(query.queries[0].name(), Some(query.queries[0].query_type()), now),
                 "explanation": cache.explain(&query, subnet, now),
@@ -949,13 +932,6 @@ async fn api(
                 .protected_mutation_permit(headers, &transport)
                 .await?;
             let manager = shared.manager.lock().await;
-            if manager.saved.as_ref().map(|s| s.revision) != Some(input.revision) {
-                return Err(error(
-                    StatusCode::CONFLICT,
-                    "REVISION",
-                    "Configuration changed; refresh before invalidating",
-                ));
-            }
             let resolver = manager
                 .resolver()
                 .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
@@ -968,7 +944,7 @@ async fn api(
                 ));
             }
             let removed = cache.invalidate(name.as_ref(), kind, scope);
-            Ok(json!({"removed":removed,"epoch":cache.epoch(),"revision":input.revision}))
+            Ok(json!({"removed":removed,"epoch":cache.epoch()}))
         }
         ("GET", "/api/config") => {
             let manager = shared.manager.lock().await;
@@ -1082,6 +1058,15 @@ async fn api(
     }
 }
 
+// blob: images are only the browser-local custom background, created by the
+// console's own script from a file the administrator chose.
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const TURNSTILE_CSP: &str = "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
+/// Marks a console document served to a sign-in page with Turnstile enabled.
+#[derive(Clone, Copy)]
+struct TurnstileDocument;
+
 async fn handle(
     State(shared): State<Arc<Shared>>,
     Extension(peer): Extension<SocketAddr>,
@@ -1098,18 +1083,20 @@ async fn handle(
             .headers_mut()
             .insert(header::CONNECTION, HeaderValue::from_static("close"));
     }
+    // Only a sign-in document that shows the Turnstile widget may load its script
+    // and frame; the console reloads after signing in to drop them again.
+    let policy = if response.extensions().get::<TurnstileDocument>().is_some() {
+        TURNSTILE_CSP
+    } else {
+        CSP
+    };
     let headers = response.headers_mut();
     for (name, value) in [
         ("cache-control", "no-store"),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
         ("referrer-policy", "no-referrer"),
-        (
-            "content-security-policy",
-            // blob: images are only the browser-local custom background, created by
-            // the console's own script from a file the administrator chose.
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        ),
+        ("content-security-policy", policy),
     ] {
         headers.insert(
             axum::http::HeaderName::from_static(name),
@@ -1172,7 +1159,13 @@ async fn handle_inner(
             _ => None,
         };
         if let Some((kind, text)) = asset {
-            return Ok(([("content-type", kind)], text).into_response());
+            let mut response = ([("content-type", kind)], text).into_response();
+            if path == "/"
+                && turnstile::document_needs_widget(&shared, &transport, peer, &parts.headers).await
+            {
+                response.extensions_mut().insert(TurnstileDocument);
+            }
+            return Ok(response);
         }
     }
     if !path.starts_with("/api/") {

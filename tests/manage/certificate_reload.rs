@@ -174,7 +174,7 @@ async fn updates_only_validate_and_apply_preserve_loaded_material_after_failed_r
         &auth,
         "POST",
         "/api/certificates/reload",
-        Some(json!({"revision":1})),
+        Some(json!({})),
     )
     .await
     .expect(422);
@@ -373,17 +373,17 @@ async fn reload_is_atomic_across_transports_and_preserves_sessions_runtime_and_o
         &auth,
         "POST",
         "/api/certificates/reload",
-        Some(json!({"revision":revision+1})),
+        Some(json!({"revision":revision})),
     )
     .await
-    .expect(409);
+    .expect(400);
     let unchanged = api(
         &server,
         &first,
         &auth,
         "POST",
         "/api/certificates/reload",
-        Some(json!({"revision":revision})),
+        Some(json!({})),
     )
     .await
     .expect(200);
@@ -399,7 +399,7 @@ async fn reload_is_atomic_across_transports_and_preserves_sessions_runtime_and_o
         &auth,
         "POST",
         "/api/certificates/reload",
-        Some(json!({"revision":revision})),
+        Some(json!({})),
     )
     .await
     .expect(422);
@@ -428,7 +428,7 @@ async fn reload_is_atomic_across_transports_and_preserves_sessions_runtime_and_o
         &auth,
         "POST",
         "/api/certificates/reload",
-        Some(json!({"revision":revision})),
+        Some(json!({})),
     )
     .await
     .expect(200);
@@ -454,7 +454,7 @@ async fn reload_is_atomic_across_transports_and_preserves_sessions_runtime_and_o
         &auth,
         "POST",
         "/api/certificates/reload",
-        Some(json!({"revision":revision})),
+        Some(json!({})),
     )
     .await
     .expect(200);

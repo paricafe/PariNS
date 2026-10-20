@@ -78,6 +78,15 @@ fn failed_check(state: &mut AppState, error: &ReaderError) {
     state.check.manual = false;
 }
 
+/// A cached candidate that is not newer than the running build: an online update
+/// installed it, or the program was upgraded by other means.
+fn not_newer(candidate: &Candidate, current: &BuildInfo) -> bool {
+    Version::parse(&candidate.version)
+        .ok()
+        .zip(Version::parse(&current.version).ok())
+        .is_some_and(|(candidate, current)| candidate <= current)
+}
+
 fn revalidate_cached_candidate(
     candidate: Option<Candidate>,
     current: &BuildInfo,
@@ -138,6 +147,19 @@ impl Coordinator {
             Ok(value) => (value.unwrap_or_default(), None),
             Err(_) => (AppState::default(), Some("update_state_unavailable")),
         };
+        // After an online update the cached candidate is the running version. Drop
+        // it (and its plan) once and persist, so it is never offered again.
+        if state
+            .candidate
+            .as_ref()
+            .is_some_and(|candidate| not_newer(candidate, &BuildInfo::current()))
+        {
+            state.candidate = None;
+            state.plan = None;
+            if unavailable.is_none() {
+                let _ = state::write(dir, &state);
+            }
+        }
         if state.check.next_check_at_ms <= now() {
             state.check.next_check_at_ms =
                 now().saturating_add((60 + rand::random::<u64>() % 241) * 1000);
@@ -225,7 +247,11 @@ impl Coordinator {
         let reason = self.supported().err();
         let root = self.root.lock().unwrap().clone();
         let state = self.state.lock().unwrap().clone();
-        let candidate = state.candidate.as_ref().map(|candidate| {
+        let offered = state
+            .candidate
+            .as_ref()
+            .filter(|candidate| !not_newer(candidate, &BuildInfo::current()));
+        let candidate = offered.map(|candidate| {
             let plan = state.plan.as_ref();
             json!({"version":candidate.version,"tag":candidate.tag,"published_at":candidate.published_at,
                 "notes":candidate.notes,"manual_reason":candidate.manual_reason,
@@ -249,7 +275,7 @@ impl Coordinator {
                 .unwrap_or_else(|| json!({"operation_id":op.operation_id,"phase":op.phase,"version":op.expected_version,"reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
         }).or_else(|| root.as_ref().and_then(|r|r.last_operation.as_ref()).map(|o|json!(o)));
         json!({"current":BuildInfo::current(),"capability":{"available":reason.is_none(),"reason":reason},
-            "check":{"state":if self.checking.load(Ordering::Acquire){"checking"}else if state.check.error.is_some(){"failed"}else if !state.check.validated{"unchecked"}else if state.candidate.is_some(){"available"}else{"up_to_date"},
+            "check":{"state":if self.checking.load(Ordering::Acquire){"checking"}else if state.check.error.is_some(){"failed"}else if !state.check.validated{"unchecked"}else if offered.is_some(){"available"}else{"up_to_date"},
                 "last_check_at_ms":state.check.last_check_at_ms,"last_success_at_ms":state.check.last_success_at_ms,
                 "next_check_at_ms":state.check.next_check_at_ms,"retry_at_ms":state.check.retry_at_ms,"error":state.check.error},
             "candidate":candidate,"active_operation":active,"last_operation":last,
@@ -606,6 +632,36 @@ mod tests {
             },
             build,
         )
+    }
+
+    #[test]
+    fn installed_candidate_is_dropped_on_open_and_never_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut installed, _) = candidate();
+        let current = BuildInfo::current();
+        installed.version = current.version.clone();
+        installed.tag = format!("v{}", current.version);
+        let mut state = AppState {
+            candidate: Some(installed.clone()),
+            ..Default::default()
+        };
+        state.check.validated = true;
+        state::write(dir.path(), &state).unwrap();
+        let coordinator = Coordinator::open(dir.path());
+        let view = coordinator.view();
+        assert!(view["candidate"].is_null());
+        assert_eq!(view["check"]["state"], "up_to_date");
+        // Persisted once, so a restart does not bring it back.
+        assert!(
+            state::read(dir.path())
+                .unwrap()
+                .unwrap()
+                .candidate
+                .is_none()
+        );
+        // A same-version candidate that reaches the state later is not shown either.
+        coordinator.state.lock().unwrap().candidate = Some(installed);
+        assert!(coordinator.view()["candidate"].is_null());
     }
 
     #[test]

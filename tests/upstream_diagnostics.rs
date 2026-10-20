@@ -157,8 +157,9 @@ async fn parallel_winner_cancels_loser_without_counting_a_failure() {
 #[tokio::test]
 async fn shutdown_abort_is_terminal_once_and_disabled_trace_keeps_aggregates() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let socket_address = socket.local_addr().unwrap();
     let pool = Arc::new(pool(
-        vec![socket.local_addr().unwrap().to_string()],
+        vec![socket_address.to_string()],
         Mode::Weighted,
         vec![],
     ));
@@ -185,6 +186,21 @@ async fn shutdown_abort_is_terminal_once_and_disabled_trace_keeps_aggregates() {
     assert_eq!(rows[0]["outcome"], "cancelled");
     assert_eq!(rows[0]["reason"], "shutdown");
     assert_eq!(rows[0]["count"], 1);
+    // Management diagnostics name each slot's endpoint and where it was reached.
+    let address = socket_address.to_string();
+    assert_eq!(counts["endpoints"][0]["slot"], 0);
+    assert_eq!(counts["endpoints"][0]["label"], address);
+    assert_eq!(counts["endpoints"][0]["address"], address);
+    // An HTTPS endpoint is shown by its URL host.
+    let https = crate::pool(
+        vec!["https://127.0.0.1/dns-query".into()],
+        Mode::Weighted,
+        vec![],
+    );
+    assert_eq!(
+        https.diagnostics_snapshot()["endpoints"][0]["address"],
+        "127.0.0.1"
+    );
 }
 
 #[tokio::test]

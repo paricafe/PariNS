@@ -242,6 +242,8 @@ pub(super) struct Client {
     h2: std::sync::Mutex<Option<Arc<H2Connection>>>,
     h2_connecting: Mutex<()>,
     h3: Option<super::h3::Client>,
+    /// The last address that answered (not HTTPS), for management diagnostics.
+    answered_by: std::sync::Mutex<Option<SocketAddr>>,
 }
 
 struct QuicConnection {
@@ -290,7 +292,24 @@ impl Client {
             h2: std::sync::Mutex::new(None),
             h2_connecting: Mutex::new(()),
             h3,
+            answered_by: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Where this endpoint is reached, for authenticated diagnostics only: the URL
+    /// host for HTTPS, otherwise the address that last answered (or the
+    /// configured host and port before any answer).
+    pub fn display_address(&self) -> String {
+        if self.spec.protocol == Protocol::Https {
+            return self.spec.host.clone();
+        }
+        match *self.answered_by.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(address) => address.to_string(),
+            None => match self.spec.host.parse::<std::net::IpAddr>() {
+                Ok(ip) => SocketAddr::new(ip, self.spec.port).to_string(),
+                Err(_) => format!("{}:{}", self.spec.host, self.spec.port),
+            },
+        }
     }
 
     async fn addresses(&self, deadline: Instant, attempt: &mut Attempt) -> Result<Vec<SocketAddr>> {
@@ -458,6 +477,11 @@ impl Client {
                     result
                 }
             };
+            // HTTPS is shown by its URL host; other protocols record the address
+            // that answered.
+            if response.is_ok() && self.spec.protocol != Protocol::Https {
+                *self.answered_by.lock().unwrap_or_else(|e| e.into_inner()) = Some(address);
+            }
             match response {
                 Ok(mut message) => {
                     protocol::strip_tcp_keepalive(&mut message);

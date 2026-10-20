@@ -303,8 +303,20 @@ impl Pool {
         })
     }
 
+    /// Attempt counts per endpoint slot, each with the endpoint's label and the
+    /// address it is reached at. Management-only: never logged or used as a
+    /// metric label.
     pub fn diagnostics_snapshot(&self) -> serde_json::Value {
-        self.diagnostics.snapshot()
+        let mut snapshot = self.diagnostics.snapshot();
+        snapshot["endpoints"] = self
+            .endpoints
+            .iter()
+            .enumerate()
+            .map(|(slot, client)| {
+                serde_json::json!({"slot": slot, "label": client.spec.label, "address": client.display_address()})
+            })
+            .collect();
+        snapshot
     }
 
     pub fn shutdown(&self) {

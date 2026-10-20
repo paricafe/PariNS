@@ -25,6 +25,7 @@ updates. PariNS is written in Rust and ships as a static Linux binary.
   and never falls back to plaintext.
 - **Console:** guided first-run setup, Chinese and English, light and dark themes,
   statistics, an opt-in query log, and a TOML editor with preview and rollback.
+  Optional Cloudflare Turnstile protects sign-in.
 - **Online updates:** an installed instance checks for official releases and
   installs them through a restricted updater with automatic rollback.
 

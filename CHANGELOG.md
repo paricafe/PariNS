@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Optional Cloudflare Turnstile on the sign-in page, set in **Account &
+  security**. It is checked before the password and counts against the sign-in
+  attempt limit; sign-ins from loopback (an SSH tunnel) skip it. The secret key is
+  kept in a private state file, never in the configuration, and is never shown
+  again. Sign-in attempts from IPv6 clients are counted per /64 network.
+- Upstream diagnostics name each upstream and the address it was reached at.
+
+### Changed
+
+- Saving applies at once without a confirmation, except for a change of the
+  console address or protocol. The console no longer shows configuration
+  revisions; a save that meets a change made elsewhere reloads it and keeps your
+  edits. The save bar has no preview; **Show changes** and **Check
+  configuration** are on the Advanced (TOML) page. Rollback is **Undo last save**.
+- Certificate reload and import, cache clearing, query log and statistics
+  clearing, subscription work and updates no longer take a configuration
+  revision, and none of them wait for unsaved settings.
+- Saving a new subscription source downloads and checks it first; its ID is
+  filled in from the name.
+- A lost response to a change is confirmed by reading the server state again
+  instead of asking you to check.
+- The overview shows one cache hit rate that includes queries joined to an
+  in-flight lookup.
+- Account changes no longer require saving settings first; they ask before
+  discarding unsaved edits.
+- Console text and diagnostics no longer show internal identifiers.
+- A software update stays available after an unrelated settings save.
+
+### Fixed
+
+- After an online update, the overview no longer keeps offering the version that
+  is already installed.
+
 ## v0.1.21 — 2026-10-19
 
 ### Removed

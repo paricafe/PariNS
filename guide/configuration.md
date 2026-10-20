@@ -382,9 +382,10 @@ Each `[[filter_subscriptions.sources]]` (up to 16):
   `0.0.0.0` or `127.0.0.1` (or their IPv6 equivalents). Neither is Adblock syntax.
 - Each list may be 16 MiB, all lists together 32 MiB, and each line 4096 bytes.
   Downloads use verified HTTPS to public addresses only and ignore proxy settings.
-- In the console, add a source, verify the download, then enable it and save.
-  Verification alone does not activate rules. A failed update keeps the previous
-  rules. Enabled local allow rules also override subscription blocks.
+- In the console, add a source and save. PariNS first downloads and checks each
+  enabled new list, and saves only when that succeeds. The console fills in `id`
+  from the name (editable under **More options**). A failed update keeps the
+  previous rules. Enabled local allow rules also override subscription blocks.
 - Downloaded lists and the catalog live under `filter-subscriptions/` in the state or
   data directory. If the catalog is damaged, keep the directory for diagnosis and
   restore it from a backup, or turn subscriptions off; do not edit it.

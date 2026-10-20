@@ -51,7 +51,7 @@ explicit design decision.
 | `src/metrics.rs`, `src/admin.rs` | Fixed-cardinality process metrics; read-only loopback `/metrics` and `/healthz` with their own small connection budget. |
 | `src/runtime_services.rs`, `src/runtime_health.rs`, `src/runtime_lifecycle.rs` | Metrics and storage across DNS generations, generation-scoped DNS health, startup/terminal boundaries for both modes. |
 | `src/storage/`, `src/query_log.rs` | Private runtime SQLite with one owner worker: statistics and opt-in bounded per-request history with clear epochs; never an aggregate metrics label store. |
-| `src/manage/` | Authenticated management APIs, sessions and accounts, configuration transactions, persistence, managed runtime ownership. |
+| `src/manage/` | Authenticated management APIs, sessions and accounts, sign-in Turnstile, configuration transactions, persistence, managed runtime ownership. |
 | `src/update/`, `src/bin/` | Official release/build contracts and bounded HTTPS reader; the fixed root executor owns its installation journal, never DNS or business data. |
 | `src/filter_subscriptions/` | Bounded subscription work, private source catalog/index, immutable policy generations. Manager/file runtime own final configuration, freeze, reload and shutdown gates. |
 | `src/https_reader.rs`, `src/private_files.rs` | Pinned HTTPS transport and private-file checks; callers keep authorization, transactions and lifecycle. |
@@ -148,7 +148,9 @@ until preview/validation.
   HTTP Age into RR TTLs; cache code has no HTTP policy. Details:
   `src/upstreams/h3.rs`, `src/upstreams/transport.rs`.
 - DNS terminal health is published once per generation to readiness and storage
-  sampling. Attempt diagnostics use bounded slots and finite typed dimensions;
+  sampling. Attempt diagnostics use bounded slots and finite typed dimensions
+  (endpoint labels and reached addresses only in the authenticated status API, never
+  in query logs or metric labels);
   cancellation/shutdown are not upstream faults. Management API 200 is not DNS readiness.
 - Server supervises each listener separately in both modes: a bind failure or an
   adapter exit rebinds only that listener (5 s doubling to 60 s, rate-limited logs)
@@ -170,16 +172,33 @@ until preview/validation.
 
 ## Management, runtime and security
 
-- Mutations keep authentication, Host/Origin and revision/epoch checks, atomic
-  persistence and failure recovery. Attempt budgets use the socket peer, never
-  forwarding headers. Details: `src/manage/auth_budget.rs`.
+- Mutations keep authentication, Host/Origin checks, atomic persistence and failure
+  recovery. Configuration saves and rollback carry the saved revision as an
+  optimistic-concurrency check; the console keeps it internal, never shows it, and on
+  a conflict reloads while keeping the draft (non-overlapping edits merge, otherwise
+  the administrator chooses). Other operations (subscription work, certificate
+  reload and import, cache invalidation, storage clears, software updates) act on
+  the server's current saved state and take no client revision; epochs still guard
+  data the administrator saw. Attempt budgets use the socket peer, never forwarding
+  headers. Details: `src/manage/auth_budget.rs`.
 - Sessions are HttpOnly, SameSite=Strict Cookies plus an in-memory binding on
   protected APIs: `parins_session_http` (HTTP) or Secure `__Host-parins_session`
   (HTTPS). Logout revokes only its own server-side session, without clearing the
-  Cookie. Never persist or broadcast the binding. An unknown configuration result
-  is not proof of failure and is never silently replayed.
+  Cookie. Never persist or broadcast the binding. An unknown mutation result is
+  not proof of failure: the console confirms it by reading server state and never
+  replays it.
 - Credential changes are separate Store transactions that revoke all sessions and
   require explicit login. Details: `src/manage/account.rs`.
+- Turnstile is optional; its keys live only in the private `turnstile.json`, and
+  the secret never enters the TOML, logs, API responses or exports. Sign-in checks
+  it (siteverify through the pinned HTTPS reader: success, host name, `login`
+  action) before the password, charged to the peer's attempt budget (IPv6 peers by
+  /64); failure refuses. Only a loopback socket peer skips it (a same-host proxy or
+  tunnel makes everyone loopback; documented and warned in the console). Cloudflare
+  test keys only as a pair. The relaxed CSP for its script and frame applies only to
+  a signed-out console document that shows it. Setting or clearing the keys needs
+  the current password, revokes all sessions and voids sign-ins admitted under the
+  old setting. Details: `src/manage/turnstile.rs`.
 - The live query log WebSocket (`/api/query-log/live`) belongs to the management
   process: Host/Origin (Origin required) and session Cookie are checked before the
   upgrade; the binding arrives only as the first message. Sockets leave the 90 s

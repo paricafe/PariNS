@@ -22,12 +22,15 @@ proxy.
 `parins_session_http` over HTTP, or a Secure `__Host-parins_session` over HTTPS. It
 ends at expiry, at sign-out (which revokes that session on the server) or when the
 service restarts. Sign-in and setup attempts are limited to 5 per minute per client
-address. Passwords are stored as Argon2id hashes.
+address (an IPv6 client counts by its /64 network), including attempts that fail
+[human verification](#human-verification-cloudflare-turnstile). Passwords are stored
+as Argon2id hashes.
 
-**Admin account.** The **Admin account** page changes the username (1–64 ASCII
-letters, digits, `-` or `_`) and password (12–256 bytes); it asks for the current
-password. Save or discard configuration drafts first. A successful change signs out
-every session, including the current one. If the connection drops before you see
+**Admin account.** **Account & security** (the person icon) changes the username
+(1–64 ASCII letters, digits, `-` or `_`) and password (at least 12 characters, at
+most 256 bytes); it asks for the current password. A successful change signs out every
+session, including the current one, and discards unsaved settings changes, so the
+console asks first when there are any. If the connection drops before you see
 the result, sign in with the intended new credentials to check; do not repeat the
 change. Account changes are separate from configuration, so a configuration
 rollback never restores an old password. There is no password recovery: keep the
@@ -39,8 +42,22 @@ remembers only these two choices; credentials, drafts and logs are never stored 
 the browser.
 
 **Applying configuration.** Settings pages and **Advanced (TOML)** edit one draft.
-Saving validates it, shows the changes, and applies it with a revision check, so a
-stale tab cannot overwrite newer settings. What a change restarts:
+**Save** validates and applies it at once, then says whether DNS restarted. It asks
+first only when the change moves the console to another address or protocol, which
+signs you out, and asks explicitly before switching the console from HTTPS to HTTP.
+**Advanced (TOML)** can show the changes against the saved configuration, and **Undo
+last save** returns to the configuration before the last save.
+
+A tab with an older copy cannot overwrite newer settings. If the configuration was
+saved elsewhere meanwhile, the console reloads it and keeps your draft: edits to
+other settings are merged for you to review and save again; when both changed the
+same setting, you choose which to keep. Other actions (subscription updates,
+certificate reloads, clearing logs or statistics) work on the saved configuration
+and do not wait for your draft. A software update asks you to save or discard the
+draft first, because it restarts PariNS and reloads the console. If the connection
+drops before an action's result arrives, the console reads the server's state to
+confirm it and never sends the action again. What a change
+restarts:
 
 | Change | Effect |
 | --- | --- |
@@ -54,8 +71,41 @@ stopped.
 
 A new configuration must bind every listener before it is saved. If it cannot, or
 saving fails, the previous configuration keeps running and the console shows the
-error. If the connection drops during a save, reload the page to see whether it was
-applied before trying again. Hot changes do not reload certificates.
+error. If the connection drops during a save, the console checks the saved
+configuration to see whether it was applied. Hot changes do not reload certificates.
+
+## Human verification (Cloudflare Turnstile)
+
+**Account & security** can turn on Cloudflare Turnstile for the sign-in page. It is
+off by default. Create a Turnstile widget for the console's host name in the
+Cloudflare dashboard, then enter its site key and secret key. Setting, changing or
+clearing the keys asks for the current password, is saved on its own and signs out
+every session.
+
+The secret key is kept only in the private state directory: it is never shown again,
+never written to the configuration TOML (which the console can export and roll back)
+and never logged. The sign-in page then shows the widget, and PariNS asks Cloudflare
+to confirm it (success, host name and the `login` action) before it checks the
+password; a failure or an unreachable Cloudflare refuses the sign-in, and every
+attempt counts toward the sign-in limit. Sign-ins whose connection comes from the
+server itself (a loopback address, such as an SSH tunnel to `localhost`) skip
+Turnstile, so you can always sign in that way, for example to fix wrong keys or when
+Cloudflare is unreachable. Only the connection's own source address counts;
+forwarding headers are ignored.
+
+Do not put a tunnel or proxy on the same server in front of the console (for
+example cloudflared, an nginx `stream` proxy or sslh). Every connection then comes
+from the server itself: all sign-ins skip Turnstile and share one attempt limit. The
+console warns about this when Turnstile is on and your connection is from this
+machine.
+
+With Turnstile on, the sign-in page loads and runs Cloudflare's widget script
+(`challenges.cloudflare.com`) and frame; the rest of the console never does, and it
+reloads after signing in to drop that permission. Cloudflare's published test keys
+(site keys like `1x00000000000000000000AA`, secret keys like
+`1x0000000000000000000000000000000AA`) are accepted only as a pair. They make every
+sign-in pass (or fail) and give no protection, and the console says so while they
+are set; use them only to try the flow.
 
 ## Online updates and recovery
 
@@ -69,11 +119,12 @@ by the installer.
 
 1. The release is downloaded over HTTPS from public GitHub addresses only (proxy
    settings are ignored) and checked against its SHA256 manifest.
-2. The new version checks the saved configuration and the saved rollback
-   configuration, read-only, as the service user (`parins --manage --check`). If
-   either fails, the update stops with `preflight_failed` and nothing changes. If
-   the current configuration is fine, save any configuration change: the current
-   configuration then becomes the rollback copy.
+2. The new version checks the current configuration and the one from before your
+   last save (kept for **Undo last save**), read-only, as the service user
+   (`parins --manage --check`). If either fails, the update stops with
+   `preflight_failed` and nothing changes. Check the configuration and
+   certificates; if the current configuration is fine, change and save a setting
+   once, then update again.
 3. DNS stops briefly, the new program starts, and the update completes only when DNS
    (every listener) and storage are ready. Otherwise the previous program is put
    back automatically. Sign in again afterwards.
@@ -143,7 +194,7 @@ sudo systemctl reload parins-managed.service
 
 A reload checks every configured certificate first and swaps them all together; on
 any failure the previous ones stay. It keeps listeners, caches, sessions and the
-configuration revision. New handshakes use the new certificate; open connections
+saved configuration. New handshakes use the new certificate; open connections
 continue. The console shows the result and the active fingerprints; check them,
 because a sent signal does not mean the reload succeeded. In managed mode SIGHUP
 reloads only certificates; in file mode it also reloads `filter_file`.
@@ -157,6 +208,7 @@ permissions:
 | Path | Content |
 | --- | --- |
 | `state.json` | Administrator hash, current and previous (rollback) configuration, revision. |
+| `turnstile.json` | Turnstile site key and secret key, when human verification is on. |
 | `setup-token` | One-time setup token, before setup. |
 | `certificates/` | Imported certificate identities. |
 | `filter-subscriptions/` | Downloaded lists and their catalog. |
@@ -192,9 +244,12 @@ record and why older ones were removed. Queries cancelled after reaching the
 resolver are recorded as dropped. Prefetch is not logged. Query data never appears
 in metrics or the service log.
 
-**Statistics.** The **Overview** page shows totals, cache and block rates, latency
-and response codes, plus trends sampled once a minute (7 days by default). Totals and
-trends survive restarts and contain no names or client addresses.
+**Statistics.** The **Overview** page shows totals, the cache hit rate, blocked
+queries, latency and response codes, plus trends sampled once a minute (7 days by
+default). The hit rate is the share of cache lookups that needed no upstream request
+of their own: fresh and stale cache hits plus queries that joined an identical query
+in progress. The **Cache** page lists those parts separately. Totals and trends
+survive restarts and contain no names or client addresses.
 
 **Storage.** One worker owns the SQLite database; DNS never waits for it. When the
 write queue is full, new records are dropped and counted. Cleanup runs every

@@ -1,0 +1,21 @@
+web/package.json
+  s_cffe143f0c5c88::t_924a4a0c0a393a 31
+web/package-lock.json
+  s_cffe143f0c5c88::t_5a9ef077d4e98a 28,291-293,301-303,318-320,335-337,352-354,369-371,386-388,403-405,423-425,443-445,463-465,483-485,503-505,523-525,540-542,557-559,1730-1732,1788-1790,1808,1810,1904-1906,1910,1920-1934,2097-2099,2105-2106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "301f9765d3a8d4aab8ec872908b48cfab6b13ea5",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

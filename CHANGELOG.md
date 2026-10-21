@@ -1,6 +1,15 @@
 # Changelog
 
-## v0.1.22 — 2026-10-21
+## v0.1.23 — 2026-10-21
+
+v0.1.22 was tagged but never published: its release build failed the dependency
+audit. v0.1.23 contains all of its changes plus the dependency update below.
+
+### Security
+
+- Updated `rustls-webpki` to 0.103.16 and `webpki-roots` to 1.0.10
+  (RUSTSEC-2026-0382, RUSTSEC-2026-0381), so certificate verification no longer
+  accepts distrusted intermediates.
 
 ### Added
 

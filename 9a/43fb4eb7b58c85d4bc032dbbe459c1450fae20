@@ -1,0 +1,24 @@
+tests/manage.rs
+  s_cffe143f0c5c88::t_691882e76b671a 363-419
+src/manage/mod.rs
+  s_cffe143f0c5c88::t_691882e76b671a 3-4
+  s_cffe143f0c5c88::t_445378de69342a 1334
+src/transport/accept.rs
+  s_cffe143f0c5c88::t_23e2bb39bbec2a 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a43fb4eb7b58c85d4bc032dbbe459c1450fae20",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

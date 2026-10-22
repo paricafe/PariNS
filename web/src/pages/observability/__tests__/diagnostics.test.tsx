@@ -37,7 +37,8 @@ describe('server-owned diagnostic presentation', () => {
     expect(screen.getByText(/^2 records could not be saved · last query log drop: \d{1,2}:\d{2}\s?[AP]M$/)).toBeTruthy();
   });
   it('says in words that storage settings are pending, never as revision numbers', () => {
-    render(<StorageStatusPanel status={{ ...storage, configured_revision: 18, applied_revision: 17 }} language="en" />);
+    // A fixed commit time keeps the rendered clock from containing the revision digits.
+    render(<StorageStatusPanel status={{ ...storage, last_commit_at_ms: 1700000000000, configured_revision: 18, applied_revision: 17 }} language="en" />);
     expect(screen.getByText("Some storage settings haven't taken effect yet; they're being applied.")).toBeTruthy();
     expect(screen.queryByText(/18|revision|version/i)).toBeNull();
   });

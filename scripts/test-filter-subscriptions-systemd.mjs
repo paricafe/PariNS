@@ -215,7 +215,8 @@ if (stage === 'activate') {
   assert.equal(before.input_rules, evidence.input_rules);
   const active = before.sources.find(item => item.id === source.id);
   assert(active?.active && active.ready);
-  assert.equal(before.unavailable_reason, null);
+  // An update freeze is reported as status; every other stage is available.
+  assert.equal(before.unavailable_reason, stage === 'frozen' ? 'update_in_progress' : null);
   selected(evidence);
   await blocked(evidence);
   if (stage === 'enospc' || stage === 'recovered') {

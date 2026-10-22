@@ -215,11 +215,6 @@ impl Cache {
         max_bytes: usize,
         cancel: &AtomicBool,
     ) -> Result<SnapshotReport> {
-        ensure!(
-            fingerprint.len() == 64 && fingerprint.bytes().all(|b| b.is_ascii_hexdigit()),
-            "invalid semantic fingerprint"
-        );
-        ensure!(max_bytes >= HEADER_BYTES, "snapshot budget too small");
         cancelled(cancel)?;
         writer.seek(SeekFrom::Start(0))?;
         writer.write_all(&[b' '; HEADER_BYTES])?;
@@ -423,7 +418,7 @@ pub fn semantic_fingerprint(
     let mut cache = serde_json::to_value(&config.cache)?;
     cache
         .as_object_mut()
-        .context("cache policy is not an object")?
+        .expect("cache configuration serializes as an object")
         .remove("persistence");
     // The answer source is part of the semantics: recursive answers carry
     // validated AD bits and authority scopes that forwarded ones do not.

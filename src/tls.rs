@@ -1,5 +1,6 @@
 //! Verified TLS configuration and DNS-over-TLS adapters (RFC 7858 / RFC 8310).
-//! No opportunistic plaintext fallback. The resolver owns upstream deadlines.
+//! Upstream DoT uses the strict privacy profile: a TLS failure fails the attempt.
+//! The resolver owns upstream deadlines.
 
 use std::{
     fmt,

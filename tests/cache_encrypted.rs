@@ -175,7 +175,7 @@ async fn verified_dot_and_https_missing_ecs_padding_cache_and_clean_restart() {
         let persistence = CachePersistence::new(directory.path());
         let flag = AtomicBool::new(false);
         persistence
-            .consume_startup(&config.cache.persistence, &flag)
+            .consume_startup(&config.cache.persistence)
             .unwrap();
         let server = Server::bind(config.clone()).await.unwrap();
         let resolver = server.resolver().clone();
@@ -213,9 +213,7 @@ async fn verified_dot_and_https_missing_ecs_padding_cache_and_clean_restart() {
             1
         );
         let owner = CachePersistence::new(directory.path());
-        let candidate = owner
-            .consume_startup(&config.cache.persistence, &flag)
-            .unwrap();
+        let candidate = owner.consume_startup(&config.cache.persistence).unwrap();
         let server = Server::bind(config.clone()).await.unwrap();
         let report = candidate.restore_into(
             &server.resolver().cache(),

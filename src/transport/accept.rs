@@ -69,7 +69,7 @@ fn recovery(error: &io::Error) -> Recovery {
     if let Some(code) = error.raw_os_error() {
         use nix::errno::Errno;
         match Errno::from_raw(code) {
-            Errno::EMFILE | Errno::ENFILE | Errno::ENOBUFS | Errno::ENOMEM => {
+            Errno::EMFILE | Errno::ENFILE | Errno::ENOBUFS => {
                 return Recovery::Pause;
             }
             // EPERM: a firewall rule refused this connection (Linux).
@@ -78,7 +78,7 @@ fn recovery(error: &io::Error) -> Recovery {
             | Errno::EHOSTDOWN
             | Errno::EOPNOTSUPP
             | Errno::EPERM => return Recovery::Retry,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
+            #[cfg(target_os = "linux")]
             Errno::ENONET => return Recovery::Retry,
             _ => {}
         }

@@ -1,4 +1,4 @@
-//! ECS provenance, validation, and response scope. No IO or cache ownership.
+//! ECS provenance, validation, and response scope.
 
 use std::net::IpAddr;
 

@@ -422,16 +422,14 @@ impl Client {
         scope: &AttemptScope,
     ) -> Result<super::Exchange> {
         let mut error = anyhow::anyhow!("no upstream address");
-        let addresses = if self.spec.host.parse::<IpAddr>().is_err() {
-            let mut attempt = scope.start(None);
-            let result = self.addresses(deadline, &mut attempt).await;
-            attempt.finish(&result);
-            result?
-        } else {
-            vec![SocketAddr::new(
-                self.spec.host.parse::<IpAddr>()?,
-                self.spec.port,
-            )]
+        let addresses = match self.spec.host.parse::<IpAddr>() {
+            Ok(address) => vec![SocketAddr::new(address, self.spec.port)],
+            Err(_) => {
+                let mut attempt = scope.start(None);
+                let result = self.addresses(deadline, &mut attempt).await;
+                attempt.finish(&result);
+                result?
+            }
         };
         for address in addresses {
             ensure!(scope.remaining(), "upstream deadline exhausted");
@@ -716,11 +714,6 @@ impl Client {
         let (mut send, mut recv) = connection.connection.open_bi().await.map_err(not_sent)?;
         let mut outbound = query.clone();
         outbound.metadata.id = 0;
-        // EDNS TCP keepalive is hop-specific and prohibited on DoQ (RFC 9250).
-        if let Some(edns) = &mut outbound.edns {
-            edns.options_mut()
-                .remove(hickory_proto::rr::rdata::opt::EdnsCode::from(11));
-        }
         attempt.stage(Stage::RequestWrite);
         tcp::write_frame(&mut send, &protocol::encode_upstream(&outbound, true)?).await?;
         send.finish()?;

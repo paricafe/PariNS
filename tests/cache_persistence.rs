@@ -52,7 +52,7 @@ fn clean_file_is_one_shot_and_tmp_is_never_a_recovery_source() {
     let owner = CachePersistence::new(dir.path());
     assert_eq!(
         owner
-            .consume_startup(&settings, &cancelled)
+            .consume_startup(&settings)
             .unwrap()
             .report()
             .reason
@@ -85,7 +85,7 @@ fn clean_file_is_one_shot_and_tmp_is_never_a_recovery_source() {
     }
     fs::copy(&clean, dir.path().join("dns-cache.tmp.old")).unwrap();
     let startup = CachePersistence::new(dir.path());
-    let candidate = startup.consume_startup(&settings, &cancelled).unwrap();
+    let candidate = startup.consume_startup(&settings).unwrap();
     assert!(
         !clean.exists(),
         "recovery eligibility must be revoked before serving"
@@ -111,7 +111,7 @@ fn clean_file_is_one_shot_and_tmp_is_never_a_recovery_source() {
     let after_crash = CachePersistence::new(dir.path());
     assert_eq!(
         after_crash
-            .consume_startup(&settings, &cancelled)
+            .consume_startup(&settings)
             .unwrap()
             .report()
             .reason
@@ -149,7 +149,7 @@ fn disabled_oversized_invalid_and_cancelled_files_are_consumed() {
         private_write(&clean, b"broken snapshot");
         let cancelled = AtomicBool::new(cancel);
         let owner = CachePersistence::new(dir.path());
-        let candidate = owner.consume_startup(&settings, &cancelled).unwrap();
+        let candidate = owner.consume_startup(&settings).unwrap();
         assert!(!clean.exists());
         let report = candidate.restore_into(&cache, FP, SystemTime::now(), now, &cancelled);
         assert!(report.reason.unwrap().contains(expected));
@@ -169,14 +169,14 @@ fn failed_startup_consumption_and_non_quiescent_cancel_do_not_publish() {
             .is_err()
     );
     fs::create_dir(dir.path().join(CLEAN_FILE)).unwrap();
-    assert!(owner.consume_startup(&settings, &cancel).is_err());
+    assert!(owner.consume_startup(&settings).is_err());
     assert!(
         owner
             .save_terminal(&cache, FP, &settings, SystemTime::now(), now, &cancel)
             .is_err()
     );
     fs::remove_dir(dir.path().join(CLEAN_FILE)).unwrap();
-    owner.consume_startup(&settings, &cancel).unwrap();
+    owner.consume_startup(&settings).unwrap();
     cancel.store(true, std::sync::atomic::Ordering::Release);
     assert!(
         owner
@@ -199,7 +199,7 @@ fn linked_files_are_rejected_without_touching_external_material() {
     let owner = CachePersistence::new(dir.path());
     assert!(
         owner
-            .consume_startup(&CachePersistenceConfig::default(), &AtomicBool::new(false))
+            .consume_startup(&CachePersistenceConfig::default())
             .is_err()
     );
     assert_eq!(fs::read(&external).unwrap(), b"external unchanged");
@@ -207,7 +207,7 @@ fn linked_files_are_rejected_without_touching_external_material() {
     fs::hard_link(&external, &clean).unwrap();
     assert!(
         owner
-            .consume_startup(&CachePersistenceConfig::default(), &AtomicBool::new(false))
+            .consume_startup(&CachePersistenceConfig::default())
             .is_err()
     );
     assert_eq!(fs::read(&external).unwrap(), b"external unchanged");

@@ -1,5 +1,4 @@
 //! Immutable filtering policy and bounded local rule-file loading.
-//! No cache ownership or upstream state.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -365,7 +364,7 @@ impl Policy {
     }
 
     pub fn blocks_query(&self, query: &Message) -> bool {
-        query.queries.first().is_some_and(|q| self.blocks(q.name()))
+        self.blocks(query.queries[0].name())
     }
 
     /// Only follow answer CNAMEs reachable from the original question and class.
@@ -374,9 +373,7 @@ impl Policy {
         if self.index_rules() == 0 {
             return false;
         }
-        let Some(question) = query.queries.first() else {
-            return false;
-        };
+        let question = &query.queries[0];
         let mut links: HashMap<&Name, Vec<&Name>> = HashMap::new();
         for rr in &response.answers {
             if rr.dns_class == question.query_class()

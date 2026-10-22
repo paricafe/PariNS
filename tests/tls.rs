@@ -73,7 +73,7 @@ async fn listener(
     let (stop, stopped) = watch::channel(false);
     let connections = Arc::new(Semaphore::new(slots));
     let ingress = Ingress {
-        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default())),
         resolver: Arc::new(common::resolver(
             "127.0.0.1:9".parse().unwrap(),
             Duration::from_millis(100),

@@ -86,10 +86,7 @@ impl Ingress {
         self.resolver.metrics().inc(Counter::EncryptedReceived);
         let Some(_source) = self.admit_query(peer) else {
             self.resolver.metrics().inc(Counter::EncryptedRejected);
-            let reply = rejected_response(bytes);
-            self.resolver
-                .log_rejected(bytes, peer, transport, reply.as_ref());
-            return encode_rejected(bytes, &reply?);
+            return self.rejected_reply(bytes, peer, transport);
         };
         let permit = self.queries.clone().try_acquire_owned();
         match permit {
@@ -100,30 +97,31 @@ impl Ingress {
                 .and_then(|r| r.padding.encode_response(&r.message, true).ok()),
             Err(_) => {
                 self.resolver.metrics().inc(Counter::EncryptedRejected);
-                let reply = rejected_response(bytes);
-                self.resolver
-                    .log_rejected(bytes, peer, transport, reply.as_ref());
-                reply.and_then(|reply| encode_rejected(bytes, &reply))
+                self.rejected_reply(bytes, peer, transport)
             }
         }
     }
+
+    fn rejected_reply(&self, bytes: &[u8], peer: IpAddr, transport: &str) -> Option<Vec<u8>> {
+        let reply = rejected_response(bytes);
+        self.resolver
+            .log_rejected(bytes, peer, transport, reply.as_ref().map(|(r, _)| r));
+        let (reply, padding) = reply?;
+        padding.encode_response(&reply, true).ok()
+    }
 }
 
-fn encode_rejected(bytes: &[u8], reply: &hickory_proto::op::Message) -> Option<Vec<u8>> {
-    let padding = protocol::decode(bytes)
-        .as_ref()
-        .map(protocol::Padding::from_query)
-        .unwrap_or_default();
-    padding.encode_response(reply, true).ok()
-}
-
-pub(crate) fn rejected_response(bytes: &[u8]) -> Option<hickory_proto::op::Message> {
+/// The SERVFAIL (or protocol error) answer to a query refused at admission,
+/// with the padding intent of that query.
+pub(crate) fn rejected_response(
+    bytes: &[u8],
+) -> Option<(hickory_proto::op::Message, protocol::Padding)> {
     match protocol::request(bytes) {
-        protocol::Request::Forward(q) => Some(protocol::error_response(
-            &q,
-            hickory_proto::op::ResponseCode::ServFail,
+        protocol::Request::Forward(q) => Some((
+            protocol::error_response(&q, hickory_proto::op::ResponseCode::ServFail),
+            protocol::Padding::from_query(&q),
         )),
-        protocol::Request::Reply(r) => Some(r),
+        protocol::Request::Reply(r, padding) => Some((r, padding)),
         protocol::Request::Drop => None,
     }
 }
@@ -139,7 +137,7 @@ mod tests {
             resolver: Arc::new(Resolver::from_config(&config)),
             queries: Arc::new(Semaphore::new(1)),
             connections: Arc::new(Semaphore::new(1)),
-            source_limits: Arc::new(Limiter::new(&config.source_limits).unwrap()),
+            source_limits: Arc::new(Limiter::new(&config.source_limits)),
             stop: receiver,
             io_timeout: Duration::from_secs(1),
             shutdown_grace: Duration::from_millis(20),

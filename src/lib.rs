@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod cache;
 pub mod cache_persistence;
+mod clock;
 pub mod config;
 pub mod doh;
 pub mod ecs;

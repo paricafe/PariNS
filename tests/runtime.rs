@@ -1,15 +1,17 @@
 //! Integration between listener ownership, one resolver, startup files and reload publication.
+mod common;
 #[path = "support/runtime.rs"]
 mod runtime_support;
 
 use std::time::Duration;
 
+use common::Identity;
 use hickory_proto::{
     op::{Message, ResponseCode},
     rr::{Name, RData, Record, RecordType, rdata::A},
 };
 use parins::{config::Config, protocol, server::Server, tls};
-use runtime_support::{Certificate, WAIT, answer, config, finish, query, read, run, udp, write};
+use runtime_support::{WAIT, answer, config, connect, finish, query, read, run, udp, write};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     time::timeout,
@@ -18,7 +20,7 @@ use tokio_rustls::TlsAcceptor;
 
 #[tokio::test]
 async fn source_budget_is_shared_by_udp_tcp_dot_and_charges_cache_hits() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(upstream.local_addr().unwrap());
     config.dot = Some(cert.listener());
@@ -39,7 +41,7 @@ async fn source_budget_is_shared_by_udp_tcp_dot_and_charges_cache_hits() {
             .await
             .unwrap();
     });
-    let mut tls = cert.connect(dot).await;
+    let mut tls = connect(&cert, dot).await;
     let mut tcp = TcpStream::connect(address).await.unwrap();
     assert_eq!(udp(address, 71).await.answers.len(), 1);
     write(&mut tcp, &query(72)).await;
@@ -114,7 +116,7 @@ async fn source_inflight_rejection_does_not_cancel_admitted_udp_query() {
 
 #[tokio::test]
 async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream = listener.local_addr().unwrap();
     let plaintext_trap = UdpSocket::bind(upstream).await.unwrap();
@@ -172,7 +174,7 @@ async fn configured_dot_upstream_is_verified_and_never_falls_back_to_plaintext()
 
 #[tokio::test]
 async fn failed_certificate_startup_releases_previously_bound_sockets() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     for _ in 0..16 {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = probe.local_addr().unwrap();
@@ -229,7 +231,7 @@ async fn failed_certificate_startup_releases_previously_bound_sockets() {
 
 #[test]
 fn relative_runtime_paths_and_check_resolve_against_configuration_directory() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let path = cert.directory.path().join("parins.toml");
     std::fs::write(
         cert.directory.path().join("rules.toml"),
@@ -267,8 +269,8 @@ fn relative_runtime_paths_and_check_resolve_against_configuration_directory() {
 
 #[tokio::test]
 async fn reload_prepares_all_rule_and_certificate_candidates_before_publication() {
-    let cert = Certificate::new();
-    let replacement = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
+    let replacement = Identity::new(&["localhost"]);
     let rules = cert.directory.path().join("rules.toml");
     std::fs::write(&rules, "enabled = true\nblock_exact = ['runtime.test']").unwrap();
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -286,7 +288,7 @@ async fn reload_prepares_all_rule_and_certificate_candidates_before_publication(
     // New certificate plus old private key must not publish the unblocking policy.
     assert!(reload.reload().is_err());
     assert!(udp(address, 2).await.answers.is_empty());
-    let client = cert.connect(dot).await;
+    let client = connect(&cert, dot).await;
     assert_eq!(client.get_ref().1.peer_certificates().unwrap()[0], cert.der);
     drop(client);
     std::fs::copy(&replacement.files.key_file, &cert.files.key_file).unwrap();
@@ -301,7 +303,7 @@ async fn reload_prepares_all_rule_and_certificate_candidates_before_publication(
             .unwrap();
     });
     assert_eq!(udp(address, 3).await.answers.len(), 1);
-    let client = replacement.connect(dot).await;
+    let client = connect(&replacement, dot).await;
     assert_eq!(
         client.get_ref().1.peer_certificates().unwrap()[0],
         replacement.der
@@ -317,8 +319,11 @@ async fn reload_prepares_all_rule_and_certificate_candidates_before_publication(
 #[tokio::test]
 async fn client_auth_only_reload_keeps_old_tls_fingerprint_and_dns_policy() {
     use sha2::{Digest, Sha256};
-    let cert = Certificate::new();
-    let restricted = Certificate::with_eku(vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth]);
+    let cert = Identity::new(&["localhost"]);
+    let restricted = Identity::with_usages(
+        &["localhost"],
+        vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth],
+    );
     let rules = cert.directory.path().join("rules.toml");
     std::fs::write(&rules, "enabled = true\nblock_exact = ['runtime.test']").unwrap();
     let mut config = config("127.0.0.1:9".parse().unwrap());
@@ -346,7 +351,7 @@ async fn client_auth_only_reload_keeps_old_tls_fingerprint_and_dns_policy() {
     assert!(blocked.answers.is_empty());
     // This is a new connection through the live DoT listener using the normal
     // rustls server-auth verifier, not a prepared-key or mock handshake.
-    let client = cert.connect(dot).await;
+    let client = connect(&cert, dot).await;
     let presented = &client.get_ref().1.peer_certificates().unwrap()[0];
     assert_eq!(presented, &cert.der);
     assert_eq!(
@@ -359,8 +364,8 @@ async fn client_auth_only_reload_keeps_old_tls_fingerprint_and_dns_policy() {
 
 #[tokio::test]
 async fn reload_busy_generation_keeps_candidate_certificates_unpublished() {
-    let cert = Certificate::new();
-    let replacement = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
+    let replacement = Identity::new(&["localhost"]);
     let rules = cert.directory.path().join("rules.toml");
     std::fs::write(&rules, "enabled = true\nblock_exact = ['runtime.test']").unwrap();
     let mut config = config("127.0.0.1:9".parse().unwrap());
@@ -386,12 +391,12 @@ async fn reload_busy_generation_keeps_candidate_certificates_unpublished() {
     std::fs::copy(&replacement.files.key_file, &cert.files.key_file).unwrap();
     std::fs::write(&rules, "enabled = true\nblock_exact = ['changed.test']").unwrap();
     assert!(reload.reload().is_err());
-    let client = cert.connect(dot).await;
+    let client = connect(&cert, dot).await;
     assert_eq!(client.get_ref().1.peer_certificates().unwrap()[0], cert.der);
     drop(client);
     drop(old_request);
     reload.reload().unwrap();
-    let client = replacement.connect(dot).await;
+    let client = connect(&replacement, dot).await;
     assert_eq!(
         client.get_ref().1.peer_certificates().unwrap()[0],
         replacement.der
@@ -437,8 +442,8 @@ fn binary_subscription_check_is_offline_and_creates_no_runtime_state() {
 
 #[tokio::test]
 async fn file_subscription_reload_prepares_all_material_and_closes_publication() {
-    let cert = Certificate::new();
-    let replacement = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
+    let replacement = Identity::new(&["localhost"]);
     let rules = cert.directory.path().join("rules.toml");
     std::fs::write(&rules, "enabled=true\nblock_exact=['runtime.test']").unwrap();
     let mut config = config("127.0.0.1:9".parse().unwrap());
@@ -492,8 +497,8 @@ async fn file_subscription_reload_prepares_all_material_and_closes_publication()
 #[tokio::test]
 async fn corrupt_subscription_catalog_keeps_busy_file_reload_policy_and_certificate_unpublished() {
     use parins::filter_subscriptions::service::Service;
-    let cert = Certificate::new();
-    let replacement = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
+    let replacement = Identity::new(&["localhost"]);
     let rules = cert.directory.path().join("rules.toml");
     std::fs::write(&rules, "enabled=true\nblock_exact=['one.test']").unwrap();
     let mut config = config("127.0.0.1:9".parse().unwrap());
@@ -562,7 +567,7 @@ async fn corrupt_subscription_catalog_keeps_busy_file_reload_policy_and_certific
             .policy
             .blocks(&Name::from_ascii("three.test").unwrap())
     );
-    let client = cert.connect(dot).await;
+    let client = connect(&cert, dot).await;
     assert_eq!(client.get_ref().1.peer_certificates().unwrap()[0], cert.der);
     drop(client);
     drop(old_request);
@@ -576,7 +581,7 @@ async fn corrupt_subscription_catalog_keeps_busy_file_reload_policy_and_certific
             .policy
             .blocks(&Name::from_ascii("three.test").unwrap())
     );
-    let client = replacement.connect(dot).await;
+    let client = connect(&replacement, dot).await;
     assert_eq!(
         client.get_ref().1.peer_certificates().unwrap()[0],
         replacement.der

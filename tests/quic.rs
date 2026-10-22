@@ -51,7 +51,7 @@ async fn already_stopped_listener_releases_port_before_returning() {
     let config = Config::parse(include_str!("../parins.example.toml")).unwrap();
     let (_stop, receiver) = watch::channel(true);
     let ingress = Ingress {
-        source_limits: Arc::new(parins::limits::Limiter::new(&config.source_limits).unwrap()),
+        source_limits: Arc::new(parins::limits::Limiter::new(&config.source_limits)),
         resolver: Arc::new(Resolver::from_config(&config)),
         queries: Arc::new(Semaphore::new(8)),
         connections: Arc::new(Semaphore::new(1)),
@@ -112,7 +112,7 @@ impl Fixture {
         });
         let (stop, receiver) = watch::channel(false);
         let connections = Arc::new(Semaphore::new(connection_capacity));
-        let source_limits = Arc::new(parins::limits::Limiter::new(&settings).unwrap());
+        let source_limits = Arc::new(parins::limits::Limiter::new(&settings));
         let resolver = Arc::new(Resolver::from_config(&config));
         let queries = Arc::new(Semaphore::new(8));
         let ingress = Ingress {

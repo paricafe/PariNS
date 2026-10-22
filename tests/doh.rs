@@ -115,7 +115,7 @@ async fn real_h2_tls_get_post_errors_and_shutdown() {
     let connections = Arc::new(Semaphore::new(2));
     let queries = Arc::new(Semaphore::new(4));
     let ingress = Ingress {
-        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default())),
         resolver,
         queries: queries.clone(),
         connections: connections.clone(),
@@ -226,7 +226,7 @@ async fn alt_svc_follows_the_http3_listener_state() {
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = watch::channel(false);
     let ingress = Ingress {
-        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default())),
         resolver: Arc::new(common::resolver(
             "127.0.0.1:9".parse().unwrap(),
             Duration::from_millis(100),
@@ -284,7 +284,7 @@ async fn incomplete_body_expires_and_shutdown_releases_admission() {
     let connections = Arc::new(Semaphore::new(2));
     let queries = Arc::new(Semaphore::new(1));
     let ingress = Ingress {
-        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default()).unwrap()),
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default())),
         resolver: Arc::new(common::resolver(
             "127.0.0.1:9".parse().unwrap(),
             Duration::from_millis(100),
@@ -347,14 +347,11 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = watch::channel(false);
     let queries = Arc::new(Semaphore::new(1));
-    let source_limits = Arc::new(
-        parins::limits::Limiter::new(&parins::limits::Settings {
-            enabled: true,
-            max_inflight: 1,
-            ..Default::default()
-        })
-        .unwrap(),
-    );
+    let source_limits = Arc::new(parins::limits::Limiter::new(&parins::limits::Settings {
+        enabled: true,
+        max_inflight: 1,
+        ..Default::default()
+    }));
     let ingress = Ingress {
         source_limits: source_limits.clone(),
         resolver: resolver.clone(),
@@ -440,16 +437,13 @@ async fn h2_source_limits_cover_pre_tls_admission_and_ignore_forwarded_identity(
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = watch::channel(false);
     let connections = Arc::new(Semaphore::new(3));
-    let source_limits = Arc::new(
-        parins::limits::Limiter::new(&parins::limits::Settings {
-            enabled: true,
-            max_connections: 1,
-            burst: 1,
-            rate_per_sec: 1,
-            ..Default::default()
-        })
-        .unwrap(),
-    );
+    let source_limits = Arc::new(parins::limits::Limiter::new(&parins::limits::Settings {
+        enabled: true,
+        max_connections: 1,
+        burst: 1,
+        rate_per_sec: 1,
+        ..Default::default()
+    }));
     let ingress = Ingress {
         source_limits: source_limits.clone(),
         resolver: resolver.clone(),

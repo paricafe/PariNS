@@ -149,12 +149,12 @@ impl Drop for Permit {
 }
 
 impl Limiter {
-    pub fn new(settings: &Settings) -> anyhow::Result<Self> {
-        settings.validate()?;
-        Ok(Self {
+    /// `settings` has passed `Settings::validate`.
+    pub fn new(settings: &Settings) -> Self {
+        Self {
             settings: settings.clone(),
             state: settings.enabled.then(|| Mutex::new(State::default())),
-        })
+        }
     }
 
     pub fn try_query(self: &Arc<Self>, peer: IpAddr) -> Result<Permit, Denied> {

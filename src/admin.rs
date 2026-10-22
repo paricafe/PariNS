@@ -13,7 +13,8 @@ use tokio::{
 
 use crate::{ingress::Ingress, metrics::Metrics};
 
-/// Concurrent snapshots are approximate, as in the existing JSON exporter.
+/// Renders one metrics snapshot. Counters are read one at a time, so a scrape
+/// taken under load can be slightly out of step across counters.
 pub fn render(metrics: &Metrics) -> String {
     let snapshot = metrics.snapshot();
     let mut output = String::new();

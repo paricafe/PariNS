@@ -25,7 +25,7 @@ fn query_at(limiter: &Arc<Limiter>, peer: IpAddr, now: Instant) -> Result<Permit
 
 #[test]
 fn burst_refills_fractionally_and_drop_never_refunds_rate() {
-    let limiter = Arc::new(Limiter::new(&enabled()).unwrap());
+    let limiter = Arc::new(Limiter::new(&enabled()));
     let now = Instant::now();
     drop(query_at(&limiter, peer(1), now).unwrap());
     drop(query_at(&limiter, peer(1), now).unwrap());
@@ -48,18 +48,15 @@ fn source_and_configured_subnet_budgets_are_distinct() {
         burst: 1,
         ..enabled()
     };
-    let limiter = Arc::new(Limiter::new(&settings).unwrap());
+    let limiter = Arc::new(Limiter::new(&settings));
     drop(limiter.try_query(peer(1)).unwrap());
     assert_eq!(limiter.try_query(peer(1)).err(), Some(Denied::Rate));
     drop(limiter.try_query(peer(2)).unwrap());
 
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            ipv4_prefix: 24,
-            ..settings
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        ipv4_prefix: 24,
+        ..settings
+    }));
     drop(limiter.try_query(peer(1)).unwrap());
     assert_eq!(limiter.try_query(peer(2)).err(), Some(Denied::Rate));
     drop(limiter.try_query("192.0.3.1".parse().unwrap()).unwrap());
@@ -67,13 +64,10 @@ fn source_and_configured_subnet_budgets_are_distinct() {
 
 #[test]
 fn mapped_ipv4_cannot_bypass_ipv4_budget_and_ipv6_uses_prefix() {
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            burst: 1,
-            ..enabled()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        burst: 1,
+        ..enabled()
+    }));
     drop(limiter.try_query(peer(1)).unwrap());
     assert_eq!(
         limiter.try_query("::ffff:192.0.2.1".parse().unwrap()).err(),
@@ -89,14 +83,11 @@ fn mapped_ipv4_cannot_bypass_ipv4_budget_and_ipv6_uses_prefix() {
 
 #[test]
 fn drop_releases_independent_query_and_connection_quotas() {
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            max_inflight: 1,
-            max_connections: 1,
-            ..enabled()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        max_inflight: 1,
+        max_connections: 1,
+        ..enabled()
+    }));
     let query = limiter.try_query(peer(1)).unwrap();
     let connection = limiter.try_connection(peer(1)).unwrap();
     assert_eq!(limiter.try_query(peer(1)).err(), Some(Denied::Inflight));
@@ -113,15 +104,12 @@ fn drop_releases_independent_query_and_connection_quotas() {
 
 #[test]
 fn full_table_preserves_token_debt_and_active_permits() {
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            max_sources: 1,
-            burst: 1,
-            rate_per_sec: 1,
-            ..enabled()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        max_sources: 1,
+        burst: 1,
+        rate_per_sec: 1,
+        ..enabled()
+    }));
     let now = Instant::now();
     let active = query_at(&limiter, peer(1), now).unwrap();
     assert_eq!(
@@ -130,15 +118,12 @@ fn full_table_preserves_token_debt_and_active_permits() {
     );
     drop(active);
     // Use a separate table to check debt independently of the full refill above.
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            max_sources: 1,
-            burst: 1,
-            rate_per_sec: 1,
-            ..enabled()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        max_sources: 1,
+        burst: 1,
+        rate_per_sec: 1,
+        ..enabled()
+    }));
     drop(query_at(&limiter, peer(1), now).unwrap());
     assert_eq!(
         query_at(&limiter, peer(2), now + Duration::from_millis(999)).err(),
@@ -157,16 +142,13 @@ fn full_table_preserves_token_debt_and_active_permits() {
 
 #[test]
 fn disabled_limiter_has_no_source_state_or_quotas() {
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            max_sources: 1,
-            max_inflight: 1,
-            max_connections: 1,
-            burst: 1,
-            ..Settings::default()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        max_sources: 1,
+        max_inflight: 1,
+        max_connections: 1,
+        burst: 1,
+        ..Settings::default()
+    }));
     let mut permits = Vec::new();
     for source in 1..100 {
         permits.push(limiter.try_query(peer(source)).unwrap());
@@ -219,15 +201,12 @@ fn settings_reject_zero_excessive_and_unknown_values() {
 
 #[test]
 fn simultaneous_callers_cannot_exceed_concurrent_budget() {
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            max_inflight: 3,
-            rate_per_sec: 100,
-            burst: 100,
-            ..enabled()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        max_inflight: 3,
+        rate_per_sec: 100,
+        burst: 100,
+        ..enabled()
+    }));
     let barrier = Arc::new(std::sync::Barrier::new(17));
     let threads: Vec<_> = (0..16)
         .map(|_| {
@@ -260,13 +239,10 @@ fn simultaneous_callers_cannot_exceed_concurrent_budget() {
 
 #[test]
 fn bounded_sweep_eventually_finds_inactive_entries_without_evicting_active_ones() {
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            max_sources: 17,
-            ..enabled()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        max_sources: 17,
+        ..enabled()
+    }));
     let now = Instant::now();
     let connections: Vec<_> = (1..=16)
         .map(|source| {
@@ -294,16 +270,13 @@ fn bounded_sweep_eventually_finds_inactive_entries_without_evicting_active_ones(
 
 #[tokio::test]
 async fn cancelling_a_task_releases_permits_but_preserves_rate_debt() {
-    let limiter = Arc::new(
-        Limiter::new(&Settings {
-            max_inflight: 1,
-            max_connections: 1,
-            rate_per_sec: 1,
-            burst: 1,
-            ..enabled()
-        })
-        .unwrap(),
-    );
+    let limiter = Arc::new(Limiter::new(&Settings {
+        max_inflight: 1,
+        max_connections: 1,
+        rate_per_sec: 1,
+        burst: 1,
+        ..enabled()
+    }));
     let now = Instant::now();
     let (ready, acquired) = tokio::sync::oneshot::channel();
     let task_limiter = limiter.clone();
@@ -327,7 +300,7 @@ async fn cancelling_a_task_releases_permits_but_preserves_rate_debt() {
 
 #[test]
 fn long_idle_refill_caps_burst_and_stale_timestamps_never_mint_tokens() {
-    let limiter = Arc::new(Limiter::new(&enabled()).unwrap());
+    let limiter = Arc::new(Limiter::new(&enabled()));
     let now = Instant::now();
     drop(query_at(&limiter, peer(1), now).unwrap());
     drop(query_at(&limiter, peer(1), now).unwrap());

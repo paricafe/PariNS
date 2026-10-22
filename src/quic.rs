@@ -58,16 +58,13 @@ pub enum Protocol {
     H3,
 }
 
+/// `max_streams` is the validated `max_inflight`, capped at 1024.
 pub fn bind(
     address: SocketAddr,
     tls: Arc<rustls::ServerConfig>,
     max_streams: usize,
     protocol: Protocol,
 ) -> Result<Listener> {
-    ensure!(
-        (1..=1024).contains(&max_streams),
-        "invalid QUIC stream limit"
-    );
     let mut tls = (*tls).clone();
     tls.max_early_data_size = 0;
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
@@ -424,7 +421,7 @@ async fn h3_request(
 async fn h3_body(stream: &mut H3Stream) -> Result<Option<Vec<u8>>> {
     let mut body = Vec::new();
     while let Some(mut data) = stream.recv_data().await? {
-        if body.len() + data.remaining() > 65535 {
+        if body.len() + data.remaining() > crate::protocol::MAX_MESSAGE {
             stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
             return Ok(None);
         }

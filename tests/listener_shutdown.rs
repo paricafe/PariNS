@@ -1,10 +1,12 @@
 //! An isolated listener-shutdown assertion without parallel runtime tests or subprocess fixtures.
+mod common;
 #[path = "support/runtime.rs"]
 #[allow(dead_code)] // The shared fixture also serves the broader runtime suite.
 mod runtime_support;
 
+use common::Identity;
 use parins::{ecs, protocol, server::Server};
-use runtime_support::{Certificate, WAIT, answer, config, finish, query, read, run, udp, write};
+use runtime_support::{WAIT, answer, config, connect, finish, query, read, run, udp, write};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -13,7 +15,7 @@ use tokio::{
 
 #[tokio::test]
 async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(upstream.local_addr().unwrap());
     // Global query capacity can exceed the QUIC per-connection stream cap.
@@ -56,7 +58,7 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     let (stop, task) = run(server);
     let first = udp(address, 11).await;
     assert_eq!((first.id, first.answers.len()), (11, 1));
-    let mut client = cert.connect(dot).await;
+    let mut client = connect(&cert, dot).await;
     write(&mut client, &query(12)).await;
     let second = read(&mut client).await;
     assert_eq!((second.id, second.answers.len()), (12, 1));
@@ -93,7 +95,7 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
 
 /// Stops a DoH server while a peer that completed TLS/h2 no longer reads.
 async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration) {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(upstream.local_addr().unwrap());
     config.tcp_io_timeout_ms = 5000;
@@ -225,7 +227,7 @@ async fn unfinished_doh_resolution_still_forces_shutdown() {
 /// and the clean snapshot remains possible.
 #[tokio::test]
 async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(upstream.local_addr().unwrap());
     config.tcp_io_timeout_ms = 5000;
@@ -291,7 +293,7 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
 /// A server whose grace is long enough that waiting on it would be visible:
 /// the stop must finish well before it, and without forcing.
 async fn incomplete_query_server(
-    cert: &Certificate,
+    cert: &Identity,
     upstream: &UdpSocket,
     doh: bool,
     doq: bool,
@@ -323,7 +325,7 @@ fn encrypted(server: &Server, name: &str) -> std::net::SocketAddr {
         .1
 }
 
-fn quic_client(cert: &Certificate, alpn: &[u8]) -> quinn::Endpoint {
+fn quic_client(cert: &Identity, alpn: &[u8]) -> quinn::Endpoint {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.der.clone()).unwrap();
     let mut tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
@@ -356,7 +358,7 @@ async fn wait_for_stream(server_metrics: &parins::metrics::Metrics, protocol: &s
 /// refuses it at once instead of waiting for the grace and forcing.
 #[tokio::test]
 async fn doh_post_with_partial_body_is_cancelled_at_stop() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server = incomplete_query_server(&cert, &upstream, true, false).await;
     let resolver = server.resolver().clone();
@@ -408,7 +410,7 @@ async fn doh_post_with_partial_body_is_cancelled_at_stop() {
 /// A DoQ stream without FIN has no complete query and is cancelled at the stop.
 #[tokio::test]
 async fn doq_stream_without_fin_is_cancelled_at_stop() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server = incomplete_query_server(&cert, &upstream, false, true).await;
     let resolver = server.resolver().clone();
@@ -442,7 +444,7 @@ async fn doq_stream_without_fin_is_cancelled_at_stop() {
 /// An HTTP/3 POST whose body has not ended is cancelled at the stop.
 #[tokio::test]
 async fn h3_post_with_partial_body_is_cancelled_at_stop() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server = incomplete_query_server(&cert, &upstream, true, false).await;
     let resolver = server.resolver().clone();
@@ -492,7 +494,7 @@ async fn h3_post_with_partial_body_is_cancelled_at_stop() {
 /// grace, and the stop stays quiescent.
 #[tokio::test]
 async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
-    let cert = Certificate::new();
+    let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server = incomplete_query_server(&cert, &upstream, false, true).await;
     let resolver = server.resolver().clone();

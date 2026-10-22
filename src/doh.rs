@@ -14,7 +14,7 @@ use http::{Request, Response};
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::{TlsAcceptor, rustls};
 
-use crate::{ingress::Ingress, metrics::Counter, resolver::ForcedShutdown};
+use crate::{ingress::Ingress, metrics::Counter, protocol::MAX_MESSAGE, resolver::ForcedShutdown};
 
 pub const PATH: &str = "/dns-query";
 
@@ -26,7 +26,6 @@ pub type H3Port = Arc<dyn Fn() -> Option<u16> + Send + Sync>;
 pub(crate) fn alt_svc(port: Option<u16>) -> String {
     port.map_or_else(|| "clear".into(), |port| format!("h3=\":{port}\"; ma=300"))
 }
-const MAX_DNS: usize = 65535;
 
 /// Shared HTTP/2 and HTTP/3 wire contract. No proxy header is used for identity.
 pub fn request_bytes(
@@ -47,7 +46,7 @@ pub fn request_bytes(
                 return Err(400);
             }
             let encoded = query.strip_prefix("dns=").ok_or(400u16)?;
-            if encoded.len() > MAX_DNS.div_ceil(3) * 4 {
+            if encoded.len() > MAX_MESSAGE.div_ceil(3) * 4 {
                 return Err(413);
             }
             URL_SAFE_NO_PAD.decode(encoded).map_err(|_| 400u16)?
@@ -65,7 +64,7 @@ pub fn request_bytes(
         }
         _ => return Err(405),
     };
-    if bytes.len() > MAX_DNS {
+    if bytes.len() > MAX_MESSAGE {
         return Err(413);
     }
     if bytes.len() < 12 {
@@ -204,7 +203,8 @@ async fn connection(
         // the listener grace bounds this wait and forces the stop on expiry.
         while requests.join_next().await.is_some() {}
     }
-    // JoinSet drop aborts remaining request work; there are no detached collectors.
+    // Abort the remaining request tasks and wait for them, so no request work
+    // outlives the listener.
     requests.abort_all();
     while requests.join_next().await.is_some() {}
     Ok(())
@@ -255,7 +255,7 @@ async fn collect(stream: &mut h2::RecvStream) -> anyhow::Result<(Vec<u8>, Option
     let mut body = Vec::new();
     while let Some(chunk) = stream.data().await {
         let chunk = chunk?;
-        if body.len() + chunk.len() > MAX_DNS {
+        if body.len() + chunk.len() > MAX_MESSAGE {
             return Ok((body, Some(413)));
         }
         body.extend_from_slice(&chunk);

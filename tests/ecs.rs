@@ -139,7 +139,7 @@ fn malformed_ecs_lengths_padding_scope_and_duplicates_are_rejected() {
         edns.options_mut().insert(EdnsOption::Unknown(8, raw));
         q.edns = Some(edns);
         assert!(
-            matches!(protocol::request(&q.to_vec().unwrap()), protocol::Request::Reply(r) if r.response_code == ResponseCode::FormErr)
+            matches!(protocol::request(&q.to_vec().unwrap()), protocol::Request::Reply(r, _) if r.response_code == ResponseCode::FormErr)
         );
     }
     let mut q = query(Some("192.0.2.0/24"));
@@ -164,7 +164,7 @@ fn malformed_ecs_lengths_padding_scope_and_duplicates_are_rejected() {
     let length = (bytes.len() - opt_start - 11) as u16;
     bytes[opt_start + 9..opt_start + 11].copy_from_slice(&length.to_be_bytes());
     assert!(
-        matches!(protocol::request(&bytes), protocol::Request::Reply(r) if r.response_code == ResponseCode::FormErr)
+        matches!(protocol::request(&bytes), protocol::Request::Reply(r, _) if r.response_code == ResponseCode::FormErr)
     );
 }
 

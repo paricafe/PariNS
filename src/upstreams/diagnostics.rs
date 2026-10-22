@@ -1,11 +1,8 @@
 //! Bounded diagnostics for actual upstream attempts, not client requests.
 use serde::{Deserialize, Serialize};
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::{SystemTime, UNIX_EPOCH},
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use tokio::time::Instant;
 
@@ -73,8 +70,8 @@ pub struct AttemptRecord {
     pub reason: Option<Reason>,
     pub code: Option<u64>,
     pub elapsed_ms: u64,
-    /// Absent for protocols without connection pooling and in records saved
-    /// before this field existed.
+    /// Whether the attempt opened a new connection or reused one, for
+    /// transports that keep connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionUse>,
 }
@@ -135,7 +132,7 @@ impl Operation {
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 pub(super) struct Diagnostics {
     generation: u64,
-    since_ms: Option<u64>,
+    since_ms: u64,
     shutdown: AtomicBool,
     slots: Vec<Box<[AtomicU64; 2800]>>,
 }
@@ -151,10 +148,7 @@ impl Diagnostics {
     pub fn new(slots: usize) -> Arc<Self> {
         Arc::new(Self {
             generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
-            since_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .and_then(|v| v.as_millis().try_into().ok()),
+            since_ms: crate::clock::unix_ms(),
             shutdown: AtomicBool::new(false),
             slots: (0..slots)
                 .map(|_| Box::new(std::array::from_fn(|_| AtomicU64::new(0))))

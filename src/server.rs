@@ -770,7 +770,7 @@ impl Server {
             resolver: resolver.clone(),
             queries: Arc::new(Semaphore::new(self.config.max_inflight)),
             connections: Arc::new(Semaphore::new(self.config.max_tcp_connections)),
-            source_limits: Arc::new(crate::limits::Limiter::new(&self.config.source_limits)?),
+            source_limits: Arc::new(crate::limits::Limiter::new(&self.config.source_limits)),
             stop: stop.clone(),
             io_timeout: Duration::from_millis(self.config.tcp_io_timeout_ms),
             shutdown_grace: Duration::from_millis(self.config.shutdown_grace_ms),
@@ -958,7 +958,7 @@ async fn serve_tcp(
                 .map(|reply| reply.message),
             _ => {
                 resolver.metrics().inc(Counter::TcpRejected);
-                let reply = crate::ingress::rejected_response(&bytes);
+                let reply = crate::ingress::rejected_response(&bytes).map(|(reply, _)| reply);
                 resolver.log_rejected(&bytes, peer, "tcp", reply.as_ref());
                 reply
             }

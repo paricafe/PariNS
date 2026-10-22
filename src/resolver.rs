@@ -389,14 +389,11 @@ impl Resolver {
         let epoch = cache.epoch();
         let query = match protocol::request(bytes) {
             Request::Drop => return None,
-            Request::Reply(message) => {
+            Request::Reply(message, padding) => {
                 return Some(Reply {
                     message,
                     udp_limit: 512,
-                    padding: protocol::decode(bytes)
-                        .as_ref()
-                        .map(protocol::Padding::from_query)
-                        .unwrap_or_default(),
+                    padding,
                 });
             }
             Request::Forward(query) => query,
@@ -543,29 +540,21 @@ impl Resolver {
         // Fallback belongs to each foreground consumer, never to the shared work:
         // background refresh reports only actual admissions, and stale-hit counts
         // describe replies even when many callers shared one failed exchange.
-        let response = if result.stale_eligible {
-            cache
-                .lookup_with_decision(&query, context.outgoing, Instant::now(), true)
-                .hit
-                .map(|hit| {
-                    let decision = crate::cache::LookupDecision {
-                        outcome: if hit.stale {
-                            crate::cache::LookupOutcome::Stale
-                        } else {
-                            crate::cache::LookupOutcome::Fresh
-                        },
-                        reason: None,
-                    };
-                    self.metrics.record_cache_lookup(decision);
-                    trace.cache_lookup = Some(decision);
-                    trace.cache_scope = Some(hit.scope.tag());
-                    trace.cache = Some(if hit.stale { "stale" } else { "fresh" });
-                    (hit.message, hit.scope.reply_scope(context.outgoing))
-                })
-                .map(Ok)
-                .unwrap_or(result.response)
-        } else {
-            result.response
+        let fallback = result
+            .stale_eligible
+            .then(|| cache.lookup_with_decision(&query, context.outgoing, Instant::now(), true));
+        let response = match fallback {
+            Some(crate::cache::LookupResult {
+                hit: Some(hit),
+                decision,
+            }) => {
+                self.metrics.record_cache_lookup(decision);
+                trace.cache_lookup = Some(decision);
+                trace.cache_scope = Some(hit.scope.tag());
+                trace.cache = Some(if hit.stale { "stale" } else { "fresh" });
+                Ok((hit.message, hit.scope.reply_scope(context.outgoing)))
+            }
+            _ => result.response,
         };
         let (mut message, scope) = response.unwrap_or_else(|()| {
             (
@@ -772,7 +761,7 @@ impl Exchange {
             Err(_) => Answer {
                 response: Err(()),
                 admitted: false,
-                stale_eligible: failed && !retried,
+                stale_eligible: !retried,
                 upstream: endpoint,
                 outgoing_ecs: crate::query_log::subnet(&self.outbound),
                 cached: false,

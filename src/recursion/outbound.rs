@@ -29,7 +29,6 @@ use tokio::{
 pub struct Bounds {
     inflight: Arc<Semaphore>,
     rate: f64,
-    burst: f64,
     bucket: Mutex<(f64, Instant)>,
     pub(super) sent: AtomicU64,
     pub(super) rate_waits: AtomicU64,
@@ -43,8 +42,6 @@ impl Bounds {
         Arc::new(Self {
             inflight: Arc::new(Semaphore::new(inflight)),
             rate,
-            // One second of burst keeps the sustained rate a hard cap.
-            burst: rate,
             bucket: Mutex::new((rate, Instant::now())),
             sent: AtomicU64::new(0),
             rate_waits: AtomicU64::new(0),
@@ -75,7 +72,8 @@ impl Bounds {
                 let now = Instant::now();
                 let mut bucket = self.bucket.lock().unwrap_or_else(|e| e.into_inner());
                 let elapsed = now.saturating_duration_since(bucket.1).as_secs_f64();
-                bucket.0 = (bucket.0 + elapsed * self.rate).min(self.burst);
+                // The bucket holds one second of tokens, so the sustained rate is a hard cap.
+                bucket.0 = (bucket.0 + elapsed * self.rate).min(self.rate);
                 bucket.1 = now;
                 if bucket.0 >= 1.0 {
                     bucket.0 -= 1.0;

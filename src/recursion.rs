@@ -31,7 +31,7 @@ use std::{
 use anyhow::{Result, anyhow, ensure};
 use hickory_proto::{
     dnssec::{Proof, rdata::DNSSECRData},
-    op::{Edns, Message, MessageType, OpCode, ResponseCode},
+    op::{Edns, Message, OpCode, ResponseCode},
     rr::{
         RData, Record, RecordType,
         rdata::opt::{ClientSubnet, EdnsCode, EdnsOption},
@@ -146,7 +146,7 @@ const ROOTS_V6: [Ipv6Addr; 13] = [
 ];
 
 pub struct Recursion {
-    since_ms: Option<u64>,
+    since_ms: u64,
     recursor: Recursor<outbound::Provider>,
     bounds: Arc<outbound::Bounds>,
     inflight_limit: usize,
@@ -186,10 +186,7 @@ impl Recursion {
         )
         .map_err(|e| anyhow!("recursion setup failed: {e}"))?;
         Ok(Self {
-            since_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|v| v.as_millis().try_into().ok()),
+            since_ms: crate::clock::unix_ms(),
             recursor,
             bounds,
             inflight_limit: settings.max_outbound_inflight,
@@ -204,11 +201,7 @@ impl Recursion {
             !self.shutdown.load(Ordering::Acquire),
             "recursion is shut down"
         );
-        let question = query
-            .queries
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("query has no question"))?;
+        let question = query.queries[0].clone();
         let subnet = ecs::subnet(query);
         let dnssec_ok = query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
         let mut options = ResolveOptions::default();
@@ -677,7 +670,6 @@ fn bogus(query: &Message, scope: EcsScope) -> Outcome {
 
 fn header(query: &Message, code: ResponseCode) -> Message {
     let mut response = Message::response(query.id, OpCode::Query);
-    response.metadata.message_type = MessageType::Response;
     response.metadata.recursion_desired = query.recursion_desired;
     response.metadata.recursion_available = true;
     response.metadata.checking_disabled = query.checking_disabled;

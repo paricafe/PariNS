@@ -174,7 +174,7 @@ impl Client {
             .is_some_and(|until| until > Instant::now())
     }
 
-    fn cached(&self, address: SocketAddr) -> Result<Option<Arc<Connection>>> {
+    fn cached(&self, address: SocketAddr) -> Option<Arc<Connection>> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state
             .connection
@@ -183,11 +183,11 @@ impl Client {
         {
             state.connection = None;
         }
-        Ok(state
+        state
             .connection
             .as_ref()
             .filter(|c| c.quic.remote_address() == address)
-            .cloned())
+            .cloned()
     }
 
     async fn connection(
@@ -196,7 +196,7 @@ impl Client {
         address: SocketAddr,
         attempt: &mut Attempt,
     ) -> Result<Arc<Connection>> {
-        if let Some(connection) = self.cached(address)? {
+        if let Some(connection) = self.cached(address) {
             return Ok(connection);
         }
         attempt.stage(Stage::Wait);
@@ -205,7 +205,7 @@ impl Client {
             attempt.skipped();
             anyhow::bail!("HTTP/3 cooling down");
         }
-        if let Some(connection) = self.cached(address)? {
+        if let Some(connection) = self.cached(address) {
             return Ok(connection);
         }
         let bind = if address.is_ipv4() {

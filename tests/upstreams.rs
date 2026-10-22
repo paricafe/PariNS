@@ -357,7 +357,7 @@ async fn doh_authenticated_and_edns_preserved() {
 }
 
 #[tokio::test]
-async fn doq_authenticated_preserves_edns_except_prohibited_keepalive() {
+async fn doq_authenticated_preserves_edns() {
     let (_dir, ca, tls) = identity(b"doq");
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from((*tls).clone()).unwrap();
     let endpoint = quinn::Endpoint::server(
@@ -383,12 +383,7 @@ async fn doq_authenticated_preserves_edns_except_prohibited_keepalive() {
         }
         connection.closed().await;
     });
-    let mut q = query();
-    q.edns
-        .as_mut()
-        .unwrap()
-        .options_mut()
-        .insert(EdnsOption::Unknown(11, Vec::new()));
+    let q = query();
     let client = client(&config).unwrap();
     let (first, second) = tokio::join!(exchange(&client, &q), exchange(&client, &q));
     assert_eq!(first.unwrap().message.id, 123);

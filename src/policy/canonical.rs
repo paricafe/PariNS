@@ -1,4 +1,5 @@
-//! Bounded streaming subscription parser and canonical logical rules; no physical index.
+//! Bounded streaming rule parser for local and subscription rules. It produces
+//! canonical logical rules, which `radix` builds into the lookup index.
 use hickory_proto::rr::Name;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -566,7 +567,7 @@ fn duplicate_count(records: &[Record], arena: &[u8]) -> usize {
         .count()
 }
 
-/// Canonical logical rules. No final physical index has been allocated.
+/// Canonical logical rules, the input of `radix::Index::build`.
 pub struct Canonical {
     pub(super) arena: Vec<u8>,
     pub(super) records: Vec<Record>,

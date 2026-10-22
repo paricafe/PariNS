@@ -1,4 +1,5 @@
-//! DNS semantics only; no sockets, scheduling, or configuration loading.
+//! DNS message admission, error responses, and per-hop encoding (padding and
+//! UDP truncation).
 
 use anyhow::{Result, ensure};
 use hickory_proto::{
@@ -51,11 +52,9 @@ pub fn encode_hop(
     let mut normalized = message.clone();
     strip_padding(&mut normalized);
     let bytes = normalized.to_vec()?;
-    let limit = limit.min(MAX_MESSAGE);
     if !pad || bytes.len().saturating_add(4) > limit {
         return Ok(bytes);
     }
-    ensure!(block > 0, "padding block must be nonzero");
     let with_header = bytes.len() + 4;
     let length = ((block - with_header % block) % block).min(limit - with_header);
     normalized
@@ -121,7 +120,8 @@ pub fn canonical_work_key(query: &Message) -> Option<Vec<u8>> {
 
 pub enum Request {
     Forward(Message),
-    Reply(Message),
+    /// An error response, with the padding intent of the query it answers.
+    Reply(Message, Padding),
     Drop,
 }
 
@@ -148,11 +148,10 @@ pub fn request(bytes: &[u8]) -> Request {
             if header.message_type == MessageType::Response {
                 return Request::Drop;
             }
-            return Request::Reply(Message::error_msg(
-                header.id,
-                header.op_code,
-                ResponseCode::FormErr,
-            ));
+            return Request::Reply(
+                Message::error_msg(header.id, header.op_code, ResponseCode::FormErr),
+                Padding::default(),
+            );
         }
     };
     if query.message_type != MessageType::Query {
@@ -187,7 +186,7 @@ pub fn request(bytes: &[u8]) -> Request {
         None
     };
     match error {
-        Some(code) => Request::Reply(error_response(&query, code)),
+        Some(code) => Request::Reply(error_response(&query, code), Padding::from_query(&query)),
         None => {
             // Without the hop-specific option the query shares cache entries and
             // upstream work with equivalent queries.
@@ -376,17 +375,17 @@ mod tests {
         assert!(matches!(request(&q.to_vec().unwrap()), Request::Forward(_)));
         q.metadata.op_code = OpCode::Update;
         assert!(
-            matches!(request(&q.to_vec().unwrap()), Request::Reply(r) if r.response_code == ResponseCode::NotImp)
+            matches!(request(&q.to_vec().unwrap()), Request::Reply(r, _) if r.response_code == ResponseCode::NotImp)
         );
         q.metadata.op_code = OpCode::Query;
         q.queries.push(q.queries[0].clone());
         assert!(
-            matches!(request(&q.to_vec().unwrap()), Request::Reply(r) if r.response_code == ResponseCode::FormErr)
+            matches!(request(&q.to_vec().unwrap()), Request::Reply(r, _) if r.response_code == ResponseCode::FormErr)
         );
         let mut bytes = query().to_vec().unwrap();
         bytes.push(0);
         assert!(
-            matches!(request(&bytes), Request::Reply(r) if r.response_code == ResponseCode::FormErr)
+            matches!(request(&bytes), Request::Reply(r, _) if r.response_code == ResponseCode::FormErr)
         );
         assert!(matches!(request(&[0, 1]), Request::Drop));
     }
@@ -408,13 +407,13 @@ mod tests {
         let mut q = query();
         q.queries[0].set_query_type(RecordType::AXFR);
         assert!(
-            matches!(request(&q.to_vec().unwrap()), Request::Reply(r) if r.response_code == ResponseCode::Refused)
+            matches!(request(&q.to_vec().unwrap()), Request::Reply(r, _) if r.response_code == ResponseCode::Refused)
         );
         q.queries[0].set_query_type(RecordType::A);
         let mut edns = Edns::new();
         edns.set_version(1);
         q.edns = Some(edns);
-        let Request::Reply(r) = request(&q.to_vec().unwrap()) else {
+        let Request::Reply(r, _) = request(&q.to_vec().unwrap()) else {
             panic!("expected BADVERS")
         };
         let decoded = decode(&r.to_vec().unwrap()).unwrap();

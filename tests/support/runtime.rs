@@ -4,12 +4,7 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{Name, RData, Record, RecordType, rdata::A},
 };
-use parins::{
-    config::Config,
-    protocol,
-    server::Server,
-    tls::{ListenerConfig, TlsFiles},
-};
+use parins::{config::Config, protocol, server::Server};
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -20,67 +15,34 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
+use crate::common::Identity;
+
 pub(super) const WAIT: Duration = Duration::from_secs(3);
 
-pub(super) struct Certificate {
-    pub(super) directory: tempfile::TempDir,
-    pub(super) files: TlsFiles,
-    pub(super) der: rustls::pki_types::CertificateDer<'static>,
-}
-
-impl Certificate {
-    pub(super) fn new() -> Self {
-        Self::with_eku(vec![])
-    }
-
-    pub(super) fn with_eku(usages: Vec<rcgen::ExtendedKeyUsagePurpose>) -> Self {
-        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
-        params.extended_key_usages = usages;
-        let key = rcgen::KeyPair::generate().unwrap();
-        let certificate = params.self_signed(&key).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let files = TlsFiles {
-            cert_file: directory.path().join("cert.pem"),
-            key_file: directory.path().join("key.pem"),
-        };
-        std::fs::write(&files.cert_file, certificate.pem()).unwrap();
-        std::fs::write(&files.key_file, key.serialize_pem()).unwrap();
-        Self {
-            directory,
-            files,
-            der: certificate.der().clone(),
-        }
-    }
-    pub(super) fn listener(&self) -> ListenerConfig {
-        ListenerConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            files: self.files.clone(),
-        }
-    }
-    pub(super) async fn connect(
-        &self,
-        address: SocketAddr,
-    ) -> tokio_rustls::client::TlsStream<TcpStream> {
-        let mut roots = RootCertStore::empty();
-        roots.add(self.der.clone()).unwrap();
-        let mut client =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        client.alpn_protocols = vec![b"dot".to_vec()];
-        timeout(
-            WAIT,
-            TlsConnector::from(Arc::new(client)).connect(
-                ServerName::try_from("localhost").unwrap(),
-                TcpStream::connect(address).await.unwrap(),
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-    }
+/// A DoT client session to `address` that trusts only `identity`.
+pub(super) async fn connect(
+    identity: &Identity,
+    address: SocketAddr,
+) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let mut roots = RootCertStore::empty();
+    roots.add(identity.der.clone()).unwrap();
+    let mut client =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    client.alpn_protocols = vec![b"dot".to_vec()];
+    timeout(
+        WAIT,
+        TlsConnector::from(Arc::new(client)).connect(
+            ServerName::try_from("localhost").unwrap(),
+            TcpStream::connect(address).await.unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap()
 }
 
 pub(super) fn config(upstream: SocketAddr) -> Config {

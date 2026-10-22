@@ -1,4 +1,6 @@
-//! Owned, bounded refresh work. No queue, no task survives its cache generation.
+//! Bounded background refresh for one cache generation. Work over the in-flight
+//! or rate limit is rejected at once, and cancelling or shutting down the
+//! generation aborts its tasks.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},

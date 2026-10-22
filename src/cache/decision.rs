@@ -105,7 +105,7 @@ impl LookupResult {
 }
 
 pub(super) struct Diagnostics {
-    since_ms: Option<u64>,
+    since_ms: u64,
     lookup: [AtomicU64; 5],
     store: [AtomicU64; 4],
     lookup_reasons: [AtomicU64; 10],
@@ -115,10 +115,7 @@ pub(super) struct Diagnostics {
 impl Default for Diagnostics {
     fn default() -> Self {
         Self {
-            since_ms: std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .ok()
-                .and_then(|d| d.as_millis().try_into().ok()),
+            since_ms: crate::clock::unix_ms(),
             lookup: std::array::from_fn(|_| AtomicU64::new(0)),
             store: std::array::from_fn(|_| AtomicU64::new(0)),
             lookup_reasons: std::array::from_fn(|_| AtomicU64::new(0)),

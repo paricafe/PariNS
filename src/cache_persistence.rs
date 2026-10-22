@@ -4,7 +4,6 @@
 
 use std::{
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::{Instant, SystemTime},
@@ -15,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use crate::{
     cache::{Cache, persistence::SnapshotReport},
     config::CachePersistenceConfig,
-    manage::store::{checked_open, create_private},
+    private_files::{checked_open, create_private},
 };
 
 pub const CLEAN_FILE: &str = "dns-cache-clean.snapshot";
@@ -72,21 +71,17 @@ impl CachePersistence {
     }
 
     /// Must finish successfully before any DNS listener starts accepting. Even a
-    /// disabled, cancelled, oversized or unreadable snapshot is durably consumed.
+    /// disabled or oversized snapshot is durably consumed; the restore reports
+    /// any other defect.
     /// A failed unlink/directory fsync is a hard startup error, never a cold-start
     /// success with an old recoverable file remaining beside a running cache.
-    pub fn consume_startup(
-        &self,
-        settings: &CachePersistenceConfig,
-        cancelled: &AtomicBool,
-    ) -> Result<ConsumedSnapshot> {
+    pub fn consume_startup(&self, settings: &CachePersistenceConfig) -> Result<ConsumedSnapshot> {
         ensure!(
             !self.consumed.load(Ordering::Acquire),
             "clean snapshot startup already consumed"
         );
         let path = self.directory.join(CLEAN_FILE);
-        let Some(mut file) = checked_open(&path, false).context("open clean cache snapshot")?
-        else {
+        let Some(file) = checked_open(&path, false).context("open clean cache snapshot")? else {
             sync_directory(&self.directory).context("confirm consumed cache runtime directory")?;
             self.consumed.store(true, Ordering::Release);
             return Ok(ConsumedSnapshot {
@@ -96,53 +91,27 @@ impl CachePersistence {
             });
         };
         let length = file.metadata()?.len();
-        let mut report = SnapshotReport {
-            bytes: length,
-            ..SnapshotReport::default()
+        // The restore reads and verifies the complete file within the same budget.
+        let rejected = if !settings.enabled {
+            Some("persistence_disabled")
+        } else if length > settings.max_bytes as u64 {
+            Some("snapshot exceeds byte budget")
+        } else {
+            None
         };
-        let readable = (|| -> Result<()> {
-            ensure!(settings.enabled, "persistence_disabled");
-            ensure!(
-                length <= settings.max_bytes as u64,
-                "snapshot exceeds byte budget"
-            );
-            let mut buffer = [0; 16 * 1024];
-            let mut consumed = 0u64;
-            loop {
-                ensure!(
-                    !cancelled.load(Ordering::Acquire),
-                    "cache snapshot cancelled"
-                );
-                let count = file.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                consumed += count as u64;
-                ensure!(
-                    consumed <= settings.max_bytes as u64,
-                    "snapshot grew beyond byte budget"
-                );
-            }
-            ensure!(consumed == length, "snapshot size changed during startup");
-            file.seek(SeekFrom::Start(0))?;
-            Ok(())
-        })();
         // This step is unconditional after identifying an owned regular file.
         fs::remove_file(&path).context("consume clean cache snapshot before DNS startup")?;
         sync_directory(&self.directory)
             .context("durably consume clean cache snapshot before DNS startup")?;
         self.consumed.store(true, Ordering::Release);
-        let file = match readable {
-            Ok(()) => Some(file),
-            Err(error) => {
-                report.reason = Some(format!("{error:#}"));
-                None
-            }
-        };
         Ok(ConsumedSnapshot {
-            file,
+            file: rejected.is_none().then_some(file),
             max_bytes: settings.max_bytes,
-            report,
+            report: SnapshotReport {
+                bytes: length,
+                reason: rejected.map(Into::into),
+                ..SnapshotReport::default()
+            },
         })
     }
 

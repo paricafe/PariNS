@@ -49,10 +49,10 @@ struct Key {
 }
 
 impl Key {
+    /// `query` has passed `protocol::request`, so it has exactly one question.
     fn of(query: &Message) -> Option<Self> {
-        let question = query.queries.first()?;
-        if query.queries.len() != 1 || question.query_class() != DNSClass::IN || !plain_edns(query)
-        {
+        let question = &query.queries[0];
+        if question.query_class() != DNSClass::IN || !plain_edns(query) {
             return None;
         }
         Some(Self {
@@ -307,7 +307,10 @@ impl Cache {
                 name: Name::from_ascii(&rule.name)
                     .expect("validated cache rule name")
                     .to_lowercase(),
-                qtype: rule.qtype.as_ref().and_then(|q| q.parse().ok()),
+                qtype: rule
+                    .qtype
+                    .as_ref()
+                    .map(|q| q.parse().expect("validated cache rule qtype")),
                 index,
             })
             .collect();
@@ -367,6 +370,7 @@ impl Cache {
         }
     }
 
+    #[cfg(test)]
     pub fn lookup(
         &self,
         query: &Message,
@@ -548,6 +552,7 @@ impl Cache {
         }
     }
 
+    #[cfg(test)]
     pub fn insert_if_epoch(
         &self,
         query: &Message,
@@ -956,10 +961,7 @@ fn prepare_response(
     if !plain_edns(response) {
         return Err(DecisionReason::UnsupportedEdns);
     }
-    let question = query
-        .queries
-        .first()
-        .ok_or(DecisionReason::UnsupportedQuery)?;
+    let question = &query.queries[0];
     let negative = is_negative(question, response);
     let mut stored = response.clone();
     let mut lifetime = config.max_ttl_secs;

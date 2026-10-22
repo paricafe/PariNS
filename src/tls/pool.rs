@@ -1,4 +1,5 @@
-//! Fixed, request-owned connection slots; no worker or unbounded endpoint map.
+//! DoT connection pool: a fixed number of slots per endpoint, each leased to one
+//! request at a time. Idle connections expire when a request checks them out.
 use std::{
     net::SocketAddr,
     ops::{Deref, DerefMut},

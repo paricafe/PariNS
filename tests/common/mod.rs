@@ -7,7 +7,7 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, Query},
     rr::{Name, RecordType},
 };
-use parins::tls::{ClientSettings, TlsFiles};
+use parins::tls::{ClientSettings, ListenerConfig, TlsFiles};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 pub fn resolver(upstream: SocketAddr, timeout: Duration) -> parins::resolver::Resolver {
@@ -36,22 +36,37 @@ pub struct Identity {
 
 impl Identity {
     pub fn new(names: &[&str]) -> Self {
-        let generated = rcgen::generate_simple_self_signed(
-            names.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
-        )
-        .unwrap();
+        Self::with_usages(names, Vec::new())
+    }
+
+    /// An identity whose certificate is limited to the extended key `usages`.
+    pub fn with_usages(names: &[&str], usages: Vec<rcgen::ExtendedKeyUsagePurpose>) -> Self {
+        let mut params =
+            rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+                .unwrap();
+        params.extended_key_usages = usages;
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let files = TlsFiles {
             cert_file: directory.path().join("cert.pem"),
             key_file: directory.path().join("key.pem"),
         };
-        std::fs::write(&files.cert_file, generated.cert.pem()).unwrap();
-        std::fs::write(&files.key_file, generated.signing_key.serialize_pem()).unwrap();
+        std::fs::write(&files.cert_file, certificate.pem()).unwrap();
+        std::fs::write(&files.key_file, key.serialize_pem()).unwrap();
         Self {
             directory,
             files,
-            der: generated.cert.der().clone(),
-            key: PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()),
+            der: certificate.der().clone(),
+            key: PrivatePkcs8KeyDer::from(key.serialize_der()),
+        }
+    }
+
+    /// A listener on an ephemeral loopback port that serves this identity.
+    pub fn listener(&self) -> ListenerConfig {
+        ListenerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            files: self.files.clone(),
         }
     }
 

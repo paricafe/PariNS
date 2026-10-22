@@ -22,15 +22,10 @@ pub async fn consume(
     persistence: Arc<CachePersistence>,
     settings: CachePersistenceConfig,
 ) -> Result<ConsumedSnapshot> {
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let flag = cancelled.clone();
-    let work = tokio::task::spawn_blocking(move || persistence.consume_startup(&settings, &flag));
+    let work = tokio::task::spawn_blocking(move || persistence.consume_startup(&settings));
     match tokio::time::timeout(Duration::from_secs(5), work).await {
         Ok(result) => result?,
-        Err(_) => {
-            cancelled.store(true, Ordering::Release);
-            anyhow::bail!("cache startup consumption timed out; DNS will not start")
-        }
+        Err(_) => anyhow::bail!("cache startup consumption timed out; DNS will not start"),
     }
 }
 

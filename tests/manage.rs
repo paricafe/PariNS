@@ -360,6 +360,63 @@ async fn assert_dns(address: SocketAddr) {
     assert!(response.answers.is_empty());
 }
 
+/// Idle connections exhaust a low descriptor limit, so accepting fails with
+/// EMFILE. The management listener pauses and serves again once they close;
+/// the process (which also runs managed DNS) keeps running.
+#[tokio::test]
+async fn descriptor_exhaustion_pauses_the_management_listener_without_exiting() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    // Without -S or -H, ulimit lowers the hard limit too, so the process cannot
+    // raise its soft limit back at startup.
+    let mut child = tokio::process::Command::new("sh")
+        .args([
+            "-c",
+            "ulimit -n 32 && exec \"$0\" --manage --state-dir \"$1\" --web-listen \"$2\"",
+            env!("CARGO_BIN_EXE_parins"),
+        ])
+        .arg(directory.path().join("state"))
+        .arg(address.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let server = Management {
+        address,
+        stop: None,
+        task: None,
+    };
+    timeout(DEADLINE, async {
+        while TcpStream::connect(address).await.is_err() {
+            assert!(child.try_wait().unwrap().is_none(), "management exited");
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    server
+        .request("GET", "/api/session", None, None)
+        .await
+        .expect(200);
+    let mut idle = Vec::new();
+    for _ in 0..40 {
+        idle.push(TcpStream::connect(address).await.unwrap());
+    }
+    sleep(Duration::from_secs(1)).await;
+    assert!(child.try_wait().unwrap().is_none(), "management exited");
+    drop(idle);
+    server
+        .request("GET", "/api/session", None, None)
+        .await
+        .expect(200);
+    assert!(child.try_wait().unwrap().is_none(), "management exited");
+}
+
 #[tokio::test]
 async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong_host() {
     let temporary = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-//! TCP accept shared by the DNS TCP, DoT, DoH and admin listeners.
+//! TCP accept shared by the DNS TCP, DoT, DoH, admin and management listeners.
 //!
 //! An accept error usually concerns one pending connection (the peer aborted
 //! it, or the network failed for it) or a passing resource shortage, so the

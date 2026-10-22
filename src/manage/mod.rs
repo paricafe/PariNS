@@ -1,6 +1,7 @@
 //! Authenticated management plane. DNS forwarding remains in Server/Resolver.
 //! Connections serve one request each; only a live query log WebSocket (`live`)
-//! outlives its request, under that module's own limits and shutdown drain.
+//! outlives its request, under that module's own limits and shutdown drain. The
+//! listener rides out per-connection accept errors like the DNS listeners.
 mod account;
 mod auth_budget;
 mod cache;
@@ -1330,7 +1331,7 @@ pub async fn serve(
                 if reload_pending { reload_pending = false; reload_task = Some(start_signal_reload(shared.clone())); }
             },
             _ = tasks.join_next(), if !tasks.is_empty() => {},
-            incoming = listener.accept() => {
+            incoming = crate::transport::accept::accept(&listener) => {
                 let (stream,peer) = match incoming {
                     Ok(incoming) => incoming,
                     Err(error) => break Err(error.into()),

@@ -1,0 +1,21 @@
+scripts/test-filter-subscriptions-systemd.mjs
+  s_cffe143f0c5c88::t_80dd9ac645f89f 218-219
+web/src/pages/observability/__tests__/diagnostics.test.tsx
+  s_cffe143f0c5c88::t_ebedd6c2217d43 40-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b4c59050a53749ef04a14e930eddf461d20d4d73",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

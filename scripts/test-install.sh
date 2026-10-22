@@ -126,7 +126,7 @@ printf 'external public HTTPS certificate\n' > "$stage/var/lib/parins/tls/cert.p
 printf 'legacy service unchanged\n' > "$stage/etc/systemd/system/parins.service"
 chmod 0750 "$stage/etc"
 sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" > "$fixture/staging.log"
-grep -Fxq 'Staging only: state is untouched and no service or executable was started.' "$fixture/staging.log"
+grep -Fxq "Staged for inspection under $(CDPATH= cd -- "$stage" && pwd -P)." "$fixture/staging.log"
 ! grep -Eq 'Fresh setup|setup-token|ssh -N|Existing configuration preserved|Check service:' "$fixture/staging.log" || exit 1
 cmp "$binary" "$stage/opt/parins-managed/parins"
 cmp "$repo/deploy/parins-managed.service" "$stage/etc/systemd/system/parins-managed.service"

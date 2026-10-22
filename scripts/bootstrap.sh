@@ -92,14 +92,16 @@ main() {
         END { if (NR != 1) exit 1; print hash }
     ' "$download_dir/$asset.sha256") || fail 'invalid archive checksum file'
     [ "$(digest "$download_dir/$asset")" = "$expected" ] || fail 'archive checksum mismatch'
+    files='parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service'
     # Reject links, special files, extra paths, duplicate entries and traversal.
     tar -tzf "$download_dir/$asset" > "$download_dir/members" || fail 'cannot list archive'
-    awk -v prefix="$archive/" '
+    awk -v prefix="$archive/" -v files="SHA256SUMS $files" '
+        BEGIN { n = split(files, list, " "); for (i = 1; i <= n; i++) allowed[list[i]] = 1 }
         { if (++seen[$0] != 1) exit 1 }
         $0 == prefix || $0 == prefix "deploy/" { next }
         index($0, prefix) != 1 { exit 1 }
         { name = substr($0, length(prefix) + 1) }
-        name !~ /^(SHA256SUMS|parins|parins-updater|install-build-info\.json|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed|-updater|-update-recovery)?\.service|deploy\/parins-updater\.path)$/ { exit 1 }
+        !(name in allowed) { exit 1 }
         END { if (NR == 0) exit 1 }
     ' "$download_dir/members" || fail 'unsafe or unexpected archive path'
     tar -tvzf "$download_dir/$asset" > "$download_dir/types" || fail 'cannot inspect archive types'
@@ -109,15 +111,14 @@ main() {
     ' "$download_dir/types" || fail 'archive links and special files are forbidden'
     package="$download_dir/$archive"
     mkdir -m 0700 "$package" "$package/deploy"
-    files='parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service'
     # Extract exact regular-file contents, never archive paths or permissions.
     for name in SHA256SUMS $files; do
         grep -Fxq "$archive/$name" "$download_dir/members" || fail "missing package member: $name"
         tar -xOzf "$download_dir/$asset" "$archive/$name" > "$package/$name" || fail "cannot read package member: $name"
     done
-    awk '
-        NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ { exit 1 }
-        $2 !~ /^(parins|parins-updater|install-build-info\.json|install\.sh|parins\.example\.toml|LICENSE|LICENSE\.beui|README\.md|CHANGELOG\.md|deploy\/parins(-managed|-updater|-update-recovery)?\.service|deploy\/parins-updater\.path)$/ { exit 1 }
+    awk -v files="$files" '
+        BEGIN { n = split(files, list, " "); for (i = 1; i <= n; i++) allowed[list[i]] = 1 }
+        NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ || !($2 in allowed) { exit 1 }
         ++seen[$2] != 1 { exit 1 }
         END { if (NR == 0) exit 1 }
     ' "$package/SHA256SUMS" || fail 'invalid package checksum manifest'

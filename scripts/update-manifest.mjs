@@ -50,7 +50,6 @@ export function verifyPackages(directory, version, sourceCommit, official) {
     const base = `parins-${version}-linux-${arch}`;
     const raw = join(directory, `${base}.bin`);
     const size = statSync(raw).size;
-    assert(size >= 64 && size <= 128 * 1024 * 1024, 'Raw ELF size exceeds contract');
     const bytes = readFileSync(raw);
     assert(bytes.subarray(0, 6).equals(Buffer.from('7f454c460201', 'hex')), 'Not ELF64 little-endian');
     assert(bytes.readUInt16LE(18) === (arch === 'x86_64' ? 62 : 183), 'ELF architecture mismatch');

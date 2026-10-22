@@ -454,7 +454,7 @@ fi
 fresh_guidance() {
     token_file="$state_dir/setup-token" token=
     if [ -f "$token_file" ] && [ ! -L "$token_file" ] && [ "$(links "$token_file")" = 1 ]; then
-        token=$(timeout 5 head -c 65 "$token_file" 2>/dev/null) || token=
+        token=$(head -c 65 "$token_file") || token=
         case "$token" in *[!0-9a-f]*) token= ;; esac
         [ "${#token}" = 64 ] || token=
     fi
@@ -476,12 +476,12 @@ fresh_guidance() {
         printf '%s\n' '  3. Enter the one-time setup token from: sudo cat /var/lib/parins-managed/setup-token'
     fi
     printf '%s\n' 'The console uses unencrypted HTTP on 0.0.0.0:3000: allow TCP 3000 only from administrators, or use only the tunnel.' \
-        'DNS starts after setup. PariNS has not changed host DNS or firewall rules.'
+        'DNS starts after setup: point your clients at this server and open the DNS ports you enable (53 for plain DNS) in your firewall.'
 }
 committed=true
 printf 'Installed. Backup: %s\n' "$backup"
 if [ -n "$root" ]; then
-    printf '%s\n' 'Staging only: state is untouched and no service or executable was started.'
+    printf 'Staged for inspection under %s.\n' "$root"
 else
     if "$initialized"; then
         printf '%s\n' 'Existing configuration preserved. Continue using your existing management address and administrator account.'

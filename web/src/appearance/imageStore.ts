@@ -42,6 +42,6 @@ export async function saveImage(image: StoredImage): Promise<boolean> {
   try { await run('readwrite', (store) => store.put(image, KEY)); return true; } catch { return false; }
 }
 
-export async function clearImage(): Promise<boolean> {
-  try { await run('readwrite', (store) => store.delete(KEY)); return true; } catch { return false; }
+export async function clearImage(): Promise<void> {
+  try { await run('readwrite', (store) => store.delete(KEY)); } catch { /* Browser storage may be unavailable. */ }
 }

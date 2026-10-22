@@ -5,15 +5,8 @@ export interface SubscriptionSource {
   id: string; name: string; url: string; format: SubscriptionFormat;
   enabled: boolean; auto_update: boolean; update_interval_hours: number;
 }
-export interface SubscriptionSettings {
-  enabled: boolean; max_rules: number; max_memory_bytes: number; max_disk_bytes: number;
-  sources: SubscriptionSource[];
-}
 /** `autoId`: the ID still follows the name; it stops once the ID is edited, and saved sources keep theirs. */
 export type SubscriptionDraft = Omit<SubscriptionSource, 'update_interval_hours'> & { update_interval_hours: string; key: string; autoId?: boolean };
-export const defaultSubscriptions: SubscriptionSettings = {
-  enabled: true, max_rules: 1000000, max_memory_bytes: 134217728, max_disk_bytes: 268435456, sources: [],
-};
 export function subscriptionDraft(source: SubscriptionSource, key = source.id): SubscriptionDraft {
   return { ...source, key, update_interval_hours: String(source.update_interval_hours) };
 }

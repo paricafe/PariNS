@@ -11,7 +11,7 @@ import { formatDate, presentIssue, translate, type Language } from '../../i18n';
 export interface CertificateStatus {
   certificate_generation: number;
   roles: { role: 'dot' | 'doh' | 'doq'; leaf_sha256: string; not_before_ms: number; not_after_ms: number }[];
-  last_reload: null | { attempt_id: number; source: 'api' | 'signal'; started_at_ms: number; completed_at_ms: number | null; outcome: 'applied' | 'unchanged' | 'failed'; error_code: string | null };
+  last_reload: null | { attempt_id: number; source: 'api' | 'signal'; started_at_ms: number; completed_at_ms: number; outcome: 'applied' | 'unchanged' | 'failed'; error_code: string | null };
 }
 export interface CertificateView { certificates: CertificateStatus }
 interface ReloadResult { outcome: 'applied' | 'unchanged'; certificate_generation: number; certificates: CertificateStatus }
@@ -80,7 +80,7 @@ export function CertificateTools({ language, view, readFailure, read, hold, publ
           <InfoTip text={`${t('fingerprint')}: ${role.leaf_sha256}`} label={t('fingerprint')} /></p>
         <p className="small muted">{t('validFrom')}: {date(role.not_before_ms)}</p>
       </section>)}
-      {last && <p className="small muted">{translate('reliability.lastReload', language, { time: date(last.completed_at_ms ?? last.started_at_ms), source: t(`source_${last.source}`), result: t(`result_${last.outcome}`) })}
+      {last && <p className="small muted">{translate('reliability.lastReload', language, { time: date(last.completed_at_ms), source: t(`source_${last.source}`), result: t(`result_${last.outcome}`) })}
         {last.error_code && <> · <code>{last.error_code}</code></>}</p>}
     </>}
   </div></section>;

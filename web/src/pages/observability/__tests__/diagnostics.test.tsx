@@ -56,7 +56,7 @@ describe('server-owned diagnostic presentation', () => {
   });
   it('keeps admission, handoff and actual protocol counts distinct', () => {
     const protocol = { handshake_inflight: 1, handshake_established: 9, stream_inflight: 2, stream_response_handed_to_transport: 8, admission_source_rejected: 3, stream_peer_cancelled: 4 };
-    render(<TransportDiagnostics language="en" recursion={null} upstreams={{ scope: 'pool_generation', pool_generation: 5, since_ms: null, slots: [{ slot: 0, counts: [{ protocol: null, stage: 'wait', outcome: 'cancelled', reason: 'caller_cancelled', count: 7 }] }], endpoints: [{ slot: 0, label: 'tls://dns.example', address: '192.0.2.53:853' }] }} quic={{ scope: 'process', doq: protocol, doh3: protocol }} />);
+    render(<TransportDiagnostics language="en" recursion={null} upstreams={{ scope: 'pool_generation', pool_generation: 5, since_ms: 1700000000000, slots: [{ slot: 0, counts: [{ protocol: null, stage: 'wait', outcome: 'cancelled', reason: 'caller_cancelled', count: 7 }] }], endpoints: [{ slot: 0, label: 'tls://dns.example', address: '192.0.2.53:853' }] }} quic={{ scope: 'process', doq: protocol, doh3: protocol }} />);
     // Each upstream is named by its configured label and the address it was reached at.
     expect(screen.getByText('tls://dns.example')).toBeTruthy();
     expect(screen.getByText(/reached at 192\.0\.2\.53:853/)).toBeTruthy();

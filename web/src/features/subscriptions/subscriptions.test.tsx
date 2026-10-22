@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@t
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type ApiClient } from '../../session/client';
 import { ConfigProvider, useConfig } from '../../config/context';
-import { defaultSubscriptions, subscriptionDraft, subscriptionId } from '../../model/subscriptions';
+import { subscriptionDraft, subscriptionId } from '../../model/subscriptions';
 import { formatDate, type Language } from '../../i18n';
 import { SubscriptionsPanel } from './SubscriptionsPanel';
 import { useSubscriptions } from './useSubscriptions';
@@ -15,6 +15,7 @@ vi.mock('../../session/context', () => ({ useSession: () => ({ api: currentApi }
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const initial: SubscriptionState = { enabled: true, sources: [], generation: 2, content_revision: 1, input_rules: 20, index_rules: 10, index_bytes: 256, retained_bytes: 0, disk_bytes: 500, operation: null, recent_operation: null, unavailable_reason: null };
 const operation: Operation = { id: 'op1', kind: 'prepare', source_id: 'example', fingerprint: 'hash', status: 'succeeded', started_at: 1, finished_at: 2, error: null, sha256: 'sha', rules: 20 };
+const subscriptionLimits = { max_rules: 1000000, max_memory_bytes: 134217728, max_disk_bytes: 268435456 };
 const source = { id: 'example', name: 'Example', url: 'https://example.com/list', format: 'domain_list' as const, enabled: false, auto_update: true, update_interval_hours: 24 };
 
 describe('subscription operations', () => {
@@ -28,7 +29,7 @@ describe('subscription operations', () => {
     const api = { request } as unknown as ApiClient;
     const hook = renderHook(() => useSubscriptions(api, 1));
     await waitFor(() => expect(hook.result.current.state).toEqual(initial));
-    await act(async () => { await hook.result.current.start('refresh', 'example'); });
+    await act(async () => { await hook.result.current.refresh('example'); });
     expect(request).toHaveBeenCalledWith('filter/subscriptions/refresh', 'POST', { source_id: 'example' });
     expect(hook.result.current.operation?.status).toBe('running');
     state = { ...initial, recent_operation: refresh };
@@ -42,7 +43,7 @@ describe('subscription operations', () => {
     const api = { request } as unknown as ApiClient;
     const hook = renderHook(() => useSubscriptions(api, 1));
     await waitFor(() => expect(hook.result.current.state).not.toBeNull());
-    await act(async () => { await hook.result.current.start('refresh', null); await hook.result.current.load(); });
+    await act(async () => { await hook.result.current.refresh(null); await hook.result.current.load(); });
     expect(hook.result.current.unknown).toBe(true);
     expect(request.mock.calls.filter(([path]) => path.endsWith('/refresh'))).toHaveLength(1);
     expect(hook.result.current.error).toBeNull();
@@ -63,7 +64,7 @@ describe('subscription polling cadence', () => {
 
 describe('subscription draft and console', () => {
   function fixture(state: SubscriptionState = initial, savedSource = source) {
-    let settings = { filter_subscriptions: { ...defaultSubscriptions, enabled: state.enabled, sources: [savedSource] }, cache: { rules: [] } };
+    let settings = { filter_subscriptions: { ...subscriptionLimits, enabled: state.enabled, sources: [savedSource] }, cache: { rules: [] } };
     let previewSettings = settings;
     let revision = 1;
     const request = vi.fn(async (path: string, method?: string, body?: unknown) => {
@@ -160,6 +161,16 @@ describe('subscription draft and console', () => {
     expect(hook.result.current.draft?.sources).toBeNull();
   });
 
+  it('shows a software update freeze as status and storage failures as errors', async () => {
+    const frozen = render(<SubscriptionsPanel language="en" />, { wrapper: fixture({ ...initial, unavailable_reason: 'update_in_progress' }).wrapper });
+    const notice = await screen.findByText('A software update is being installed; subscription updates resume when it finishes.');
+    expect(notice.getAttribute('role')).toBe('status');
+    expect(notice.className).toBe('notice');
+    frozen.unmount();
+    render(<SubscriptionsPanel language="en" />, { wrapper: fixture({ ...initial, unavailable_reason: 'subscription_storage_unavailable' }).wrapper });
+    expect((await screen.findByText("Subscription data can't be read or written. Check the service log and the server's disk.")).getAttribute('role')).toBe('alert');
+  });
+
   it('fills a disabled Natsuki draft without network, keeps controls across language and theme changes, and derives its ID from the name', async () => {
     vi.spyOn(crypto, 'randomUUID').mockImplementation(() => { throw new Error('unavailable on HTTP'); });
     const { request, wrapper } = fixture();
@@ -219,7 +230,7 @@ describe('subscription draft and console', () => {
 describe('save downloads new sources first', () => {
   const list = 'https://example.org/new.list';
   function saveFixture(outcome: 'succeeded' | 'failed') {
-    const saved = { filter_subscriptions: { ...defaultSubscriptions, sources: [] as unknown[] }, cache: { rules: [] } };
+    const saved = { filter_subscriptions: { ...subscriptionLimits, enabled: true, sources: [] as unknown[] }, cache: { rules: [] } };
     let state: SubscriptionState = initial;
     let preview = saved;
     const request = vi.fn(async (path: string, method?: string, body?: unknown) => {

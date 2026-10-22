@@ -25,7 +25,7 @@ export function convertFieldValue(field: SettingField, draft: RawFieldValue): un
   if (field.type === "checkbox") return draft === true;
   if (typeof draft !== "string") throw new ModelError("settings.validation.check", field.path);
   if (field.type === "lines") return draft.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (field.path === "filter_file" || field.path.endsWith("_file")) return field.type === "nullable" && draft === "" ? null : draft;
+  if (field.path.endsWith("_file")) return field.type === "nullable" && draft === "" ? null : draft;
   if (field.type === "nullable") return draft.trim() || null;
   if (field.type === "number") {
     const text = draft.trim();
@@ -44,7 +44,7 @@ export function convertFieldValue(field: SettingField, draft: RawFieldValue): un
   if (field.type === "select" && !field.options?.some(([value]) => value === draft)) {
     throw new ModelError("settings.validation.check", field.path);
   }
-  if (field.type === "text" && draft.trim() === "" && !field.path.endsWith("_file")) {
+  if (field.type === "text" && draft.trim() === "") {
     throw new ModelError("settings.validation.required", field.path);
   }
   return draft.trim();

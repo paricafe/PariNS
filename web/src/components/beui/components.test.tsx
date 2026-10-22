@@ -13,10 +13,10 @@ beforeAll(() => {
 describe("beUI console adaptations", () => {
   it("keeps buttons semantic and passes native button props", () => {
     const action = vi.fn();
-    render(<Button variant="outline" type="submit" onClick={action}>Save</Button>);
+    render(<Button variant="secondary" type="submit" onClick={action}>Save</Button>);
     const button = screen.getByRole("button", { name: "Save" });
     expect(button.getAttribute("type")).toBe("submit");
-    expect(button.className).toContain("beui-button--outline");
+    expect(button.className).toContain("beui-button--secondary");
     fireEvent.click(button);
     expect(action).toHaveBeenCalledOnce();
   });

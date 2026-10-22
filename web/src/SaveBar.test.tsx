@@ -66,7 +66,7 @@ describe('one-click save', () => {
   });
 
   it('asks first when the console address or protocol changes', async () => {
-    const change = { from: 'http', to: 'https', next_origin: 'https://dns.example.com:3000', reauthenticate: true, requires_http_confirmation: false } as const;
+    const change = { to: 'https', next_origin: 'https://dns.example.com:3000', requires_http_confirmation: false } as const;
     const { puts } = mount(change);
     await edit();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -80,7 +80,7 @@ describe('one-click save', () => {
   });
 
   it('asks before an HTTPS to HTTP downgrade and sends nothing when cancelled', async () => {
-    const change = { from: 'https', to: 'http', next_origin: 'http://192.0.2.20:3000', reauthenticate: true, requires_http_confirmation: true } as const;
+    const change = { to: 'http', next_origin: 'http://192.0.2.20:3000', requires_http_confirmation: true } as const;
     const { puts } = mount(change);
     await edit();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));

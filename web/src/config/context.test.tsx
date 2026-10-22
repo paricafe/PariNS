@@ -75,7 +75,7 @@ describe('single configuration draft', () => {
   });
 
   it('projects a new console access name and confirms an HTTPS to HTTP save explicitly', async () => {
-    const change = { from: 'https', to: 'http', next_origin: 'http://192.0.2.20:3000', reauthenticate: true, requires_http_confirmation: true } as const;
+    const change = { to: 'http', next_origin: 'http://192.0.2.20:3000', requires_http_confirmation: true } as const;
     const { api, request } = fixture(async (path, method, body) => {
       if (path === 'config' && method === 'GET') return { toml: original, revision: 1, has_backup: false };
       if (path === 'config/parse') return { toml: (body as { toml: string }).toml, settings: baseSettings };
@@ -119,7 +119,7 @@ describe('single configuration draft', () => {
   });
 
   it('previews rollback before sending the downgrade confirmation flag', async () => {
-    const change = { from: 'https', to: 'http', next_origin: null, reauthenticate: true, requires_http_confirmation: true } as const;
+    const change = { to: 'http', next_origin: null, requires_http_confirmation: true } as const;
     const { api, request } = fixture(async (path, method, body) => {
       if (path === 'config' && method === 'GET') return { toml: original, revision: 1, has_backup: true };
       if (path === 'config/parse') return { toml: (body as { toml: string }).toml, settings: baseSettings };

@@ -12,7 +12,7 @@ beforeAll(() => {
 function Probe() {
   const confirmAction = useConfirm();
   const [result, setResult] = useState('pending');
-  return <><button type="button" onClick={(event) => { event.currentTarget.blur(); void confirmAction('app.discardHelp', 'app.discard', event.currentTarget).then((accepted) => setResult(accepted ? 'accepted' : 'cancelled')); }}>Ask</button><span>{result}</span></>;
+  return <><button type="button" onClick={(event) => { event.currentTarget.blur(); void confirmAction('Discard the draft?', 'app.discard', event.currentTarget).then((accepted) => setResult(accepted ? 'accepted' : 'cancelled')); }}>Ask</button><span>{result}</span></>;
 }
 
 describe('console confirmation', () => {

@@ -42,7 +42,7 @@ function AccountForm({ language, setBusy }: { language: Language; setBusy: (busy
     if (problem) { setError(problem); return; }
     if (newPassword !== confirmation) { setError('account.mismatch'); return; }
     // Like signing out: the change ends every session, so an unsaved draft is lost.
-    if (config.dirty && !await confirmAction('account.draftConfirm', 'account.continue', trigger)) return;
+    if (config.dirty && !await confirmAction(t('draftConfirm'), 'account.continue', trigger)) return;
     mutation.current = true; setSubmitting(true); setBusy(true);
     try { await rotateCredentials(currentPassword, username, newPassword); config.discard(); }
     catch (reason) {

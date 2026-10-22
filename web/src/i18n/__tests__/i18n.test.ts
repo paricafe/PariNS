@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseLanguage, hasTranslation, normalizeLanguage, translate, translationKeys } from "../index";
+import { chooseLanguage, hasTranslation, normalizeLanguage, translate } from "../index";
 import { apiMessages, appMessages, uiMessages } from "../console";
 import { settingsMessages } from "../settings";
 import { viewsMessages } from "../views";
@@ -42,7 +42,6 @@ describe("bilingual console catalog", () => {
         expect(translate(key, "en"), key).not.toBe(key);
       }
     }
-    expect(translationKeys.length).toBeGreaterThan(400);
   });
 
   it("chooses saved language, then supported browser language", () => {

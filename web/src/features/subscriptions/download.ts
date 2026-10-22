@@ -1,5 +1,5 @@
 import { ApiError, type ApiClient } from '../../session/client';
-import { ModelError, getPath, type SettingsObject } from '../../model';
+import { ModelError, configList, getPath, type SettingsObject } from '../../model';
 import { hasTranslation } from '../../i18n';
 import type { SubscriptionSource } from '../../model/subscriptions';
 import type { SubscriptionState } from './types';
@@ -14,8 +14,7 @@ const delay = (ms: number) => new Promise<void>((resolve) => { window.setTimeout
  */
 export function newSources(settings: SettingsObject, saved: readonly SubscriptionSource[]): { source: SubscriptionSource; index: number }[] {
   if (getPath(settings, 'filter_subscriptions.enabled') !== true) return [];
-  const sources = (getPath(settings, 'filter_subscriptions.sources') as SubscriptionSource[] | undefined) ?? [];
-  return sources.map((source, index) => ({ source, index })).filter(({ source }) => source.enabled
+  return configList(settings, 'filter_subscriptions.sources').map((source, index) => ({ source, index })).filter(({ source }) => source.enabled
     && !saved.some((item) => item.url === source.url && item.format === source.format));
 }
 

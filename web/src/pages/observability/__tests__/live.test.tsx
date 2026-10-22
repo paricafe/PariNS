@@ -139,6 +139,24 @@ describe('LiveLogClient', () => {
     expect(FakeSocket.instances).toHaveLength(11);
   });
 
+  it('reconnects after a message it cannot read', () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const events = handlers();
+    const client = new LiveLogClient(() => BINDING, events, { interval: 3, cursor: null, filter: { search: null, status: null, cache: null } });
+    client.start({ interval: 3, cursor: null, filter: { search: null, status: null, cache: null } });
+    latest().open();
+    expect(events.log.at(-1)).toBe('open');
+    latest().onmessage?.({ data: '{"type":"unknown"}' });
+    expect(events.log.at(-1)).toBe('reconnecting');
+    expect(latest().closedBy).toBe(1000);
+    vi.advanceTimersByTime(1_000);
+    expect(FakeSocket.instances).toHaveLength(2);
+    latest().open();
+    latest().onmessage?.({ data: 'not json' });
+    expect(events.log.at(-1)).toBe('reconnecting');
+  });
+
   it('does not connect without an in-memory binding', () => {
     const events = handlers();
     new LiveLogClient(() => null, events, { interval: 3, cursor: null, filter: { search: null, status: null, cache: null } })
@@ -193,16 +211,18 @@ describe('LogsPage live updates', () => {
     expect(api.request).toHaveBeenCalledTimes(1);
   });
 
-  it('updates only on Refresh in manual mode', async () => {
-    const { api, socket } = await mount();
+  it('closes the connection in manual mode and refreshes through the list', async () => {
+    let entries = [entry];
+    const { api, socket } = await mount(() => page(entries, 3, 20));
     fireEvent.click(screen.getByRole('radio', { name: 'Manual' }));
-    expect(socket.ofType('subscribe').at(-1)).toMatchObject({ interval: null });
-    expect(socket.ofType('refresh')).toHaveLength(1); // the catch-up sent on connect in auto mode
+    expect(socket.closedBy).toBe(1000);
+    entries = [row(43, 'manual.test'), entry];
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    expect(socket.ofType('refresh')).toHaveLength(2);
-    act(() => socket.push({ type: 'entries', entries: [row(43, 'manual.test')], cursor: 43, more: false }));
-    expect(screen.getAllByText('manual.test').length).toBeGreaterThan(0);
-    expect(api.request).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getAllByText('manual.test').length).toBeGreaterThan(0));
+    expect(api.request).toHaveBeenCalledTimes(2);
+    expect(FakeSocket.instances).toHaveLength(1);
+    fireEvent.click(screen.getByRole('radio', { name: '3 s' }));
+    expect(FakeSocket.instances).toHaveLength(2);
   });
 
   it('pauses while a detail card is open and shows a pill that inserts on click', async () => {

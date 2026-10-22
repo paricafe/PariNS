@@ -6,7 +6,7 @@ import { SetupPage } from './AuthPages';
 import type { Language } from './i18n';
 
 const template = 'listen = "127.0.0.1:5353"\nmax_tcp_connections = 64\n\n[upstreams]\nservers = ["udp://127.0.0.1:5354"]\nmode = "weighted"\nprefer_h3 = false\nbootstrap = []\n';
-const setupView = { setup_required: true, authenticated: false, session: null, transport: { scheme: 'http', origin: null, certificate_source: null } };
+const setupView = { setup_required: true, authenticated: false, session: null, transport: { scheme: 'http', origin: null } };
 const json = (value: unknown, status = 200) => ({ ok: status < 400, status, json: async () => value }) as Response;
 
 function Harness({ language }: { language: Language }) {

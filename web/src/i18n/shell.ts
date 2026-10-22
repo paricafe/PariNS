@@ -2,7 +2,6 @@
 export const shellMessages = {
   unsavedOne: ['1 项修改未保存', '1 unsaved change'],
   unsavedMany: ['{count} 项修改未保存', '{count} unsaved changes'],
-  dismiss: ['知道了', 'Got it'],
   dismissNotice: ['关闭提示', 'Dismiss notice'],
   headlineLoading: ['正在读取状态…', 'Reading status…'],
   headlineHealthy: ['运行正常', 'Running normally'],

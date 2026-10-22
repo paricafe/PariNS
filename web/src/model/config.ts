@@ -1,4 +1,6 @@
 import { ModelError } from "./errors";
+import type { CacheRule } from "./cacheRule";
+import type { SubscriptionSource } from "./subscriptions";
 
 export type SettingsObject = Record<string, unknown>;
 
@@ -8,6 +10,13 @@ function isObject(value: unknown): value is SettingsObject {
 
 export function getPath(object: unknown, path: string): unknown {
   return path.split(".").reduce<unknown>((value, key) => isObject(value) ? value[key] : undefined, object);
+}
+
+/** Lists the server always sends, since it serializes the complete configuration. */
+interface ConfigLists { "cache.rules": CacheRule[]; "filter_subscriptions.sources": SubscriptionSource[] }
+
+export function configList<P extends keyof ConfigLists>(settings: SettingsObject, path: P): ConfigLists[P] {
+  return getPath(settings, path) as ConfigLists[P];
 }
 
 /** Immutable nested write for a touched form field. */

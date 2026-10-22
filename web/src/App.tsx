@@ -84,7 +84,7 @@ export function SaveBar({ language }: { language: Language }) {
       if (result.refreshed) { banner(t(result.restartRequired ? 'app.savedRestarted' : 'app.savedApplied')); settleFocus(); }
     } catch (reason) { setError(toConfigIssue(reason)); }
   };
-  const discardChanges = () => void confirmAction('app.discardHelp', 'app.discard').then((accepted) => { if (accepted) void reload().then(settleFocus).catch(() => {}); });
+  const discardChanges = () => void confirmAction(t('app.discardHelp'), 'app.discard').then((accepted) => { if (accepted) void reload().then(settleFocus).catch(() => {}); });
   const conflict = draft.conflict;
   const status = draft.unknownApply ? t(changedElsewhere ? 'api.REVISION' : confirmation.state === 'unresolved' ? 'app.saveStillUnknown' : confirmation.state === 'failed'
     ? draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown' : 'shell.confirming')
@@ -144,7 +144,7 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
   const t = (key: string) => translate(`ui.${key}`, language);
   const signOut = async () => {
     if (config.busy || config.locked) return;
-    if (config.dirty && !await confirmAction('app.logoutHelp', 'ui.logout')) return;
+    if (config.dirty && !await confirmAction(translate('app.logoutHelp', language), 'ui.logout')) return;
     config.discard();
     try { await logout(); } catch (reason) { setLogoutError(toConfigIssue(reason)); }
   };

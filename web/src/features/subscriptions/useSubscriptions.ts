@@ -52,14 +52,14 @@ export function useSubscriptions(api: ApiClient, savedKey: unknown) {
   const visibleDelay = pollDelay(state, pending, unknown, false);
   useEffect(() => { reschedule.current(); }, [visibleDelay]);
   /** Updates one saved source (or all with `null`); new sources are downloaded by Save. */
-  const start = async (kind: 'refresh', sourceId: string | null) => {
+  const refresh = async (sourceId: string | null) => {
     if (sending.current) return;
     sending.current = true; setPending(true); setError(null); setUnknown(false); setOperationId(null);
     const token = owner.current;
     try {
       // The server works against its current saved configuration; no client revision is sent.
       const body = { source_id: sourceId };
-      const result = await api.request<{ operation_id: string }>(`filter/subscriptions/${kind}`, 'POST', body);
+      const result = await api.request<{ operation_id: string }>('filter/subscriptions/refresh', 'POST', body);
       if (token !== owner.current) return;
       setOperationId(result.operation_id);
       await load();
@@ -70,5 +70,5 @@ export function useSubscriptions(api: ApiClient, savedKey: unknown) {
     } finally { if (token === owner.current) { sending.current = false; setPending(false); } }
   };
   const operation = [state?.operation, state?.recent_operation].find((item) => item && item.id === operationId) ?? null;
-  return { state, error: error ?? readError, pending, unknown, operation, load, start };
+  return { state, error: error ?? readError, pending, unknown, operation, load, refresh };
 }

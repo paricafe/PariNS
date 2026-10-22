@@ -6,11 +6,12 @@ import { Drawer } from './beui';
 const DESTRUCTIVE = new Set(['app.discard', 'ui.rollback', 'views.clearAll', 'views.clearEntry', 'shell.discardPem',
   'storage.clearLogs', 'storage.resetTotals', 'storage.clearHistory']);
 
-type ConfirmAction = (messageKey: string, actionKey: string, returnFocus?: HTMLElement) => Promise<boolean>;
+/** `message` is shown as given; `actionKey` names the confirming action and whether it is destructive. */
+type ConfirmAction = (message: string, actionKey: string, returnFocus?: HTMLElement) => Promise<boolean>;
 const ConfirmContext = createContext<ConfirmAction | null>(null);
 
 export function ConfirmProvider({ language, children }: { language: Language; children: ReactNode }) {
-  const [request, setRequest] = useState<{ messageKey: string; actionKey: string } | null>(null);
+  const [request, setRequest] = useState<{ message: string; actionKey: string } | null>(null);
   const pending = useRef<((accepted: boolean) => void) | null>(null);
   const focusAfter = useRef<HTMLElement | null>(null);
   useEffect(() => () => { pending.current?.(false); pending.current = null; }, []);
@@ -27,19 +28,19 @@ export function ConfirmProvider({ language, children }: { language: Language; ch
     setRequest(null);
     resolve?.(accepted);
   }, []);
-  const ask = useCallback<ConfirmAction>((messageKey, actionKey, returnFocus) => {
+  const ask = useCallback<ConfirmAction>((message, actionKey, returnFocus) => {
     if (pending.current) return Promise.resolve(false);
     focusAfter.current = returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     return new Promise<boolean>((resolve) => {
       pending.current = resolve;
-      setRequest({ messageKey, actionKey });
+      setRequest({ message, actionKey });
     });
   }, []);
 
   return <ConfirmContext.Provider value={ask}>
     {children}
     <Drawer open={request !== null} variant="sheet" title={translate('ui.confirm', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => settle(false)}>
-      {request && <><p className="sheet-message">{translate(request.messageKey, language)}</p>
+      {request && <><p className="sheet-message">{request.message}</p>
         <div className="action-sheet">
           <button type="button" className={`button ${DESTRUCTIVE.has(request.actionKey) ? 'destructive' : 'primary'}`} onClick={() => settle(true)}>{translate(request.actionKey, language)}</button>
           <button type="button" className="button secondary" onClick={() => settle(false)}>{translate('ui.cancel', language)}</button>

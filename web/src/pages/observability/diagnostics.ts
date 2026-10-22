@@ -6,7 +6,7 @@ export interface UpstreamResult { protocol: string | null; stage: string; outcom
 export interface UpstreamAttempt extends UpstreamResult { pool_generation: number; slot: number; code: number | null; elapsed_ms: number; connection?: 'new' | 'reused' }
 export interface UpstreamTrace { attempts: UpstreamAttempt[]; omitted: number }
 export interface UpstreamEndpoint { slot: number; label: string; address: string }
-export interface UpstreamDiagnostics { scope: string; pool_generation: number; since_ms: number | null; slots: { slot: number; counts: (UpstreamResult & { count: number })[] }[]; endpoints: UpstreamEndpoint[] }
+export interface UpstreamDiagnostics { scope: string; pool_generation: number; since_ms: number; slots: { slot: number; counts: (UpstreamResult & { count: number })[] }[]; endpoints: UpstreamEndpoint[] }
 /** Counters since the DNS generation started; `outbound.inflight` is a current gauge. */
 export interface RecursionDiagnostics {
   scope: string;
@@ -19,7 +19,7 @@ export interface RecursionDiagnostics {
 export interface QuicDiagnostics { scope: string; doq: Record<string, number>; doh3: Record<string, number> }
 export interface CacheDiagnostics {
   scope: string;
-  since_ms: number | null;
+  since_ms: number;
   lookup: { fresh: number; stale: number; miss: number; bypass: number; disabled: number; reasons: Record<string, number> };
   store: { admitted: number; replaced: number; skipped: number; superseded_only: number; reasons: Record<string, number> };
 }

@@ -35,13 +35,6 @@
 .beui-button--primary:not(:disabled):hover { background: color-mix(in srgb, var(--primary, #5b4dff) 88%, var(--text, #121528)); }
 .beui-button--secondary { background: color-mix(in srgb, var(--surface-strong, #fff) 72%, transparent); color: var(--text, #121528); border-color: transparent; box-shadow: var(--glass-highlight, none); }
 .beui-button--secondary:not(:disabled):hover { background: var(--hover, #f2f2f3); }
-.beui-button--ghost { background: transparent; color: var(--text, #121528); }
-.beui-button--ghost:not(:disabled):hover { background: var(--hover, #f2f2f3); }
-.beui-button--outline { background: transparent; color: var(--text, #121528); border-color: var(--control-border, #85858f); }
-.beui-button--outline:not(:disabled):hover { background: var(--hover, #f2f2f3); }
-.beui-button--sm { min-height: 36px; padding-inline: 12px; font-size: 13px; }
-.beui-button--lg { min-height: 44px; padding-inline: 24px; font-size: 16px; }
-.beui-button--icon { width: 40px; padding: 0; }
 
 /* iOS segmented control: one track, a sliding thumb (shared layout animation). */
 .beui-tabs {
@@ -197,7 +190,7 @@ body:has(.beui-drawer[open]) { overflow: hidden; }
   .beui-drawer__content { padding: 16px; }
 }
 @media (pointer: coarse) {
-  .beui-button--sm, .beui-button--icon, .beui-drawer__close { min-height: 44px; }
+  .beui-drawer__close { min-height: 44px; }
   .beui-switch { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {

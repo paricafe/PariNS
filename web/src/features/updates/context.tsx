@@ -111,9 +111,8 @@ export function UpdatesProvider({ active, children }: { active: boolean; childre
   const apply = useCallback(async (candidate: UpdateCandidate) => {
     const current = configRef.current;
     if (acting.current || attempt.current || !canApply(viewRef.current)) return;
-    // The update restarts PariNS and reloads the console, which would lose unsaved changes.
-    if (current.dirty || current.locked || current.busy
-      || viewRef.current?.candidate?.plan_id !== candidate.plan_id) { setError('draftChanged'); return; }
+    // The offered release can change while the confirmation is open.
+    if (viewRef.current?.candidate?.plan_id !== candidate.plan_id) { setError('draftChanged'); return; }
     acting.current = true; setAction('apply'); setError(null); setUnknown(false); setPending(true);
     unknownRef.current = false;
     attempt.current = { version: candidate.version, operationId: null, previousOperation: viewRef.current?.last_operation?.operation_id ?? null };

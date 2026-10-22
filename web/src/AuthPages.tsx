@@ -16,21 +16,24 @@ function present(error: unknown, language: Language): string {
 }
 
 interface LoginOptions { turnstile: { site_key: string; action: string } | null; turnstile_skipped: boolean }
-const NO_OPTIONS: LoginOptions = { turnstile: null, turnstile_skipped: false };
 
 export function LoginPage({ language }: { language: Language }) {
   const { api, login, state, turnstileAllowed } = useSession();
   const [options, setOptions] = useState<LoginOptions | null>(null);
+  // Sign-in waits for the options: they say whether it needs Turnstile.
+  const [optionsFailed, setOptionsFailed] = useState(false);
+  const [optionsAttempt, setOptionsAttempt] = useState(0);
   const [username, setUsername] = useState(''); const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null); const [resetSignal, setResetSignal] = useState(0);
   const t = (key: string) => translate(`ui.${key}`, language);
   useEffect(() => {
     let live = true;
+    setOptionsFailed(false);
     api.request<LoginOptions>('login/options', 'GET', undefined, undefined, { unauthenticated: true })
-      .then((value) => { if (live) setOptions(value); }, () => { if (live) setOptions(NO_OPTIONS); });
+      .then((value) => { if (live) setOptions(value); }, () => { if (live) setOptionsFailed(true); });
     return () => { live = false; };
-  }, [api]);
+  }, [api, optionsAttempt]);
   const turnstile = options?.turnstile ?? null;
   // Only a document served signed out while Turnstile was on may load the widget (its script
   // policy is relaxed for it); any other document reloads once to get that policy.
@@ -52,6 +55,8 @@ export function LoginPage({ language }: { language: Language }) {
   return <section className="auth-wrap"><div className="auth-card">
     <h1>{t('loginTitle')}</h1>
     {state.credentials && <p className="notice" role="status">{translate(`account.${state.credentials}`, language)}</p>}
+    {optionsFailed && <div className="notice error" role="alert"><p>{translate('app.loginOptionsFailed', language)}</p>
+      <button className="button secondary" type="button" onClick={() => setOptionsAttempt((value) => value + 1)}>{t('retry')}</button></div>}
     <form onSubmit={(event) => void submit(event)} className="auth-form">
       <label htmlFor="login-username">{t('username')}</label><input id="login-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required maxLength={64} />
       <label htmlFor="login-password">{t('password')}</label><input id="login-password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required />
@@ -93,7 +98,7 @@ export function SetupPage({ language }: { language: Language }) {
   const [toml, setToml] = useState(''); const [generated, setGenerated] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [templateError, setTemplateError] = useState<unknown>(null);
   const t = (key: string) => translate(`ui.${key}`, language);
-  useEffect(() => { void api.request<{ toml: string }>('template').then((result) => setTemplate(result.toml)).catch(setTemplateError); }, [api]);
+  useEffect(() => { void api.request<{ toml: string }>('template', 'GET', undefined, undefined, { unauthenticated: true }).then((result) => setTemplate(result.toml)).catch(setTemplateError); }, [api]);
   const listen = LISTEN[listenMode];
   const upstreams = preset === 'custom'
     ? { servers: lines(servers), bootstrap: lines(bootstrap), mode, prefer_h3: preferH3 }

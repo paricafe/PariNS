@@ -1,21 +1,18 @@
 export interface SessionView {
   setup_required: boolean;
   authenticated: boolean;
-  session: { binding: string; expires_in_seconds: number } | null;
+  session: { binding: string } | null;
   transport: TransportView;
 }
 
 export interface TransportView {
   scheme: 'http' | 'https';
   origin: string | null;
-  certificate_source: 'doh' | null;
 }
 
 export interface TransportChange {
-  from: 'http' | 'https';
   to: 'http' | 'https';
   next_origin: string | null;
-  reauthenticate: boolean;
   requires_http_confirmation: boolean;
 }
 
@@ -36,19 +33,6 @@ export class CookieUnavailable extends Error {
 
 export type ApiMethod = 'GET' | 'POST' | 'PUT';
 type AuthEvent = 'unauthorized' | 'session-changed' | 'transport-changed';
-
-function hasSession(value: unknown): value is SessionView {
-  if (!value || typeof value !== 'object') return false;
-  const view = value as Record<string, unknown>;
-  if (typeof view.setup_required !== 'boolean' || typeof view.authenticated !== 'boolean') return false;
-  const transport = view.transport as Record<string, unknown> | undefined;
-  if (!transport || !['http', 'https'].includes(String(transport.scheme)) ||
-    !(transport.origin === null || typeof transport.origin === 'string') ||
-    ![null, 'doh'].includes(transport.certificate_source as null | string)) return false;
-  if (view.session === null) return !view.authenticated;
-  const session = view.session as Record<string, unknown> | undefined;
-  return Boolean(view.authenticated && session && typeof session.binding === 'string' && session.binding.length > 0 && typeof session.expires_in_seconds === 'number');
-}
 
 // Only this layer knows the session binding. It is never persisted or broadcast.
 export class ApiClient {
@@ -71,12 +55,11 @@ export class ApiClient {
   }
 
   async request<T = unknown>(path: string, method: ApiMethod = 'GET', body?: unknown, extraHeaders?: Record<string, string>, options?: { unauthenticated?: boolean; query?: Record<string, string> }): Promise<T> {
-    if (!/^[a-z0-9/-]+$/i.test(path) || path.startsWith('/')) throw new Error('Invalid API path');
     const owner = this.epoch;
     const binding = this.binding;
     const headers: Record<string, string> = { ...extraHeaders };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    if (!options?.unauthenticated && path !== 'session' && path !== 'template' && path !== 'login' && path !== 'setup') {
+    if (!options?.unauthenticated) {
       if (!binding) throw new ApiError(401, 'UNAUTHORIZED', 'Sign in required');
       headers['X-PariNS-Session'] = binding;
     }
@@ -117,10 +100,8 @@ export class ApiClient {
     }
   }
 
-  async session(): Promise<SessionView> {
-    const view = await this.request<unknown>('session', 'GET', undefined, undefined, { unauthenticated: true });
-    if (!hasSession(view)) throw new ApiError(0, 'BAD_RESPONSE', 'Invalid session response');
-    return view;
+  session(): Promise<SessionView> {
+    return this.request<SessionView>('session', 'GET', undefined, undefined, { unauthenticated: true });
   }
 
   private ensureCurrent(epoch: number) { if (epoch !== this.epoch) throw new StaleRequest(); }

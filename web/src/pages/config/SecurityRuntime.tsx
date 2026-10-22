@@ -3,23 +3,22 @@ import { useConfig } from '../../config/context';
 import { useSession } from '../../session/context';
 import { ApiError, StaleRequest } from '../../session/client';
 import type { Language } from '../../i18n';
-import { DohStatusContext, type DohStatus } from './DohRuntime';
+import { DohStatusContext } from './DohRuntime';
 import { CertificateTools, type CertificateView } from './CertificateTools';
-
-export type SecurityStatus = DohStatus & CertificateView;
+import type { StatusView } from '../observability/metrics';
 
 /** Owns the security page's single /status read and its one 5-second poll, shared by the certificate panel and the DoH group in `children`. */
 export function SecurityRuntime({ language, children }: { language: Language; children?: ReactNode }) {
   const { api } = useSession();
   const revision = useConfig().draft?.revision;
-  const [status, setStatus] = useState<SecurityStatus | null>(null);
+  const [status, setStatus] = useState<StatusView | null>(null);
   const [failure, setFailure] = useState<ApiError | string | null>(null);
   const mounted = useRef(false);
   const request = useRef(0);
   const held = useRef(false);
   const read = useCallback(async () => {
     const owner = ++request.current;
-    const current = await api.request<SecurityStatus>('status');
+    const current = await api.request<StatusView>('status');
     if (!mounted.current || request.current !== owner) throw new StaleRequest();
     setStatus(current); setFailure(null);
     return current;

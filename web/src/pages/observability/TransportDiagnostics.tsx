@@ -43,7 +43,7 @@ export function TransportDiagnostics({ upstreams, recursion, quic, language }: {
   return <div className="settings-stack">
     {recursion && <RecursionDiagnosticsPanel value={recursion} language={language} />}
     {upstreams && <section className="panel"><h2>{translate('reliability.upstreams', language)}</h2>
-      <p className="small muted">{translate('reliability.upstreamScope', language, { time: upstreams.since_ms === null ? translate('reliability.unknownTime', language) : formatDate(upstreams.since_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}</p>
+      <p className="small muted">{translate('reliability.upstreamScope', language, { time: formatDate(upstreams.since_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}</p>
       {upstreams.slots.map((slot) => {
         const endpoint = upstreams.endpoints.find((item) => item.slot === slot.slot);
         return <details key={slot.slot}><summary>{endpoint

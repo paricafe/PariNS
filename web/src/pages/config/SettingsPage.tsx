@@ -3,7 +3,7 @@ import { Ellipsis } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { SPRING_IOS } from '../../components/beui/motion';
 import { useNavigate } from 'react-router-dom';
-import { cacheRuleDraft, defaultCacheRule, fieldDisplayValue, getPath, settingPages, ModelError, type CacheRule, type CacheRuleDraft, type RawFieldValue, type SettingField, type SettingPageId } from '../../model';
+import { cacheRuleDraft, configList, defaultCacheRule, fieldDisplayValue, getPath, settingPages, ModelError, type CacheRuleDraft, type RawFieldValue, type SettingField, type SettingPageId } from '../../model';
 import { formatBytes, formatNumber, hasTranslation, presentIssue, translate, type Language } from '../../i18n';
 import { toConfigIssue, useConfig, type ConfigIssue } from '../../config/context';
 import { useSession } from '../../session/context';
@@ -25,7 +25,7 @@ import type { SnapshotReport } from '../observability/storage';
 import { UpdatePanel } from '../../features/updates/UpdatePanel';
 import { SubscriptionsPanel } from '../../features/subscriptions/SubscriptionsPanel';
 import { UnitInput, unitFamily } from '../../components/UnitInput';
-import { cacheBreakdown, cacheHitRate } from '../observability/metrics';
+import { cacheBreakdown, cacheHitRate, type StatusView } from '../observability/metrics';
 import { scopeNote } from '../observability/diagnostics';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
@@ -143,8 +143,7 @@ function CacheRules({ language }: { language: Language }) {
   const reduced = useReducedMotion();
   const t = (key: string) => translate(`views.${key}`, language);
   if (!draft) return null;
-  const original = getPath(draft.settings, 'cache.rules');
-  const rules = draft.rules ?? (Array.isArray(original) ? original.map((rule) => cacheRuleDraft(rule as CacheRule)) : []);
+  const rules = draft.rules ?? configList(draft.settings, 'cache.rules').map((rule) => cacheRuleDraft(rule));
   const update = (index: number, key: keyof CacheRuleDraft, value: string) => setRules(rules.map((rule, at) => at === index ? { ...rule, [key]: value } : rule));
   const choices: Partial<Record<keyof CacheRuleDraft, readonly [string, string][]>> = {
     suffix: [['false', 'exact'], ['true', 'suffix']], bypass: [['false', 'allow'], ['true', 'bypass']],
@@ -169,7 +168,6 @@ function CacheRules({ language }: { language: Language }) {
   </section>;
 }
 
-interface CacheStatus { running: boolean; metrics?: { counters: Record<string, number> } | null; cache?: Record<string, number>; refresh?: Record<string, number>; cache_persistence?: SnapshotReport }
 interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
 /** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
@@ -185,21 +183,21 @@ function CacheUsage({ language }: { language: Language }) {
   const { api } = useSession();
   const confirmAction = useConfirm();
   const banner = useBanner();
-  const [status, setStatus] = useState<CacheStatus | null>(null);
+  const [status, setStatus] = useState<StatusView | null>(null);
   const [error, setError] = useState<ConfigIssue | null>(null);
   const [working, setWorking] = useState(false);
   const t = (key: string) => translate(`views.${key}`, language);
-  const load = async () => { try { setStatus(await api.request<CacheStatus>('status')); setError(null); } catch (reason) { setError(toConfigIssue(reason)); } };
+  const load = async () => { try { setStatus(await api.request<StatusView>('status')); setError(null); } catch (reason) { setError(toConfigIssue(reason)); } };
   useEffect(() => { void load(); }, [api]);
   const cache = status?.running ? status.cache : null;
-  const lookups = cacheBreakdown(status?.metrics?.counters);
-  const hitRate = cacheHitRate(status?.metrics?.counters);
+  const lookups = cacheBreakdown(status?.metrics.counters);
+  const hitRate = cacheHitRate(status?.metrics.counters);
   const count = (value: number) => formatNumber(value, language);
-  const details: [string, number | undefined, number | undefined][] = [
-    ['positiveNegative', cache?.positive_entries, cache?.negative_entries], ['freshStale', cache?.hits, cache?.stale_hits],
-    ['missBypass', cache?.misses, cache?.bypasses], ['evictionRejection', cache?.evictions, cache?.rejections],
-    ['ecsSharedHitsEntries', cache?.ecs_shared_hits, cache?.ecs_shared_entries],
-  ];
+  const details: [string, number, number][] = cache ? [
+    ['positiveNegative', cache.positive_entries, cache.negative_entries], ['freshStale', cache.hits, cache.stale_hits],
+    ['missBypass', cache.misses, cache.bypasses], ['evictionRejection', cache.evictions, cache.rejections],
+    ['ecsSharedHitsEntries', cache.ecs_shared_hits, cache.ecs_shared_entries],
+  ] : [];
   const persistence = status?.cache_persistence;
   const row = (label: ReactNode, value: ReactNode) => <div className="row" data-layout="inline"><div className="row-label"><span>{label}</span></div><div className="row-control"><span className="row-value num">{value}</span></div></div>;
   return <>
@@ -215,14 +213,14 @@ function CacheUsage({ language }: { language: Language }) {
           <div className="row" data-layout="inline"><div className="row-label"><span>{translate('shell.hitRate', language)}</span><InfoTip text={translate('shell.hitRateHelp', language)} label={translate('shell.about', language, { label: translate('shell.hitRate', language) })} /></div>
             <div className="row-control"><span className="row-value num">{hitRate === null ? '—' : `${formatNumber(hitRate, language, { maximumFractionDigits: 1 })}%`}</span></div>
             {lookups && <small className="row-note">{translate('shell.cacheLookups', language, { hits: count(lookups.hits), stale: count(lookups.stale), joined: count(lookups.joined), misses: count(lookups.misses) })}</small>}</div>
-          <ExpandRow label={translate('storage.detailedCounts', language)}>{details.map(([key, first, second]) => <div key={key}>{row(t(key), `${formatNumber(first ?? 0, language)} / ${formatNumber(second ?? 0, language)}`)}</div>)}
-            {row(t('ecsSharingRevocations'), formatNumber(cache.ecs_sharing_revocations ?? 0, language))}</ExpandRow>
+          <ExpandRow label={translate('storage.detailedCounts', language)}>{details.map(([key, first, second]) => <div key={key}>{row(t(key), `${formatNumber(first, language)} / ${formatNumber(second, language)}`)}</div>)}
+            {row(t('ecsSharingRevocations'), formatNumber(cache.ecs_sharing_revocations, language))}</ExpandRow>
         </>}
       </div>
       <div className="group-actions"><button className="button quiet" type="button" onClick={() => void load()}>{translate('ui.refresh', language)}</button>
         {cache && <button type="button" className="button danger" disabled={working} onClick={async (event) => {
           const trigger = event.currentTarget;
-          if (!status?.cache || !await confirmAction('views.clearAllConfirm', 'views.clearAll', trigger)) return;
+          if (!status?.cache || !await confirmAction(t('clearAllConfirm'), 'views.clearAll', trigger)) return;
           setWorking(true); try { await api.request('cache/invalidate', 'POST', { all: true, epoch: status.cache.epoch }); await load(); banner(t('cleared')); } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
         }}>{t('clearAll')}</button>}</div>
     </section>
@@ -254,7 +252,7 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
   };
   /** Clears the listed entry's name, type and scope against the inspected epoch, then shows the cache again. */
   const clear = async (variant: Variant, trigger: HTMLElement) => {
-    if (!result || !await confirmAction('views.clearEntryConfirm', 'views.clearEntry', trigger)) return;
+    if (!result || !await confirmAction(t('clearEntryConfirm'), 'views.clearEntry', trigger)) return;
     setWorking(true); setError(null);
     try {
       await api.request('cache/invalidate', 'POST', { name: variant.name, qtype: variant.qtype, scope: variant.scope, epoch: result.epoch });
@@ -299,7 +297,7 @@ function CertificateImport({ language }: { language: Language }) {
   const enabledProtocols = protocols.filter((protocol) => draft.optional[protocol] ?? getPath(draft.settings, protocol) !== null);
   const close = async () => {
     if (busy) return;
-    if ((certificate || privateKey) && !await confirmAction('app.discardPem', 'shell.discardPem')) return;
+    if ((certificate || privateKey) && !await confirmAction(t('app.discardPem'), 'shell.discardPem')) return;
     setTarget(null); setCertificate(''); setPrivateKey(''); setError(null);
   };
   return <section className="settings-group" aria-labelledby="certificate-import-title"><h2 id="certificate-import-title" className="group-title">{t('ui.pasteCertificate')}</h2><div className="grouped padded">
@@ -309,7 +307,6 @@ function CertificateImport({ language }: { language: Language }) {
     <Drawer open={target !== null} variant="sheet" title={`${t('ui.pasteCertificate')} · ${target === 'doh' ? 'DoH' : target === 'dot' ? 'DoT' : target === 'doq' ? 'DoQ' : ''}`} closeLabel={t('ui.closeDialog')} onClose={() => void close()}>
     <form className="fields-grid" onSubmit={async (event) => {
       event.preventDefault(); if (!target) return;
-      if (locked || configBusy || busy) return;
       setBusy(true); setError(null);
       try {
         await importCertificate(target, certificate, privateKey);

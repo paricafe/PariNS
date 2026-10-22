@@ -16,7 +16,7 @@ export const reliabilityMessages = {
   runtimeFailed: ['运行中意外停止', 'Stopped unexpectedly'], startupFailed: ['启动失败', 'Failed to start'], notReady: ['未就绪', 'Not ready'],
   runtimeGeneration: ['DNS 状态自 {time} 起', 'DNS state since {time}'],
   diagnostics: ['缓存决策', 'Cache decisions'], diagnosticsScope: ['自 {time} 缓存重建以来', 'Since the cache was rebuilt at {time}'],
-  unknownTime: ['时间未知', 'unknown time'], lookup: ['缓存查找', 'Cache lookups'], store: ['缓存写入', 'Cache writes'],
+  lookup: ['缓存查找', 'Cache lookups'], store: ['缓存写入', 'Cache writes'],
   lookup_fresh: ['有效命中', 'Fresh hit'], lookup_stale: ['过期命中', 'Stale hit'], lookup_miss: ['未命中', 'Miss'], lookup_bypass: ['绕过缓存', 'Bypassed cache'], lookup_disabled: ['缓存已关闭', 'Cache off'],
   store_admitted: ['已写入', 'Stored'], store_replaced: ['已替换', 'Replaced'], store_skipped: ['未写入', 'Not stored'], store_superseded_only: ['仅清除了旧答案', 'Only cleared the older answer'],
   reason: ['原因', 'Reason'], reason_unsupported_query: ['这类查询不缓存', "This kind of query isn't cached"],

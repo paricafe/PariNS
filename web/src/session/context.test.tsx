@@ -5,8 +5,8 @@ import { SessionProvider, useSession } from './context';
 const updateReload = vi.hoisted(() => vi.fn());
 vi.mock('../features/updates/reload', () => ({ reloadConsole: updateReload }));
 
-const session = { setup_required: false, authenticated: true, session: { binding: 'binding-1', expires_in_seconds: 28000 },
-  transport: { scheme: 'http', origin: null, certificate_source: null } };
+const session = { setup_required: false, authenticated: true, session: { binding: 'binding-1' },
+  transport: { scheme: 'http', origin: null } };
 const jsonResponse = (value: unknown) => ({ ok: true, status: 200, json: async () => value }) as Response;
 
 afterEach(() => { vi.unstubAllGlobals(); updateReload.mockClear(); });
@@ -52,7 +52,7 @@ describe('session transition', () => {
       if (url === '/api/session') return jsonResponse(session);
       if (url === '/api/account/credentials') {
         if (code === 'NETWORK') throw new TypeError('response lost');
-        return jsonResponse({});
+        return ({ ok: true, status: 200, json: async () => { throw new SyntaxError('truncated body'); } }) as unknown as Response;
       }
       if (url === '/api/login') return ({ ok: false, status: 401, json: async () => ({ error: { code: 'LOGIN_FAILED', message: 'Not changed yet' } }) }) as Response;
       throw new Error(`Unexpected request ${url}`);
@@ -155,18 +155,18 @@ describe('session transition', () => {
     expect(hook.result.current.state.phase).toBe('login');
     hook.unmount();
   });
-  it('updates the security transport source on same-origin session refresh', async () => {
+  it('updates the transport on same-origin session refresh', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url !== '/api/session') throw new Error(`Unexpected request ${url}`);
       return jsonResponse({ ...session, transport: {
-        scheme: 'https', origin: 'https://dns.example.com:3000', certificate_source: 'doh',
+        scheme: 'https', origin: 'https://dns.example.com:3000',
       } });
     }));
     const hook = renderHook(() => useSession(), { wrapper: SessionProvider });
-    await waitFor(() => expect(hook.result.current.state.transport?.certificate_source).toBe('doh'));
+    await waitFor(() => expect(hook.result.current.state.transport?.scheme).toBe('https'));
     await act(async () => { await hook.result.current.recheck(); });
     expect(hook.result.current.state.phase).toBe('ready');
-    expect(hook.result.current.state.transport?.certificate_source).toBe('doh');
+    expect(hook.result.current.state.transport?.scheme).toBe('https');
     hook.unmount();
   });
 
@@ -190,7 +190,7 @@ describe('session transition', () => {
 
   it('does not confirm an HTTP setup Cookie after setup switches to HTTPS', async () => {
     let checks = 0;
-    const change = { from: 'http', to: 'https', next_origin: null, reauthenticate: true, requires_http_confirmation: false };
+    const change = { to: 'https', next_origin: null, requires_http_confirmation: false };
     const fetcher = vi.fn(async (url: string) => {
       if (url === '/api/session') { checks += 1; return jsonResponse({ ...session, setup_required: true, authenticated: false, session: null }); }
       if (url === '/api/setup/preview') return jsonResponse({ valid: true, transport_change: change });
@@ -215,7 +215,7 @@ describe('session transition', () => {
         return jsonResponse({ ...session, setup_required: true, authenticated: false, session: null });
       }
       if (url === '/api/setup/preview') return jsonResponse({ valid: true, transport_change: {
-        from: 'http', to: 'https', next_origin: nextOrigin, reauthenticate: true, requires_http_confirmation: false,
+        to: 'https', next_origin: nextOrigin, requires_http_confirmation: false,
       } });
       if (url === '/api/setup') throw new TypeError('connection closed');
       throw new Error(`Unexpected request ${url}`);

@@ -27,6 +27,7 @@ export const subscriptionMessages = {
   revision_conflict: ['运行期间配置被再次保存，请重试。', 'The configuration was saved again while this ran. Try again.'],
   subscription_busy: ['另一个订阅正在下载，请稍后重试。', 'Another subscription is downloading. Try again shortly.'],
   subscription_material_missing: ['规则文件缺失。请再保存一次，或点“立即更新”重新下载。', 'The downloaded rules are missing. Save again, or use Update now to download them again.'],
+  frozenStatus: ['正在安装软件更新，订阅更新暂停，安装完成后恢复。', 'A software update is being installed; subscription updates resume when it finishes.'],
   subscription_storage_unavailable: ['订阅数据无法读写。请查看服务日志并检查服务器磁盘。', "Subscription data can't be read or written. Check the service log and the server's disk."],
   subscription_durability_uncertain: ['规则已生效，但无法确认已写入磁盘；请检查服务器磁盘。', "The rules are in use, but writing them to disk couldn't be confirmed. Check the server's disk."],
   subscription_active_source: ['这个订阅源已在使用中，请改用“立即更新”。', 'This source is already in use. Use Update now instead.'],

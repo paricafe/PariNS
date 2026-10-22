@@ -3,8 +3,8 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { SPRING_IOS } from '../../components/beui/motion';
 import { useConfig } from '../../config/context';
 import { useSession } from '../../session/context';
-import { getPath } from '../../model';
-import { subscriptionDraft, subscriptionId, type SubscriptionSource } from '../../model/subscriptions';
+import { configList } from '../../model';
+import { subscriptionDraft, subscriptionId } from '../../model/subscriptions';
 import { formatBytes, formatNumber, translate, type Language } from '../../i18n';
 import { useSubscriptions } from './useSubscriptions';
 import { SourceCard, failureText } from './SourceCard';
@@ -21,7 +21,7 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
   const t = (key: string) => translate(`subscriptions.${key}`, language);
   if (!draft) return <p role="status">{translate('app.connecting', language)}</p>;
   const saved = draft.savedSources;
-  const sources = draft.sources ?? ((getPath(draft.settings, 'filter_subscriptions.sources') as SubscriptionSource[] | undefined) ?? []).map((source) => subscriptionDraft(source));
+  const sources = draft.sources ?? configList(draft.settings, 'filter_subscriptions.sources').map((source) => subscriptionDraft(source));
   const observedOperation = view.operation ?? view.state?.operation ?? (view.unknown ? view.state?.recent_operation : null);
   const sourceName = (id: string) => sources.find((item) => item.id === id)?.name || saved.find((item) => item.id === id)?.name || id;
   const working = view.pending || view.state?.operation?.status === 'running' || locked || busy;
@@ -34,10 +34,12 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
   };
   return <><section className="panel subscription-panel"><div className="heading-row"><h2>{t('title')}</h2>
     <div className="button-group"><button type="button" className="button quiet" onClick={() => void view.load()}>{t('refreshStatus')}</button>
-      <button type="button" className="button secondary" disabled={working || !view.state?.sources.length} onClick={() => void view.start('refresh', null)}>{t('refreshAll')}</button></div></div>
+      <button type="button" className="button secondary" disabled={working || !view.state?.sources.length} onClick={() => void view.refresh(null)}>{t('refreshAll')}</button></div></div>
     <p className="muted small">{t('help')}</p>
     {view.error && <p role="alert" className="notice error">{failureText(view.error, language)}</p>}
-    {view.state?.unavailable_reason && <p className="notice error" role="alert">{failureText({ code: view.state.unavailable_reason, line: null }, language)}</p>}
+    {view.state?.unavailable_reason === 'update_in_progress'
+      ? <p className="notice" role="status">{translate('subscriptions.frozenStatus', language)}</p>
+      : view.state?.unavailable_reason && <p className="notice error" role="alert">{failureText({ code: view.state.unavailable_reason, line: null }, language)}</p>}
     {view.unknown && <p className="notice" role="status">{t('unknown')}</p>}
     {(observedOperation || view.pending) && <p className="notice" role="status">{t(view.pending ? 'running' : observedOperation!.status)}
       {observedOperation?.source_id && <> · {sourceName(observedOperation.source_id)}</>}
@@ -53,7 +55,7 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
         exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><SourceCard source={source} index={index} status={status} language={language} locked={locked || busy} working={working}
         savedSource={baseline} subscriptionsEnabled={view.state?.enabled === true} takenIds={sources.filter((_, at) => at !== index).map((item) => item.id)}
         change={(next) => setSources(sources.map((item, at) => at === index ? next : item))} remove={() => setSources(sources.filter((_, at) => at !== index))}
-        refresh={() => void view.start('refresh', source.id)} /></motion.div>;
+        refresh={() => void view.refresh(source.id)} /></motion.div>;
     })}</AnimatePresence></div>
     <div className="button-group"><button type="button" className="button secondary" disabled={locked || busy || sources.length >= 16} onClick={() => add(false)}>{t('add')}</button>
       <button type="button" className="button quiet" disabled={locked || busy || sources.length >= 16} onClick={() => add(true)}>{t('example')}</button></div>

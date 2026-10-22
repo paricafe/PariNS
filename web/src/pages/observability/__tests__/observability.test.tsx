@@ -28,6 +28,8 @@ const status: StatusView = {
     request_inflight: 1,
     request_latency: { count: 10, sum_micros: 25_000, buckets: [{ upper_bound_micros: 1_000, count: 3 }, { upper_bound_micros: null, count: 10 }] },
   },
+  storage, cache_persistence: { saved: 0, restored: 0, skipped: 0, bytes: 0, reason: 'no_clean_snapshot' }, listeners: null, cache: null,
+  doh_listen: null, doh_http3: false, certificates: { certificate_generation: 0, roles: [], last_reload: null },
 };
 
 const entry: LogEntry = {

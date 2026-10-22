@@ -92,5 +92,3 @@ export function formatBytes(value: number, language: Language): string {
 export function formatDate(value: string | number | Date, language: Language, options?: Intl.DateTimeFormatOptions): string {
   return new Intl.DateTimeFormat(language, options).format(new Date(value));
 }
-
-export const translationKeys = Object.freeze(Object.keys(catalog));

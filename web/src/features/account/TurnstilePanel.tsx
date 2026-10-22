@@ -39,7 +39,7 @@ export function TurnstilePanel({ view, language, setBusy }: { view: TurnstileVie
     const trigger = event.currentTarget instanceof HTMLFormElement ? event.currentTarget.querySelector<HTMLElement>('button[type="submit"]') ?? undefined : undefined;
     setError(null);
     // Like signing out: the change ends every session, so an unsaved draft is lost.
-    if (config.dirty && !await confirmAction('turnstile.draftConfirm', 'account.continue', trigger)) return;
+    if (config.dirty && !await confirmAction(t('draftConfirm'), 'account.continue', trigger)) return;
     setSubmitting(true); setBusy(true);
     try {
       const turnstile = action === 'clear' ? null : { site_key: siteKey.trim(), secret_key: replaceSecret ? secretKey.trim() : undefined };

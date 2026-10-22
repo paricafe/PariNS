@@ -1,6 +1,3 @@
-@import "tailwindcss";
-@custom-variant dark (&:where(.dark, .dark *));
-
 /* Semantic tokens. Components use these names only; light and dark are
    complete sets selected by the console's .dark class. Token names are a
    shared contract (page styles such as observability.css use them): add, never rename.
@@ -112,11 +109,39 @@
 /* Theme changes cross-fade the page snapshot (View Transitions; opacity only, skipped under reduced motion). */
 ::view-transition-old(root), ::view-transition-new(root) { animation-duration: var(--dur-theme); animation-timing-function: ease; }
 
-* { box-sizing: border-box; }
-html { min-width: 320px; }
+/* Base: element defaults start from zero; components set their own spacing, borders and type. */
+*, ::before, ::after, ::backdrop { box-sizing: border-box; margin: 0; padding: 0; border: 0 solid; }
+html { min-width: 320px; line-height: 1.5; tab-size: 4; -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"; }
 /* Only the root paints the canvas so the ambient layer shows through. */
-body { margin: 0; min-width: 320px; min-height: 100vh; overflow-x: hidden; }
-button, input, select, textarea { font: inherit; }
+body { min-width: 320px; min-height: 100vh; overflow-x: hidden; }
+h1, h2, h3, h4, h5, h6 { font-size: inherit; font-weight: inherit; }
+b, strong { font-weight: bolder; }
+ol, ul, menu { list-style: none; }
+img, svg, video, canvas, iframe { display: block; vertical-align: middle; }
+img, video { max-width: 100%; height: auto; }
+progress { vertical-align: baseline; }
+table { border-collapse: collapse; border-color: inherit; text-indent: 0; }
+code, kbd, samp, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 1em; }
+button, input, select, textarea, ::file-selector-button { font: inherit; letter-spacing: inherit; color: inherit; background-color: transparent; border-radius: 0; }
+::placeholder { opacity: 1; color: color-mix(in oklab, currentcolor 50%, transparent); }
+:-moz-ui-invalid { box-shadow: none; }
+::-webkit-search-decoration { -webkit-appearance: none; }
+/* Date inputs keep the field's own height and alignment. Vendor pseudo-elements stay in separate
+   rules: a browser drops a whole selector list that names one it does not know. */
+::-webkit-date-and-time-value { min-height: 1lh; text-align: inherit; }
+::-webkit-datetime-edit { display: inline-flex; padding-block: 0; }
+::-webkit-datetime-edit-fields-wrapper { padding: 0; }
+::-webkit-datetime-edit-year-field { padding-block: 0; }
+::-webkit-datetime-edit-month-field { padding-block: 0; }
+::-webkit-datetime-edit-day-field { padding-block: 0; }
+::-webkit-datetime-edit-hour-field { padding-block: 0; }
+::-webkit-datetime-edit-minute-field { padding-block: 0; }
+::-webkit-datetime-edit-second-field { padding-block: 0; }
+::-webkit-datetime-edit-millisecond-field { padding-block: 0; }
+::-webkit-datetime-edit-meridiem-field { padding-block: 0; }
+::-webkit-calendar-picker-indicator { line-height: 1; }
+[hidden]:where(:not([hidden="until-found"])) { display: none !important; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 input, select, textarea { color: var(--text); background: var(--control-bg); border: 1px solid var(--control-border); border-radius: var(--radius-control); min-height: 40px; padding: 8px 12px; max-width: 100%; transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease; }
@@ -126,7 +151,7 @@ textarea { width: 100%; resize: vertical; line-height: 1.55; }
 input[type=range] { min-height: 0; padding: 0; border: 0; background: transparent; accent-color: var(--primary); box-shadow: none; }
 input[type=checkbox] { min-height: 0; width: 17px; height: 17px; margin: 0; accent-color: var(--primary); box-shadow: none; }
 input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-a { color: inherit; }
+a { color: inherit; text-decoration: inherit; }
 small, .small { font-size: 13px; }
 .muted { color: var(--muted); }
 .error { color: var(--danger); }

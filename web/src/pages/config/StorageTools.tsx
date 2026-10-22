@@ -8,15 +8,15 @@ import { Button } from '../../components/beui';
 import { useAutoConfirm } from '../../components/useAutoConfirm';
 import { formatDate, presentIssue, translate, type Language } from '../../i18n';
 import { StorageStatusPanel } from '../observability/StorageStatusPanel';
-import { isUnknownStorageMutation, storageActions, type StorageAction, type StorageStatus } from '../observability/storage';
-import type { StatsView } from '../observability/metrics';
+import { isUnknownStorageMutation, storageActions, type StorageAction } from '../observability/storage';
+import type { StatsView, StatusView } from '../observability/metrics';
 
 export function StorageTools({ language }: { language: Language }) {
   const { api } = useSession();
   const { locked, busy: configBusy } = useConfig();
   const confirm = useConfirm();
   const banner = useBanner();
-  const [view, setView] = useState<{ storage: StorageStatus } | null>(null);
+  const [view, setView] = useState<StatusView | null>(null);
   const [stats, setStats] = useState<StatsView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | ApiError | null>(null);
@@ -28,7 +28,7 @@ export function StorageTools({ language }: { language: Language }) {
   // Statistics totals change only through the totals reset, so they are read on mount and after that reset rather than polled.
   const load = useCallback(async (includeStats: boolean) => {
     const owner = ++requestId.current;
-    const current = await api.request<{ storage: StorageStatus }>('status');
+    const current = await api.request<StatusView>('status');
     if (owner !== requestId.current) throw new StaleRequest();
     setView(current);
     if (!includeStats) return current;
@@ -46,7 +46,7 @@ export function StorageTools({ language }: { language: Language }) {
     if (!view || busy || unknown || locked || configBusy) return;
     const spec = storageActions[action];
     const epoch = view.storage[spec.epoch];
-    if (!await confirm(`storage.${spec.confirm}`, `storage.${spec.label}`, trigger)) return;
+    if (!await confirm(t(spec.confirm), `storage.${spec.label}`, trigger)) return;
     setBusy(true); setError(null); setNotice(null);
     try {
       await api.request(spec.path, 'POST', { [spec.epoch]: epoch });

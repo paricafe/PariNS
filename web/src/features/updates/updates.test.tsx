@@ -139,16 +139,6 @@ describe('software update presentation', () => {
     expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1);
   });
 
-  it('rejects a draft introduced while the confirmation is open', async () => {
-    const current = fixture(); mocks.request.mockResolvedValue(current);
-    mocks.confirm.mockImplementation(async () => { mocks.config.dirty = true; return true; });
-    mount();
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await screen.findByText('Your changes or the configuration just changed. Resolve them and confirm the update again.');
-    expect(mocks.request.mock.calls.some(([path]) => path === 'updates/apply')).toBe(false);
-  });
-
   it('disarms restart and releases the local editing lock after a definite rejection', async () => {
     const current = fixture();
     mocks.request.mockImplementation(async (path) => { if (path === 'updates/apply') throw new ApiError(409, 'config_changed', 'changed'); return current; });

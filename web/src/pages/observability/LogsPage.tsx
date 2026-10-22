@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { AnimatePresence, useReducedMotion } from "motion/react";
-import { ApiError, StaleRequest, type ApiClient } from "../../session/client";
-import { formatDate, formatNumber, hasTranslation, translate, type Language } from "../../i18n";
+import { StaleRequest, type ApiClient } from "../../session/client";
+import { formatDate, formatNumber, presentIssue, translate, type Language } from "../../i18n";
+import { toConfigIssue, type ConfigIssue } from "../../config/context";
 import { pathLabel, statusLabel, type CacheFilter, type LogEntry, type LogFilter, type LogListResponse } from "./logs";
 import { LiveLogClient, type LiveInterval, type LiveLogState, type LiveStatus, type LiveSubscription } from "./live";
 import "./observability.css";
@@ -20,19 +21,6 @@ export interface LogsPageProps {
   api: ApiClient;
   language: Language;
   onOpenSettings: () => void;
-}
-
-/** Failures keep the error or catalog key and are translated at render time, so a language switch needs no new request. */
-type Failure = { error: unknown } | { key: string };
-
-function localizedError(failure: Failure, language: Language): string {
-  if ("key" in failure) return translate(failure.key, language);
-  const { error } = failure;
-  if (error instanceof ApiError) {
-    const key = `api.${error.code}`;
-    if (hasTranslation(key)) return translate(key, language, { detail: error.message, status: error.status });
-  }
-  return translate("app.loadFailed", language);
 }
 
 function DetailRow({ label, children }: { label: string; children: ReactNode }) {
@@ -106,7 +94,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [atHead, setAtHead] = useState(true);
   const [updated, setUpdated] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
-  const [failure, setFailure] = useState<Failure | null>(null);
+  const [failure, setFailure] = useState<ConfigIssue | null>(null);
   const [notice, setNotice] = useState("");
   const [confirmation, setConfirmation] = useState<{ epoch: number } | null>(null);
   const [unknownEpoch, setUnknownEpoch] = useState<number | null>(null);
@@ -159,7 +147,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
         }
       }
     } catch (error) {
-      if (owner === requestId.current && !(error instanceof StaleRequest)) setFailure({ error });
+      if (owner === requestId.current && !(error instanceof StaleRequest)) setFailure(toConfigIssue(error));
     } finally {
       if (owner === requestId.current) setLoading(false);
     }
@@ -238,7 +226,8 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   useEffect(() => {
     const live = client.current;
     if (!live) return;
-    if (!ready || hidden || suspended) live.stop();
+    // Manual mode holds no connection; Refresh reads the list instead.
+    if (!ready || hidden || suspended || interval === null) live.stop();
     else live.start(subscription());
   }, [ready, hidden, suspended, interval, subscription]);
 
@@ -374,7 +363,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       if (!(error instanceof StaleRequest)) {
         const unknown = isUnknownStorageMutation(error);
         if (unknown) setUnknownEpoch(listed);
-        else setFailure({ error });
+        else setFailure(toConfigIssue(error));
       }
     } finally { setClearing(false); }
   }
@@ -424,7 +413,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
       </div>
     </div>
     {liveMessage && <p role="status" className="muted small log-live-note">{translate(liveMessage, language)}</p>}
-    {failure && <p role="alert" className="notice error">{localizedError(failure, language)}</p>}
+    {failure && <p role="alert" className="notice error">{presentIssue(failure, language)}</p>}
     {notice && <p role="status" className="notice">{translate(notice, language)}</p>}
     {unknownEpoch !== null && <p role="status" className="notice">{translate(clearCheck.state === 'failed' ? 'app.clearLogsUnknown' : clearCheck.state === 'unresolved' ? 'storage.stillUnknown' : 'shell.confirming', language)}</p>}
     {unknownEpoch !== null && (clearCheck.state === 'failed' || clearCheck.state === 'unresolved') && <button type="button" className="button secondary" disabled={loading} onClick={clearCheck.check}>{translate('storage.checkResult', language)}</button>}

@@ -1,8 +1,9 @@
 import { createContext, useContext } from 'react';
 import { translate, type Language } from '../../i18n';
 import { splitListener } from '../../model';
+import type { StatusView } from '../observability/metrics';
 
-export interface DohStatus { running: boolean; doh_listen: string | null; doh_http3: boolean }
+export type DohStatus = Pick<StatusView, 'running' | 'doh_listen' | 'doh_http3'>;
 
 /** The security page's one status read, shared with the DoH group's in-service row. */
 export const DohStatusContext = createContext<{ status: DohStatus | null; failed: boolean } | null>(null);

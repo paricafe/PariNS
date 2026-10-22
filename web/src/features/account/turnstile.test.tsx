@@ -12,9 +12,9 @@ vi.mock('../updates/reload', () => ({ reloadConsole: reload }));
 const config = vi.hoisted(() => ({ busy: false, locked: false, dirty: false, reload: vi.fn(), discard: vi.fn() }));
 vi.mock('../../config/context', async (original) => ({ ...await original<typeof import('../../config/context')>(), useConfig: () => config }));
 
-const transport = { scheme: 'http', origin: null, certificate_source: null };
+const transport = { scheme: 'http', origin: null };
 const signedOut = { setup_required: false, authenticated: false, session: null, transport };
-const signedIn = { setup_required: false, authenticated: true, session: { binding: 'binding-1', expires_in_seconds: 28000 }, transport };
+const signedIn = { setup_required: false, authenticated: true, session: { binding: 'binding-1' }, transport };
 const noOptions = { turnstile: null, turnstile_skipped: false };
 const json = (value: unknown, status = 200) => ({ ok: status < 400, status, json: async () => value }) as Response;
 const off: TurnstileView = { turnstile: null, loopback: false };
@@ -126,6 +126,21 @@ describe('sign-in with Turnstile', () => {
     serve({ '/api/session': () => json(signedOut), '/api/login/options': () => json({ ...noOptions, turnstile_skipped: true }) });
     render(<SessionProvider><Harness /></SessionProvider>);
     expect(await screen.findByText(/skips human verification/)).toBeTruthy();
+  });
+
+  it('keeps sign-in closed until the sign-in options load, with a retry', async () => {
+    let available = false;
+    serve({
+      '/api/session': () => json(signedOut),
+      '/api/login/options': () => available ? json(noOptions) : json({ error: { code: 'STORAGE_BUSY', message: 'busy' } }, 503),
+    });
+    render(<SessionProvider><Harness /></SessionProvider>);
+    expect((await screen.findByRole('alert')).textContent).toContain("Couldn't load the sign-in options");
+    expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(true);
+    available = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 

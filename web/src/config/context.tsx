@@ -3,7 +3,7 @@ import { ApiError, StaleRequest, type ApiClient } from '../session/client';
 import type { TransportChange } from '../session/client';
 import { decodeSubscription, type SubscriptionDraft, type SubscriptionSource } from '../model/subscriptions';
 import { downloadNewSources, newSources } from '../features/subscriptions/download';
-import { decodeCacheRule, diffSettings, fieldDisplayValue, getPath, setPath, settingPages, convertFieldValue, ModelError, type CacheRuleDraft, type RawFieldValue, type SettingsObject } from '../model';
+import { configList, decodeCacheRule, diffSettings, fieldDisplayValue, getPath, setPath, settingPages, convertFieldValue, ModelError, type CacheRuleDraft, type RawFieldValue, type SettingsObject } from '../model';
 
 export interface ConfigResponse { toml: string; revision: number; has_backup: boolean }
 interface ParsedResponse { toml: string; settings: SettingsObject; transport_change?: TransportChange | null }
@@ -69,11 +69,11 @@ interface ConfigContextValue {
   changes: number;
   setError(error: ConfigIssue | null): void;
   updateField(path: string, value: RawFieldValue): void;
-  setOptional(protocol: string, enabled: boolean): void;
+  setOptional(protocol: OptionalListener, enabled: boolean): void;
   setRules(rules: CacheRuleDraft[]): void;
   setSources(sources: SubscriptionDraft[]): void;
   setToml(toml: string): void;
-  importCertificate(target: 'dot' | 'doh' | 'doq', certificate: string, privateKey: string): Promise<void>;
+  importCertificate(target: OptionalListener, certificate: string, privateKey: string): Promise<void>;
   preview(): Promise<string>;
   validate(): Promise<ValidationResponse>;
   prepareSave(): Promise<PreparedSave>;
@@ -90,6 +90,7 @@ interface ConfigContextValue {
   setUpdateLocked(locked: boolean): void;
 }
 
+type OptionalListener = 'dot' | 'doh' | 'doq';
 const ConfigContext = createContext<ConfigContextValue | null>(null);
 const fieldByPath = new Map(Object.values(settingPages).flatMap((page) => page.groups.flatMap((group) => group.fields)).map((field) => [field.path, field]));
 const EMPTY_LISTENER = { listen: '', cert_file: '', key_file: '' };
@@ -108,7 +109,7 @@ function changeCount(draft: ConfigDraft | null): number {
 function createDraft(config: ConfigResponse, parsed: ParsedResponse): ConfigDraft {
   return { original: config.toml, toml: config.toml, revision: config.revision,
     hasBackup: config.has_backup, base: parsed.settings, settings: parsed.settings, fields: {}, optional: {},
-    rules: null, sources: null, savedSources: (getPath(parsed.settings, 'filter_subscriptions.sources') as SubscriptionSource[] | undefined) ?? [], stale: false, unknownApply: false, pendingApply: null, pendingRollback: null,
+    rules: null, sources: null, savedSources: configList(parsed.settings, 'filter_subscriptions.sources'), stale: false, unknownApply: false, pendingApply: null, pendingRollback: null,
     previewTransportChange: null, pendingTransportChange: null, conflict: null, merged: false };
 }
 
@@ -189,13 +190,11 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   const discard = useCallback(() => { version.current += 1; writeLock.current = false; setDraft(null); setError(null); }, []);
 
   const updateField = useCallback((path: string, value: RawFieldValue) => {
-    if (!fieldByPath.has(path)) throw new Error(`Unknown field ${path}`);
     if (writeLock.current || updateLock.current) return;
     version.current += 1;
     setDraft((current) => current && ({ ...current, previewTransportChange: null, fields: { ...current.fields, [path]: value } }));
   }, []);
-  const setOptional = useCallback((protocol: string, enabled: boolean) => {
-    if (!['dot', 'doh', 'doq'].includes(protocol)) throw new Error('Unknown listener');
+  const setOptional = useCallback((protocol: OptionalListener, enabled: boolean) => {
     if (writeLock.current || updateLock.current) return;
     version.current += 1;
     setDraft((current) => current && ({ ...current, previewTransportChange: null, optional: { ...current.optional, [protocol]: enabled } }));
@@ -217,7 +216,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     setDraft((current) => current && ({ ...current, previewTransportChange: null, sources }));
   }, []);
 
-  const importCertificate = useCallback(async (target: 'dot' | 'doh' | 'doq', certificate: string, privateKey: string) => {
+  const importCertificate = useCallback(async (target: OptionalListener, certificate: string, privateKey: string) => {
     if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
     const enabled = draft.optional[target] ?? getPath(draft.settings, target) !== null;
     if (!enabled) throw new Error('app.enableListener');
@@ -380,7 +379,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       assertVersion(prepared.version);
       version.current += 1;
       setDraft((current) => current && ({ ...current, original: prepared.toml, toml: prepared.toml, revision: acknowledged.revision,
-        hasBackup: true, base: prepared.settings, fields: {}, optional: {}, rules: null, sources: null, savedSources: (getPath(current.settings, 'filter_subscriptions.sources') as SubscriptionSource[] | undefined) ?? [], stale: false, unknownApply: false, pendingApply: null, pendingRollback: null, merged: false }));
+        hasBackup: true, base: prepared.settings, fields: {}, optional: {}, rules: null, sources: null, savedSources: configList(current.settings, 'filter_subscriptions.sources'), stale: false, unknownApply: false, pendingApply: null, pendingRollback: null, merged: false }));
       const restartRequired = acknowledged.restart_required;
       if (acknowledged.transport_change) return { refreshed: false, transportChange: acknowledged.transport_change, restartRequired, reconciled: null };
       try { await reload(); return { refreshed: true, transportChange: null, restartRequired, reconciled: null }; }
@@ -510,8 +509,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       if (sent && (reason instanceof StaleRequest || reason instanceof ApiError && ['NETWORK', 'BAD_RESPONSE'].includes(reason.code))) {
         keepLocked = true;
         setDraft((current) => current && ({ ...current, unknownApply: true, pendingApply: null,
-          pendingRollback: { revision: draft.revision } }));
-        setDraft((current) => current && ({ ...current, pendingTransportChange: prepared.transportChange }));
+          pendingRollback: { revision: draft.revision }, pendingTransportChange: prepared.transportChange }));
       }
       setError(toConfigIssue(reason));
       throw reason;

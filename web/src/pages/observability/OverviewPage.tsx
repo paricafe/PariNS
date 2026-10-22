@@ -36,8 +36,10 @@ function uptime(seconds: number | null, language: Language): string {
   return minutes > 0 ? translate("shell.durationMinutes", language, { minutes }) : translate("shell.durationJustNow", language);
 }
 
-/** Display-only signal: most upstream operations failed over roughly the last minute. */
-/** Null until two samples give a delta, so a fresh page does not claim upstreams are healthy. */
+/**
+ * Display-only signal: most upstream operations failed over roughly the last minute.
+ * Null until two samples give a delta, so a fresh page does not claim upstreams are healthy.
+ */
 function upstreamTrouble(samples: readonly UpstreamSample[]): boolean | null {
   if (samples.length < 2) return null;
   const first = samples[0]; const last = samples[samples.length - 1];
@@ -114,15 +116,13 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
         const next = await api.request<StatusView>("status");
         if (!active) return;
         setStatus(next); setUpdated(Date.now()); setStatusFailed(false);
-        const counters = next.metrics?.counters;
-        if (counters) {
-          const now = Date.now();
-          const samples = [...upstreamSamples.current, { at: now, operations: counters.upstream_operations ?? 0, failures: counters.upstream_failures ?? 0 }]
-            .filter((sample) => now - sample.at <= 65_000);
-          // A restart resets process counters; start a new window.
-          upstreamSamples.current = samples.some((sample, index) => index > 0 && sample.operations < samples[index - 1].operations) ? samples.slice(-1) : samples;
-          setTroubled(upstreamTrouble(upstreamSamples.current));
-        }
+        const counters = next.metrics.counters;
+        const now = Date.now();
+        const samples = [...upstreamSamples.current, { at: now, operations: counters.upstream_operations ?? 0, failures: counters.upstream_failures ?? 0 }]
+          .filter((sample) => now - sample.at <= 65_000);
+        // A restart resets process counters; start a new window.
+        upstreamSamples.current = samples.some((sample, index) => index > 0 && sample.operations < samples[index - 1].operations) ? samples.slice(-1) : samples;
+        setTroubled(upstreamTrouble(upstreamSamples.current));
       } catch {
         if (active) setStatusFailed(true);
       } finally { statusBusy = false; }
@@ -207,7 +207,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
         <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
       </div>
       <dl className="status-strip-facts">
-        <div><dt>{t('shell.stripInflight')}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>
+        <div><dt>{t('shell.stripInflight')}</dt><dd className="num">{running ? value(status?.metrics.request_inflight, language) : "—"}</dd></div>
         <div><dt>{t('shell.stripResolution')}</dt><dd>{status?.resolution_mode ? t(`settings.resolution.mode.${status.resolution_mode}`) : "—"}</dd></div>
         {status?.resolution_mode !== 'recursive' && <div><dt>{t('shell.stripUpstreams')}</dt><dd>{upstreamCount === null ? "—" : t('shell.upstreamCount', { count: upstreamCount })}</dd></div>}
       </dl>
@@ -254,7 +254,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
       <div className="advanced-stack">
         {status && <p className="small muted">{t('reliability.runtimeGeneration', { time: formatDate(status.dns_health.changed_at_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}{status.dns_health.code && <> · <code>{status.dns_health.code}</code></>}</p>}
         <p className="small muted">{t("ui.statsHelp")}{stats && <> {t('storage.totalsSince', { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</>}</p>
-        {status?.storage && <StorageStatusPanel status={status.storage} language={language} compact />}
+        {status && <StorageStatusPanel status={status.storage} language={language} compact />}
         <section className="panel" aria-labelledby="parins-latency-title">
           <h2 id="parins-latency-title">{t("ui.latencyDistribution")}</h2>
           <p className="muted small">{t("ui.latencyDistributionHelp")}</p>
@@ -268,7 +268,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
           <dl className="fact-grid">
             <div><dt>{t("ui.dnsAddress")}</dt><dd className="transport-address">{status?.listen ?? t("app.notConfigured")}</dd></div>
             <div><dt>{t("ui.uptime")}</dt><dd className="num">{running ? uptime(status?.uptime_seconds ?? null, language) : "—"}</dd></div>
-            <div><dt>{t("ui.inflight")}</dt><dd className="num">{running ? value(status?.metrics?.request_inflight, language) : "—"}</dd></div>
+            <div><dt>{t("ui.inflight")}</dt><dd className="num">{running ? value(status?.metrics.request_inflight, language) : "—"}</dd></div>
             <div><dt>{t("ui.failures")}</dt><dd className="num">{value(counters?.upstream_failures, language)}</dd></div>
             <div><dt>{t("ui.updated")}</dt><dd className="num">{updated === null ? "—" : formatDate(updated, language, { hour: "2-digit", minute: "2-digit", second: "2-digit" })} <span className="muted small">{t("ui.statusInterval")}</span></dd></div>
           </dl>

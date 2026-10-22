@@ -9,8 +9,8 @@ import type { Language } from '../../i18n';
 
 const config = vi.hoisted(() => ({ busy: false, locked: false, dirty: false, reload: vi.fn(), discard: vi.fn() }));
 vi.mock('../../config/context', async (original) => ({ ...await original<typeof import('../../config/context')>(), useConfig: () => config }));
-const session = { setup_required: false, authenticated: true, session: { binding: 'account-owner', expires_in_seconds: 28000 },
-  transport: { scheme: 'http', origin: null, certificate_source: null } };
+const session = { setup_required: false, authenticated: true, session: { binding: 'account-owner' },
+  transport: { scheme: 'http', origin: null } };
 const json = (value: unknown) => ({ ok: true, status: 200, json: async () => value }) as Response;
 const turnstile = { turnstile: null, loopback: false };
 function Harness({ language = 'en' }: { language?: Language }) {

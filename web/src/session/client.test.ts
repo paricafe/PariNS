@@ -2,23 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiClient, ApiError, StaleRequest } from './client';
 
 const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
-const view = { setup_required: false, authenticated: true, session: { binding: 'binding-1', expires_in_seconds: 3600 },
-  transport: { scheme: 'http', origin: null, certificate_source: null } };
+const view = { setup_required: false, authenticated: true, session: { binding: 'binding-1' },
+  transport: { scheme: 'http', origin: null } };
 
 describe('management request ownership', () => {
-  it('encodes statistics query values without relaxing API path validation', async () => {
+  it('encodes statistics query values', async () => {
     const fetcher = vi.fn(async () => json(200, {}));
     const api = new ApiClient(fetcher as typeof fetch);
     api.replaceBinding('binding-1');
     await api.request('stats', 'GET', undefined, undefined, { query: { range: 'custom', from_ms: '1&range=7d', to_ms: '20' } });
     expect(fetcher).toHaveBeenCalledWith('/api/stats?range=custom&from_ms=1%26range%3D7d&to_ms=20', expect.any(Object));
-    await expect(api.request('stats?range=7d')).rejects.toThrow('Invalid API path');
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects the removed standalone DoH3 certificate source', async () => {
-    const api = new ApiClient(vi.fn(async () => json(200, { ...view, transport: { ...view.transport, certificate_source: 'doh3' } })) as typeof fetch);
-    await expect(api.session()).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
   });
 
   it('calls the browser fetch with its global receiver by default', async () => {
@@ -89,15 +82,5 @@ describe('management request ownership', () => {
     await expect(api.request('config', 'PUT', { toml: '', revision: 1 })).rejects.toMatchObject({ code: 'TRANSPORT_CHANGED' });
     expect(events).toEqual(['transport-changed']);
     expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects malformed session payloads instead of fabricating login', async () => {
-    const api = new ApiClient(vi.fn(async () => json(200, { authenticated: true, setup_required: false, token: 'bad' })) as typeof fetch);
-    await expect(api.session()).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
-  });
-
-  it('requires a transport view when restoring the session', async () => {
-    const api = new ApiClient(vi.fn(async () => json(200, { ...view, transport: undefined })) as typeof fetch);
-    await expect(api.session()).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
   });
 });

@@ -11,6 +11,7 @@ export interface RequestLatency {
 
 import type { SnapshotReport, StorageStatus } from './storage';
 import type { CacheDiagnostics, DnsHealth, QuicDiagnostics, RecursionDiagnostics, UpstreamDiagnostics } from './diagnostics';
+import type { CertificateStatus } from '../config/CertificateTools';
 export interface MetricsSnapshot {
   counters: Record<string, number>;
   request_inflight: number;
@@ -23,22 +24,35 @@ export interface ListenerStatus {
   error: string | null;
 }
 
+/** Cache usage and counters of the running generation. */
+export interface CacheUsage {
+  epoch: number; entries: number; max_entries: number; bytes: number; max_bytes: number;
+  positive_entries: number; negative_entries: number; hits: number; stale_hits: number; misses: number; bypasses: number;
+  evictions: number; rejections: number; ecs_shared_hits: number; ecs_shared_entries: number; ecs_sharing_revocations: number;
+}
+
+/** `GET /api/status`, the fields the console reads. */
 export interface StatusView {
   running: boolean;
   last_error: string | null;
   listen: string | null;
   uptime_seconds: number | null;
   generation: number;
-  metrics: MetricsSnapshot | null;
-  storage?: StorageStatus;
-  cache_persistence?: SnapshotReport;
+  metrics: MetricsSnapshot;
+  storage: StorageStatus;
+  cache_persistence: SnapshotReport;
   dns_health: DnsHealth;
   /** Resolution mode of the running generation; null while DNS is not running. */
   resolution_mode: 'forward' | 'recursive' | null;
-  /** Per-listener state of the running generation; absent while DNS is stopped. */
-  listeners?: ListenerStatus[] | null;
+  /** Per-listener state of the running generation; null while DNS is stopped. */
+  listeners: ListenerStatus[] | null;
   /** `upstreams` is null in recursive mode; `recursion` is null in forward mode. Both are null while DNS is not running. */
   diagnostics: { cache: CacheDiagnostics | null; upstreams: UpstreamDiagnostics | null; recursion: RecursionDiagnostics | null; quic: QuicDiagnostics };
+  /** Null while DNS is not running. */
+  cache: CacheUsage | null;
+  doh_listen: string | null;
+  doh_http3: boolean;
+  certificates: CertificateStatus;
 }
 
 export interface HistorySample {
@@ -76,7 +90,7 @@ export function trendSeries(samples: readonly HistorySample[], key: TrendKey, ho
     const value = sample.running && !sample.gap && sample.elapsed_seconds > 0 ? sample[key] / sample.elapsed_seconds : null;
     return {
       time: sample.timestamp_ms,
-      value: value !== null && Number.isFinite(value) ? value : null,
+      value,
       breakBefore: !previous || !previous.running || Boolean(previous.gap) || Boolean(sample.gap) || sample.generation !== previous.generation
         || sample.run_id !== previous.run_id || sample.totals_epoch !== previous.totals_epoch || sample.history_epoch !== previous.history_epoch
         || sample.timestamp_ms - previous.timestamp_ms > Math.max(90_000, sample.elapsed_seconds * 1000 + 5000),

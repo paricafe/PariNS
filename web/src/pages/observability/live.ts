@@ -1,6 +1,6 @@
 import type { LogEntry } from './logs';
 
-/** Seconds between pushes; null is manual mode (the server pushes only on refresh). */
+/** Seconds between pushes; null is manual mode, where the page closes the connection and refreshes through the list API. */
 export type LiveInterval = 1 | 3 | 5 | 10 | null;
 export interface LiveFilter { search: string | null; status: string | null; cache: string | null }
 export interface LiveSubscription { interval: LiveInterval; cursor: number | null; filter: LiveFilter }
@@ -17,9 +17,14 @@ export interface LiveHandlers {
   status(status: LiveStatus): void;
 }
 
+/** Server messages; anything else is a protocol error. */
+type LiveMessage =
+  | { type: 'entries'; entries: LogEntry[]; cursor: number | null; more: boolean }
+  | ({ type: 'state' } & LiveLogState)
+  | { type: 'pong' };
+
 export const PING_MS = 10_000;
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
-const logStates = new Set(['ok', 'disabled', 'unavailable', 'checking']);
 
 export function liveUrl(location: Pick<Location, 'protocol' | 'host'> = window.location): string {
   return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/query-log/live`;
@@ -98,25 +103,33 @@ export class LiveLogClient {
       if (this.subscription.interval !== null) this.send({ type: 'refresh' });
       this.ping = setInterval(() => this.send({ type: 'ping' }), PING_MS);
     };
-    socket.onmessage = (event) => { if (this.socket === socket) this.receive(event.data); };
+    socket.onmessage = (event) => {
+      if (this.socket !== socket) return;
+      // A message this console cannot read ends the connection like a network failure.
+      try { this.receive(event.data); } catch (error) { console.error(error); this.closed(1002); }
+    };
     socket.onclose = (event) => { if (this.socket === socket) this.closed(event.code); };
   }
 
-  private receive(data: unknown) {
-    if (typeof data !== 'string') return;
-    let message: Record<string, unknown>;
-    try { message = JSON.parse(data) as Record<string, unknown>; } catch { return; }
-    if (message.type === 'entries' && Array.isArray(message.entries)) {
-      this.failures = 0;
-      if (this.unanswered > 0) return;
-      const entries = message.entries as LogEntry[];
-      if (typeof message.cursor === 'number') this.advance(Math.max(message.cursor, this.subscription.cursor ?? 0));
-      this.handlers.entries(entries, message.more === true);
-    } else if (message.type === 'state' && logStates.has(String(message.log)) && typeof message.log_epoch === 'number') {
-      this.failures = 0;
-      if (this.unanswered > 0) this.unanswered -= 1;
-      this.handlers.state({ log: message.log as LiveLogState['log'], log_epoch: message.log_epoch });
-      this.handlers.status('open');
+  private receive(data: string) {
+    const message = JSON.parse(data) as LiveMessage;
+    switch (message.type) {
+      case 'entries':
+        this.failures = 0;
+        if (this.unanswered > 0) return;
+        if (message.cursor !== null) this.advance(Math.max(message.cursor, this.subscription.cursor ?? 0));
+        this.handlers.entries(message.entries, message.more);
+        return;
+      case 'state':
+        this.failures = 0;
+        if (this.unanswered > 0) this.unanswered -= 1;
+        this.handlers.state({ log: message.log, log_epoch: message.log_epoch });
+        this.handlers.status('open');
+        return;
+      case 'pong':
+        return;
+      default:
+        throw new Error(`Unexpected live query log message: ${data.slice(0, 80)}`);
     }
   }
 

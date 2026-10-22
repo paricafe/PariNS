@@ -5,7 +5,7 @@ import { reloadConsole } from '../features/updates/reload';
 export type SessionPhase = 'checking' | 'setup' | 'setup-unknown' | 'login' | 'ready' | 'connection-error' | 'cookie-unavailable' | 'logout-unknown' | 'transport-change';
 /** `logout`: for `logout-unknown`, whether the sign-out request is still running, its result is being confirmed, or the session is known to remain. */
 /** `credentials`: the outcome of an account or Turnstile change that ended every session. */
-export interface SessionState { phase: SessionPhase; expiresInSeconds?: number; error?: string; transport?: TransportView; nextOrigin?: string | null; credentials?: CredentialOutcome; logout?: 'sending' | 'unconfirmed' | 'signed-in' }
+export interface SessionState { phase: SessionPhase; error?: string; transport?: TransportView; nextOrigin?: string | null; credentials?: CredentialOutcome; logout?: 'sending' | 'unconfirmed' | 'signed-in' }
 export type CredentialOutcome = 'changed' | 'unknown' | 'turnstileChanged' | 'turnstileUnknown';
 
 interface SessionContextValue {
@@ -16,7 +16,6 @@ interface SessionContextValue {
   rotateCredentials(currentPassword: string, username: string, newPassword: string): Promise<void>;
   /** Sets or clears the Turnstile keys; every session ends. */
   changeTurnstile(body: unknown): Promise<void>;
-  /** Whether this document was loaded while signed in (its policy then blocks the Turnstile widget). */
   /** Records the first login options this document saw; returns whether it may show the Turnstile widget. */
   turnstileAllowed(optionsHaveTurnstile: boolean): boolean;
   setup(username: string, password: string, toml: string, token: string): Promise<void>;
@@ -63,7 +62,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const binding = view.authenticated ? view.session!.binding : null;
     if (binding !== api.currentBinding) api.replaceBinding(binding);
     setState(view.setup_required ? { phase: 'setup', transport: view.transport } : view.authenticated
-      ? { phase: 'ready', expiresInSeconds: view.session!.expires_in_seconds, transport: view.transport }
+      ? { phase: 'ready', transport: view.transport }
       : { phase: 'login', transport: view.transport });
   }, [api]);
 
@@ -188,8 +187,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     };
     await authAction(async () => {
       try {
-        const result = await api.request<{ reauthentication_required: true }>(path, 'POST', body);
-        if (result?.reauthentication_required !== true) throw new ApiError(200, 'BAD_RESPONSE', 'Invalid credential response');
+        await api.request(path, 'POST', body);
         requireLogin(outcome.changed);
       } catch (error) {
         if (error instanceof ApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) requireLogin(outcome.unknown);
@@ -219,7 +217,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       await authAction(async () => {
         const view = await api.session();
         if (view.authenticated) { applySession(view); return; }
-        if (!view.setup_required) { applySession(view); throw new ApiError(409, 'SETUP_DONE', 'Setup already completed'); }
+        if (!view.setup_required) { applySession(view); throw new ApiError(409, 'ALREADY_SETUP', 'Setup already completed'); }
         const preview = await api.request<{ valid: true; transport_change: TransportChange | null }>('setup/preview', 'POST', { toml },
           { 'X-PariNS-Setup': token }, { unauthenticated: true });
         candidate.change = preview.transport_change;

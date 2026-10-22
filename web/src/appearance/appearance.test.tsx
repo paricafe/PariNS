@@ -143,7 +143,7 @@ describe('custom image storage', () => {
     vi.stubGlobal('indexedDB', undefined);
     await expect(loadImage()).resolves.toBeNull();
     await expect(saveImage({ blob: new Blob(['x']), luminance: 0.5 })).resolves.toBe(false);
-    await expect(clearImage()).resolves.toBe(false);
+    await expect(clearImage()).resolves.toBeUndefined();
   });
 
   it('restores a stored image, then clears it back to the default background', async () => {

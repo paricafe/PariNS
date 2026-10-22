@@ -1,5 +1,6 @@
 //! A single sampler owns raw-offset/base arithmetic and both reset cut points.
-use super::{Error, Result, Status, now_ms};
+use super::{Error, Result, Status};
+use crate::clock::unix_ms;
 use crate::metrics::{Metrics, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -149,7 +150,7 @@ impl Owner {
             offset: zero,
             totals_epoch: 0,
             history_epoch: 0,
-            since_ms: now_ms(),
+            since_ms: unix_ms(),
             run_id: format!("{:032x}", rand::random::<u128>()),
             seq: 0,
             latest: None,
@@ -157,7 +158,7 @@ impl Owner {
             dropped_points: 0,
             baseline: metrics.snapshot(),
             baseline_at: now,
-            baseline_ms: now_ms(),
+            baseline_ms: unix_ms(),
             checkpoint_at: now,
             running: false,
             generation: 0,
@@ -192,7 +193,7 @@ impl Owner {
         let raw = metrics.snapshot();
         self.checkpoint(&raw);
         if force || now.duration_since(self.baseline_at) >= Duration::from_secs(60) {
-            self.point(&raw, now, now_ms());
+            self.point(&raw, now, unix_ms());
         }
     }
     fn point(&mut self, raw: &Snapshot, now: Instant, wall: u64) {
@@ -289,13 +290,13 @@ mod tests {
         for _ in 0..7 {
             metrics.inc(Counter::Requests);
         }
-        owner.reset_committed(cut, now_ms(), 1);
+        owner.reset_committed(cut, unix_ms(), 1);
         assert_eq!(
             owner.totals(&metrics.snapshot()).metrics.counters["requests"],
             7
         );
         assert_eq!(metrics.snapshot().counters["requests"], 17);
-        owner.history_cleared(metrics.snapshot(), now_ms(), Instant::now(), 1);
+        owner.history_cleared(metrics.snapshot(), unix_ms(), Instant::now(), 1);
         metrics.inc(Counter::Requests);
         owner.sample(&metrics, true);
         assert_eq!(owner.points.back().unwrap().requests, 1);
@@ -331,14 +332,14 @@ mod tests {
         let mut owner = Owner::new(&metrics);
         owner.running = true;
         owner.next_gap = None;
-        owner.baseline_ms = now_ms() + 30_000;
+        owner.baseline_ms = unix_ms() + 30_000;
         owner.sample(&metrics, true);
         assert_eq!(
             owner.points.back().unwrap().gap.as_deref(),
             Some("clock_jump")
         );
         owner.baseline_at = Instant::now() - Duration::from_secs(120);
-        owner.baseline_ms = now_ms() - 120_000;
+        owner.baseline_ms = unix_ms() - 120_000;
         owner.sample(&metrics, true);
         assert_eq!(
             owner.points.back().unwrap().gap.as_deref(),

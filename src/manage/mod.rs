@@ -18,7 +18,7 @@ mod turnstile;
 mod update_checks;
 mod updates;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Extension, Router,
     body::{Body, to_bytes},
@@ -457,10 +457,7 @@ fn session_view(setup_required: bool, session: Option<&Session>) -> Value {
         Some(session) => json!({
             "setup_required":setup_required,
             "authenticated":true,
-            "session":{
-                "binding":session.binding,
-                "expires_in_seconds":SESSION_LIFETIME.saturating_sub(session.created.elapsed()).as_secs(),
-            }
+            "session":{"binding":session.binding}
         }),
         None => json!({"setup_required":setup_required,"authenticated":false,"session":null}),
     }
@@ -846,7 +843,6 @@ async fn api(
         }
         ("POST", "/api/query-log/list") => {
             let input: crate::query_log::ListOptions = decode(body)?;
-            input.validate().map_err(invalid)?;
             let services = shared.manager.lock().await.services.clone();
             Ok(json!({"page":services.storage.list_logs(input).await.map_err(storage_error)?}))
         }
@@ -1258,9 +1254,10 @@ pub async fn serve(
     address: SocketAddr,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    #[cfg(unix)]
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    let listener = TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("bind management listener {address}"))?;
     let address = listener.local_addr()?;
     let store = Store::open(directory)?;
     if store.read()?.is_none() {
@@ -1322,7 +1319,7 @@ pub async fn serve(
         tokio::select! {
             biased;
             _ = &mut shutdown => break Ok(()),
-            _ = async { #[cfg(unix)] { hangup.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => {
+            _ = hangup.recv() => {
                 if reload_task.is_some() { reload_pending = true; }
                 else { reload_task = Some(start_signal_reload(shared.clone())); }
             },

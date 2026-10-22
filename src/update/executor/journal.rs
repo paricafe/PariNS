@@ -1,4 +1,5 @@
 use super::fs::Dir;
+use crate::clock::unix_ms;
 use crate::update::ipc::*;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -101,7 +102,7 @@ impl Journal {
                     (!self.installed.build.official_release)
                         .then(|| "unsupported_installation".into())
                 },
-                checked_at_ms: now_ms(),
+                checked_at_ms: unix_ms(),
                 helper_protocol: crate::update::contract::HELPER_PROTOCOL,
                 install_contract: crate::update::contract::INSTALL_CONTRACT.into(),
             },
@@ -136,7 +137,7 @@ impl Journal {
         if let Some(op) = &mut self.operation {
             op.status.phase = phase;
             op.status.reason = reason.map(str::to_owned);
-            op.status.updated_at_ms = now_ms();
+            op.status.updated_at_ms = unix_ms();
             op.pending_launch = None;
             // A separately rejected Stage still needs its own fence even when
             // the installation owner later finishes. Both live in this journal.
@@ -194,14 +195,6 @@ impl Journal {
         self.finish(Phase::Succeeded, None);
         Ok(())
     }
-}
-
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
 }
 
 /// The running executable's hash, computed at most once per PID/InvocationID.

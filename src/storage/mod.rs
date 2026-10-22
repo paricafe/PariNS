@@ -9,6 +9,7 @@ mod statistics;
 mod tests;
 
 use crate::{
+    clock::unix_ms,
     metrics::Metrics,
     query_log::{Entry, ListOptions, NEWER_LIMIT, Newer, Page},
 };
@@ -24,7 +25,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
 
@@ -538,68 +539,26 @@ fn status(shared: &Shared) -> Status {
     result.filesystem.stale = result
         .filesystem
         .sampled_at_ms
-        .is_some_and(|at| now_ms().saturating_sub(at) > 120_000);
+        .is_some_and(|at| unix_ms().saturating_sub(at) > 120_000);
     let stats = shared.stats.lock().expect("statistics owner");
     result.pending_points = stats.points.len();
     result.dropped_points = stats.dropped_points;
     result.persist_lag_ms =
         if result.pending_entries > 0 || !stats.points.is_empty() || stats.latest.is_some() {
-            now_ms().saturating_sub(result.last_commit_at_ms.unwrap_or(stats.since_ms))
+            unix_ms().saturating_sub(result.last_commit_at_ms.unwrap_or(stats.since_ms))
         } else {
             0
         };
     result
 }
-pub(super) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as u64
-}
 
 fn private_directory(path: &Path) -> anyhow::Result<(PathBuf, File)> {
-    use crate::manage::store::{checked_open, create_private, private_permissions};
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)?;
     // The caller-specified root can be systemd's DynamicUser logical link.
     // Managed mode validates its owned `runtime` child before calling us.
     // All component files are checked only inside the resolved private root.
-    let dir = path.canonicalize()?;
-    anyhow::ensure!(
-        dir.parent().is_some(),
-        "runtime directory cannot be filesystem root: {}",
-        path.display()
-    );
-    if let Some(home) = std::env::var_os("HOME")
-        && let Ok(home) = Path::new(&home).canonicalize()
-    {
-        anyhow::ensure!(
-            dir != home,
-            "runtime directory cannot be HOME: {}; use a dedicated private subdirectory",
-            path.display()
-        );
-    }
-    private_permissions(&std::fs::metadata(&dir)?, 0o700)?;
-    let lock = match create_private(&dir.join("lock")) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            checked_open(&dir.join("lock"), true)?
-                .ok_or_else(|| anyhow::anyhow!("runtime lock disappeared"))?
-        }
-        Err(e) => return Err(e.into()),
-    };
-    lock.try_lock().map_err(|e| {
-        anyhow::anyhow!("runtime directory {} is already in use: {e}", dir.display())
-    })?;
+    let (dir, lock) = crate::private_files::lock_private_dir(path, "runtime")?;
     for name in ["observability.sqlite3", "observability.sqlite3-journal"] {
-        checked_open(&dir.join(name), false)?;
+        crate::private_files::checked_open(&dir.join(name), false)?;
     }
     Ok((dir, lock))
 }

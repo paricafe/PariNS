@@ -8,8 +8,7 @@
 //!   reconstructed by scanning objects.
 //! - Post-rename directory-sync uncertainty retains both versions and pauses GC
 //!   until reconciliation. Current/previous GC roots are synchronized before a new
-//!   collection. There is no invented cross-file atomic transaction or legacy
-//!   migration.
+//!   collection.
 //! - Preparation cannot refresh an active source or bypass later aggregate
 //!   compilation, revision, local-basis and update-freeze gates.
 //!
@@ -23,10 +22,11 @@
 //!   worker there. Config is persisted before its infallible policy swap; background
 //!   content selects the catalog before policy publication.
 //! - A process started while a software update is frozen serves read-only material
-//!   and leaves the Store (and its lock) closed. After the update coordinator's
-//!   reconcile thaws, management calls `Service::thaw`, which opens the Store once
-//!   and seeds the refresh schedule; a failure stays `subscription_storage_unavailable`
-//!   and the next thaw retries.
+//!   and leaves the Store (and its lock) closed; its status reports
+//!   `update_in_progress`. After the update coordinator's reconcile thaws,
+//!   management calls `Service::thaw`, which opens the Store once and seeds the
+//!   refresh schedule; a failure is logged and stays
+//!   `subscription_storage_unavailable`, and the next thaw retries.
 pub(crate) mod download;
 pub mod handle;
 pub mod service;
@@ -38,8 +38,8 @@ use crate::policy::canonical::{Format, PARSER_VERSION};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-/// Identity excludes names, schedules and enablement. There is no public Config
-/// field yet: this is input to the isolated preparation foundation only.
+/// Identity is the canonical URL, list format and parser version; names,
+/// schedules and enablement leave it unchanged.
 #[derive(Clone)]
 pub(crate) struct Source {
     url: String,

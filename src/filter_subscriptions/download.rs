@@ -1,6 +1,6 @@
 //! Low-privilege subscription download. A result is not an accepted source until
 //! the caller has completely parsed it and durably committed its content binding.
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
@@ -10,7 +10,9 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use url::Url;
 
 pub use crate::https_reader::ReaderError as DownloadError;
-use crate::https_reader::{HttpsReader, WireResponse, global_address, validate_headers};
+use crate::https_reader::{
+    HttpsReader, WireResponse, content_length, global_address, retry_after_unix,
+};
 
 pub const MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub const REPRESENTATION: &str = "text/plain;accept-encoding=gzip, identity;v=1";
@@ -73,13 +75,12 @@ impl SubscriptionReader {
     }
 
     /// The caller supplies a safe empty staging descriptor and owns disk quota,
-    /// cleanup, complete parsing and commit. `verified_lkg_sha256` may only name
-    /// an object whose complete bytes have been verified by the source store.
+    /// cleanup, complete parsing and commit. `previous` comes from a record the
+    /// source store validated, so its validators bind the verified content.
     pub async fn download<W: AsyncWrite + Unpin>(
         &self,
         url: &str,
         previous: Option<&Validators>,
-        verified_lkg_sha256: Option<&str>,
         output: &mut W,
     ) -> Result<DownloadOutcome, DownloadError> {
         let _permit = DOWNLOAD
@@ -90,7 +91,6 @@ impl SubscriptionReader {
             download_with(
                 url,
                 previous,
-                verified_lkg_sha256,
                 output,
                 |uri, headers| self.transport.request(uri, headers),
                 MAX_BYTES,
@@ -204,7 +204,6 @@ fn request_headers(binding: Option<&Validators>) -> HeaderMap {
 async fn download_with<W, F, Fut>(
     url: &str,
     previous: Option<&Validators>,
-    verified_lkg_sha256: Option<&str>,
     output: &mut W,
     mut request: F,
     limit: u64,
@@ -214,18 +213,11 @@ where
     F: FnMut(Uri, HeaderMap) -> Fut,
     Fut: Future<Output = Result<WireResponse, DownloadError>>,
 {
-    if let Some(previous) = previous {
-        previous.validate()?;
-    }
     let mut current = canonical_url(url)?;
     let mut redirects = 0;
     let mut repaired = false;
     loop {
-        let binding = previous.filter(|v| {
-            !repaired
-                && v.final_url == current
-                && verified_lkg_sha256 == Some(v.content_sha256.as_str())
-        });
+        let binding = previous.filter(|v| !repaired && v.final_url == current);
         let headers = request_headers(binding);
         let conditional = headers.contains_key(header::IF_NONE_MATCH)
             || headers.contains_key(header::IF_MODIFIED_SINCE);
@@ -236,7 +228,6 @@ where
             headers,
         )
         .await?;
-        validate_headers(&response.headers)?;
         if matches!(response.status.as_u16(), 301 | 302 | 303 | 307 | 308) {
             if redirects == 3 {
                 return Err(DownloadError::new("redirect_limit"));
@@ -278,7 +269,7 @@ where
         let etag = saved_header(&response.headers, header::ETAG).filter(|v| valid_etag(v));
         let last_modified =
             saved_header(&response.headers, header::LAST_MODIFIED).filter(|v| valid_modified(v));
-        let (sha256, bytes, _transferred_bytes) = stream_text(response, output, limit).await?;
+        let (sha256, bytes) = stream_text(response, output, limit).await?;
         let validators = Validators {
             final_url: current.clone(),
             representation: REPRESENTATION.into(),
@@ -298,7 +289,7 @@ async fn stream_text<W: AsyncWrite + Unpin>(
     mut response: WireResponse,
     output: &mut W,
     limit: u64,
-) -> Result<(String, u64, u64), DownloadError> {
+) -> Result<(String, u64), DownloadError> {
     let mut encodings = response.headers.get_all(header::CONTENT_ENCODING).iter();
     let encoding = encodings
         .next()
@@ -309,16 +300,7 @@ async fn stream_text<W: AsyncWrite + Unpin>(
     {
         return Err(DownloadError::new("unsupported_encoding"));
     }
-    let length = response
-        .headers
-        .get(header::CONTENT_LENGTH)
-        .map(|v| {
-            v.to_str()
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .ok_or_else(|| DownloadError::new("invalid_response"))
-        })
-        .transpose()?;
+    let length = content_length(&response.headers)?;
     if length.is_some_and(|n| n > limit) {
         return Err(DownloadError::new("transfer_too_large"));
     }
@@ -386,7 +368,7 @@ async fn stream_text<W: AsyncWrite + Unpin>(
         .flush()
         .await
         .map_err(|_| DownloadError::new("file_write_failed"))?;
-    Ok((format!("{:x}", hash.finalize()), written, transferred))
+    Ok((format!("{:x}", hash.finalize()), written))
 }
 
 async fn write_decoded<W: AsyncWrite + Unpin>(
@@ -409,26 +391,8 @@ async fn write_decoded<W: AsyncWrite + Unpin>(
 }
 
 fn http_error(status: StatusCode, headers: &HeaderMap) -> DownloadError {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
     let retry_after_unix = if matches!(status.as_u16(), 429 | 503) {
-        headers
-            .get(header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| {
-                v.parse::<u64>()
-                    .ok()
-                    .map(|seconds| now.saturating_add(seconds))
-                    .or_else(|| {
-                        httpdate::parse_http_date(v)
-                            .ok()?
-                            .duration_since(UNIX_EPOCH)
-                            .ok()
-                            .map(|d| d.as_secs())
-                    })
-            })
+        retry_after_unix(headers, crate::clock::unix_secs())
     } else {
         None
     };
@@ -449,7 +413,6 @@ mod tests;
 pub(crate) async fn download_fixture<W: AsyncWrite + Unpin>(
     url: &str,
     previous: Option<&Validators>,
-    verified_lkg_sha256: Option<&str>,
     output: &mut W,
     responses: Vec<WireResponse>,
 ) -> Result<DownloadOutcome, DownloadError> {
@@ -457,7 +420,6 @@ pub(crate) async fn download_fixture<W: AsyncWrite + Unpin>(
     download_with(
         url,
         previous,
-        verified_lkg_sha256,
         output,
         |_, _| {
             std::future::ready(

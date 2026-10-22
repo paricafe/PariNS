@@ -462,7 +462,7 @@ async fn byte_limit_and_reliable_settings_survive_full_queues() {
     let runtime = RuntimeServices::ephemeral(config.clone());
     let (release, paused) = pause(&runtime.storage).await;
     assert_eq!(runtime.storage.status().last_dropped_log_at_ms, None);
-    let before = now_ms();
+    let before = unix_ms();
     let mut large = entry("fresh");
     large.name = "x".repeat(60_000);
     for _ in 0..100 {
@@ -471,7 +471,7 @@ async fn byte_limit_and_reliable_settings_survive_full_queues() {
     assert!(runtime.storage.status().pending_bytes <= 1_048_576);
     assert!(runtime.storage.status().dropped_logs > 0);
     let last = runtime.storage.status().last_dropped_log_at_ms.unwrap();
-    assert!((before..=now_ms()).contains(&last));
+    assert!((before..=unix_ms()).contains(&last));
     config.query_log.enabled = false;
     runtime.storage.publish_settings(config, 37);
     assert!(runtime.query_log.begin().is_none());
@@ -595,7 +595,7 @@ async fn full_database_rolls_back_batch_and_retains_prior_rows() {
 async fn corrupt_database_is_preserved_unavailable_and_keeps_single_writer_lock() {
     let dir = private_dir();
     let path = dir.path().join("observability.sqlite3");
-    let mut file = crate::manage::store::create_private(&path).unwrap();
+    let mut file = crate::private_files::create_private(&path).unwrap();
     use std::io::Write;
     file.write_all(b"not a SQLite database").unwrap();
     drop(file);
@@ -619,7 +619,7 @@ async fn a_database_without_tables_is_initialized_like_a_new_one() {
     // a valid, non-empty SQLite file with no tables.
     let dir = private_dir();
     let path = dir.path().join("observability.sqlite3");
-    drop(crate::manage::store::create_private(&path).unwrap());
+    drop(crate::private_files::create_private(&path).unwrap());
     rusqlite::Connection::open(&path)
         .unwrap()
         .execute_batch("PRAGMA user_version=7;")
@@ -671,7 +671,7 @@ async fn private_component_permissions_links_and_database_pragmas() {
     .unwrap();
     runtime.storage.shutdown().await.unwrap();
     let external = dir.path().join("external");
-    crate::manage::store::create_private(&external).unwrap();
+    crate::private_files::create_private(&external).unwrap();
     let unsafe_dir = dir.path().join("unsafe");
     std::fs::create_dir(&unsafe_dir).unwrap();
     std::fs::set_permissions(&unsafe_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -834,7 +834,7 @@ async fn indexed_coverage_reports_twenty_six_seconds_not_six_hour_configuration(
     settings.query_log.max_entries = 1000;
     settings.query_log.retention_secs = 21_600;
     let runtime = RuntimeServices::ephemeral(settings);
-    let end = now_ms();
+    let end = unix_ms();
     for index in 0..2000 {
         let mut record = entry("fresh");
         record.time_ms = end - ((1999 - index) as f64 / 38.1 * 1000.0) as u64;
@@ -974,7 +974,7 @@ async fn clock_rollback_keeps_new_log_and_minute_points_with_monotonic_retention
     runtime.storage.record_log(0, entry("fresh"));
     runtime.storage.flush().await.unwrap();
     runtime.storage.shutdown().await.unwrap();
-    let lower = now_ms() + 172_800_000;
+    let lower = unix_ms() + 172_800_000;
     let conn = rusqlite::Connection::open(directory.path().join("observability.sqlite3")).unwrap();
     conn.execute(
         "UPDATE metadata SET value=? WHERE key='clock_lower_ms'",
@@ -1073,7 +1073,7 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     runtime.metrics.inc(Counter::Requests);
     runtime.storage.flush().await.unwrap();
     runtime.storage.shutdown().await.unwrap();
-    let lower = now_ms() + 172_800_000;
+    let lower = unix_ms() + 172_800_000;
     let conn = rusqlite::Connection::open(directory.path().join("observability.sqlite3")).unwrap();
     conn.execute(
         "UPDATE metadata SET value=? WHERE key='clock_lower_ms'",

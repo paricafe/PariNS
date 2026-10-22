@@ -52,15 +52,8 @@ jobs:
         run: |
           set -euo pipefail
           rustup show active-toolchain
+          # build.rs checks the tag, version and source SHA of official builds.
           version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
-          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$version" ]]; then
-            echo 'Tag does not match Cargo.toml' >&2
-            exit 1
-          fi
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            test "$(git rev-parse "$GITHUB_REF^{commit}")" = "$GITHUB_SHA"
-          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           sudo apt-get update
           sudo apt-get install --yes musl-tools binutils

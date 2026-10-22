@@ -87,7 +87,7 @@ impl Drops {
     pub fn record_many(&self, counter: &AtomicU64, count: u64) {
         if count > 0 {
             counter.fetch_add(count, Ordering::Relaxed);
-            self.last_at_ms.store(now_ms(), Ordering::Relaxed);
+            self.last_at_ms.store(unix_ms(), Ordering::Relaxed);
         }
     }
     pub fn last_at_ms(&self) -> Option<u64> {
@@ -129,7 +129,7 @@ impl Filesystem {
     }
     pub(super) fn sample(directory: Option<&Path>, settings: &RuntimeSettings) -> Self {
         let mut result = Self {
-            sampled_at_ms: Some(now_ms()),
+            sampled_at_ms: Some(unix_ms()),
             ..Default::default()
         };
         result.apply_settings(settings);
@@ -137,25 +137,17 @@ impl Filesystem {
             result.error = Some("ephemeral_storage".into());
             return result;
         };
-        #[cfg(unix)]
-        {
-            match rustix::fs::statvfs(path) {
-                Ok(stat) => {
-                    let available = stat.f_bavail.saturating_mul(stat.f_frsize);
-                    let total = stat.f_blocks.saturating_mul(stat.f_frsize);
-                    result.total_bytes = Some(total);
-                    result.available_bytes = Some(available);
-                    result.apply_settings(settings);
-                }
-                Err(_) => {
-                    result.error = Some("filesystem_unavailable".into());
-                }
+        match rustix::fs::statvfs(path) {
+            Ok(stat) => {
+                let available = stat.f_bavail.saturating_mul(stat.f_frsize);
+                let total = stat.f_blocks.saturating_mul(stat.f_frsize);
+                result.total_bytes = Some(total);
+                result.available_bytes = Some(available);
+                result.apply_settings(settings);
             }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            result.error = Some("platform_unsupported".into());
+            Err(_) => {
+                result.error = Some("filesystem_unavailable".into());
+            }
         }
         result
     }

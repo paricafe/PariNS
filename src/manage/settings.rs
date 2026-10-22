@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use crate::config::Config;
 
-const MAX_CONFIG: usize = 256 * 1024;
+use super::store::MAX_CONFIG;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

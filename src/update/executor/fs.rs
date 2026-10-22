@@ -154,10 +154,9 @@ impl Dir {
     }
     pub fn space(&self, required: u64) -> Result<()> {
         let stat = fs::fstatvfs(&self.fd)?;
-        ensure!(
-            stat.f_bavail.saturating_mul(stat.f_frsize) >= required,
-            "insufficient_space"
-        );
+        if stat.f_bavail.saturating_mul(stat.f_frsize) < required {
+            return Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
+        }
         Ok(())
     }
 }

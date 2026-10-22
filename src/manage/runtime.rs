@@ -4,7 +4,7 @@
 mod tests;
 use super::{
     Active,
-    store::{Store, Stored},
+    store::{MAX_CONFIG, Store, Stored},
     transport::Snapshot,
 };
 use crate::resolver::ForcedShutdown;
@@ -233,25 +233,15 @@ impl Manager {
         // local_error so no start path ever serves this placeholder policy.
         let local = local.ok().flatten().unwrap_or_default();
         use crate::filter_subscriptions::service::Service as Filters;
-        let filters = if updates.frozen.load(std::sync::atomic::Ordering::Acquire) {
-            Filters::open_frozen(
-                store.dir.join("filter-subscriptions"),
-                local,
-                filter_settings,
-                revision,
-                previous,
-            )
-            .await?
-        } else {
-            Filters::open(
-                store.dir.join("filter-subscriptions"),
-                local,
-                filter_settings,
-                revision,
-                previous,
-            )
-            .await?
-        };
+        let filters = Filters::open(
+            store.dir.join("filter-subscriptions"),
+            local,
+            filter_settings,
+            revision,
+            previous,
+            updates.frozen.load(std::sync::atomic::Ordering::Acquire),
+        )
+        .await?;
         let directory = store.dir.join("runtime");
         let (services, persistence) = tokio::task::spawn_blocking(move || {
             match std::fs::symlink_metadata(&directory) {
@@ -374,14 +364,7 @@ impl Manager {
     /// while DNS is stopped. The management listener owns the same active set.
     pub async fn reload_certificates(&mut self, source: &'static str) -> Result<Value> {
         self.reload_attempt = self.reload_attempt.saturating_add(1);
-        let now = || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .min(u64::MAX as u128) as u64
-        };
-        let started = now();
+        let started = crate::clock::unix_ms();
         let certificates = self.active.lock().unwrap().snapshot.certificates.clone();
         let result = if let Some(certificates) = certificates {
             let prepare = certificates.clone();
@@ -406,7 +389,7 @@ impl Manager {
             }
         });
         self.last_reload = Some(
-            serde_json::json!({"attempt_id":self.reload_attempt,"source":source,"started_at_ms":started,"completed_at_ms":now(),"outcome":outcome,"error_code":error_code}),
+            serde_json::json!({"attempt_id":self.reload_attempt,"source":source,"started_at_ms":started,"completed_at_ms":crate::clock::unix_ms(),"outcome":outcome,"error_code":error_code}),
         );
         result.map_err(|error| {
             if error.is::<crate::tls::ManagementNameMismatch>() {
@@ -494,7 +477,7 @@ impl Manager {
     }
 
     pub async fn validate(&self, toml: String) -> Result<Config> {
-        ensure!(toml.len() <= 256 * 1024, "configuration exceeds 256 KiB");
+        ensure!(toml.len() <= MAX_CONFIG, "configuration exceeds 256 KiB");
         if self.updates_only(&toml)? {
             return Config::parse_in(&toml, &self.store.dir);
         }
@@ -512,7 +495,7 @@ impl Manager {
     }
 
     pub async fn prepare(&self, toml: String) -> Result<(Config, Snapshot)> {
-        ensure!(toml.len() <= 256 * 1024, "configuration exceeds 256 KiB");
+        ensure!(toml.len() <= MAX_CONFIG, "configuration exceeds 256 KiB");
         let dir = self.store.dir.clone();
         let address = self.address;
         tokio::task::spawn_blocking(move || {

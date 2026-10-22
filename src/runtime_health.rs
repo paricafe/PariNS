@@ -2,6 +2,8 @@
 use serde::Serialize;
 use std::sync::Mutex;
 
+use crate::clock::unix_ms;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -30,21 +32,14 @@ impl Default for Health {
             state: State::Unconfigured,
             ready: false,
             generation: 0,
-            changed_at_ms: now(),
+            changed_at_ms: unix_ms(),
             code: None,
         }))
     }
 }
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
-}
 impl Health {
     pub fn publish(&self, state: State, generation: u64, code: Option<&'static str>) -> bool {
-        let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut current = self.0.lock().unwrap();
         if generation < current.generation {
             return false;
         }
@@ -59,13 +54,13 @@ impl Health {
             state,
             ready: state == State::Running,
             generation,
-            changed_at_ms: now(),
+            changed_at_ms: unix_ms(),
             code,
         };
         true
     }
     pub fn snapshot(&self) -> Snapshot {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.0.lock().unwrap().clone()
     }
 }
 

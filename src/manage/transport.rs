@@ -38,7 +38,6 @@ pub(super) struct Snapshot {
     pub scheme: Scheme,
     pub origin: Option<String>,
     pub public_host: Option<String>,
-    pub source: Option<&'static str>,
     pub tls: Option<Arc<ServerConfig>>,
     pub certificates: Option<Arc<tls::CertificateSet>>,
     pub realm: u64,
@@ -50,7 +49,6 @@ impl Snapshot {
             scheme: Scheme::Http,
             origin: None,
             public_host: None,
-            source: None,
             tls: None,
             certificates: None,
             realm: 0,
@@ -58,8 +56,7 @@ impl Snapshot {
     }
 
     pub fn describe(config: &Config, address: SocketAddr) -> Result<Self> {
-        let (source, _) = selected_files(config);
-        let scheme = if source.is_some() {
+        let scheme = if config.doh.is_some() {
             Scheme::Https
         } else {
             Scheme::Http
@@ -80,7 +77,6 @@ impl Snapshot {
             scheme,
             origin,
             public_host,
-            source,
             tls: None,
             certificates: None,
             realm: 0,
@@ -98,7 +94,7 @@ impl Snapshot {
                 CertificateInvalid(error).into()
             }
         })?;
-        if candidate.source.is_some() {
+        if candidate.scheme == Scheme::Https {
             candidate.tls =
                 Some(certificates.server_config(tls::CertificateRole::Doh, &[b"http/1.1"])?);
         }
@@ -107,8 +103,7 @@ impl Snapshot {
     }
 
     pub fn view(&self) -> Value {
-        json!({"scheme":self.scheme.as_str(),"origin":self.origin,
-            "certificate_source":self.source})
+        json!({"scheme":self.scheme.as_str(),"origin":self.origin})
     }
 
     pub fn change(&self, next: &Self, request_host: &str, address: SocketAddr) -> Value {
@@ -125,9 +120,8 @@ impl Snapshot {
             }
         });
         json!({
-            "from":self.scheme.as_str(), "to":next.scheme.as_str(),
+            "to":next.scheme.as_str(),
             "next_origin":next_origin,
-            "reauthenticate":true,
             "requires_http_confirmation":self.scheme == Scheme::Https && next.scheme == Scheme::Http,
         })
     }
@@ -147,14 +141,6 @@ impl fmt::Display for CertificateInvalid {
 }
 
 impl std::error::Error for CertificateInvalid {}
-
-fn selected_files(config: &Config) -> (Option<&'static str>, Option<&tls::TlsFiles>) {
-    if let Some(doh) = &config.doh {
-        (Some("doh"), Some(&doh.files))
-    } else {
-        (None, None)
-    }
-}
 
 fn origin(scheme: Scheme, host: &str, port: u16) -> String {
     let host = if host.contains(':') {
@@ -190,7 +176,7 @@ mod tests {
         let config = Config::parse_in(&format!("{example}{listeners}"), temp.path()).unwrap();
         let address = "127.0.0.1:3000".parse().unwrap();
         let chosen = Snapshot::prepare(&config, address).unwrap();
-        assert_eq!(chosen.source, Some("doh"));
+        assert_eq!(chosen.scheme, Scheme::Https);
         assert_eq!(
             chosen
                 .certificates
@@ -205,7 +191,7 @@ mod tests {
         let mut config = config;
         config.doh.as_mut().unwrap().http3 = true;
         let enabled = Snapshot::prepare(&config, address).unwrap();
-        assert_eq!(enabled.source, Some("doh"));
+        assert_eq!(enabled.scheme, Scheme::Https);
         assert!(!chosen.changes_realm(&enabled));
         assert_eq!(
             chosen

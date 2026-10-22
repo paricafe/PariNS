@@ -108,14 +108,10 @@ async fn run() -> Result<()> {
             );
             return Ok(());
         }
-        #[cfg(unix)]
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         return parins::manage::serve(&state_dir, web_listen, async {
-            #[cfg(unix)]
             tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
-            #[cfg(not(unix))]
-            let _ = tokio::signal::ctrl_c().await;
         })
         .await;
     }
@@ -147,6 +143,7 @@ async fn run() -> Result<()> {
         config.filter_subscriptions.clone(),
         0,
         vec![],
+        false,
     )
     .await?;
     // Only a never-selected fingerprint may perform first preparation. Existing
@@ -196,20 +193,14 @@ async fn run() -> Result<()> {
             eprintln!("PariNS listening on {} ({protocol})", listener.address);
         }
     }
-    #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    #[cfg(unix)]
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    #[cfg(unix)]
     let reload = server.reload_handle();
-    #[cfg(unix)]
     let mut reload_task: Option<tokio::task::JoinHandle<Result<()>>> = None;
-    #[cfg(unix)]
     let mut reload_pending = false;
     let scheduler = tokio::spawn(filters.clone().run_file_scheduler());
     let outcome = server
         .run(async {
-            #[cfg(unix)]
             loop { tokio::select! {
                 biased;
                 result = tokio::signal::ctrl_c() => {
@@ -238,10 +229,6 @@ async fn run() -> Result<()> {
                     }
                 }
             }}
-            #[cfg(not(unix))]
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                eprintln!("shutdown signal error: {error}");
-            }
         })
         .await;
     services.set_dns_state(false, 1);
@@ -261,7 +248,6 @@ async fn run() -> Result<()> {
     );
     // Server has closed publication before returning: a late blocking read can
     // never change the policy fingerprint or active identities after this cut.
-    #[cfg(unix)]
     let reload_drained = if let Some(task) = reload_task {
         tokio::time::timeout(std::time::Duration::from_secs(5), task)
             .await
@@ -269,8 +255,6 @@ async fn run() -> Result<()> {
     } else {
         true
     };
-    #[cfg(not(unix))]
-    let reload_drained = true;
     let quiescent = filters_drained && reload_drained && outcome.is_ok() && resolver.is_quiescent();
     let report = parins::runtime_lifecycle::terminal(
         services,

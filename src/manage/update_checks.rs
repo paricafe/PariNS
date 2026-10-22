@@ -31,14 +31,11 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
                 }
                 let parsed =
                     tokio::task::spawn_blocking(move || toml::from_str::<SavedSettings>(&toml))
-                        .await;
-                match parsed {
-                    Ok(Ok(parsed)) => {
-                        settings = parsed.updates;
-                        revision = Some(current);
-                    }
-                    _ => return, // Config owns the persisted schema.
-                }
+                        .await
+                        .expect("parse saved configuration")
+                        .expect("saved configuration was validated by Config");
+                settings = parsed.updates;
+                revision = Some(current);
             }
             if !*stop.borrow() && updates.due(settings.auto_check) {
                 // Do not abort an atomic persistence worker during shutdown.

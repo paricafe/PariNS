@@ -12,7 +12,7 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_ha
 use serde::{Deserialize, Serialize};
 
 const MAX_STATE: usize = 2 * 1024 * 1024;
-const MAX_CONFIG: usize = 256 * 1024;
+pub(super) const MAX_CONFIG: usize = 256 * 1024;
 const STATE: &str = "state.json";
 const TOKEN: &str = "setup-token";
 
@@ -33,51 +33,9 @@ pub(super) struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(path)
-            .context("create management directory")?;
         // systemd DynamicUser StateDirectory may itself be a legitimate symlink.
         // All later access is through its resolved, private directory.
-        let dir = path
-            .canonicalize()
-            .context("resolve management directory")?;
-        ensure!(
-            dir.parent().is_some(),
-            "management directory input '{}' resolves to filesystem root '{}'; use a dedicated private subdirectory",
-            path.display(),
-            dir.display()
-        );
-        if let Some(home) = std::env::var_os("HOME")
-            && let Ok(home) = Path::new(&home).canonicalize()
-        {
-            ensure!(
-                dir != home,
-                "management directory input '{}' resolves to HOME '{}'; use a dedicated private subdirectory, not the account home",
-                path.display(),
-                dir.display()
-            );
-        }
-        let metadata = fs::metadata(&dir)?;
-        ensure!(metadata.is_dir(), "management path must be a directory");
-        private_permissions(&metadata, 0o700)?;
-
-        let lock_path = dir.join("lock");
-        let lock = match create_private(&lock_path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                checked_open(&lock_path, true)?.context("management lock disappeared")?
-            }
-            Err(error) => return Err(error).context("create management lock"),
-        };
-        lock.try_lock()
-            .context("management directory is already in use")?;
+        let (dir, lock) = lock_private_dir(path, "management")?;
         let store = Self { dir, _lock: lock };
         // Invalid state is an error, never an invitation to run setup again.
         store.read()?;
@@ -119,18 +77,17 @@ impl Store {
         file.write_all(bytes).context("write management state")?;
         file.sync_all().context("synchronize management state")?;
         fs::rename(&temporary.0, destination).context("publish management state")?;
-        // rename is the commit point. A subsequent directory-fsync failure must
-        // not tell the runtime to roll back a configuration already published.
-        // Atomic visibility still holds, but power-loss durability is uncertain.
-        if File::open(&self.dir)
-            .and_then(|dir| dir.sync_all())
-            .is_err()
-        {
-            eprintln!(
-                "management state committed; directory sync failed, power-loss durability is uncertain"
-            );
-        }
+        sync_committed(&self.dir, "management state");
         Ok(())
+    }
+}
+
+/// Makes a rename or removal in `dir` durable. That change is the commit point,
+/// so a failed directory sync must not tell the caller to roll back what is
+/// already visible; it is logged because power-loss durability is uncertain.
+pub(super) fn sync_committed(dir: &Path, change: &str) {
+    if File::open(dir).and_then(|dir| dir.sync_all()).is_err() {
+        eprintln!("{change} committed; directory sync failed, power-loss durability is uncertain");
     }
 }
 
@@ -169,7 +126,7 @@ fn validate_stored(stored: &Stored) -> Result<()> {
     Ok(())
 }
 
-pub(crate) use crate::private_files::{checked_open, create_private, private_permissions};
+use crate::private_files::{checked_open, create_private, lock_private_dir};
 
 pub(super) fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     let Some(file) = checked_open(path, false)? else {
@@ -267,12 +224,9 @@ mod tests {
     use super::*;
 
     fn private_directory() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         directory
     }
 
@@ -286,7 +240,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn root_and_home_rejections_identify_input_and_resolved_directory() {
         let error = Store::open(Path::new("/"))
@@ -401,7 +354,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn permissions_are_private_and_existing_directories_are_not_chmodded() {
         use std::os::unix::fs::PermissionsExt;
@@ -431,7 +383,6 @@ mod tests {
         assert!(store.save(&stored()).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn directory_symlink_supported_but_file_links_rejected() {
         use std::os::unix::fs::{PermissionsExt, symlink};

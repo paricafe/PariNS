@@ -455,6 +455,7 @@ async fn file_subscription_reload_prepares_all_material_and_closes_publication()
         config.filter_subscriptions.clone(),
         0,
         vec![],
+        false,
     )
     .await
     .unwrap();
@@ -511,6 +512,7 @@ async fn corrupt_subscription_catalog_keeps_busy_file_reload_policy_and_certific
         config.filter_subscriptions.clone(),
         0,
         vec![],
+        false,
     )
     .await
     .unwrap();
@@ -523,6 +525,7 @@ async fn corrupt_subscription_catalog_keeps_busy_file_reload_policy_and_certific
         config.filter_subscriptions.clone(),
         0,
         vec![],
+        false,
     )
     .await
     .unwrap();

@@ -25,15 +25,16 @@
 mod fs;
 mod journal;
 
+use crate::clock::unix_ms;
 use crate::update::{
     build_info::BuildInfo,
-    contract::{HELPER_PROTOCOL, MAX_BINARY_BYTES},
+    contract::{ContractError, HELPER_PROTOCOL, MAX_BINARY_BYTES},
     ipc::*,
     reader::{DownloadTuple, GithubReader},
 };
 use anyhow::{Context, Result, bail, ensure};
 use fs::Dir;
-use journal::{ExecutableIdentity, Installation, Journal, Operation, Readiness, now_ms};
+use journal::{ExecutableIdentity, Installation, Journal, Operation, Readiness};
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -66,12 +67,7 @@ fn failure_code(error: &anyhow::Error) -> &'static str {
             _ => "verification_failed",
         };
     }
-    match error.to_string().as_str() {
-        "insufficient_space" => "insufficient_space",
-        "rate_limited" => "rate_limited",
-        "release_changed" => "release_changed",
-        _ => "verification_failed",
-    }
+    "verification_failed"
 }
 
 pub async fn run_cli() -> Result<()> {
@@ -203,7 +199,7 @@ impl Executor {
     fn phase(&self, journal: &mut Journal, phase: Phase) -> Result<()> {
         let op = journal.operation.as_mut().context("missing operation")?;
         op.status.phase = phase;
-        op.status.updated_at_ms = now_ms();
+        op.status.updated_at_ms = unix_ms();
         self.persist(journal)
     }
     fn finish(&self, journal: &mut Journal, phase: Phase, reason: Option<&str>) -> Result<()> {
@@ -397,7 +393,7 @@ impl Executor {
                         && op.config_revision == config_revision,
                     "invalid commit phase"
                 );
-                let current_time = now_ms();
+                let current_time = unix_ms();
                 if current_time < op.started_at_ms
                     || current_time.saturating_sub(op.started_at_ms) > 30 * 60 * 1000
                 {
@@ -457,7 +453,7 @@ impl Executor {
             phase: Phase::Failed,
             version: request.version.clone(),
             reason: Some(reason.into()),
-            updated_at_ms: now_ms(),
+            updated_at_ms: unix_ms(),
             downloaded_bytes: 0,
             total_bytes: request.download.size,
         });
@@ -540,7 +536,7 @@ impl Executor {
     }
 
     async fn stage(&mut self, journal: &mut Journal, request: &StageRequest<'_>) -> Result<()> {
-        if !self.stage_gate(journal, request, now_ms())? {
+        if !self.stage_gate(journal, request, unix_ms())? {
             return Ok(());
         }
         let (inbox, download, current_sha256) =
@@ -559,13 +555,13 @@ impl Executor {
         if service().await?.get("InvocationID").map(String::as_str) != Some(request.invocation_id) {
             return self.reject_stage(journal, request, "config_changed");
         }
-        self.begin_stage(journal, request, now_ms())?;
+        self.begin_stage(journal, request, unix_ms())?;
         let outcome: Result<()> = async {
             let reader = GithubReader::new();
             let manifest = reader.manifest(&download.tag).await?;
             ensure!(
                 manifest.sha256 == download.manifest_sha256,
-                "release_changed"
+                ContractError::ReleaseChanged
             );
             manifest
                 .manifest
@@ -577,7 +573,7 @@ impl Executor {
                 artifact.name == download.asset_name
                     && artifact.size == download.size
                     && artifact.sha256 == download.sha256,
-                "release_changed"
+                ContractError::ReleaseChanged
             );
             let m = &manifest.manifest;
             let candidate = InstalledIdentity {
@@ -1206,7 +1202,7 @@ pub(crate) fn manual_recovery_reinstall_fixture(
             candidate: installed.clone(),
             invocation_id: "e".repeat(32),
             config_revision: 1,
-            started_at_ms: now_ms(),
+            started_at_ms: unix_ms(),
             rollback_attempted: true,
             rollback_started: true,
             pending_launch: None,
@@ -1316,7 +1312,7 @@ pub(crate) fn consume_abort_fixture(
             candidate: status.installed.clone(),
             invocation_id: "f".repeat(32),
             config_revision: 2,
-            started_at_ms: now_ms(),
+            started_at_ms: unix_ms(),
             rollback_attempted: false,
             rollback_started: false,
             pending_launch: status.pending_launch.clone(),
@@ -1385,7 +1381,7 @@ mod tests {
                     phase: Phase::Downloading,
                     version: "0.1.5".into(),
                     reason: None,
-                    updated_at_ms: now_ms(),
+                    updated_at_ms: unix_ms(),
                     downloaded_bytes: 0,
                     total_bytes: 100,
                 },
@@ -1393,7 +1389,7 @@ mod tests {
                 candidate: installed,
                 invocation_id: "e".repeat(32),
                 config_revision: 2,
-                started_at_ms: now_ms(),
+                started_at_ms: unix_ms(),
                 rollback_attempted: false,
                 rollback_started: false,
                 pending_launch: None,
@@ -1547,7 +1543,7 @@ mod tests {
                 .stage_gate(
                     &mut journal,
                     &StageRequest::parse(&malformed).unwrap(),
-                    now_ms()
+                    unix_ms()
                 )
                 .is_err()
         );
@@ -1686,9 +1682,6 @@ mod tests {
 
     #[test]
     fn stage_failures_keep_stable_actionable_reasons() {
-        for code in ["insufficient_space", "rate_limited", "release_changed"] {
-            assert_eq!(failure_code(&anyhow::anyhow!(code)), code);
-        }
         assert_eq!(
             failure_code(&crate::update::contract::ContractError::ReleaseChanged.into()),
             "release_changed"

@@ -10,7 +10,7 @@ use super::{
     settings::{Format, Settings},
     store::{SourceRecord, Store, WorkPin},
 };
-use crate::policy::Policy;
+use crate::{clock::unix_secs, policy::Policy};
 use anyhow::{Context, Result, ensure};
 use hickory_proto::rr::Name;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -183,25 +182,9 @@ pub struct ConfigCandidate {
 }
 
 impl Service {
+    /// `frozen`: a software update froze the process. The Service then
+    /// publishes read-only material and keeps its Store closed until [`Self::thaw`].
     pub async fn open(
-        path: PathBuf,
-        local: Policy,
-        settings: Settings,
-        revision: u64,
-        previous: Vec<String>,
-    ) -> Result<Arc<Self>> {
-        Self::open_inner(path, local, settings, revision, previous, false).await
-    }
-    pub async fn open_frozen(
-        path: PathBuf,
-        local: Policy,
-        settings: Settings,
-        revision: u64,
-        previous: Vec<String>,
-    ) -> Result<Arc<Self>> {
-        Self::open_inner(path, local, settings, revision, previous, true).await
-    }
-    async fn open_inner(
         path: PathBuf,
         local: Policy,
         settings: Settings,
@@ -224,7 +207,10 @@ impl Service {
         .await?;
         let (store, unavailable) = match opened {
             Ok(store) => (store, None),
-            Err(_) => (None, Some("subscription_storage_unavailable".into())),
+            Err(error) => {
+                eprintln!("PariNS subscription storage unavailable: {error:#}");
+                (None, Some("subscription_storage_unavailable".into()))
+            }
         };
         let service = Arc::new(Self {
             path,
@@ -304,7 +290,7 @@ impl Service {
                 service.handle.publish(material.policy);
                 state.input_digest = Some(material.material_digest);
                 state.index_pin = material.index_pin;
-                state.unavailable = None;
+                state.unavailable = frozen.then(|| "update_in_progress".into());
             }
             Err(error) => {
                 service.state.lock().unwrap().unavailable = Some(Failure::from_error(&error).code);
@@ -357,10 +343,17 @@ impl Service {
             store.set_references(current, previous)?;
             Ok(store)
         });
-        let Ok(store) = opened else {
-            self.state.lock().unwrap().unavailable =
-                Some("subscription_storage_unavailable".into());
-            return false;
+        let store = match opened {
+            Ok(store) => store,
+            Err(error) => {
+                let mut state = self.state.lock().unwrap();
+                // Thaw retries every second; log each new failure once.
+                if state.unavailable.as_deref() != Some("subscription_storage_unavailable") {
+                    eprintln!("PariNS subscription storage unavailable: {error:#}");
+                }
+                state.unavailable = Some("subscription_storage_unavailable".into());
+                return false;
+            }
         };
         // A frozen start that could not build its policy keeps that reason.
         {
@@ -634,7 +627,7 @@ impl Service {
                 || old_settings
                     .sources
                     .iter()
-                    .find(|old| old.identity().is_ok_and(|s| s.fingerprint == fp))
+                    .find(|old| old.identity().expect("validated settings").fingerprint == fp)
                     .is_none_or(|old| {
                         !old.enabled
                             || !old.auto_update
@@ -645,8 +638,8 @@ impl Service {
                 && record.status.failures == 0
             {
                 let due = operations::periodic(record.prepared_at, source.update_interval_hours);
-                record.status.next_update = Some(if due <= now() {
-                    now() + rand::random_range(60..=300)
+                record.status.next_update = Some(if due <= unix_secs() {
+                    unix_secs() + rand::random_range(60..=300)
                 } else {
                     due
                 });
@@ -728,13 +721,6 @@ impl Service {
         };
         state.content_revision = store.revision();
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 pub fn error_code(error: &anyhow::Error) -> &'static str {

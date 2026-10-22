@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 // Manual work acts on the saved configuration current at admission; the
@@ -144,11 +144,7 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
         let request = {
             let manager = shared.manager.lock().await;
             if manager.saved.is_some() && !manager.updates.frozen.load(Ordering::Acquire) {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                manager.filters.next_due(now)
+                manager.filters.next_due(crate::clock::unix_secs())
             } else {
                 None
             }
@@ -257,7 +253,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(checked["decision"], "unmatched");
-        // Manual work no longer accepts a client configuration revision.
+        // Manual work acts on the saved configuration; a client revision is rejected.
         let input = br#"{"config_revision":0,"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#;
         let obsolete = api(
             shared.clone(),

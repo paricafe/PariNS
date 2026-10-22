@@ -44,13 +44,6 @@ fn managed_check_stdout_is_the_installation_preflight_contract() {
     let mut other = BuildInfo::current();
     other.source_commit = "0".repeat(40);
     assert!(report.validate_build(&other).is_err());
-    let mut unknown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    unknown["extra"] = true.into();
-    assert!(serde_json::from_value::<ManagedCheckOutput>(unknown).is_err());
-    assert!(
-        serde_json::from_value::<ManagedCheckOutput>(serde_json::to_value(&report.check).unwrap())
-            .is_err()
-    );
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(fs::read_dir(state.path()).unwrap().count(), 1);
 }

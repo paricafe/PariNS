@@ -4,8 +4,12 @@ use super::super::{
     writer::StagingWriter,
 };
 use super::*;
-use crate::policy::canonical::{Builder, Limits};
+use crate::{
+    clock::retry_backoff_ms,
+    policy::canonical::{Builder, Limits},
+};
 use std::{
+    convert::identity,
     io::{BufReader, Seek},
     time::Duration,
 };
@@ -102,7 +106,9 @@ impl Service {
                 ensure!(
                     !state.settings.effective().any(|s| s
                         .identity()
-                        .is_ok_and(|s| s.fingerprint == identity.fingerprint)),
+                        .expect("validated settings")
+                        .fingerprint
+                        == identity.fingerprint),
                     Failure::new("subscription_active_source")
                 );
                 (
@@ -144,7 +150,7 @@ impl Service {
                                 .iter()
                                 .find(|r| r.fingerprint == fp)
                                 .and_then(|r| r.status.last_attempt)
-                                .is_none_or(|last| now().saturating_sub(last) >= 60),
+                                .is_none_or(|last| unix_secs().saturating_sub(last) >= 60),
                             Failure::new("subscription_rate_limited")
                         );
                     }
@@ -166,7 +172,7 @@ impl Service {
                 .as_mut()
                 .context(Failure::new("subscription_storage_unavailable"))?;
             self.sync_roots(store)?;
-            let collected_at = now();
+            let collected_at = unix_secs();
             let needs_download = match &request {
                 WorkRequest::Prepare { source, .. } => store
                     .read_prepared(
@@ -205,7 +211,7 @@ impl Service {
             source_id,
             fingerprint,
             status: "running".into(),
-            started_at: now(),
+            started_at: unix_secs(),
             finished_at: None,
             error: None,
             sha256: None,
@@ -281,17 +287,17 @@ impl Service {
                     let retry_after = error
                         .downcast_ref::<super::super::download::DownloadError>()
                         .and_then(|e| e.retry_after_unix);
-                    let delay = match count {
-                        1 => 300,
-                        2 => 900,
-                        _ => 3600,
-                    }
-                    .min(u64::from(interval) * 3600);
+                    let delay =
+                        (retry_backoff_ms(count, identity) / 1000).min(u64::from(interval) * 3600);
                     failures.push((
                         source.fingerprint,
                         StoredStatus {
-                            last_attempt: Some(now()),
-                            next_update: Some(retry_after.unwrap_or(now() + delay).max(now() + 60)),
+                            last_attempt: Some(unix_secs()),
+                            next_update: Some(
+                                retry_after
+                                    .unwrap_or(unix_secs() + delay)
+                                    .max(unix_secs() + 60),
+                            ),
                             failures: count,
                             last_error: Some(failure.code),
                             error_line: failure.line,
@@ -358,7 +364,10 @@ impl Service {
             let store = locked
                 .as_mut()
                 .context(Failure::new("subscription_storage_unavailable"))?;
-            if reuse && let Some((record, _)) = store.read_prepared(&identity.fingerprint, now())? {
+            if reuse
+                && let Some((record, _)) =
+                    store.read_prepared(&identity.fingerprint, unix_secs())?
+            {
                 let pin = store.pin(&record.sha256)?;
                 return Ok::<_, anyhow::Error>(Err((record, pin)));
             }
@@ -461,17 +470,17 @@ impl Service {
                 }
             };
             let mut record = match metadata {
-                Some(metadata) => store.install_object(stage, metadata, now())?,
+                Some(metadata) => store.install_object(stage, metadata, unix_secs())?,
                 None => {
                     store.discard(stage)?;
                     let mut record = old.context(Failure::new("subscription_material_missing"))?;
-                    record.prepared_at = now();
+                    record.prepared_at = unix_secs();
                     record
                 }
             };
             record.status = StoredStatus {
-                last_attempt: Some(now()),
-                next_update: Some(periodic(now(), interval)),
+                last_attempt: Some(unix_secs()),
+                next_update: Some(periodic(unix_secs(), interval)),
                 failures: 0,
                 last_error: None,
                 error_line: None,
@@ -540,7 +549,7 @@ impl Service {
                         .unwrap_or_else(|| "subscription_download".into()),
                     line: status.error_line,
                 });
-                operation.finished_at = Some(now());
+                operation.finished_at = Some(unix_secs());
                 if let Some(record) = candidate.records.first() {
                     operation.sha256 = Some(record.sha256.clone());
                     operation.rules = Some(record.rules);
@@ -583,24 +592,20 @@ impl Service {
                             id == &source.id
                         })
                 })
-                .filter_map(|source| {
-                    source
-                        .identity()
-                        .ok()
-                        .map(|s| (s.fingerprint, source.update_interval_hours))
+                .map(|source| {
+                    (
+                        source.identity().expect("validated settings").fingerprint,
+                        source.update_interval_hours,
+                    )
                 })
                 .collect();
             for (fp, interval) in targets {
                 if let Some(record) = state.records.iter_mut().find(|r| r.fingerprint == fp) {
                     record.status.failures = record.status.failures.saturating_add(1);
-                    record.status.last_attempt = Some(now());
-                    let delay = match record.status.failures {
-                        1 => 300,
-                        2 => 900,
-                        _ => 3600,
-                    }
-                    .min(u64::from(interval) * 3600);
-                    record.status.next_update = Some(now() + delay);
+                    record.status.last_attempt = Some(unix_secs());
+                    let delay = (retry_backoff_ms(record.status.failures, identity) / 1000)
+                        .min(u64::from(interval) * 3600);
+                    record.status.next_update = Some(unix_secs() + delay);
                     record.status.last_error = Some(failure.code.clone());
                     record.status.error_line = failure.line;
                 }
@@ -617,7 +622,7 @@ impl Service {
                 "failed"
             }
             .into();
-            operation.finished_at = Some(now());
+            operation.finished_at = Some(unix_secs());
             operation.error = Some(failure);
             state.recent = state.operation.take();
             state.active_request = None;
@@ -642,7 +647,6 @@ impl Service {
                 return super::super::download::download_fixture(
                     &source.url,
                     old.map(|r| &r.validators),
-                    old.map(|r| r.sha256.as_str()),
                     writer,
                     responses,
                 )
@@ -650,12 +654,7 @@ impl Service {
             }
         }
         self.reader
-            .download(
-                &source.url,
-                old.map(|r| &r.validators),
-                old.map(|r| r.sha256.as_str()),
-                writer,
-            )
+            .download(&source.url, old.map(|r| &r.validators), writer)
             .await
     }
 
@@ -672,11 +671,11 @@ impl Service {
             .effective()
             .filter(|s| s.auto_update)
             .find(|s| {
-                let fp = s.identity().ok().map(|s| s.fingerprint);
+                let fp = s.identity().expect("validated settings").fingerprint;
                 state
                     .records
                     .iter()
-                    .find(|r| Some(&r.fingerprint) == fp.as_ref())
+                    .find(|r| r.fingerprint == fp)
                     .and_then(|r| r.status.next_update)
                     .is_some_and(|due| due <= at)
             })
@@ -698,12 +697,12 @@ impl Service {
             if let Some(record) = store.record(&fp) {
                 let mut status = record.status.clone();
                 let due = if status.failures > 0 {
-                    status.next_update.unwrap_or(now())
+                    status.next_update.unwrap_or(unix_secs())
                 } else {
                     periodic(record.prepared_at, source.update_interval_hours)
                 };
-                status.next_update = Some(if due <= now() {
-                    now() + rand::random_range(60..=300)
+                status.next_update = Some(if due <= unix_secs() {
+                    unix_secs() + rand::random_range(60..=300)
                 } else {
                     due
                 });
@@ -726,7 +725,7 @@ impl Service {
             if self.closed.load(Ordering::Acquire) {
                 break;
             }
-            let Some(request) = self.next_due(now()) else {
+            let Some(request) = self.next_due(unix_secs()) else {
                 continue;
             };
             let Ok(begin) = self.begin(request).await else {

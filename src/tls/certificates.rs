@@ -263,7 +263,6 @@ fn prepare(sources: &CertificateSources, owner: Arc<()>) -> Result<PreparedCerti
 pub(super) fn read_pem_file(path: &Path) -> Result<Vec<u8>> {
     // NONBLOCK prevents FIFO opens from stalling before fstat rejects them.
     // Symlinks are intentional: external renewers commonly rotate symlink targets.
-    #[cfg(unix)]
     let file = File::from(
         rustix::fs::open(
             path,
@@ -272,8 +271,6 @@ pub(super) fn read_pem_file(path: &Path) -> Result<Vec<u8>> {
         )
         .map_err(std::io::Error::from)?,
     );
-    #[cfg(not(unix))]
-    let file = File::open(path)?;
     let metadata = file.metadata()?;
     ensure!(metadata.is_file(), "TLS material must be a regular file");
     ensure!(

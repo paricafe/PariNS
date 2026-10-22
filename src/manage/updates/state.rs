@@ -38,9 +38,7 @@ pub(super) struct Candidate {
 pub(super) struct Plan {
     pub plan_id: String,
     pub expires_at_ms: u64,
-    /// The revision saved when the check made this plan; diagnostic only, since
-    /// accepting the plan does not require it to match (it stays in the
-    /// persisted shape so existing state files keep loading).
+    /// Kept only so state files written by older versions still load.
     pub config_revision: u64,
     pub current_sha256: String,
 }
@@ -132,15 +130,15 @@ fn validate(state: &AppState) -> Result<()> {
 }
 pub(super) fn atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     let target = dir.join(name);
-    store::checked_open(&target, false)?;
+    crate::private_files::checked_open(&target, false)?;
     // Each caller has one process-owned writer for its fixed destination.
     // Reuse that reserved temporary name so crashes cannot accumulate files.
     let temp = dir.join(format!(".{name}.tmp"));
-    if store::checked_open(&temp, false)?.is_some() {
+    if crate::private_files::checked_open(&temp, false)?.is_some() {
         std::fs::remove_file(&temp)?;
     }
     let result = (|| {
-        let mut file = store::create_private(&temp)?;
+        let mut file = crate::private_files::create_private(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&temp, &target)?;
@@ -206,7 +204,8 @@ mod tests {
     fn reserved_temporary_is_reclaimed_without_touching_unknown_files() {
         let dir = tempfile::tempdir().unwrap();
         let mut partial =
-            store::create_private(&dir.path().join(".update-state.json.tmp")).unwrap();
+            crate::private_files::create_private(&dir.path().join(".update-state.json.tmp"))
+                .unwrap();
         partial.write_all(b"partial").unwrap();
         let unknown = dir.path().join(".unrelated.tmp");
         std::fs::write(&unknown, b"keep").unwrap();

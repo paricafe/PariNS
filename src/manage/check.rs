@@ -18,7 +18,7 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     );
     let metadata = std::fs::metadata(&dir)?;
     ensure!(metadata.is_dir(), "management path must be a directory");
-    store::private_permissions(&metadata, 0o700)?;
+    crate::private_files::private_permissions(&metadata, 0o700)?;
     let saved = store::read_stored(&dir)?.context("management is not initialized")?;
     // Startup reads the Turnstile keys as well; reject a file this version cannot.
     super::turnstile::read(&dir)?;

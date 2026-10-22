@@ -159,20 +159,16 @@ pub struct PendingLaunch {
 }
 
 pub fn read_public_status() -> anyhow::Result<PublicStatus> {
-    use std::{fs::File, io::Read};
+    use std::{fs::File, io::Read, os::unix::fs::MetadataExt};
     let meta = std::fs::symlink_metadata(STATUS_PATH)?;
     anyhow::ensure!(
         meta.is_file() && meta.len() <= STATUS_LIMIT as u64,
         "invalid helper status"
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        anyhow::ensure!(
-            meta.uid() == 0 && meta.mode() & 0o022 == 0 && meta.nlink() == 1,
-            "untrusted helper status"
-        );
-    }
+    anyhow::ensure!(
+        meta.uid() == 0 && meta.mode() & 0o022 == 0 && meta.nlink() == 1,
+        "untrusted helper status"
+    );
     let mut bytes = Vec::new();
     File::open(STATUS_PATH)?
         .take(STATUS_LIMIT as u64 + 1)

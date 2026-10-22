@@ -2,8 +2,9 @@
 //! The manager's mutation semaphore serializes import and configuration writes.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs,
     io::Write,
+    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
 };
 
@@ -12,7 +13,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use serde::Serialize;
 
-use super::store::{read_bounded, secret};
+use super::store::{read_bounded, secret, sync_committed};
+use crate::private_files::{create_private, private_permissions};
 
 const MAX_PEM: usize = 64 * 1024;
 const MAX_IMPORTS: usize = 32;
@@ -22,8 +24,6 @@ const MAX_IDENTITY: usize = 2 * MAX_PEM + 1024;
 pub(super) struct ImportedCertificate {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
-    pub certificate_count: usize,
-    pub key_matches: bool,
 }
 
 /// `state_dir` is the resolved, private directory owned by the locked Store.
@@ -65,13 +65,7 @@ pub(super) fn import(
     );
 
     let directory = state_dir.join("certificates");
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(&directory) {
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error).context("create private certificate directory"),
@@ -81,14 +75,7 @@ pub(super) fn import(
         metadata.is_dir(),
         "certificate directory must not be a symlink"
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            metadata.permissions().mode() & 0o7777 == 0o700,
-            "certificate directory requires 0700 permissions"
-        );
-    }
+    private_permissions(&metadata, 0o700)?;
 
     let mut count = 0;
     for entry in fs::read_dir(&directory)? {
@@ -99,7 +86,7 @@ pub(super) fn import(
             "certificate import storage limit exceeded"
         );
         if read_bounded(&entry.path(), MAX_IDENTITY)?.as_deref() == Some(combined.as_bytes()) {
-            return Ok(imported(entry.path(), identity.cert.len()));
+            return Ok(imported(entry.path()));
         }
     }
     ensure!(
@@ -108,16 +95,7 @@ pub(super) fn import(
     );
 
     let path = directory.join(format!("{}.pem", secret()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&path)
-        .context("create private imported identity")?;
+    let mut file = create_private(&path).context("create private imported identity")?;
     // Cleanup is limited to the exact file that this call created exclusively.
     if let Err(error) = file
         .write_all(combined.as_bytes())
@@ -127,24 +105,14 @@ pub(super) fn import(
         let _ = fs::remove_file(&path);
         return Err(error).context("persist imported identity");
     }
-    // A directory sync failure is not reported as a rollback after publication.
-    if File::open(&directory)
-        .and_then(|dir| dir.sync_all())
-        .is_err()
-    {
-        eprintln!(
-            "certificate import committed; directory sync failed, power-loss durability is uncertain"
-        );
-    }
-    Ok(imported(path, identity.cert.len()))
+    sync_committed(&directory, "certificate import");
+    Ok(imported(path))
 }
 
-fn imported(path: PathBuf, certificate_count: usize) -> ImportedCertificate {
+fn imported(path: PathBuf) -> ImportedCertificate {
     ImportedCertificate {
         cert_file: path.clone(),
         key_file: path,
-        certificate_count,
-        key_matches: true,
     }
 }
 
@@ -166,6 +134,7 @@ mod tests {
         manage::store::Store,
         tls::{self, TlsFiles},
     };
+    use rustls::pki_types::CertificateDer;
 
     fn pair() -> (String, String) {
         pair_with_eku(vec![])
@@ -185,8 +154,6 @@ mod tests {
         let (cert, key) = pair();
         let result = import(&store.dir, &cert, &key).unwrap();
         assert_eq!(result.cert_file, result.key_file);
-        assert_eq!(result.certificate_count, 1);
-        assert!(result.key_matches);
         tls::server_config(
             &TlsFiles {
                 cert_file: result.cert_file.clone(),
@@ -206,22 +173,19 @@ mod tests {
         let response = serde_json::to_string(&result).unwrap();
         assert!(!response.contains("PRIVATE KEY"));
         assert!(!response.contains(&key));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&result.key_file).unwrap().permissions().mode() & 0o7777,
-                0o600
-            );
-            assert_eq!(
-                fs::metadata(store.dir.join("certificates"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o7777,
-                0o700
-            );
-        }
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&result.key_file).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(store.dir.join("certificates"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
     }
 
     #[test]
@@ -266,7 +230,7 @@ mod tests {
         let (other_cert, other_key) = pair();
         let result = import(&store.dir, &format!("{other_key}{cert}{other_cert}"), &key).unwrap();
         let bytes = fs::read(&result.cert_file).unwrap();
-        assert_eq!(result.certificate_count, 2);
+        assert_eq!(CertificateDer::pem_slice_iter(&bytes).count(), 2);
         assert_eq!(PrivateKeyDer::pem_slice_iter(&bytes).count(), 1);
         tls::server_config(
             &TlsFiles {
@@ -302,7 +266,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn rejects_linked_or_non_private_storage() {
         use std::os::unix::fs::{PermissionsExt, symlink};

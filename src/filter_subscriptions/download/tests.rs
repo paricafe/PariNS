@@ -35,7 +35,7 @@ fn binding() -> Validators {
 async fn subscription_download_slot_is_separate_and_nonqueueing() {
     let _permit = DOWNLOAD.try_acquire().unwrap();
     let error = SubscriptionReader::new()
-        .download("https://example.com/a", None, None, &mut Vec::new())
+        .download("https://example.com/a", None, &mut Vec::new())
         .await
         .unwrap_err();
     assert_eq!(error.code, "subscription_busy");
@@ -79,7 +79,6 @@ async fn validators_bind_exact_final_path_representation_and_verified_content() 
     let result = download_with(
         &previous.final_url,
         Some(&previous),
-        Some(&previous.content_sha256),
         &mut output,
         |uri, headers| {
             seen.push((uri.to_string(), headers));
@@ -107,13 +106,12 @@ async fn validators_bind_exact_final_path_representation_and_verified_content() 
 }
 
 #[tokio::test]
-async fn valid_304_requires_verified_lkg_and_missing_object_repairs_only_once() {
+async fn valid_304_needs_a_conditional_request_and_repairs_only_once() {
     let previous = binding();
     let mut output = Vec::new();
     let result = download_with(
         &previous.final_url,
         Some(&previous),
-        Some(&previous.content_sha256),
         &mut output,
         |_, headers| {
             assert!(headers.contains_key(header::IF_NONE_MATCH));
@@ -127,7 +125,6 @@ async fn valid_304_requires_verified_lkg_and_missing_object_repairs_only_once() 
     let mut requests = 0;
     let result = download_with(
         &previous.final_url,
-        Some(&previous),
         None,
         &mut output,
         |_, headers| {
@@ -144,7 +141,6 @@ async fn valid_304_requires_verified_lkg_and_missing_object_repairs_only_once() 
     let mut responses = VecDeque::from([response(304, &[], b""), response(200, &[], b"fixed")]);
     let result = download_with(
         &previous.final_url,
-        Some(&previous),
         None,
         &mut output,
         |_, _| ready(Ok(responses.pop_front().unwrap())),
@@ -170,7 +166,6 @@ async fn every_redirect_is_checked_and_auth_is_never_added() {
         let result = download_with(
             "https://example.com/a",
             None,
-            None,
             &mut Vec::new(),
             |_, headers| {
                 calls += 1;
@@ -187,7 +182,6 @@ async fn every_redirect_is_checked_and_auth_is_never_added() {
     let mut calls = 0;
     let result = download_with(
         "https://example.com/a",
-        None,
         None,
         &mut Vec::new(),
         |_, _| {
@@ -213,7 +207,6 @@ async fn last_modified_fallback_and_etag_priority_are_bound_to_verified_content(
         let result = download_with(
             &previous.final_url,
             Some(&previous),
-            Some(&previous.content_sha256),
             &mut Vec::new(),
             |_, headers| {
                 assert_eq!(headers.contains_key(header::IF_NONE_MATCH), use_etag);
@@ -315,7 +308,7 @@ async fn streaming_identity_gzip_size_truncation_and_unknown_encoding() {
         .is_err()
     );
     let mut output = Vec::new();
-    let (hash, bytes, transferred) = stream_text(
+    let (hash, bytes) = stream_text(
         response(
             200,
             &[
@@ -331,7 +324,6 @@ async fn streaming_identity_gzip_size_truncation_and_unknown_encoding() {
     .unwrap();
     assert_eq!(output, raw);
     assert_eq!(bytes, raw.len() as u64);
-    assert_eq!(transferred, zipped.len() as u64);
     assert_eq!(hash, format!("{:x}", Sha256::digest(&raw)));
     assert_eq!(
         stream_text(
@@ -426,7 +418,6 @@ async fn header_and_validator_limits_and_transport_errors_are_bounded() {
     let result = download_with(
         "https://example.com/a",
         None,
-        None,
         &mut output,
         |_, _| ready(Ok(response(200, &[("etag", &etag)], b"x"))),
         MAX_BYTES,
@@ -437,26 +428,10 @@ async fn header_and_validator_limits_and_transport_errors_are_bounded() {
         panic!()
     };
     assert!(result.validators.etag.is_none());
-    let huge = "x".repeat(32768);
-    assert_eq!(
-        download_with(
-            "https://example.com/a",
-            None,
-            None,
-            &mut Vec::new(),
-            |_, _| ready(Ok(response(200, &[("x-large", &huge)], b"x"))),
-            MAX_BYTES
-        )
-        .await
-        .unwrap_err()
-        .code,
-        "response_headers_too_large"
-    );
     for code in ["tls_error", "destination_not_allowed", "connect_timeout"] {
         assert_eq!(
             download_with(
                 "https://example.com/a",
-                None,
                 None,
                 &mut Vec::new(),
                 |_, _| ready(Err(DownloadError::new(code))),

@@ -1,11 +1,12 @@
 //! Bounded, unauthenticated official-release transport shared by app and helper.
 //! No caller-supplied URL, proxy, TLS roots, or command is accepted.
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use crate::clock::unix_secs;
 pub use crate::https_reader::ReaderError;
 #[cfg(test)]
 use crate::https_reader::global_address;
-use crate::https_reader::{HttpsReader, WireResponse};
+use crate::https_reader::{HttpsReader, WireResponse, content_length, retry_after_unix};
 #[cfg(test)]
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -305,7 +306,7 @@ where
             return Ok(response);
         }
         if response.status != StatusCode::OK {
-            return Err(http_error(response.status, &response.headers, unix_now()));
+            return Err(http_error(response.status, &response.headers, unix_secs()));
         }
         // No decompressor is enabled: a server ignoring identity is rejected.
         if response
@@ -397,17 +398,6 @@ fn parse_release(bytes: &[u8]) -> Result<GithubRelease, ReaderError> {
     }
     Ok(release)
 }
-fn content_length(headers: &HeaderMap) -> Result<Option<u64>, ReaderError> {
-    headers
-        .get(header::CONTENT_LENGTH)
-        .map(|v| {
-            v.to_str()
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .ok_or_else(|| ReaderError::new("invalid_response"))
-        })
-        .transpose()
-}
 async fn collect(mut response: WireResponse, limit: usize) -> Result<Vec<u8>, ReaderError> {
     let length = content_length(&response.headers)?;
     if length.is_some_and(|n| n > limit as u64) {
@@ -457,28 +447,8 @@ async fn stream_binary(
         .map_err(|_| ReaderError::new("file_write_failed"))?;
     Ok(())
 }
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 fn http_error(status: StatusCode, headers: &HeaderMap, now: u64) -> ReaderError {
-    let retry = headers
-        .get(header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            v.parse::<u64>()
-                .ok()
-                .map(|s| now.saturating_add(s))
-                .or_else(|| {
-                    httpdate::parse_http_date(v)
-                        .ok()?
-                        .duration_since(UNIX_EPOCH)
-                        .ok()
-                        .map(|d| d.as_secs())
-                })
-        });
+    let retry = retry_after_unix(headers, now);
     let reset = headers
         .get("x-ratelimit-reset")
         .and_then(|v| v.to_str().ok())

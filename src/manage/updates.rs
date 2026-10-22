@@ -4,6 +4,7 @@ pub(super) mod operation;
 mod state;
 use super::store;
 use crate::{
+    clock::{retry_backoff_ms, unix_ms},
     config::UpdatesConfig,
     update::{
         build_info::BuildInfo,
@@ -39,13 +40,6 @@ pub(super) struct Coordinator {
     reader: GithubReader,
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
-}
 fn id() -> String {
     rand::random::<[u8; 16]>()
         .iter()
@@ -65,13 +59,8 @@ impl Drop for CheckingGuard<'_> {
 
 fn failed_check(state: &mut AppState, error: &ReaderError) {
     state.check.failures = state.check.failures.saturating_add(1);
-    let delay = match state.check.failures {
-        1 => 300_000,
-        2 => 900_000,
-        _ => 3_600_000,
-    };
-    state.check.retry_at_ms = now()
-        .saturating_add(jitter(delay))
+    state.check.retry_at_ms = unix_ms()
+        .saturating_add(retry_backoff_ms(state.check.failures, jitter))
         .max(error.retry_after_unix.unwrap_or(0).saturating_mul(1000));
     state.check.next_check_at_ms = state.check.retry_at_ms;
     state.check.error = Some(error.code.into());
@@ -160,9 +149,9 @@ impl Coordinator {
                 let _ = state::write(dir, &state);
             }
         }
-        if state.check.next_check_at_ms <= now() {
+        if state.check.next_check_at_ms <= unix_ms() {
             state.check.next_check_at_ms =
-                now().saturating_add((60 + rand::random::<u64>() % 241) * 1000);
+                unix_ms().saturating_add((60 + rand::random::<u64>() % 241) * 1000);
         }
         let invocation = std::env::var("INVOCATION_ID")
             .ok()
@@ -327,8 +316,8 @@ impl Coordinator {
         }
         let state = self.state.lock().unwrap();
         (auto_check || state.check.manual)
-            && state.check.retry_at_ms <= now()
-            && state.check.next_check_at_ms <= now()
+            && state.check.retry_at_ms <= unix_ms()
+            && state.check.next_check_at_ms <= unix_ms()
     }
 
     pub async fn request_check(&self) -> Result<(), (&'static str, u64)> {
@@ -341,10 +330,10 @@ impl Coordinator {
         }
         let mut next = self.state.lock().unwrap().clone();
         let retry = next.check.retry_at_ms;
-        if retry > now() {
+        if retry > unix_ms() {
             return Err(("rate_limited", retry));
         }
-        next.check.next_check_at_ms = now();
+        next.check.next_check_at_ms = unix_ms();
         next.check.manual = true;
         if self.save_locked(next).await.is_err() {
             self.persistence_failed_locked();
@@ -381,7 +370,7 @@ impl Coordinator {
             }
             let old = self.state.lock().unwrap().clone();
             let mut next = old.clone();
-            let began = now();
+            let began = unix_ms();
             next.check.last_check_at_ms = Some(began);
             next.check.retry_at_ms = began.saturating_add(60_000);
             next.check.manual = false;
@@ -407,8 +396,8 @@ impl Coordinator {
                     s.check.validated = true;
                     s.check.error = None;
                     s.check.failures = 0;
-                    s.check.last_success_at_ms = Some(now());
-                    s.check.next_check_at_ms = now().saturating_add(jitter(
+                    s.check.last_success_at_ms = Some(unix_ms());
+                    s.check.next_check_at_ms = unix_ms().saturating_add(jitter(
                         u64::from(settings.check_interval_hours) * 3_600_000,
                     ));
                     if !s.operation.as_ref().is_some_and(|o| !o.finished) {
@@ -419,7 +408,7 @@ impl Coordinator {
                         {
                             current_sha.map(|current_sha| Plan {
                                 plan_id: id(),
-                                expires_at_ms: now() + 1_800_000,
+                                expires_at_ms: unix_ms() + 1_800_000,
                                 config_revision: revision,
                                 current_sha256: current_sha,
                             })
@@ -783,7 +772,7 @@ mod tests {
             tokio::spawn(async move { coordinator.request_check().await })
         };
         tokio::task::yield_now().await;
-        coordinator.state.lock().unwrap().check.retry_at_ms = now() + 60_000;
+        coordinator.state.lock().unwrap().check.retry_at_ms = unix_ms() + 60_000;
         drop(guard);
         assert_eq!(waiting.await.unwrap().unwrap_err().0, "rate_limited");
         assert!(!coordinator.state.lock().unwrap().check.manual);

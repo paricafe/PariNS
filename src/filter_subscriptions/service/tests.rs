@@ -41,7 +41,7 @@ fn install(store: &mut Store, settings: &SourceSettings, text: &[u8]) {
                     last_modified: None,
                 },
             },
-            now() - 120,
+            unix_secs() - 120,
         )
         .unwrap();
 }
@@ -66,6 +66,7 @@ async fn fixture(sources: Vec<SourceSettings>) -> (tempfile::TempDir, Arc<Servic
         },
         1,
         vec![],
+        false,
     )
     .await
     .unwrap();
@@ -276,6 +277,7 @@ async fn local_configuration_and_read_only_do_not_require_subscription_material(
         settings.clone(),
         1,
         vec![],
+        false,
     )
     .await
     .unwrap();
@@ -458,6 +460,7 @@ async fn insufficient_local_budget_is_not_ready_and_disabled_sources_can_be_prep
         },
         1,
         vec![],
+        false,
     )
     .await
     .unwrap();
@@ -513,9 +516,16 @@ async fn bootstrap_reclaims_young_removed_source_for_manual_only_download() {
         sources: vec![old],
         ..Default::default()
     };
-    let service = Service::open(path.clone(), Policy::default(), settings.clone(), 1, vec![])
-        .await
-        .unwrap();
+    let service = Service::open(
+        path.clone(),
+        Policy::default(),
+        settings.clone(),
+        1,
+        vec![],
+        false,
+    )
+    .await
+    .unwrap();
     // A recent, almost 16 MiB download leaves insufficient room for another
     // full download reservation plus the catalog transaction under 32 MiB.
     let mut comment = vec![b'#'; 4095];
@@ -536,7 +546,7 @@ async fn bootstrap_reclaims_young_removed_source_for_manual_only_download() {
     settings.sources = vec![new];
     // File startup has only the new Config roots, not the removed source's
     // previous-Config root. Normal GC still retains its recent preparation.
-    let service = Service::open(path, Policy::default(), settings, 1, vec![])
+    let service = Service::open(path, Policy::default(), settings, 1, vec![], false)
         .await
         .unwrap();
     assert!(!service.ready());
@@ -578,12 +588,13 @@ async fn bootstrap_reclaims_young_removed_source_for_manual_only_download() {
 async fn frozen_start_is_read_only_and_bootstrap_downloads_all_new_sources_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("frozen");
-    let frozen = Service::open_frozen(
+    let frozen = Service::open(
         path.clone(),
         Policy::default(),
         Settings::default(),
         1,
         vec![],
+        true,
     )
     .await
     .unwrap();
@@ -602,6 +613,7 @@ async fn frozen_start_is_read_only_and_bootstrap_downloads_all_new_sources_once(
         },
         1,
         vec![],
+        false,
     )
     .await
     .unwrap();
@@ -624,13 +636,23 @@ async fn frozen_start_opens_the_store_once_thawed() {
         sources: vec![one],
         ..Default::default()
     };
-    let service =
-        Service::open_frozen(path.clone(), Policy::default(), settings.clone(), 1, vec![])
-            .await
-            .unwrap();
+    let service = Service::open(
+        path.clone(),
+        Policy::default(),
+        settings.clone(),
+        1,
+        vec![],
+        true,
+    )
+    .await
+    .unwrap();
     // Frozen: the published policy comes from read-only material and the Store stays closed.
     assert!(service.ready());
     assert!(service.next_due(u64::MAX).is_none());
+    assert_eq!(
+        service.snapshot().unavailable_reason.as_deref(),
+        Some("update_in_progress")
+    );
     let error = service
         .prepare_config(settings.clone(), Policy::default(), 1)
         .await
@@ -685,8 +707,8 @@ async fn metadata_schedule_changes_and_aggregate_failure_have_bounded_next_due()
         &begin.operation_id,
         &Failure::new("subscription_memory_limit").into(),
     );
-    assert!(service.next_due(now() + 1).is_none());
-    assert!(service.snapshot().sources[0].next_update.unwrap() >= now() + 299);
+    assert!(service.next_due(unix_secs() + 1).is_none());
+    assert!(service.snapshot().sources[0].next_update.unwrap() >= unix_secs() + 299);
     assert_eq!(
         service.snapshot().sources[0].error.as_ref().unwrap().code,
         "subscription_memory_limit"
@@ -779,6 +801,7 @@ async fn local_source_budget_counts_old_policy_and_preserves_generation() {
         Settings::default(),
         1,
         vec![],
+        false,
     )
     .await
     .unwrap();

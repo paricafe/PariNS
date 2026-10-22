@@ -364,11 +364,9 @@ async fn persist(store: Arc<Store>, keys: Option<Keys>) -> Result<(), ApiError> 
         }
         None => {
             let path = store.dir.join(FILE);
-            if store::checked_open(&path, false)?.is_some() {
+            if crate::private_files::checked_open(&path, false)?.is_some() {
                 std::fs::remove_file(&path).context("remove Turnstile state")?;
-                // Removal is the commit point; as with atomic_write, a failed
-                // directory sync leaves only power-loss durability uncertain.
-                let _ = std::fs::File::open(&store.dir).and_then(|dir| dir.sync_all());
+                store::sync_committed(&store.dir, "Turnstile key removal");
             }
             Ok(())
         }

@@ -1,4 +1,5 @@
-//! Private pinned HTTPS transport. Callers retain their distinct URL permissions.
+//! Private pinned HTTPS transport, plus the response-header and retry helpers
+//! its readers share. Callers retain their distinct URL permissions.
 use bytes::Bytes;
 use futures_util::Stream;
 use http::{HeaderMap, StatusCode, Uri, header};
@@ -8,7 +9,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::Arc,
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 use tokio::{
     net::{TcpStream, lookup_host},
@@ -246,6 +247,34 @@ pub(crate) fn validate_headers(headers: &HeaderMap) -> Result<(), ReaderError> {
     }
     Ok(())
 }
+/// The declared body length; a malformed value is an invalid response.
+pub(crate) fn content_length(headers: &HeaderMap) -> Result<Option<u64>, ReaderError> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .map(|v| {
+            v.to_str()
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| ReaderError::new("invalid_response"))
+        })
+        .transpose()
+}
+/// Retry-After as a Unix time in seconds: delay seconds added to `now`, or an
+/// HTTP date.
+pub(crate) fn retry_after_unix(headers: &HeaderMap, now: u64) -> Option<u64> {
+    let value = headers.get(header::RETRY_AFTER)?.to_str().ok()?;
+    value
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| now.saturating_add(seconds))
+        .or_else(|| {
+            httpdate::parse_http_date(value)
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs())
+        })
+}
 pub(crate) fn validate_addresses(addresses: &[SocketAddr]) -> Result<(), ReaderError> {
     if addresses.is_empty()
         || addresses.len() > 16
@@ -304,6 +333,19 @@ mod tests {
         assert!(validate_addresses(&[public; 17]).is_err());
         assert!(verify_peer(public, public).is_ok());
         assert!(verify_peer(public, private).is_err());
+    }
+
+    #[test]
+    fn oversized_response_headers_are_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-large",
+            http::HeaderValue::from_str(&"x".repeat(HEADER_LIMIT)).unwrap(),
+        );
+        assert_eq!(
+            validate_headers(&headers).unwrap_err().code,
+            "response_headers_too_large"
+        );
     }
 
     #[tokio::test]

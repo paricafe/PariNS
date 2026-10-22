@@ -2,7 +2,7 @@
 //! Object installation and catalog selection are separate transactions. The
 //! service owns aggregate validation and policy publication around these calls.
 use super::download::Validators;
-use crate::private_files::{checked_open, create_private, private_permissions};
+use crate::private_files::{checked_open, create_private, lock_private_dir, private_permissions};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -191,22 +191,10 @@ impl Store {
     }
 
     pub(crate) fn open(path: &Path, max_disk: u64) -> Result<Self> {
+        // Unlike the runtime roots, the subscription directory itself must not
+        // be a symlink, and its creation is made durable in the parent.
         private_dir(path)?;
-        let dir = path.canonicalize()?;
-        ensure!(
-            dir.parent().is_some(),
-            "dedicated subscription directory required"
-        );
-        let lock_path = dir.join("lock");
-        let lock = match create_private(&lock_path) {
-            Ok(lock) => lock,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                checked_open(&lock_path, true)?.context("subscription lock disappeared")?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        lock.try_lock()
-            .context("subscription directory already in use")?;
+        let (dir, lock) = lock_private_dir(path, "subscription")?;
         let catalog = if let Some(file) = checked_open(&dir.join(CATALOG), false)? {
             read_catalog(file)?
         } else {
@@ -856,13 +844,8 @@ impl Store {
 }
 
 fn private_dir(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    let created = match builder.create(path) {
+    use std::os::unix::fs::DirBuilderExt;
+    let created = match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(error.into()),

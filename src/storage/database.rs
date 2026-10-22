@@ -110,7 +110,7 @@ pub(super) fn run(
                         .expect("statistics owner")
                         .sample(&shared.metrics, true);
                     let result = db.drain(&shared, &logs);
-                    db.report(&shared, &result);
+                    db.report_error(&shared, &result);
                     db.update_status(&shared);
                     result
                 } else {
@@ -146,7 +146,7 @@ pub(super) fn run(
                 || shared.queue_entries.load(Ordering::Relaxed) >= 256
             {
                 let result = db.flush_batch(&shared, &logs);
-                db.report(&shared, &result);
+                db.report_error(&shared, &result);
                 last_flush = Instant::now();
             }
             if db.last_cleanup.elapsed()
@@ -158,7 +158,7 @@ pub(super) fn run(
                     .capacity_pending
             {
                 let result = db.cleanup();
-                db.report(&shared, &result);
+                db.report_error(&shared, &result);
                 db.last_cleanup = Instant::now();
             }
             let reset_days = db.settings.statistics.reset_interval_days;
@@ -170,7 +170,7 @@ pub(super) fn run(
                 drop(owner);
                 if due {
                     let result = db.reset_totals(&shared, epoch).map(|_| ());
-                    db.report(&shared, &result);
+                    db.report_error(&shared, &result);
                 }
             }
             if last_status.elapsed() >= Duration::from_secs(1) {
@@ -230,7 +230,7 @@ fn prepare(directory: Option<&Path>) -> Result<bool> {
         return Ok(true);
     };
     let path = dir.join("observability.sqlite3");
-    match crate::manage::store::create_private(&path) {
+    match crate::private_files::create_private(&path) {
         Ok(file) => {
             file.sync_all()
                 .map_err(|e| Error::StorageUnavailable(e.to_string()))?;
@@ -437,7 +437,7 @@ impl Database {
             settings,
             revision,
             cleanup_anchor: Instant::now(),
-            cleanup_wall: now_ms().max(lower),
+            cleanup_wall: unix_ms().max(lower),
             last_cleanup: Instant::now(),
             run_id: String::new(),
             settings_pending: true,
@@ -481,7 +481,7 @@ impl Database {
         }
         {
             let mut status = shared.status.lock().expect("storage status");
-            status.clock_rollback = now_ms() < lower;
+            status.clock_rollback = unix_ms() < lower;
             status.log_epoch = log_epoch;
             status.totals_epoch = totals_epoch;
             status.history_epoch = history_epoch;
@@ -504,7 +504,7 @@ impl Database {
         self.settings_pending = true;
         drop(desired);
         let result = self.set_page_cap().and_then(|_| self.cleanup());
-        self.report(shared, &result);
+        self.report_error(shared, &result);
         self.update_status(shared);
     }
     fn cleanup_now(&mut self) -> u64 {
@@ -514,7 +514,7 @@ impl Database {
                 .as_millis()
                 .min(u64::MAX as u128) as u64,
         );
-        let value = advancing.max(now_ms());
+        let value = advancing.max(unix_ms());
         self.cleanup_wall = value;
         self.cleanup_anchor = Instant::now();
         value
@@ -750,22 +750,11 @@ impl Database {
                     .expect("statistics owner")
                     .sample(&shared.metrics, true);
                 let result = self.drain(shared, logs);
-                self.report(shared, &result);
+                self.report_error(shared, &result);
                 self.update_status(shared);
                 let _ = reply.send(result);
             }
-            Command::Shutdown(reply) => {
-                shared.stop.store(true, Ordering::Release);
-                shared
-                    .stats
-                    .lock()
-                    .expect("statistics owner")
-                    .sample(&shared.metrics, true);
-                let result = self.drain(shared, logs);
-                self.report(shared, &result);
-                self.update_status(shared);
-                let _ = reply.send(result);
-            }
+            Command::Shutdown(_) => unreachable!("run handles shutdown"),
         }
     }
     /// Explicit flush and shutdown leave every record committed and the
@@ -885,13 +874,13 @@ impl Database {
         let tx = self.conn.transaction()?;
         let next = check_epoch(&tx, "log_epoch", expected)?;
         let removed = tx.execute("DELETE FROM query_log", [])? as u64;
-        record_cleanup(&tx, CleanupReason::Manual, removed, now_ms())?;
+        record_cleanup(&tx, CleanupReason::Manual, removed, unix_ms())?;
         tx.execute("UPDATE metadata SET value=? WHERE key='log_epoch'", [next])?;
         tx.commit()?;
         shared.log_epoch.store(next, Ordering::Release);
         let mut status = shared.status.lock().expect("storage status");
         status.log_epoch = next;
-        status.last_commit_at_ms = Some(now_ms());
+        status.last_commit_at_ms = Some(unix_ms());
         Ok(ClearResult {
             epoch: next,
             removed,
@@ -903,7 +892,7 @@ impl Database {
         // old-epoch checkpoints, which reset_committed discards after success.
         let (cut, since, run_id) = {
             let owner = shared.stats.lock().expect("statistics owner");
-            (shared.metrics.snapshot(), now_ms(), owner.run_id.clone())
+            (shared.metrics.snapshot(), unix_ms(), owner.run_id.clone())
         };
         // The reset schedule and retention floor share one logical clock.
         // Displayed since_ms remains wall time, which may have moved backwards.
@@ -934,7 +923,7 @@ impl Database {
             .reset_committed(cut, since, next);
         let mut status = shared.status.lock().expect("storage status");
         status.totals_epoch = next;
-        status.last_commit_at_ms = Some(now_ms());
+        status.last_commit_at_ms = Some(unix_ms());
         Ok(ClearResult {
             epoch: next,
             removed: 0,
@@ -943,12 +932,12 @@ impl Database {
     fn clear_history(&mut self, shared: &Shared, expected: u64) -> Result<ClearResult> {
         let (cut, at, since) = {
             let _owner = shared.stats.lock().expect("statistics owner");
-            (shared.metrics.snapshot(), Instant::now(), now_ms())
+            (shared.metrics.snapshot(), Instant::now(), unix_ms())
         };
         let tx = self.conn.transaction()?;
         let next = check_epoch(&tx, "history_epoch", expected)?;
         let removed = tx.execute("DELETE FROM statistics_points", [])? as u64;
-        record_cleanup(&tx, CleanupReason::Manual, removed, now_ms())?;
+        record_cleanup(&tx, CleanupReason::Manual, removed, unix_ms())?;
         tx.execute(
             "UPDATE metadata SET value=? WHERE key='history_epoch'",
             [next],
@@ -961,14 +950,14 @@ impl Database {
             .history_cleared(cut, since, at, next);
         let mut status = shared.status.lock().expect("storage status");
         status.history_epoch = next;
-        status.last_commit_at_ms = Some(now_ms());
+        status.last_commit_at_ms = Some(unix_ms());
         Ok(ClearResult {
             epoch: next,
             removed,
         })
     }
     fn statistics(&self, shared: &Shared, options: HistoryOptions) -> Result<StatisticsView> {
-        let now = now_ms();
+        let now = unix_ms();
         let duration = match options.range.as_deref() {
             Some("1h") => 3_600_000,
             Some("7d") => 604_800_000,
@@ -987,10 +976,7 @@ impl Database {
         let width = (to.saturating_sub(from).max(1))
             .div_ceil(options.max_points.unwrap_or(1000) as u64)
             .max(1);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        self.conn
-            .progress_handler(1000, Some(move || Instant::now() >= deadline))?;
-        let samples = (|| -> Result<Vec<Point>> {
+        let samples = self.bounded(|| -> Result<Vec<Point>> {
             let shape = shared.metrics.snapshot();
             let mut points: BTreeMap<u64, Point> = BTreeMap::new();
             let mut statement = self.conn.prepare("SELECT payload FROM statistics_points WHERE time_ms>=?1 AND time_ms<=?2 ORDER BY time_ms")?;
@@ -1011,8 +997,7 @@ impl Database {
                 }
             }
             Ok(points.into_values().collect())
-        })();
-        self.conn.progress_handler(0, None::<fn() -> bool>)?;
+        });
         let process_metrics = shared.metrics.snapshot();
         let owner = shared.stats.lock().expect("statistics owner");
         let totals = owner.totals(&process_metrics);
@@ -1036,12 +1021,9 @@ impl Database {
             s.error = Some(error.clone());
         }
     }
-    fn report(&self, shared: &Shared, result: &Result<()>) {
-        self.report_error(shared, result);
-    }
     fn committed(&self, shared: &Shared) {
         let mut status = shared.status.lock().expect("storage status");
-        status.last_commit_at_ms = Some(now_ms());
+        status.last_commit_at_ms = Some(unix_ms());
         status.health = "healthy".into();
         status.error = None;
     }
@@ -1113,7 +1095,7 @@ impl Database {
                         .as_millis()
                         .min(u64::MAX as u128) as u64,
                 )
-                .max(now_ms());
+                .max(unix_ms());
             let oldest_log = self
                 .conn
                 .query_row(

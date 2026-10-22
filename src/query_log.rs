@@ -1,7 +1,7 @@
 //! Opt-in bounded request records. SQLite owns retention, IDs, and clear barriers.
 use std::{
     net::IpAddr,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use hickory_proto::op::{Message, ResponseCode};
@@ -246,11 +246,7 @@ impl Entry {
     pub(crate) fn request(query: Option<&Message>, peer: IpAddr, transport: &str) -> Self {
         Self {
             id: 0,
-            time_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .min(u64::MAX as u128) as u64,
+            time_ms: crate::clock::unix_ms(),
             client: peer.to_string(),
             name: query
                 .and_then(|q| q.queries.first())

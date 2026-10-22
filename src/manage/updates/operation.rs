@@ -1,7 +1,8 @@
 //! Management half of the fixed updater transaction. Root owns installation.
 use super::state::Operation;
-use super::{Coordinator, id, now, state};
+use super::{Coordinator, id, state};
 use crate::{
+    clock::unix_ms,
     manage::{Shared, check},
     update::ipc,
 };
@@ -64,7 +65,7 @@ impl Coordinator {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("plan_expired"))?;
                 ensure!(
-                    plan.plan_id == input.plan_id && plan.expires_at_ms > now(),
+                    plan.plan_id == input.plan_id && plan.expires_at_ms > unix_ms(),
                     "plan_expired"
                 );
                 // A save after the check does not invalidate the plan: commit
@@ -118,7 +119,6 @@ impl Coordinator {
             request,
         };
         let bytes = serde_json::to_vec(&request)?;
-        ipc::Inbox::parse(&bytes)?;
         let dir = self.dir.clone();
         tokio::task::spawn_blocking(move || state::atomic(&dir, ipc::INBOX_NAME, &bytes)).await??;
         Ok(())
@@ -183,6 +183,8 @@ pub(in crate::manage) async fn run(
     let mut sequence = 0u64;
     let mut last_receipt = None;
     let mut job: Option<tokio::task::JoinHandle<()>> = None;
+    let mut reconcile_error = None;
+    let mut heartbeat_error = None;
     loop {
         if *stop.borrow() {
             break;
@@ -197,7 +199,8 @@ pub(in crate::manage) async fn run(
         };
         *coordinator.root.lock().unwrap() = status.clone();
         if let Ok(_permit) = shared.mutation.clone().try_acquire_owned() {
-            let _ = reconcile(&coordinator, status.as_ref()).await;
+            let result = reconcile(&coordinator, status.as_ref()).await;
+            log_change("reconcile", &mut reconcile_error, result);
             // Reconcile is the only thaw. Subscriptions opened during a frozen
             // start keep their Store closed until now; this is a no-op otherwise.
             if !coordinator.frozen.load(Ordering::Acquire) {
@@ -209,7 +212,8 @@ pub(in crate::manage) async fn run(
             && last_receipt
                 .is_none_or(|at: std::time::Instant| at.elapsed() >= Duration::from_secs(1))
         {
-            let _ = heartbeat(&shared, &coordinator, status, &mut sequence).await;
+            let result = heartbeat(&shared, &coordinator, status, &mut sequence).await;
+            log_change("launch health receipt", &mut heartbeat_error, result);
             last_receipt = Some(std::time::Instant::now());
         }
         if job.as_ref().is_some_and(|task| task.is_finished())
@@ -258,6 +262,18 @@ pub(in crate::manage) async fn run(
     if let Some(job) = job {
         let _ = job.await;
     }
+}
+
+/// The loop runs every second, so a failure is logged when it first appears or
+/// changes, not on every repeat.
+fn log_change(step: &str, last: &mut Option<String>, result: Result<()>) {
+    let current = result.err().map(|error| format!("{error:#}"));
+    if let Some(error) = &current
+        && current != *last
+    {
+        eprintln!("PariNS update {step} failed: {error}");
+    }
+    *last = current;
 }
 
 async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) -> Result<()> {
@@ -420,7 +436,7 @@ async fn heartbeat(
         let dir = coordinator.dir.clone();
         // Do not overwrite a request already awaiting root consumption.
         tokio::task::spawn_blocking(move || {
-            if super::store::checked_open(&dir.join(ipc::INBOX_NAME), false)?.is_none() {
+            if crate::private_files::checked_open(&dir.join(ipc::INBOX_NAME), false)?.is_none() {
                 state::atomic(&dir, ipc::INBOX_NAME, &bytes)?;
             }
             Ok::<_, anyhow::Error>(())
@@ -678,7 +694,7 @@ mod tests {
             phase: ipc::Phase::Aborted,
             version: operation.expected_version.clone(),
             reason: Some("interrupted".into()),
-            updated_at_ms: now(),
+            updated_at_ms: unix_ms(),
             downloaded_bytes: 0,
             total_bytes: operation.download.size,
         };
@@ -688,7 +704,7 @@ mod tests {
             capability: ipc::Capability {
                 available: true,
                 reason: None,
-                checked_at_ms: now(),
+                checked_at_ms: unix_ms(),
                 helper_protocol: crate::update::contract::HELPER_PROTOCOL,
                 install_contract: crate::update::contract::INSTALL_CONTRACT.into(),
             },
@@ -718,7 +734,7 @@ mod tests {
                 phase: ipc::Phase::ManualRequired,
                 version: op.expected_version.clone(),
                 reason: Some("readiness_failed".into()),
-                updated_at_ms: now(),
+                updated_at_ms: unix_ms(),
                 downloaded_bytes: 0,
                 total_bytes: op.download.size,
             };
@@ -794,7 +810,7 @@ mod tests {
             phase: ipc::Phase::ManualRequired,
             version: installed.build.version.clone(),
             reason: Some("readiness_failed".into()),
-            updated_at_ms: now(),
+            updated_at_ms: unix_ms(),
             downloaded_bytes: 0,
             total_bytes: 0,
         };
@@ -848,7 +864,7 @@ mod tests {
                 config_revision: op.config_revision,
             },
         };
-        let began = now();
+        let began = unix_ms();
         crate::update::executor::consume_stage_failure_fixture(
             root_dir.path(),
             identity,
@@ -976,7 +992,7 @@ mod tests {
         };
         coordinator.accept(accept_plan(), 2, true).await.unwrap();
         let op_a = state::read(dir.path()).unwrap().unwrap().operation.unwrap();
-        let at = now();
+        let at = unix_ms();
         let send_stage = |op: &Operation| ipc::Request::Stage {
             download: op.download.clone(),
             current_sha256: coordinator.identity.as_ref().unwrap().sha256.clone(),
@@ -1058,7 +1074,7 @@ mod tests {
         // Advance both independent cooldowns without waiting or restarting.
         coordinator
             .change(|state| {
-                state.check.retry_at_ms = now() - 1;
+                state.check.retry_at_ms = unix_ms() - 1;
                 Ok(())
             })
             .await

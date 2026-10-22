@@ -138,6 +138,20 @@ Behavior:
   for names that only have descendants. Root hints and the trust anchor are built in
   and change only with a PariNS release.
 
+Known limitations:
+
+- Zone cuts are found by probing name servers level by level; a referral received
+  for the answer query itself is not followed. When probing stops above the real
+  zone cut (a server refuses, fails or disagrees with the others), the lookup fails
+  and counts as `parins_recursion_failed_referral_total`.
+- When a DS or DNSKEY lookup needed for validation times out or is unreachable, the
+  answer is treated as Bogus (SERVFAIL with Extended DNS Error 6), the same as a
+  signature failure, until the recursor's validation cache entry expires.
+- Delegations, name server addresses and DNSSEC keys are kept only in memory; after
+  a restart, lookups rebuild them from the root and are slower at first.
+- In both modes, unknown algorithm numbers in a client's EDNS DAU option are dropped
+  when PariNS re-encodes the query.
+
 ## Listeners and encryption
 
 PariNS listens for plain DNS on one address and, optionally, for DoT, DoH (HTTP/2

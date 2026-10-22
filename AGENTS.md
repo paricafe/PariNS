@@ -12,8 +12,7 @@ explicit design decision.
   changing behavior. Trace the request flow and identify each affected contract's owner.
 - Preserve unrelated working-tree and staged changes. Make focused changes and
   stage explicit paths; do not include another task's work in a commit.
-- Reviews, explanations, and plans do not authorize implementation. Reuse existing
-  authorization, but distinguish committing, pushing, releasing, and deploying.
+- Committing, pushing, releasing and deploying are separate steps.
 
 ## Design principles
 
@@ -21,16 +20,12 @@ explicit design decision.
   aliases, API adapters, parallel old/new implementations, automatic migrations, or
   silent legacy fallbacks. When replacing a contract, update callers, UI, examples
   and tests together, remove the superseded path, document required user actions,
-  and reject obsolete input clearly. This never permits breaking supported
-  DNS/transport standards or required protocol negotiation and operational fallbacks.
-- Prefer existing mechanisms. Before adding validation, guards, retries, fallbacks
-  or abstractions, name the concrete requirement or reachable failure, why existing
-  guarantees are insufficient, and the simplest complete fix.
-- Validate at the owning trust boundary and rely on established internal contracts;
-  avoid repeated checks, catch-all suppression and defaults that conceal broken
-  contracts. Preserve DNS correctness, authentication, TLS verification, resource
-  bounds and persistence integrity. These rules apply to the requested change, not
-  to unrelated repository-wide cleanup.
+  and reject obsolete input clearly. DNS/transport standards, protocol negotiation
+  and their operational fallbacks still apply.
+- Prefer existing mechanisms. Validate at the owning trust boundary and rely on
+  established internal contracts; add a guard, retry, fallback or abstraction only
+  for a named requirement or reachable failure. Preserve DNS correctness,
+  authentication, TLS verification, resource bounds and persistence integrity.
 
 ## Ownership
 
@@ -153,14 +148,14 @@ until preview/validation.
   in query logs or metric labels);
   cancellation/shutdown are not upstream faults. Management API 200 is not DNS readiness.
 - Server supervises each listener separately in both modes: a bind failure or an
-  adapter exit rebinds only that listener (5 s doubling to 60 s, rate-limited logs)
-  while the others, the cache and the upstream pool keep serving. Health is ready
-  only with every listener up, otherwise degraded and not ready; an adapter's drain
-  forces a stop (and the upstream pool down) only when the generation is stopping.
-  Per-connection accept errors keep a listener serving, and descriptor exhaustion
-  pauses it briefly. QUIC answers unvalidated Initials with a stateless Retry; only
-  validated connections take the global slot and source budget. DoH advertises
-  Alt-Svc h3 only while DoH3 serves.
+  adapter exit rebinds only that listener (capped exponential backoff, rate-limited
+  logs) while the others, the cache and the upstream pool keep serving. Health is
+  ready only with every listener up, otherwise degraded and not ready; an adapter's
+  drain forces a stop (and the upstream pool down) only when the generation is
+  stopping. Per-connection accept errors keep a listener (and the management
+  listener) serving, and descriptor exhaustion pauses it briefly. QUIC answers
+  unvalidated Initials with a stateless Retry; only validated connections take the
+  global slot and source budget. DoH advertises Alt-Svc h3 only while DoH3 serves.
   Supervisors belong to the generation and stop with it. An applied configuration
   must bind every listener before it is persisted; only (re)starts of the saved
   configuration run degraded. A generation that fails
@@ -201,11 +196,12 @@ until preview/validation.
   old setting. Details: `src/manage/turnstile.rs`.
 - The live query log WebSocket (`/api/query-log/live`) belongs to the management
   process: Host/Origin (Origin required) and session Cookie are checked before the
-  upgrade; the binding arrives only as the first message. Sockets leave the 90 s
-  HTTP lifetime but stay bounded (2 per session, 16 total, 4 KiB inbound messages,
-  30 s idle). Removing the session from memory closes them (4403), and shutdown
-  closes them (1001) within its drain. Polls run on the storage worker; Manager
-  is never held across socket IO. Details: `src/manage/live.rs`.
+  upgrade; the binding arrives only as the first message. Sockets leave the HTTP
+  connection lifetime but stay bounded per session and in total, with a small
+  inbound message limit and an idle timeout. Removing the session from memory
+  closes them (4403), and shutdown closes them (1001) within its drain. Polls run
+  on the storage worker; Manager is never held across socket IO. Details:
+  `src/manage/live.rs`.
 - Validate and persist before publishing replacement state. Cache-only, storage-only
   and updates-only changes preserve listeners; updates-only changes also keep caches,
   RuntimeServices, certificates and sessions and leave stopped DNS stopped. One
@@ -277,13 +273,9 @@ meaningful behavior or regression gap.
 
 - Keep every `--ephemeral-ci` guard. Tests never change host DNS, firewall rules,
   certificate trust or system services; use isolated fixtures for local acceptance.
-- A check proves only its declared fixture and scope. Local, CI, isolated or
-  development-build results do not establish production capacity, public
-  reachability, official upgrade/rollback, or behavior on a particular host.
-- For performance changes, keep a baseline and repeat the same workload with
-  correctness checks; use `examples/bench_cache.rs` for the cache and report
-  regressions and variance. Cache operations per second are not wire DNS QPS. Never
-  remove safety checks or add complex optimizations for a microbenchmark score.
+- For performance changes, keep a baseline, repeat the same workload with
+  correctness checks (`examples/bench_cache.rs` for the cache), and report
+  regressions and variance; cache operations per second are not wire DNS QPS.
 
 ## Documentation and delivery
 
@@ -298,5 +290,5 @@ meaningful behavior or regression gap.
   alters an ownership boundary, durable invariant, or workflow. Keep it concise and
   repository-portable: no personal paths, task history, test counts, temporary
   metrics, or copied defaults.
-- When guidance conflicts with code or tests, investigate and explain the mismatch;
-  do not silently weaken a contract or preserve an obsolete design by habit.
+- When guidance and code disagree, investigate and report the mismatch before
+  changing either.

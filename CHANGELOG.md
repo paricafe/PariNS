@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The management listener keeps serving after a failed connection accept and
+  pauses briefly when file descriptors run out, like the DNS listeners. Before,
+  such an error ended the process, including DNS in managed mode.
+- In the query log, **Manual** closes the live connection; **Refresh** reloads the
+  newest page.
+- During a software update, subscriptions show that updates resume after it
+  finishes.
+- The sign-in page shows an error and **Retry** when the sign-in options cannot be
+  loaded. The live query log reconnects after a message it cannot read.
+- Query log list requests with invalid parameters are answered with 400
+  `INVALID_REQUEST`; the console shows the server's message for errors it has no
+  translation for, and translates the "already set up" error.
+- Diagnostic times (`since_ms`) are always numbers.
+- The session, transport and certificate import responses drop fields the console
+  never read: `certificate_source`, `transport_change.from`,
+  `transport_change.reauthenticate`, `expires_in_seconds`, `key_matches` and
+  `certificate_count`.
+- Certificate import checks the owner of the private directory and refuses
+  symbolic links, like the other private files.
+- The console no longer uses Tailwind. Its stylesheet is smaller and relies on CSS
+  `color-mix()` (Chrome 111, Safari 16.2, Firefox 113 or later).
+- The service log names the cause when the subscription store cannot be opened,
+  when an update step fails (once per new error), and when a directory sync fails
+  after the Turnstile keys are cleared. A management bind failure names the address.
+- The installer's last lines tell you to point clients at the server and open the
+  DNS ports you enable; staging reports where it staged.
+- The configuration guide lists the known limitations of recursive mode.
+
 ## v0.1.23 — 2026-10-21
 
 v0.1.22 was tagged but never published: its release build failed the dependency

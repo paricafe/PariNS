@@ -259,8 +259,7 @@ drain run in parallel, each with its own time budget. Clearing logs, totals or t
 affects only that kind of data.
 
 The storage status shows a low-space warning when free space falls below 10% or
-below the database limit plus twice the snapshot limit plus 64 MiB. It is an early
-warning, not a guarantee.
+below the database limit plus twice the snapshot limit plus 64 MiB.
 
 ## Metrics
 

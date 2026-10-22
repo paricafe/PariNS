@@ -1,4 +1,4 @@
-//! Local authenticated DoT transport benchmark, not a production capacity claim.
+//! Fresh versus pooled DoT transactions against one loopback TLS peer.
 //! cargo run --release --example bench_dot -- [queries=300] [concurrency=8]
 //! Runs fresh then pooled with identical input and no DNS response cache; repeat
 //! trials to account for first-run warmup and compare medians, not one sample.

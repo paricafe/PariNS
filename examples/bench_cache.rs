@@ -1,4 +1,4 @@
-//! Reproducible, in-process cache benchmark; this does not measure DNS socket QPS.
+//! In-process cache operations per second with 1, 2 and 4 workers.
 //! Run `cargo run --release --example bench_cache -- --seconds 1 --repeats 3`.
 
 use std::{
@@ -18,8 +18,7 @@ use hickory_proto::{
 };
 use parins::{cache::Cache, config::CacheConfig, ecs::Scope, protocol};
 
-// The only adapter changed when comparing the original caller-locked cache with
-// the concurrent implementation. Workloads and measurements stay identical.
+// Calls the cache the way the resolver does.
 struct SharedCache(Cache);
 impl SharedCache {
     fn new() -> Self {

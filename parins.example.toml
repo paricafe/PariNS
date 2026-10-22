@@ -36,8 +36,8 @@ max_tcp_connections = 64
 # cert_file = "server.pem"
 # key_file = "server.key"
 
-# Managed mode only: check the official stable release, never install automatically.
-# File mode does not start the update checker. Interval range: 1..168 hours.
+# Managed mode only: checks for official releases; you install them from the console.
+# File mode has no update check. Interval range: 1..168 hours.
 [updates]
 auto_check = true
 check_interval_hours = 6
@@ -84,7 +84,7 @@ ipv6_prefix = 56
 
 [cache]
 enabled = true
-# These example limits mirror the Rust defaults; explicit saved values stay unchanged.
+# These limits are the defaults.
 max_entries = 32768
 # Serialized answers + conservative entry metadata, not total process RSS.
 max_bytes = 33554432
@@ -113,7 +113,7 @@ enabled = false
 retention_secs = 300
 reply_ttl_secs = 30
 
-# Fresh cache restoration after clean process shutdown, never periodic snapshots.
+# Saves the cache at clean shutdown and restores it at the next start.
 [cache.persistence]
 enabled = true
 max_bytes = 33554432

@@ -73,9 +73,9 @@ sudo sh install.sh
 | `/var/lib/parins-updater` | The updater's journal and public status. |
 
 It then enables and starts `parins-managed.service` and `parins-updater.path`.
-It never changes host or router DNS, firewall rules or NAT, never stops
-systemd-resolved or another DNS service, and never touches a file-mode
-`parins.service`.
+Pointing clients or the router at PariNS and opening firewall ports are up to you;
+systemd-resolved, other DNS services and a file-mode `parins.service` keep running
+as before.
 
 **Fresh install output.** After the service passes its readiness check, the
 installer prints three steps:

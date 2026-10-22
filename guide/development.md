@@ -65,10 +65,9 @@ cargo run --locked --release --example bench_cache -- --seconds 1 --repeats 3
   `--case Multi --workers 2` picks one case; `PARINS_BENCH_SHARDS`,
   `PARINS_BENCH_MAX_ENTRIES` and `PARINS_BENCH_MAX_BYTES` override the cache shape.
 
-These are microbenchmarks. Cache operations per second are not wire DNS QPS, and
-none of them measures network or TLS throughput, process memory or capacity on a
-deployment host. For a performance change, keep a baseline, repeat the same workload
-on a quiet host, and report variance and regressions.
+These are in-process microbenchmarks; `bench_cache` counts cache operations, which
+are not wire DNS queries. For a performance change, keep a baseline, repeat the same
+workload on a quiet host, and report variance and regressions.
 
 ## Packaging and releases
 
@@ -133,8 +132,7 @@ systemd in staged directories (`--root`). They cover these contracts:
 
 Suites that install software or change a system refuse to run without
 `--ephemeral-ci` on a disposable GitHub-hosted Linux runner. Never run them on a
-developer machine or an existing installation, and keep their guards. Each result
-proves only its own fixture.
+developer machine or an existing installation, and keep their guards.
 
 | Workflow | Command | What it covers |
 | --- | --- | --- |
@@ -145,11 +143,6 @@ proves only its own fixture.
 | `update-check.yml` (manual) | `scripts/test-systemd.sh --ephemeral-ci --package DIR --official-updater-check` | The update check of a real published release. Never rebuild with a forged official identity. |
 | `update-recovery.yml` (manual, or on harness changes) | `python3 -B scripts/test-update-reboot.py --ephemeral-ci ...` | Update recovery across normal reboot, hard reset and journal-volume disk-full in a disposable QEMU guest. Uses a development package; does not cover official upgrades or power loss. |
 | `public-dns-acceptance.yml` (manual) | `scripts/test-public-doq.py` | One verified DoQ query to an operator-chosen public address, host name and port. Never hardcode deployment targets or add production credentials. |
-
-These suites never change the host's DNS, firewall, certificate trust or system
-services outside the disposable runner. Local, CI and development-build results do
-not prove production capacity, public reachability or official upgrade and rollback
-on a particular host.
 
 ## Hickory fork
 

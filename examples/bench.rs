@@ -1,4 +1,4 @@
-//! Local synthetic baseline; these measurements are not production capacity claims.
+//! Resolver scenarios (warm cache, cold upstreams) against synthetic loopback upstreams.
 //! cargo run --release --example bench -- [queries=1000] [concurrency=32]
 use std::{
     net::SocketAddr,

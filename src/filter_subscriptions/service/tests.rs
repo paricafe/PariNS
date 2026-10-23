@@ -19,6 +19,9 @@ fn source(id: &str) -> SourceSettings {
         enabled: true,
         auto_update: true,
         update_interval_hours: 24,
+        block_response: None,
+        block_ipv4: None,
+        block_ipv6: None,
     }
 }
 fn install(store: &mut Store, settings: &SourceSettings, text: &[u8]) {
@@ -837,4 +840,58 @@ async fn local_source_budget_counts_old_policy_and_preserves_generation() {
     assert_eq!(service.config_revision(), 1);
     assert!(service.ready());
     assert!(service.acquire().is_ok());
+}
+
+#[tokio::test]
+async fn source_block_method_publishes_from_stored_content_without_downloading() {
+    use crate::policy::{BlockMode, BlockTrace};
+    use hickory_proto::{
+        op::{Message, MessageType, OpCode, Query},
+        rr::{Name, RecordType},
+    };
+    let (dir, service) = fixture(vec![source("one")]).await;
+    let catalog = fs::read(dir.path().join("sources/catalog.json")).unwrap();
+    let answer = |service: &Service| {
+        let mut query = Message::new(1, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_ascii("x.one.test").unwrap(),
+            RecordType::A,
+        ));
+        service
+            .handle
+            .snapshot()
+            .policy
+            .block_query(&query)
+            .unwrap()
+            .1
+    };
+    let trace = |response: &str| BlockTrace {
+        rule: "one.test".into(),
+        source_id: Some("one".into()),
+        response: response.into(),
+    };
+    assert_eq!(answer(&service), trace("nodata"));
+    // No download response is queued: a refetch would fail the candidate.
+    let mut settings = service.state.lock().unwrap().settings.clone();
+    settings.sources[0].block_response = Some(BlockMode::Refused);
+    let generation = service.snapshot().generation;
+    let candidate = service
+        .prepare_config(settings.clone(), Policy::default(), 1)
+        .await
+        .unwrap();
+    service.publish_config(candidate, 2);
+    assert_eq!(answer(&service), trace("refused"));
+    assert!(service.snapshot().generation > generation);
+    // The global method giving the same answers keeps the generation.
+    settings.sources[0].block_response = None;
+    let local: Policy = toml::from_str("block_response = 'refused'").unwrap();
+    let generation = service.snapshot().generation;
+    let candidate = service.prepare_config(settings, local, 2).await.unwrap();
+    service.publish_config(candidate, 3);
+    assert_eq!(answer(&service), trace("refused"));
+    assert_eq!(service.snapshot().generation, generation);
+    assert_eq!(
+        fs::read(dir.path().join("sources/catalog.json")).unwrap(),
+        catalog
+    );
 }

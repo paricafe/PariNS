@@ -238,6 +238,69 @@ impl Index {
             position += edge.len();
         }
     }
+    /// The block rule that chooses the answer, or None when the name is allowed
+    /// or not blocked. Local slots rank before subscription slots, then exact
+    /// before suffix, then the longest suffix, then the lowest slot.
+    pub fn block_match(&self, name: &Name, local_slots: u16) -> Option<Match> {
+        let query = Key::query(name);
+        let query = query.as_slice();
+        let mut index = 0;
+        let mut position = 0;
+        // (subscription, suffix, shorter, slot): lower ranks win.
+        type Rank = (bool, bool, std::cmp::Reverse<u16>, u16);
+        let mut best: Option<(Match, Rank)> = None;
+        let mut consider = |found: Match| {
+            let rank = (
+                found.source_slot >= local_slots,
+                found.group == Group::BlockSuffix,
+                std::cmp::Reverse(found.matched_key_len),
+                found.source_slot,
+            );
+            if best.is_none_or(|(_, current)| rank < current) {
+                best = Some((found, rank));
+            }
+        };
+        loop {
+            let node = self.nodes[index];
+            let found = |group: Group| {
+                (node.sources[group as usize] != NONE).then_some(Match {
+                    group,
+                    source_slot: node.sources[group as usize],
+                    matched_key_len: position as u16,
+                })
+            };
+            if found(Group::AllowSuffix).is_some() {
+                return None;
+            }
+            if let Some(suffix) = found(Group::BlockSuffix) {
+                consider(suffix);
+            }
+            if position == query.len() {
+                if found(Group::AllowExact).is_some() {
+                    return None;
+                }
+                if let Some(exact) = found(Group::BlockExact) {
+                    consider(exact);
+                }
+                break;
+            }
+            let children = &self.nodes[node.first_child as usize
+                ..node.first_child as usize + usize::from(node.child_count)];
+            let Ok(child) = children.binary_search_by_key(&query[position], |node| node.first_byte)
+            else {
+                break;
+            };
+            index = node.first_child as usize + child;
+            let next = self.nodes[index];
+            let edge = &self.arena
+                [next.edge_offset as usize..next.edge_offset as usize + usize::from(next.edge_len)];
+            if !query[position..].starts_with(edge) {
+                break;
+            }
+            position += edge.len();
+        }
+        best.map(|(found, _)| found)
+    }
     pub fn index_bytes(&self) -> usize {
         self.arena.capacity() + self.nodes.capacity() * size_of::<Node>()
     }

@@ -37,12 +37,22 @@ async fn resolve(resolver: &Resolver, q: &Message) -> Message {
         .message
 }
 
+/// The default method: NOERROR, no records, the blocking rule's SOA and EDE 15.
 fn assert_blocked(q: &Message, reply: &Message) {
     assert_eq!(reply.response_code, ResponseCode::NoError);
     assert_eq!(reply.id, q.id);
     assert_eq!(reply.queries, q.queries);
+    assert!(reply.answers.is_empty() && reply.additionals.is_empty());
+    assert_eq!(reply.authorities.len(), 1);
+    assert_eq!(reply.authorities[0].record_type(), RecordType::SOA);
+    assert_eq!(reply.authorities[0].ttl, 10);
     assert!(
-        reply.answers.is_empty() && reply.authorities.is_empty() && reply.additionals.is_empty()
+        reply
+            .edns
+            .as_ref()
+            .unwrap()
+            .option(hickory_proto::rr::rdata::opt::EdnsCode::Unknown(15))
+            .is_some()
     );
     assert!(!reply.authoritative && !reply.authentic_data && !reply.truncation);
     assert_eq!(reply.recursion_desired, q.recursion_desired);

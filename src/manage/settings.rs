@@ -24,7 +24,8 @@ pub(super) fn parse(text: &str) -> Result<Value> {
     // Policy is a compiled radix index, not a document. Project its already-validated
     // source rules without keeping a second rule copy in the DNS runtime.
     let mut filter = json!({
-        "enabled": false, "block_exact": [], "block_suffix": [],
+        "enabled": false, "block_response": "nodata", "block_ipv4": null, "block_ipv6": null,
+        "blocked_ttl_secs": 10, "block_exact": [], "block_suffix": [],
         "allow_exact": [], "allow_suffix": []
     });
     if let Some(rules) = source.get("filter").and_then(toml::Value::as_table) {

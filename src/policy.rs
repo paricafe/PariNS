@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::Read,
+    net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -11,10 +12,13 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use canonical::{Builder, Group, Limits};
 use hickory_proto::{
-    op::{Message, ResponseCode},
+    op::Message,
     rr::{Name, RData},
 };
+use response::Responses;
+pub use response::{BlockMode, BlockResponse};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "Rules")]
@@ -27,18 +31,41 @@ struct Data {
     index: radix::Index,
     publication_digest: [u8; 32],
     source_ids: Vec<String>,
+    responses: Responses,
     local: Option<LocalRules>,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 struct Rules {
     enabled: bool,
+    block_response: BlockMode,
+    block_ipv4: Option<Ipv4Addr>,
+    block_ipv6: Option<Ipv6Addr>,
+    blocked_ttl_secs: u32,
     block_exact: Vec<String>,
     block_suffix: Vec<String>,
     allow_exact: Vec<String>,
     allow_suffix: Vec<String>,
 }
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            block_response: BlockMode::default(),
+            block_ipv4: None,
+            block_ipv6: None,
+            blocked_ttl_secs: response::DEFAULT_TTL_SECS,
+            block_exact: Vec::new(),
+            block_suffix: Vec::new(),
+            allow_exact: Vec::new(),
+            allow_suffix: Vec::new(),
+        }
+    }
+}
+
+/// Distinct per-rule block methods in local rules, each with its own index slot.
+pub(crate) const MAX_LOCAL_RESPONSES: usize = 1024;
 
 /// Configuration owns validated source rules, never a prematurely compiled
 /// index. The subscription worker owns candidate compilation and its budget.
@@ -46,6 +73,27 @@ struct Rules {
 #[serde(try_from = "Rules")]
 pub struct LocalRules {
     rules: Arc<Rules>,
+    global: BlockResponse,
+    /// Per-rule methods in first-declaration order; slot `i + 1` is `variants[i]`.
+    variants: Arc<[BlockResponse]>,
+    /// Every rule line and setting, which decide each rule's slot and method.
+    digest: [u8; 32],
+}
+
+/// A rule line is a domain, then for block rules an optional method.
+fn split_rule(rule: &str, group: Group) -> Result<(&str, Option<BlockResponse>)> {
+    ensure!(rule.trim() == rule, "leading or trailing whitespace");
+    let mut tokens = rule.split_whitespace();
+    let domain = tokens.next().context("empty rule")?;
+    let method: Vec<_> = tokens.collect();
+    if method.is_empty() {
+        return Ok((domain, None));
+    }
+    ensure!(
+        matches!(group, Group::BlockExact | Group::BlockSuffix),
+        "allow rules take no block method"
+    );
+    Ok((domain, Some(BlockResponse::parse_rule(&method)?)))
 }
 impl Default for LocalRules {
     fn default() -> Self {
@@ -56,30 +104,111 @@ impl TryFrom<Rules> for LocalRules {
     type Error = anyhow::Error;
     fn try_from(rules: Rules) -> Result<Self> {
         ensure!(
-            rules.groups().iter().map(|(g, _)| g.len()).sum::<usize>() <= 100_000,
+            rules
+                .groups()
+                .iter()
+                .map(|(g, _, _)| g.len())
+                .sum::<usize>()
+                <= 100_000,
             "filter exceeds 100000 rules"
         );
         ensure!(
             rules.bytes() <= 8 * 1024 * 1024,
             "filter exceeds 8 MiB of rule text"
         );
-        for (group, _) in rules.groups() {
-            for rule in group {
-                canonical::Key::rule(rule).with_context(|| {
-                    format!(
-                        "invalid filter domain {rule:?}: expected ASCII DNS labels, not rule syntax"
-                    )
+        // Serde shows only the message, so each one carries its cause.
+        let global =
+            BlockResponse::from_settings(rules.block_response, rules.block_ipv4, rules.block_ipv6)
+                .map_err(|error| anyhow::anyhow!("invalid filter block_response: {error}"))?;
+        ensure!(
+            (1..=response::MAX_TTL_SECS).contains(&rules.blocked_ttl_secs),
+            "filter.blocked_ttl_secs must be in 1..=86400"
+        );
+        let mut variants = Vec::new();
+        for (group, kind, list) in rules.groups() {
+            for (position, rule) in group.iter().enumerate() {
+                let entry = || format!("filter.{list}[{position}] {rule:?}");
+                let (domain, method) = split_rule(rule, kind)
+                    .map_err(|error| anyhow::anyhow!("{}: {error}", entry()))?;
+                canonical::Key::rule(domain).with_context(|| {
+                    format!("{}: expected ASCII DNS labels, not rule syntax", entry())
                 })?;
+                if let Some(method) = method
+                    && !variants.contains(&method)
+                {
+                    ensure!(
+                        variants.len() < MAX_LOCAL_RESPONSES,
+                        "filter has more than {MAX_LOCAL_RESPONSES} distinct block methods"
+                    );
+                    variants.push(method);
+                }
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"parins-local-rules-v1\0");
+        hash.update([u8::from(rules.enabled)]);
+        global.digest(&mut hash);
+        hash.update(rules.blocked_ttl_secs.to_be_bytes());
+        for (group, _, list) in rules.groups() {
+            hash.update(list.as_bytes());
+            hash.update((group.len() as u64).to_be_bytes());
+            for rule in group {
+                hash.update((rule.len() as u64).to_be_bytes());
+                hash.update(rule.as_bytes());
             }
         }
         Ok(Self {
             rules: Arc::new(rules),
+            global,
+            variants: variants.into(),
+            digest: hash.finalize().into(),
         })
     }
 }
 impl LocalRules {
     fn owned_bytes(&self) -> usize {
-        self.rules.owned_bytes() + std::mem::size_of::<Rules>() + 2 * std::mem::size_of::<usize>()
+        self.rules.owned_bytes()
+            + std::mem::size_of::<Rules>()
+            + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of_val(&*self.variants)
+    }
+    fn local_slots(&self) -> u16 {
+        1 + self.variants.len() as u16
+    }
+    fn responses(&self) -> Responses {
+        Responses {
+            global: self.global,
+            ttl: self.rules.blocked_ttl_secs,
+            local_slots: self.local_slots(),
+            slots: std::iter::once(None)
+                .chain(self.variants.iter().copied().map(Some))
+                .collect(),
+        }
+    }
+    /// Adds every enabled rule under the slot of its method.
+    fn add_to(&self, builder: &mut Builder, mut check: impl FnMut() -> Result<()>) -> Result<()> {
+        builder.local_slots = self.local_slots();
+        builder.classes = self.responses().classes();
+        if !self.rules.enabled {
+            return Ok(());
+        }
+        for (group, kind, _) in self.rules.groups() {
+            for (position, rule) in group.iter().enumerate() {
+                if position.is_multiple_of(4096) {
+                    check()?;
+                }
+                let (domain, method) = split_rule(rule, kind).expect("validated filter rule");
+                let slot = method.map_or(0, |method| {
+                    1 + self
+                        .variants
+                        .iter()
+                        .position(|variant| *variant == method)
+                        .expect("collected block method") as u16
+                });
+                builder.add(domain, kind, slot)?;
+            }
+        }
+        Ok(())
     }
     fn compile(&self, mut limits: Limits, mut check: impl FnMut() -> Result<()>) -> Result<Policy> {
         check()?;
@@ -88,16 +217,7 @@ impl LocalRules {
             .checked_add(self.owned_bytes())
             .context("subscription_memory_limit")?;
         let mut builder = Builder::new(limits)?;
-        if self.rules.enabled {
-            for (group, kind) in self.rules.groups() {
-                for (position, rule) in group.iter().enumerate() {
-                    if position.is_multiple_of(4096) {
-                        check()?;
-                    }
-                    builder.add(rule, kind, 0)?;
-                }
-            }
-        }
+        self.add_to(&mut builder, &mut check)?;
         let mut cancelled = || {
             check().map_err(|_| canonical::Error {
                 line: 0,
@@ -107,16 +227,13 @@ impl LocalRules {
         let index = builder
             .prepare_with_check(&mut cancelled)?
             .finish_radix_with_check(cancelled)?;
-        let source_ids = vec![String::new()];
-        let publication_digest = index.publication_digest(&source_ids);
-        Ok(Policy {
-            data: Arc::new(Data {
-                index,
-                publication_digest,
-                source_ids,
-                local: Some(self.clone()),
-            }),
-        })
+        let source_ids = vec![String::new(); usize::from(self.local_slots())];
+        Ok(Policy::new(
+            index,
+            source_ids,
+            self.responses(),
+            Some(self.clone()),
+        ))
     }
 }
 
@@ -176,25 +293,25 @@ impl LocalPolicySource {
 }
 
 impl Rules {
-    fn groups(&self) -> [(&Vec<String>, Group); 4] {
+    fn groups(&self) -> [(&Vec<String>, Group, &'static str); 4] {
         [
-            (&self.block_exact, Group::BlockExact),
-            (&self.block_suffix, Group::BlockSuffix),
-            (&self.allow_exact, Group::AllowExact),
-            (&self.allow_suffix, Group::AllowSuffix),
+            (&self.block_exact, Group::BlockExact, "block_exact"),
+            (&self.block_suffix, Group::BlockSuffix, "block_suffix"),
+            (&self.allow_exact, Group::AllowExact, "allow_exact"),
+            (&self.allow_suffix, Group::AllowSuffix, "allow_suffix"),
         ]
     }
     fn bytes(&self) -> usize {
         self.groups()
             .iter()
-            .flat_map(|(g, _)| g.iter())
+            .flat_map(|(g, _, _)| g.iter())
             .map(String::len)
             .sum()
     }
     fn owned_bytes(&self) -> usize {
         self.groups()
             .iter()
-            .map(|(g, _)| {
+            .map(|(g, _, _)| {
                 g.capacity() * std::mem::size_of::<String>()
                     + g.iter().map(String::capacity).sum::<usize>()
             })
@@ -233,6 +350,14 @@ pub struct Explanation {
     pub decision: Decision,
     pub witness: Option<Witness>,
 }
+/// The rule that blocked a query and the method its answer used, for the query log.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BlockTrace {
+    pub rule: String,
+    /// null identifies local rules.
+    pub source_id: Option<String>,
+    pub response: String,
+}
 
 impl TryFrom<Rules> for Policy {
     type Error = anyhow::Error;
@@ -247,16 +372,82 @@ impl Policy {
     pub fn semantic_digest(&self) -> [u8; 32] {
         self.data.index.semantic_digest
     }
-    pub(crate) fn from_index(index: radix::Index, source_ids: Vec<String>) -> Self {
-        let publication_digest = index.publication_digest(&source_ids);
+    fn new(
+        index: radix::Index,
+        source_ids: Vec<String>,
+        responses: Responses,
+        local: Option<LocalRules>,
+    ) -> Self {
+        // Each slot's witness is its source and the answer it actually gives.
+        let witnesses: Vec<_> = source_ids
+            .iter()
+            .enumerate()
+            .map(|(slot, id)| format!("{id}\0{}", responses.get(slot as u16).label()))
+            .collect();
+        let mut hash = Sha256::new();
+        hash.update(index.publication_digest(&witnesses));
+        hash.update(responses.ttl.to_be_bytes());
         Self {
             data: Arc::new(Data {
                 index,
-                publication_digest,
+                publication_digest: hash.finalize().into(),
                 source_ids,
-                local: None,
+                responses,
+                local,
             }),
         }
+    }
+    /// Slot IDs of an aggregate on this local policy: its local slots, then
+    /// one slot per subscription source in the given order.
+    pub(crate) fn aggregate_ids(&self, sources: impl IntoIterator<Item = String>) -> Vec<String> {
+        vec![String::new(); usize::from(self.data.responses.local_slots)]
+            .into_iter()
+            .chain(sources)
+            .collect()
+    }
+    /// An aggregate index built on this local policy; `sources` holds each
+    /// subscription source's method in slot order (None follows the global one).
+    pub(crate) fn aggregate(
+        &self,
+        index: radix::Index,
+        source_ids: Vec<String>,
+        sources: impl IntoIterator<Item = Option<BlockResponse>>,
+    ) -> Self {
+        let responses = self.aggregate_responses(sources);
+        debug_assert_eq!(responses.slots.len(), source_ids.len());
+        Self::new(index, source_ids, responses, None)
+    }
+    fn aggregate_responses(
+        &self,
+        sources: impl IntoIterator<Item = Option<BlockResponse>>,
+    ) -> Responses {
+        let mut responses = self.data.responses.clone();
+        responses.slots.truncate(usize::from(responses.local_slots));
+        responses.slots.extend(sources);
+        responses
+    }
+    /// Covers every block method of an aggregate on this local policy, so a
+    /// method change publishes a new generation.
+    pub(crate) fn aggregate_responses_digest(
+        &self,
+        sources: impl IntoIterator<Item = Option<BlockResponse>>,
+    ) -> [u8; 32] {
+        self.aggregate_responses(sources).digest()
+    }
+    /// Answer classes of an aggregate's slots; they decide which covered rules
+    /// the index keeps, so they name the derived index too.
+    pub(crate) fn aggregate_classes(
+        &self,
+        sources: impl IntoIterator<Item = Option<BlockResponse>>,
+    ) -> Vec<u16> {
+        self.aggregate_responses(sources).classes()
+    }
+    /// Digest of the local rule text and settings; empty for an aggregate.
+    pub(crate) fn local_digest(&self) -> [u8; 32] {
+        self.data
+            .local
+            .as_ref()
+            .map_or([0; 32], |local| local.digest)
     }
     /// Stable effective decisions and their actual bounded witnesses, excluding
     /// unused sources and input-only statistics such as repeated source lines.
@@ -278,16 +469,10 @@ impl Policy {
             .local
             .as_ref()
             .context("aggregate policy cannot be used as local input")?;
-        let rules = &local.rules;
-        if rules.enabled {
-            builder.account_local_text(rules.bytes())?;
-            for (group, kind) in rules.groups() {
-                for domain in group {
-                    builder.add(domain, kind, 0)?;
-                }
-            }
+        if local.rules.enabled {
+            builder.account_local_text(local.rules.bytes())?;
         }
-        Ok(())
+        local.add_to(builder, || Ok(()))
     }
     pub(crate) fn index_bytes(&self) -> usize {
         self.data.index.index_bytes()
@@ -363,15 +548,36 @@ impl Policy {
             .is_some_and(|matched| (matched.group as u8) >= 2)
     }
 
-    pub fn blocks_query(&self, query: &Message) -> bool {
-        self.blocks(query.queries[0].name())
+    /// The answer for a blocked `name`, chosen by the most specific rule:
+    /// local exact, local suffix (longest), subscription exact, subscription
+    /// suffix (longest); sources in configured order.
+    fn block_answer(&self, query: &Message, name: &Name) -> Option<(Message, BlockTrace)> {
+        let responses = &self.data.responses;
+        let found = self.data.index.block_match(name, responses.local_slots)?;
+        let response = responses.get(found.source_slot);
+        let rule = self.data.index.rule(name, found);
+        let owner = Name::from_ascii(format!("{rule}.")).expect("matched rules are DNS names");
+        let id = &self.data.source_ids[usize::from(found.source_slot)];
+        Some((
+            response.answer(query, &owner, responses.ttl),
+            BlockTrace {
+                rule,
+                source_id: (!id.is_empty()).then(|| id.clone()),
+                response: response.kind().into(),
+            },
+        ))
+    }
+
+    pub fn block_query(&self, query: &Message) -> Option<(Message, BlockTrace)> {
+        self.block_answer(query, query.queries[0].name())
     }
 
     /// Only follow answer CNAMEs reachable from the original question and class.
     /// A name's allow exception never skips checks on a different chain target.
-    pub fn apply_response(&self, query: &Message, response: &mut Message) -> bool {
+    /// A blocked chain name replaces the whole answer with that rule's method.
+    pub fn apply_response(&self, query: &Message, response: &mut Message) -> Option<BlockTrace> {
         if self.index_rules() == 0 {
-            return false;
+            return None;
         }
         let question = &query.queries[0];
         let mut links: HashMap<&Name, Vec<&Name>> = HashMap::new();
@@ -388,15 +594,15 @@ impl Policy {
             if !visited.insert(name) {
                 continue;
             }
-            if self.blocks(name) {
-                *response = crate::protocol::error_response(query, ResponseCode::NoError);
-                return true;
+            if let Some((answer, trace)) = self.block_answer(query, name) {
+                *response = answer;
+                return Some(trace);
             }
             if let Some(targets) = links.get(name) {
                 pending.extend(targets.iter().copied());
             }
         }
-        false
+        None
     }
 }
 
@@ -404,5 +610,6 @@ impl Policy {
 mod tests;
 
 pub(crate) mod canonical;
+mod response;
 
 pub(crate) mod radix;

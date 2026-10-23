@@ -200,6 +200,24 @@ impl Key {
     }
 }
 
+/// The longest kept suffix rule covering `bytes`, searched at each label boundary.
+fn longest_cover(arena: &[u8], suffixes: &[Record], bytes: &[u8]) -> Option<Entry> {
+    let mut boundaries = [0usize; 128];
+    let (mut count, mut position) = (0, 0);
+    while position < bytes.len() {
+        position += 1 + usize::from(bytes[position]);
+        boundaries[count] = position;
+        count += 1;
+    }
+    boundaries[..count].iter().rev().find_map(|&end| {
+        let prefix = &bytes[..end];
+        suffixes
+            .binary_search_by(|record| key(arena, record.entry).cmp(prefix))
+            .ok()
+            .map(|index| suffixes[index].entry)
+    })
+}
+
 pub(super) fn key(arena: &[u8], entry: Entry) -> &[u8] {
     &arena[entry.offset as usize..entry.offset as usize + entry.len as usize]
 }
@@ -207,6 +225,11 @@ pub struct Builder {
     pub(super) arena: Vec<u8>,
     pub(super) records: Vec<Record>,
     pub(super) budget: Budget,
+    /// Slots below this are local rules, which outrank subscription rules.
+    pub(super) local_slots: u16,
+    /// Answer class of each slot: slots with one class answer alike. Empty
+    /// means every slot answers alike.
+    pub(super) classes: Vec<u16>,
     max_rules: usize,
     decoded_bytes: usize,
     failed: Option<Error>,
@@ -265,12 +288,18 @@ impl Builder {
             arena: Vec::new(),
             records: Vec::new(),
             budget,
+            local_slots: 1,
+            classes: Vec::new(),
             max_rules: limits.max_rules,
             decoded_bytes: 0,
             failed: None,
         })
     }
-    /// Slots are assigned by the caller: local first, then stable source-ID order.
+    /// Answer class of each slot, from `Policy::aggregate_classes`.
+    pub(crate) fn set_classes(&mut self, classes: Vec<u16>) {
+        self.classes = classes;
+    }
+    /// Slots are assigned by the caller: local first, then configured source order.
     pub fn add(&mut self, domain: &str, group: Group, source_slot: u16) -> Result<(), Error> {
         if let Some(error) = self.failed {
             return Err(error);
@@ -337,8 +366,28 @@ impl Builder {
         let mut ranges = [0..0, 0..0, 0..0, 0..0];
         let mut read = 0;
         let mut write = 0;
+        let local_slots = self.local_slots;
+        let classes = &self.classes;
+        let uniform = classes.windows(2).all(|pair| pair[0] == pair[1]);
+        let class = |slot: u16| classes.get(usize::from(slot)).copied().unwrap_or(0);
+        // A covered block rule is dropped only when it cannot change the answer:
+        // every slot answers alike, a local rule covers a subscription rule, or
+        // the covering rule (the longest such suffix) has its class and layer.
+        let covers = |group: usize, cover: Entry, entry: Entry| {
+            let local = |entry: Entry| entry.source_slot < local_slots;
+            group < 2
+                || uniform
+                || (local(cover) && !local(entry))
+                || (class(cover.source_slot) == class(entry.source_slot)
+                    && local(cover) == local(entry))
+        };
         for group in 0..4 {
-            let mut previous: Option<Entry> = None;
+            // Kept suffixes that cover the current key, longest last. Keys are
+            // sorted, so an entry stops covering once a later key leaves it.
+            let mut ancestors = [None::<Entry>; 128];
+            let mut depth = 0;
+            // Only the lowest slot of an identical key survives, kept or not.
+            let mut last: Option<Entry> = None;
             let start = write;
             while read < self.records.len() && self.records[read].group as usize == group {
                 if read.is_multiple_of(4096) {
@@ -348,22 +397,28 @@ impl Builder {
                 read += 1;
                 let entry = record.entry;
                 let bytes = key(&self.arena, entry);
-                let redundant = previous.is_some_and(|prev| {
-                    if group % 2 == 0 {
-                        bytes.starts_with(key(&self.arena, prev))
-                    } else {
-                        bytes == key(&self.arena, prev)
+                let duplicate = last.is_some_and(|last| bytes == key(&self.arena, last));
+                last = Some(entry);
+                let cover = if group % 2 == 0 {
+                    while depth > 0
+                        && !bytes.starts_with(key(
+                            &self.arena,
+                            ancestors[depth - 1].expect("pushed ancestor"),
+                        ))
+                    {
+                        depth -= 1;
                     }
-                }) || (group % 2 == 1 && {
-                    let suffixes = &self.records[ranges[group - 1].clone()];
-                    let position =
-                        suffixes.partition_point(|record| key(&self.arena, record.entry) <= bytes);
-                    position
-                        .checked_sub(1)
-                        .is_some_and(|i| bytes.starts_with(key(&self.arena, suffixes[i].entry)))
-                });
+                    depth.checked_sub(1).and_then(|top| ancestors[top])
+                } else {
+                    longest_cover(&self.arena, &self.records[ranges[group - 1].clone()], bytes)
+                };
+                let redundant = duplicate || cover.is_some_and(|cover| covers(group, cover, entry));
+                if !redundant && group % 2 == 0 {
+                    // A label-aligned key nests at most 127 suffixes deep.
+                    ancestors[depth] = Some(entry);
+                    depth += 1;
+                }
                 if !redundant {
-                    previous = Some(entry);
                     self.records[write] = record;
                     write += 1;
                 }

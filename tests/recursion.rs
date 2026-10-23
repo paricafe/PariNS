@@ -17,10 +17,9 @@ use parins::{
 };
 
 fn config(mode: ResolutionMode) -> Config {
-    let text = include_str!("../parins.example.toml").replace(
-        "[filter]\nenabled = false\nblock_exact = []",
-        "[filter]\nenabled = true\nblock_exact = [\"blocked.test\"]",
-    );
+    let text = include_str!("../parins.example.toml")
+        .replace("[filter]\nenabled = false", "[filter]\nenabled = true")
+        .replace("block_exact = []", "block_exact = [\"blocked.test\"]");
     let mut config = Config::parse(&text).unwrap();
     config.resolution.mode = mode;
     config.ecs.enabled = false;

@@ -410,10 +410,10 @@ impl Resolver {
                 });
             }
         };
-        if policy.blocks_query(&query) {
+        if let Some((mut message, block)) = policy.block_query(&query) {
             trace.cache = Some("blocked");
+            trace.block = Some(block);
             self.metrics.inc(Counter::QueryBlocked);
-            let mut message = protocol::error_response(&query, ResponseCode::NoError);
             context.finish(&query, &mut message, None);
             return Some(Reply {
                 message,
@@ -462,8 +462,9 @@ impl Resolver {
             }
             let mut authentic = self.authentic(&query, hit.authentic);
             let (mut message, scope) = (hit.message, hit.scope);
-            if policy.apply_response(&query, &mut message) {
+            if let Some(block) = policy.apply_response(&query, &mut message) {
                 trace.cache = Some("blocked");
+                trace.block = Some(block);
                 self.metrics.inc(Counter::ResponseBlocked);
                 authentic = false;
             }
@@ -566,8 +567,9 @@ impl Resolver {
         let mut authentic = self.authentic(&query, message.metadata.authentic_data);
         // Cache retains the original upstream response; policy applies equally
         // on misses and hits and never inserts its synthesized answer.
-        if policy.apply_response(&query, &mut message) {
+        if let Some(block) = policy.apply_response(&query, &mut message) {
             trace.cache = Some("blocked");
+            trace.block = Some(block);
             self.metrics.inc(Counter::ResponseBlocked);
             authentic = false;
         }

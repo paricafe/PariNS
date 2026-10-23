@@ -104,6 +104,15 @@ async fn real_upstream_cache_filter_error_and_opt_in_history() {
     assert_eq!(blocked.status, "blocked");
     assert_eq!(blocked.cache, "blocked");
     assert!(blocked.upstream.is_none());
+    assert_eq!(
+        blocked.block,
+        Some(parins::policy::BlockTrace {
+            rule: "blocked.test".into(),
+            source_id: None,
+            response: "nodata".into(),
+        })
+    );
+    assert!(fresh.block.is_none());
     assert_eq!(fresh.cache, "fresh");
     assert!(fresh.upstream.is_none());
     assert!(fresh.outgoing_ecs.is_none());

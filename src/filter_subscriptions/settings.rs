@@ -1,8 +1,12 @@
 //! Authoritative subscription settings. Validation is pure and never resolves a host.
 use super::Source;
-use anyhow::{Result, ensure};
+use crate::policy::{BlockMode, BlockResponse};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    net::{Ipv4Addr, Ipv6Addr},
+};
 
 pub use crate::policy::canonical::Format;
 
@@ -41,6 +45,14 @@ pub struct SourceSettings {
     pub auto_update: bool,
     #[serde(default = "daily")]
     pub update_interval_hours: u16,
+    /// Absent follows the global `[filter]` method. Changing it recompiles the
+    /// policy from stored content; it is not part of the source identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_response: Option<BlockMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_ipv4: Option<Ipv4Addr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_ipv6: Option<Ipv6Addr>,
 }
 fn yes() -> bool {
     true
@@ -52,6 +64,21 @@ fn daily() -> u16 {
 impl SourceSettings {
     pub(crate) fn identity(&self) -> Result<Source> {
         Source::new(&self.url, self.format)
+    }
+    /// This source's block method; None follows the global one.
+    pub(crate) fn response(&self) -> Result<Option<BlockResponse>> {
+        match self.block_response {
+            None => {
+                ensure!(
+                    self.block_ipv4.is_none() && self.block_ipv6.is_none(),
+                    "block_ipv4 and block_ipv6 are allowed only with block_response = \"custom_ip\""
+                );
+                Ok(None)
+            }
+            Some(mode) => {
+                BlockResponse::from_settings(mode, self.block_ipv4, self.block_ipv6).map(Some)
+            }
+        }
     }
 }
 
@@ -97,6 +124,9 @@ impl Settings {
                 (1..=168).contains(&source.update_interval_hours),
                 "subscription update_interval_hours must be 1..=168"
             );
+            source
+                .response()
+                .with_context(|| format!("subscription {}", source.id))?;
             let identity = source.identity()?;
             ensure!(
                 fingerprints.insert(identity.fingerprint),
@@ -140,6 +170,9 @@ mod tests {
             enabled: true,
             auto_update: true,
             update_interval_hours: 24,
+            block_response: None,
+            block_ipv4: None,
+            block_ipv6: None,
         };
         let mut settings = Settings {
             sources: vec![source.clone()],
@@ -158,5 +191,38 @@ mod tests {
         settings.sources[0].url = "https://example.com/list".into();
         settings.max_rules = 5_000_001;
         assert!(settings.validate().is_err());
+    }
+    #[test]
+    fn source_block_methods_follow_global_or_validate_their_addresses() {
+        let parse = |extra: &str| {
+            let settings: Settings = toml::from_str(&format!(
+                "[[sources]]\nid = 'one'\nname = 'One'\nurl = 'https://example.com/list'\nformat = 'domain_list'\n{extra}"
+            ))
+            .unwrap();
+            settings
+                .validate()
+                .map(|()| settings.sources[0].response().unwrap())
+        };
+        assert_eq!(parse("").unwrap(), None);
+        assert_eq!(
+            parse("block_response = 'nxdomain'").unwrap(),
+            Some(BlockResponse::Nxdomain)
+        );
+        assert_eq!(
+            parse("block_response = 'custom_ip'\nblock_ipv4 = '192.0.2.1'").unwrap(),
+            Some(BlockResponse::CustomIp {
+                ipv4: Some("192.0.2.1".parse().unwrap()),
+                ipv6: None
+            })
+        );
+        for extra in [
+            "block_response = 'custom_ip'",
+            "block_ipv4 = '192.0.2.1'",
+            "block_response = 'refused'\nblock_ipv6 = '2001:db8::1'",
+            "block_response = 'custom_ip'\nblock_ipv4 = '255.255.255.255'",
+        ] {
+            let error = format!("{:#}", parse(extra).unwrap_err());
+            assert!(error.starts_with("subscription one: "), "{extra}: {error}");
+        }
     }
 }

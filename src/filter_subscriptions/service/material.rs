@@ -1,4 +1,5 @@
 use super::*;
+use crate::filter_subscriptions::settings::SourceSettings;
 use crate::policy::{
     canonical::{Builder, Error as ParseError, ErrorKind, Limits},
     radix::Index,
@@ -27,14 +28,23 @@ pub struct Material {
 struct Input {
     id: String,
     source: Source,
+    response: Option<crate::policy::BlockResponse>,
     record: SourceRecord,
     file: File,
 }
 
-fn digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
+/// Names the derived index: the rules, their slots with sources in their
+/// configured order, and which slots answer alike (the index keeps covered
+/// rules that answer differently). Method changes that keep those classes
+/// reuse the index.
+fn index_digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(b"parins-filter-input-v1\0");
+    hash.update(b"parins-filter-input-v2\0");
     hash.update(local.semantic_digest());
+    hash.update(local.local_digest());
+    for class in local.aggregate_classes(inputs.iter().map(|i| i.response)) {
+        hash.update(class.to_be_bytes());
+    }
     hash.update((local.input_rules() as u64).to_be_bytes());
     hash.update((local.input_bytes() as u64).to_be_bytes());
     for input in inputs {
@@ -44,6 +54,24 @@ fn digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
         hash.update(input.record.sha256.as_bytes());
     }
     hash.finalize().into()
+}
+/// Identifies the published policy: the derived index plus every block method,
+/// so a method change publishes a new generation from the same index.
+fn digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"parins-filter-material-v1\0");
+    hash.update(index_digest(local, inputs));
+    hash.update(local.aggregate_responses_digest(inputs.iter().map(|i| i.response)));
+    hash.finalize().into()
+}
+fn source_input(settings: &SourceSettings, record: SourceRecord, file: File) -> Result<Input> {
+    Ok(Input {
+        id: settings.id.clone(),
+        source: settings.identity()?,
+        response: settings.response()?,
+        record,
+        file,
+    })
 }
 fn limits(settings: &Settings, retained: usize) -> Result<Limits> {
     Ok(Limits {
@@ -81,7 +109,9 @@ fn compile_inputs(
 ) -> Result<Policy> {
     let mut builder = Builder::new(limits)?;
     local.append_to(&mut builder)?;
-    let mut ids = vec![String::new()];
+    let responses: Vec<_> = inputs.iter().map(|i| i.response).collect();
+    builder.set_classes(local.aggregate_classes(responses.iter().copied()));
+    let mut ids = local.aggregate_ids([]);
     for input in inputs {
         check()?;
         let parsed = builder.parse_source(
@@ -110,7 +140,7 @@ fn compile_inputs(
     let index = builder
         .prepare_with_check(&mut cancelled)?
         .finish_radix_with_check(cancelled)?;
-    Ok(Policy::from_index(index, ids))
+    Ok(local.aggregate(index, ids, responses))
 }
 
 pub(super) fn local_material(local: &Policy, settings: &Settings) -> Result<Material> {
@@ -128,20 +158,12 @@ pub(super) fn local_material(local: &Policy, settings: &Settings) -> Result<Mate
 }
 
 pub(super) fn identity(store: &Store, settings: &Settings, local: &Policy) -> Result<[u8; 32]> {
-    let mut sources: Vec<_> = settings.effective().collect();
-    sources.sort_by(|a, b| a.id.cmp(&b.id));
     let mut inputs = Vec::new();
-    for source in sources {
-        let identity = source.identity()?;
+    for source in settings.effective() {
         let (record, file) = store
-            .verified_content(&identity.fingerprint)
+            .verified_content(&source.identity()?.fingerprint)
             .map_err(|_| Failure::new("subscription_material_missing"))?;
-        inputs.push(Input {
-            id: source.id.clone(),
-            source: identity,
-            record,
-            file,
-        });
+        inputs.push(source_input(source, record, file)?);
     }
     input_limits(&inputs, local, settings)?;
     Ok(digest(local, &inputs))
@@ -170,8 +192,7 @@ pub(super) fn compile(
             .is_some_and(|n| n <= settings.max_memory_bytes),
         Failure::new("subscription_memory_limit")
     );
-    let mut sources: Vec<_> = settings.effective().collect();
-    sources.sort_by(|a, b| a.id.cmp(&b.id));
+    let sources: Vec<_> = settings.effective().collect();
     let mut inputs = Vec::with_capacity(sources.len());
     let mut source_pins = Vec::with_capacity(sources.len());
     for settings in sources {
@@ -187,25 +208,20 @@ pub(super) fn compile(
             .verified_record(&record)
             .map_err(|_| Failure::new("subscription_material_missing"))?;
         source_pins.push(store.pin(&record.sha256)?);
-        inputs.push(Input {
-            id: settings.id.clone(),
-            source,
-            record,
-            file,
-        });
+        inputs.push(source_input(settings, record, file)?);
     }
     input_limits(&inputs, local, settings)?;
     let input_digest = digest(local, &inputs);
-    let name = hex(input_digest);
-    let ids: Vec<_> = std::iter::once(String::new())
-        .chain(inputs.iter().map(|i| i.id.clone()))
-        .collect();
+    let index_digest = index_digest(local, &inputs);
+    let name = hex(index_digest);
+    let ids = local.aggregate_ids(inputs.iter().map(|i| i.id.clone()));
+    let responses: Vec<_> = inputs.iter().map(|i| i.response).collect();
     let budget = limits(settings, retained)?;
     if let Ok(Some(file)) = store.read_index(&name, settings.max_memory_bytes as u64)
-        && let Ok(index) = Index::read_from_with_check(file, input_digest, &ids, budget, &mut check)
+        && let Ok(index) = Index::read_from_with_check(file, index_digest, &ids, budget, &mut check)
     {
         return Ok(Material {
-            policy: Policy::from_index(index, ids),
+            policy: local.aggregate(index, ids, responses),
             material_digest: input_digest,
             index_pin: Some(store.pin_index(&name)?),
             content_revision: store.revision(),
@@ -225,7 +241,7 @@ pub(super) fn compile(
         .checked_add(4096)
         .context(Failure::new("subscription_disk_limit"))?;
     store.write_index(&name, max_bytes, |out| {
-        policy.write_index(out, input_digest)
+        policy.write_index(out, index_digest)
     })?;
     let index_pin = Some(store.pin_index(&name)?);
     Ok(Material {
@@ -255,32 +271,24 @@ pub fn read_only(path: &Path, settings: &Settings, local: &Policy) -> Result<Mat
             "subscription_storage_unavailable"
         })
     })?;
-    let mut sources: Vec<_> = settings.effective().collect();
-    sources.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut inputs = Vec::with_capacity(sources.len());
-    for source in sources {
-        let identity = source.identity()?;
+    let mut inputs = Vec::new();
+    for source in settings.effective() {
         let (record, file) = view
-            .verified_content(&identity.fingerprint)
+            .verified_content(&source.identity()?.fingerprint)
             .map_err(|_| Failure::new("subscription_material_missing"))?;
-        inputs.push(Input {
-            id: source.id.clone(),
-            source: identity,
-            record,
-            file,
-        });
+        inputs.push(source_input(source, record, file)?);
     }
     input_limits(&inputs, local, settings)?;
     let input_digest = digest(local, &inputs);
-    let ids: Vec<_> = std::iter::once(String::new())
-        .chain(inputs.iter().map(|i| i.id.clone()))
-        .collect();
+    let index_digest = index_digest(local, &inputs);
+    let ids = local.aggregate_ids(inputs.iter().map(|i| i.id.clone()));
+    let responses: Vec<_> = inputs.iter().map(|i| i.response).collect();
     let budget = limits(settings, local.owned_bytes())?;
-    if let Ok(Some(file)) = view.read_index(&hex(input_digest), settings.max_memory_bytes as u64)
-        && let Ok(index) = Index::read_from(file, input_digest, &ids, budget)
+    if let Ok(Some(file)) = view.read_index(&hex(index_digest), settings.max_memory_bytes as u64)
+        && let Ok(index) = Index::read_from(file, index_digest, &ids, budget)
     {
         return Ok(Material {
-            policy: Policy::from_index(index, ids),
+            policy: local.aggregate(index, ids, responses),
             material_digest: input_digest,
             index_pin: None,
             content_revision: view.revision(),

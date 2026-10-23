@@ -13,20 +13,28 @@ struct WalkFrame {
     prefix_len: usize,
     next_child: u16,
     ancestor_suffixes: u8,
+    /// Slot of the nearest ancestor block suffix, or NONE.
+    block_suffix: u16,
     entered: bool,
 }
 const SCRATCH_BYTES: usize = MAX_DEPTH * std::mem::size_of::<WalkFrame>() + 254;
 
+/// Local slots (empty IDs, at least one) then at most 16 distinct sources.
 fn source_ids_valid(ids: &[String]) -> bool {
-    (1..=17).contains(&ids.len())
-        && ids[0].is_empty()
-        && ids[1..].iter().all(|id| {
+    let local = ids.iter().take_while(|id| id.is_empty()).count();
+    let sources = &ids[local..];
+    (1..=crate::policy::MAX_LOCAL_RESPONSES + 1).contains(&local)
+        && sources.len() <= 16
+        && sources.iter().all(|id| {
             (1..=32).contains(&id.len())
                 && id
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         })
-        && ids[1..].windows(2).all(|pair| pair[0] < pair[1])
+        && sources
+            .iter()
+            .enumerate()
+            .all(|(i, id)| !sources[..i].contains(id))
 }
 
 impl Index {
@@ -283,6 +291,7 @@ impl Index {
             "invalid derived index root"
         );
         let mut frames = [WalkFrame::default(); MAX_DEPTH];
+        frames[0].block_suffix = NONE;
         let mut depth = 1;
         let mut key = [0; 254];
         let mut next_allocation = 1usize;
@@ -347,17 +356,29 @@ impl Index {
                         *source == NONE || usize::from(*source) < source_count,
                         "derived index source slot"
                     );
-                    if *source != NONE {
+                    if *source == NONE {
+                        continue;
+                    }
+                    if group < 2 {
                         ensure!(
-                            frame.ancestor_suffixes & (1 << (group / 2)) == 0,
+                            frame.ancestor_suffixes & 1 == 0,
                             "derived index redundant suffix child"
                         );
-                        if group % 2 == 1 {
-                            ensure!(
-                                node.sources[group - 1] == NONE,
-                                "derived index redundant exact"
-                            );
-                        }
+                        ensure!(
+                            group == 0 || node.sources[0] == NONE,
+                            "derived index redundant exact"
+                        );
+                    } else {
+                        // A covered block rule is kept only to answer differently
+                        // from its nearest cover, so it has another slot.
+                        ensure!(
+                            frame.block_suffix != *source,
+                            "derived index redundant suffix child"
+                        );
+                        ensure!(
+                            group == 2 || node.sources[2] != *source,
+                            "derived index redundant exact"
+                        );
                     }
                 }
                 visit(&key[..end], &node.sources)?;
@@ -372,11 +393,17 @@ impl Index {
             let ancestor_suffixes = frame.ancestor_suffixes
                 | u8::from(node.sources[0] != NONE)
                 | (u8::from(node.sources[2] != NONE) << 1);
+            let block_suffix = if node.sources[2] != NONE {
+                node.sources[2]
+            } else {
+                frame.block_suffix
+            };
             ensure!(depth < MAX_DEPTH, "derived index graph depth");
             frames[depth] = WalkFrame {
                 node: child,
                 prefix_len: end,
                 ancestor_suffixes,
+                block_suffix,
                 ..WalkFrame::default()
             };
             depth += 1;

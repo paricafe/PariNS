@@ -117,6 +117,9 @@ pub struct Entry {
     pub recursion_desired: bool,
     pub answer: Vec<Record>,
     pub answer_truncated: bool,
+    /// The rule and method of a blocked query; absent in entries before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<crate::policy::BlockTrace>,
 }
 #[derive(Serialize, Debug)]
 pub struct Page {
@@ -165,6 +168,7 @@ pub(crate) struct Trace {
     pub cache_lookup: Option<crate::cache::LookupDecision>,
     pub cache_store: Option<crate::cache::StoreDecision>,
     pub cache_scope: Option<String>,
+    pub block: Option<crate::policy::BlockTrace>,
 }
 
 /// A cancelled foreground future still has one terminal history entry. The
@@ -280,6 +284,7 @@ impl Entry {
             recursion_desired: query.is_some_and(|q| q.recursion_desired),
             answer: Vec::new(),
             answer_truncated: false,
+            block: None,
         }
     }
     pub(crate) fn finish(&mut self, response: Option<&Message>, elapsed: Duration, trace: Trace) {
@@ -295,6 +300,7 @@ impl Entry {
         self.upstream_attempts_omitted = trace.upstream_trace.as_ref().map(|trace| trace.omitted);
         self.upstream_attempts = trace.upstream_trace.map(|trace| trace.attempts);
         self.outgoing_ecs = trace.outgoing_ecs;
+        self.block = trace.block;
         let Some(response) = response else {
             return;
         };

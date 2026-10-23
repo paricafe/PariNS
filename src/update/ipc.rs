@@ -8,11 +8,62 @@ pub const INBOX_NAME: &str = "update-request.json";
 pub const INBOX_LIMIT: usize = 8192;
 pub const STATUS_LIMIT: usize = 32768;
 
+/// What `parins --manage --check` read. The running version and the candidate
+/// must report the same inputs; only digests of the inputs themselves appear,
+/// never encodings derived by one version, so a new version that encodes its
+/// policy differently still matches.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckReport {
     pub config_revision: u64,
-    pub material_digest: String,
+    pub inputs: CheckInputs,
+}
+
+/// SHA-256 of each input category, as lowercase hex.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckInputs {
+    /// The saved TOML.
+    pub configuration: String,
+    /// Rule files outside the TOML (`filter_file`).
+    pub rule_files: String,
+    /// Each selected subscription source's stored content and the catalog revision.
+    pub subscriptions: String,
+    /// DoT, DoH and DoQ certificate chains.
+    pub certificates: String,
+    pub upstream_ca: String,
+}
+
+impl CheckReport {
+    fn valid(&self) -> bool {
+        let inputs = &self.inputs;
+        self.config_revision > 0
+            && [
+                &inputs.configuration,
+                &inputs.rule_files,
+                &inputs.subscriptions,
+                &inputs.certificates,
+                &inputs.upstream_ca,
+            ]
+            .into_iter()
+            .all(|digest| valid_sha256(digest))
+    }
+    /// Input categories that differ, for the preflight log; never their contents.
+    pub fn differences(&self, other: &Self) -> Vec<&'static str> {
+        let (a, b) = (&self.inputs, &other.inputs);
+        [
+            ("revision", self.config_revision == other.config_revision),
+            ("configuration", a.configuration == b.configuration),
+            ("rule_files", a.rule_files == b.rule_files),
+            ("subscriptions", a.subscriptions == b.subscriptions),
+            ("certificates", a.certificates == b.certificates),
+            ("upstream_ca", a.upstream_ca == b.upstream_ca),
+        ]
+        .into_iter()
+        .filter(|(_, same)| !same)
+        .map(|(category, _)| category)
+        .collect()
+    }
 }
 
 /// Exact stdout contract of `parins --manage --check`.
@@ -29,10 +80,7 @@ impl ManagedCheckOutput {
             self.build_info == *expected,
             "preflight build identity differs"
         );
-        anyhow::ensure!(
-            self.check.config_revision > 0 && valid_sha256(&self.check.material_digest),
-            "invalid installation preflight"
-        );
+        anyhow::ensure!(self.check.valid(), "invalid installation preflight");
         Ok(())
     }
 }
@@ -317,5 +365,42 @@ mod tests {
         let json = serde_json::to_vec(&status).unwrap();
         let read = serde_json::from_slice::<PublicStatus>(&json).unwrap();
         assert!(read.additional_terminal.is_some());
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+
+    fn report() -> CheckReport {
+        let digest = |n: u8| format!("{n:064x}");
+        CheckReport {
+            config_revision: 7,
+            inputs: CheckInputs {
+                configuration: digest(1),
+                rule_files: digest(2),
+                subscriptions: digest(3),
+                certificates: digest(4),
+                upstream_ca: digest(5),
+            },
+        }
+    }
+
+    #[test]
+    fn differences_name_each_changed_category_and_nothing_else() {
+        let base = report();
+        assert!(base.valid());
+        assert!(base.differences(&report()).is_empty());
+        let other = format!("{:064x}", 9);
+        let mut changed = report();
+        changed.config_revision = 8;
+        changed.inputs.subscriptions = other.clone();
+        changed.inputs.upstream_ca = other;
+        assert_eq!(
+            base.differences(&changed),
+            ["revision", "subscriptions", "upstream_ca"]
+        );
+        changed.inputs.certificates = "not a digest".into();
+        assert!(!changed.valid());
     }
 }

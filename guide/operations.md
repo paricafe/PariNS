@@ -121,10 +121,12 @@ by the installer.
    settings are ignored) and checked against its SHA256 manifest.
 2. The new version checks the current configuration and the one from before your
    last save (kept for **Undo last save**), read-only, as the service user
-   (`parins --manage --check`). If either fails, the update stops with
-   `preflight_failed` and nothing changes. Check the configuration and
-   certificates; if the current configuration is fine, change and save a setting
-   once, then update again.
+   (`parins --manage --check`), and must have read the same inputs as the running
+   version: the saved configuration, rule files, the downloaded subscription lists,
+   certificates and the upstream CA. If either fails, the update stops with
+   `preflight_failed`, nothing changes, and the service log names the inputs that
+   differed. Check the configuration and certificates; if the current
+   configuration is fine, change and save a setting once, then update again.
 3. DNS stops briefly, the new program starts, and the update completes only when DNS
    (every listener) and storage are ready. Otherwise the previous program is put
    back automatically. Sign in again afterwards.

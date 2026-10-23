@@ -252,6 +252,24 @@ pub(super) fn compile(
     })
 }
 
+/// What the selected sources read, as persisted: each enabled source's ID and
+/// stored content SHA-256, and the catalog content revision. Unlike material
+/// digests, nothing here depends on how this version encodes policy.
+pub fn selected_content(path: &Path, settings: &Settings) -> Result<(Vec<(String, String)>, u64)> {
+    if settings.effective().next().is_none() {
+        return Ok((Vec::new(), 0));
+    }
+    let view = Store::read_only(path)?;
+    let mut sources = Vec::new();
+    for source in settings.effective() {
+        let record = view
+            .record(&source.identity()?.fingerprint)
+            .context(Failure::new("subscription_material_missing"))?;
+        sources.push((source.id.clone(), record.sha256.clone()));
+    }
+    Ok((sources, view.revision()))
+}
+
 /// Full material preflight, without acquiring a writer or writing any derived data.
 pub fn read_only(path: &Path, settings: &Settings, local: &Policy) -> Result<Material> {
     if settings.effective().next().is_none() {

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The online update preflight compares only the inputs both versions read (saved
+  configuration, rule files, downloaded subscription lists, certificates and the
+  upstream CA), not digests derived by one version, so an update no longer fails
+  because a new version encodes its rules differently. A failed preflight logs
+  which inputs differed. The comparison runs in the installed version, so an
+  installation of 0.1.25 or earlier needs one offline upgrade with the install
+  script to reach this version; later online updates work again.
+
 ## v0.1.25 — 2026-10-23
 
 ### Added

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, net::SocketAddr, path::Path};
 
-pub use crate::update::ipc::CheckReport;
+pub use crate::update::ipc::{CheckInputs, CheckReport};
 
 pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     let dir = path
@@ -28,51 +28,75 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     super::runtime::previous_fingerprints(&saved, &dir)?;
     let snapshot = Snapshot::prepare(&config, address)?;
     config.check_non_identity_files()?;
-    let material = crate::filter_subscriptions::service::read_only(
+    // A candidate that completes these steps accepts this configuration; the
+    // report then only shows that both versions read the same inputs.
+    crate::filter_subscriptions::service::read_only(
         &dir.join("filter-subscriptions"),
         &config.filter_subscriptions,
         &config.load_policy()?,
     )?;
-    let mut digest = Sha256::new();
-    let mut add = |bytes: &[u8]| {
-        digest.update((bytes.len() as u64).to_be_bytes());
-        digest.update(bytes);
+    let digest = |parts: &[&[u8]]| {
+        let mut digest = Sha256::new();
+        for part in parts {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part);
+        }
+        format!("{:x}", digest.finalize())
     };
-    add(&saved.revision.to_be_bytes());
-    add(saved.toml.as_bytes());
-    add(&material.material_digest);
-    add(&material.content_revision.to_be_bytes());
-    add(&material.policy.semantic_digest());
-    if let Some(certificates) = snapshot.certificates {
+    let rule_files = match &config.filter_file {
+        Some(path) => bounded(path, 8 * 1024 * 1024, "filter file")?,
+        None => Vec::new(),
+    };
+    let (sources, content_revision) = crate::filter_subscriptions::service::selected_content(
+        &dir.join("filter-subscriptions"),
+        &config.filter_subscriptions,
+    )?;
+    let revision = content_revision.to_be_bytes();
+    let subscriptions: Vec<&[u8]> = std::iter::once(&revision[..])
+        .chain(
+            sources
+                .iter()
+                .flat_map(|(id, sha256)| [id.as_bytes(), sha256.as_bytes()]),
+        )
+        .collect();
+    let mut certificates: Vec<Vec<u8>> = Vec::new();
+    if let Some(set) = &snapshot.certificates {
         for role in [
             CertificateRole::Dot,
             CertificateRole::Doh,
             CertificateRole::Doq,
         ] {
-            if let Some(key) = certificates.key(role) {
-                for cert in &key.cert {
-                    add(cert.as_ref());
-                }
+            if let Some(key) = set.key(role) {
+                certificates.extend(key.cert.iter().map(|cert| cert.as_ref().to_vec()));
             }
         }
     }
-    // CA changes also invalidate the preflight. External regular symlinks are
-    // allowed as with the existing TLS loader, but not devices or unbounded IO.
-    if let Some(path) = &config.upstreams.ca_file {
-        let file = File::open(path)?;
-        ensure!(
-            file.metadata()?.is_file(),
-            "upstream CA must be a regular file"
-        );
-        let mut bytes = Vec::new();
-        file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= 1024 * 1024, "upstream CA exceeds 1 MiB");
-        add(&bytes);
-    }
+    let certificates: Vec<&[u8]> = certificates.iter().map(Vec::as_slice).collect();
+    // External regular symlinks are allowed as with the existing TLS loader,
+    // but not devices or unbounded IO.
+    let upstream_ca = match &config.upstreams.ca_file {
+        Some(path) => bounded(path, 1024 * 1024, "upstream CA")?,
+        None => Vec::new(),
+    };
     Ok(CheckReport {
         config_revision: saved.revision,
-        material_digest: format!("{:x}", digest.finalize()),
+        inputs: CheckInputs {
+            configuration: digest(&[saved.toml.as_bytes()]),
+            rule_files: digest(&[&rule_files]),
+            subscriptions: digest(&subscriptions),
+            certificates: digest(&certificates),
+            upstream_ca: digest(&[&upstream_ca]),
+        },
     })
+}
+
+fn bounded(path: &Path, limit: u64, what: &str) -> Result<Vec<u8>> {
+    let file = File::open(path).with_context(|| format!("open {what}"))?;
+    ensure!(file.metadata()?.is_file(), "{what} must be a regular file");
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "{what} exceeds {limit} bytes");
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -113,7 +137,7 @@ mod tests {
         let before_runtime = members(&runtime);
         let report = managed(&path, "127.0.0.1:3000".parse().unwrap()).unwrap();
         assert_eq!(report.config_revision, 1);
-        assert_eq!(report.material_digest.len(), 64);
+        assert_eq!(report.inputs.configuration.len(), 64);
         assert_eq!(std::fs::read(path.join("state.json")).unwrap(), before);
         assert_eq!(members(&path), before_members);
         assert_eq!(members(&runtime), before_runtime);
@@ -152,6 +176,69 @@ mod tests {
                 .unwrap()
                 .config_revision,
             2
+        );
+    }
+
+    /// Each input category changes only its own digest; the same inputs give the
+    /// same report however this version compiles them.
+    #[test]
+    fn report_digests_each_version_independent_input_on_its_own() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("managed");
+        let store = Store::open(&path).unwrap();
+        let rules = temp.path().join("rules.toml");
+        let ca = temp.path().join("ca.pem");
+        let write_ca = |name: &str| {
+            let cert = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
+            std::fs::write(&ca, cert.cert.pem()).unwrap();
+        };
+        std::fs::write(&rules, "enabled = true\nblock_exact = ['one.test']\n").unwrap();
+        write_ca("ca-one.test");
+        // Top-level keys go first, before any table.
+        let toml = |extra: &str| {
+            format!(
+                "filter_file = {:?}{extra}\n{}",
+                rules.display().to_string(),
+                include_str!("../../parins.example.toml").replace(
+                    "# ca_file = \"private-ca.pem\"",
+                    &format!("ca_file = {:?}", ca.display().to_string()),
+                )
+            )
+        };
+        let save = |toml: String, revision: u64| {
+            store
+                .save(&Stored {
+                    username: "admin".into(),
+                    password_hash: store::hash_password("test-password").unwrap(),
+                    toml,
+                    previous: None,
+                    revision,
+                })
+                .unwrap();
+            managed(&path, "127.0.0.1:3000".parse().unwrap()).unwrap()
+        };
+        let base = save(toml(""), 1);
+        assert_eq!(save(toml(""), 1), base);
+        let mut changed = Vec::new();
+        changed.push(save(toml(""), 2).differences(&base));
+        changed.push(save(toml("\nadmin_listen = '127.0.0.1:9153'"), 1).differences(&base));
+        std::fs::write(
+            &rules,
+            "enabled = true\nblock_exact = ['two.test nxdomain']\n",
+        )
+        .unwrap();
+        changed.push(save(toml(""), 1).differences(&base));
+        std::fs::write(&rules, "enabled = true\nblock_exact = ['one.test']\n").unwrap();
+        write_ca("ca-two.test");
+        changed.push(save(toml(""), 1).differences(&base));
+        assert_eq!(
+            changed,
+            [
+                vec!["revision"],
+                vec!["configuration"],
+                vec!["rule_files"],
+                vec!["upstream_ca"]
+            ]
         );
     }
 

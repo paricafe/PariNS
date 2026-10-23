@@ -518,12 +518,19 @@ async fn stage_and_commit(
         .map_err(|_| "update_state_unavailable")?;
     let baseline = read_material(coordinator, shared.address)
         .await
-        .map_err(|_| "preflight_failed")?;
+        .map_err(|_| preflight_failed("this version's check did not complete"))?;
     let checked = candidate_check(coordinator, shared.address, op)
         .await
-        .map_err(|_| "preflight_failed")?;
-    if checked.check != baseline || !op.manifest.matches_build(&checked.build_info) {
-        return Err("preflight_failed");
+        .map_err(|_| preflight_failed("the candidate's check did not complete"))?;
+    let mut differences = baseline.differences(&checked.check);
+    if !op.manifest.matches_build(&checked.build_info) {
+        differences.push("build");
+    }
+    if !differences.is_empty() {
+        return Err(preflight_failed(&format!(
+            "{} differ",
+            differences.join(", ")
+        )));
     }
     let _permit = shared
         .mutation
@@ -596,6 +603,12 @@ async fn stage_and_commit(
         .map_err(|_| "helper_unavailable")?;
     // Return drops Manager and original permit before helper waits for SIGTERM.
     Ok(())
+}
+
+/// Logs which input categories made the preflight fail, never their contents.
+fn preflight_failed(cause: &str) -> &'static str {
+    eprintln!("PariNS update preflight failed: {cause}");
+    "preflight_failed"
 }
 
 async fn read_material(

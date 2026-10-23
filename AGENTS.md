@@ -250,7 +250,10 @@ until preview/validation.
   as `aborted`; the application keeps its own abort reason. Details: `src/update/executor/mod.rs`.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners; it also validates the saved rollback copy. Candidate preflight runs as the app user; root never
-  executes the candidate.
+  executes the candidate. The preflight compares only digests of version-independent
+  inputs (saved revision and TOML, rule files, selected subscription content and
+  catalog revision, certificates, upstream CA), never encodings a version derives,
+  and logs which categories differ.
 - The installer stops an active `parins-updater.path` right after taking its lock and
   restores it on rollback or enables it after commit; a post-commit enable failure
   is reported without rollback.

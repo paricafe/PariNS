@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub use material::{Material, read_only};
+pub use material::{Material, read_only, selected_content};
 pub(crate) use operations::WorkRequest;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

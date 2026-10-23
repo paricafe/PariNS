@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Blocked queries can be answered with an empty answer (the default, now with a
+  SOA), `0.0.0.0` and `::`, chosen addresses, NXDOMAIN or REFUSED, set globally in
+  `[filter]`, per local block rule, or per subscription source. Block answers carry
+  Extended DNS Error 15 for EDNS clients and a TTL of 10 seconds by default
+  (`blocked_ttl_secs`). When several rules match, the most specific one chooses;
+  the query log shows the rule and the method.
+
+### Changed
+
+- New cache defaults: 262,144 entries and 256 MiB (was 32,768 and 32 MiB),
+  positive TTL cap 1 day (was 1 hour), negative TTL cap 15 minutes (was 5), 16
+  shards (was 4), prefetch 32 at once and 100 per second (was 8 and 20), snapshot
+  limit 256 MiB (was 32 MiB). Installations whose configuration omits these keys use the new
+  values after upgrading.
+- Cache settings accept larger values, up to 16,777,216 entries, 64 GiB, 7-day TTL
+  caps, 256 shards and 4096 cache rules; the configuration guide lists every range
+  and how memory and snapshot time grow with the entry count.
+- The cache snapshot is written through a buffer, so a large cache saves several
+  times faster at shutdown. Saving and restoring start from the most recently used
+  entries and stop on time (8 s at shutdown, 4.5 s at startup), keeping what they
+  wrote or loaded; before, a restore that ran out of time failed that DNS start.
+- The query log's refresh interval starts at **Manual** and is remembered in the
+  browser.
+
+
+### Fixed
+
+- The overview trend chart's tooltip no longer moves the page while it is shown.
+
 ## v0.1.24 — 2026-10-22
 
 ### Changed

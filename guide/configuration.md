@@ -216,12 +216,12 @@ per client network so each network gets the answer the upstream gave for it.
 | Key | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `true` | | Turn the cache on or off. Overrides every cache rule. |
-| `max_entries` | `32768` | 1–262144 | Cached answers (each ECS variant counts). |
-| `max_bytes` | `33554432` (32 MiB) | 512–1073741824 | Charged size of cached answers plus per-entry overhead. Not process memory. |
-| `max_variants` | `64` | 1–256, at most `max_entries` | ECS variants kept for one question. |
-| `max_ttl_secs` | `3600` | 1–86400 | Cap on positive answer TTLs. |
-| `negative_ttl_cap_secs` | `300` | 1–86400 | Cap on NXDOMAIN and NODATA TTLs. |
-| `shards` | `4` | 1–64 | Independently locked cache partitions. |
+| `max_entries` | `262144` | 1–16777216 | Cached answers (each ECS variant counts). |
+| `max_bytes` | `268435456` (256 MiB) | 512 B–64 GiB | Charged size of cached answers plus per-entry overhead. Not process memory. |
+| `max_variants` | `64` | 1–4096, at most `max_entries` | ECS variants kept for one question. |
+| `max_ttl_secs` | `86400` | 1–604800 | Cap on positive answer TTLs. |
+| `negative_ttl_cap_secs` | `900` | 1–604800 | Cap on NXDOMAIN and NODATA TTLs. |
+| `shards` | `16` | 1–256 | Independently locked cache partitions. |
 | `negative_percent` | `20` | 0–90 | Share of entries and bytes reserved for negative answers. |
 
 `[cache.persistence]`:
@@ -229,17 +229,18 @@ per client network so each network gets the answer the upstream gave for it.
 | Key | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `true` | | Save fresh answers at a clean shutdown and restore them at the next start. |
-| `max_bytes` | `33554432` (32 MiB) | 1 MiB–512 MiB | Size limit of the snapshot file. |
+| `max_bytes` | `268435456` (256 MiB) | 1 MiB–64 GiB | Size limit of the snapshot file. |
 
 `[cache.ecs_sharing]` (learned ECS sharing, forwarding mode only):
 
 | Key | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `false` | | Learn which answers are the same for every network and store them once per address family. |
-| `min_networks` | `3` | 2–8 | Disjoint networks that must receive the same answer. |
-| `revoke_cooldown_secs` | `3600` | 60–604800 | After a revocation, how long the name is not learned again. |
+| `min_networks` | `3` | 2–64 | Disjoint networks that must receive the same answer. |
+| `revoke_cooldown_secs` | `3600` | 60–2592000 | After a revocation, how long the name is not learned again. |
 
-`[[cache.rules]]` (up to 256) overrides cache behavior per name:
+`[[cache.rules]]` (up to 4096) overrides cache behavior per name. Each query checks
+the rules in order, so a long list adds lookup time:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -247,7 +248,7 @@ per client network so each network gets the answer the upstream gave for it.
 | `suffix` | `false` | Also match subdomains. |
 | `qtype` | any | Record type, such as `"A"`. |
 | `bypass` | `false` | Do not cache matching answers. |
-| `max_ttl_secs`, `negative_ttl_cap_secs` | global value | TTL caps for matching answers (1–86400). |
+| `max_ttl_secs`, `negative_ttl_cap_secs` | global value | TTL caps for matching answers (1–604800). |
 | `prefetch`, `stale` | global value | Turn prefetch or serve stale on or off for matching answers. |
 
 The most specific rule wins: exact names before suffixes, then more labels, then a
@@ -285,10 +286,17 @@ Behavior:
 - **Budgets.** Each shard has separate positive and negative budgets; negative
   answers never evict positive ones. Memory grows with use; the budget is not
   reserved at startup.
+- **Sizing.** A full cache of typical answers (a CNAME and two to four addresses,
+  about 590 charged bytes each) took 300–600 bytes of process memory per entry in
+  a measurement on a desktop CPU, about 95 MiB for 262,144 entries.
 - **Persistence.** The snapshot is written only at a clean, quiescent shutdown and is
   consumed before DNS starts serving, so it is used once and a crash or forced stop
   starts with an empty cache. Restored answers keep their remaining TTL. A snapshot from a build
-  with different cache semantics is skipped.
+  with different cache semantics, or a damaged one, is discarded entirely. Both
+  directions go from the most recently used entry and stop on time: saving stops
+  after 8 seconds and publishes what it wrote, and restoring stops after 4.5
+  seconds and keeps what it loaded, so DNS starts normally. Entries that did not
+  fit are reported as skipped with the reason `deadline`.
 - Changing only cache settings replaces the cache without restarting listeners.
 
 ## Prefetch and serve stale
@@ -304,17 +312,17 @@ Both are off by default.
 | `enabled` | `false` | | Refresh hot positive answers in the background. |
 | `min_hits` | `1` | 1–1000000 | Cache hits an entry needs before it is prefetched. |
 | `remaining_percent` | `25` | 1–90 | Refresh when less than this share of the TTL remains. |
-| `max_inflight` | `8` | 1–256 | Refreshes running at once. |
-| `rate_per_sec` | `20` | 1–10000 | Refreshes started per second. |
-| `backoff_secs` | `5` | 1–3600 | Wait before refreshing the same entry again after a failure. |
+| `max_inflight` | `32` | 1–4096 | Refreshes running at once. |
+| `rate_per_sec` | `100` | 1–100000 | Refreshes started per second. |
+| `backoff_secs` | `5` | 1–86400 | Wait before refreshing the same entry again after a failure. |
 
 `[cache.stale]`:
 
 | Key | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `false` | | Answer from expired entries when the upstream fails. |
-| `retention_secs` | `300` | 1–604800 | How long after expiry an answer is kept for this. |
-| `reply_ttl_secs` | `30` | 1–300 | TTL of a stale answer. |
+| `retention_secs` | `300` | 1–2592000 | How long after expiry an answer is kept for this. |
+| `reply_ttl_secs` | `30` | 1–3600 | TTL of a stale answer. |
 
 Behavior:
 
@@ -345,19 +353,55 @@ one caller does not cancel the others; the request ends when the last caller lea
 ## Filtering and subscriptions
 
 Filtering blocks queries by name, from local rules and from online subscriptions.
-A blocked query gets NOERROR with an empty answer (no SOA). Blocked answers are never
-cached, and cached upstream answers are never altered by filtering.
+Blocked answers are never cached, never carry AD, and cached upstream answers are
+never altered by filtering.
 
 `[filter]` (local rules):
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Apply the local rules below. |
+| `block_response` | `"nodata"` | How blocked queries are answered: `nodata`, `null_ip`, `custom_ip`, `nxdomain` or `refused`. |
+| `block_ipv4`, `block_ipv6` | none | The addresses of `custom_ip` (at least one, unicast); allowed only with `custom_ip`. |
+| `blocked_ttl_secs` | `10` | TTL of block answers and of their SOA MINIMUM (1–86400). |
 | `block_exact` | `[]` | Block exactly these names. |
 | `block_suffix` | `[]` | Block these names and their subdomains. |
 | `allow_exact` | `[]` | Never block exactly these names. |
 | `allow_suffix` | `[]` | Never block these names and their subdomains. |
-| `filter_file` (top level) | none | A TOML file with the same five keys; when set, it replaces the inline `[filter]`. |
+| `filter_file` (top level) | none | A TOML file with the same keys; when set, it replaces the inline `[filter]`. |
+
+Block answers:
+
+| Method | Answer |
+| --- | --- |
+| `nodata` | NOERROR without records, with a SOA. |
+| `null_ip` | A gets `0.0.0.0`, AAAA gets `::`. |
+| `custom_ip` | A gets `block_ipv4`, AAAA gets `block_ipv6`. |
+| `nxdomain` | NXDOMAIN with a SOA. |
+| `refused` | REFUSED. |
+
+Only A and AAAA questions get addresses; other types (HTTPS, SVCB, MX and so on), and
+an address family `custom_ip` has no address for, are answered like `nodata`. The SOA
+is owned by the matching rule. Clients that use EDNS also get Extended DNS Error 15
+(Blocked).
+
+A block rule can choose its own method after the domain: a method name, or one or
+two unicast addresses (at most one per family) for a custom IP. Without one it
+follows `block_response`. Allow rules take no method.
+
+```toml
+block_suffix = [
+  "ads.example",
+  "track.example nxdomain",
+  "tele.example null_ip",
+  "page.example 192.0.2.10 2001:db8::10",
+]
+```
+
+When several block rules match a name, the most specific one chooses the answer:
+local exact, then local suffix (the longest), then subscription exact, then
+subscription suffix (the longest); between subscription sources, the first in the
+configuration. The query log shows the matching rule and the method used.
 
 Rules are ASCII names (letters, digits, `_`, `-`; punycode for IDNs), matched by DNS
 labels, ignoring case and a final dot. Wildcards, Adblock syntax, hosts lines, URLs
@@ -390,10 +434,12 @@ Each `[[filter_subscriptions.sources]]` (up to 16):
 | `enabled` | `true` | Use this source. |
 | `auto_update` | `true` | Download updates on a schedule. |
 | `update_interval_hours` | `24` | 1–168. |
+| `block_response`, `block_ipv4`, `block_ipv6` | follow `[filter]` | This source's block method, with the same values as `[filter]`. Changing it rebuilds the rules from the downloaded list without downloading again. |
 
 - `domain_list`: one domain per line; `example.org` matches exactly and
   `.example.org` also matches subdomains. `hosts_blocklist`: hosts lines with
-  `0.0.0.0` or `127.0.0.1` (or their IPv6 equivalents). Neither is Adblock syntax.
+  `0.0.0.0` or `127.0.0.1` (or their IPv6 equivalents); the address in the list is
+  ignored and the source's method applies. Neither is Adblock syntax.
 - Each list may be 16 MiB, all lists together 32 MiB, and each line 4096 bytes.
   Downloads use verified HTTPS to public addresses only and ignore proxy settings.
 - In the console, add a source and save. PariNS first downloads and checks each

@@ -58,8 +58,8 @@ configuration helpers across file mode, management APIs, and the browser.
 Console translations and field metadata live in typed modules under `web/src/i18n/`
 and `web/src/model/`. React owns only presentation and one in-memory configuration
 draft. Language and appearance changes preserve controls, drafts, focus and session
-ownership; persist only language and appearance (theme, background) in the browser,
-never credentials, session bindings, PEM, logs or drafts. Keep both languages complete; configuration values and raw
+ownership; persist only language, appearance (theme, background) and the query log
+refresh interval in the browser, never credentials, session bindings, PEM, logs or drafts. Keep both languages complete; configuration values and raw
 diagnostics stay intact. Incomplete numeric and listener edits remain raw drafts
 until preview/validation.
 
@@ -103,10 +103,18 @@ until preview/validation.
 - One aggregate radix policy serves local and subscription rules; Config keeps local
   rules, not an index. Each request holds its policy generation across cache, CNAME
   and stale handling. Preserve semantic cache restoration checks.
+- A blocked name is answered with the method of its most specific block rule (local
+  exact, local suffix, subscription exact, subscription suffix; longest suffix;
+  configured source order); slots carry the methods, and the index keeps a covered
+  block rule only when it can answer differently. Block answers carry EDE 15 for
+  EDNS clients. Details: `src/policy.rs`, `src/policy/response.rs`.
 - Cache byte accounting is not process RSS. Keep separate positive and negative
   budgets; document capacity/utilization trade-offs when changing them.
 - Consume a clean cache snapshot durably before serving; publish one only at
   terminal, quiescent shutdown, never after apply/rollback or abnormal termination.
+  Save and restore run most recently used first and stop at their deadline; a save
+  publishes a complete snapshot of what it wrote, a restore keeps what it loaded,
+  and a damaged snapshot loads nothing.
 
 ## Concurrency, listeners and upstreams
 

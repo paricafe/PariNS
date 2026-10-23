@@ -213,6 +213,37 @@ describe('subscription draft and console', () => {
     expect(screen.queryByText(/saved again/)).toBeNull();
   });
 
+  it('follows the global block response by default, shows addresses only for Custom IP, and saves the mode without a download', async () => {
+    const { request, wrapper } = fixture(scheduled, { ...source, enabled: true });
+    let config!: ReturnType<typeof useConfig>;
+    function Console({ language }: { language: Language }) { config = useConfig(); return <SubscriptionsPanel language={language} />; }
+    const view = render(<Console language="en" />, { wrapper });
+    fireEvent.click(await screen.findByRole('button', { name: 'Block response: Follow global setting' }));
+    expect(screen.queryByLabelText('IPv4 address')).toBeNull();
+    fireEvent.click(screen.getByRole('option', { name: 'Custom IP' }));
+    fireEvent.change(screen.getByLabelText('IPv4 address'), { target: { value: ' 192.0.2.10 ' } });
+    expect((screen.getByLabelText('IPv6 address') as HTMLInputElement).value).toBe('');
+    view.rerender(<Console language="zh-CN" />);
+    expect(screen.getByRole('button', { name: '拦截方式: 指定 IP' })).toBeTruthy();
+    await act(async () => { await config.preview(); });
+    const sent = () => (request.mock.calls.filter(([path]) => path === 'config/preview').at(-1)?.[2] as { changes: { filter_subscriptions: { sources: object[] } } }).changes.filter_subscriptions.sources[0];
+    expect(sent()).toEqual({ ...source, enabled: true, block_response: 'custom_ip', block_ipv4: '192.0.2.10' });
+    view.rerender(<Console language="en" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Block response: Custom IP' }));
+    fireEvent.click(screen.getByRole('option', { name: 'NXDOMAIN' }));
+    expect(screen.queryByLabelText('IPv4 address')).toBeNull();
+    let prepared!: Awaited<ReturnType<typeof config.prepareSave>>;
+    await act(async () => { prepared = await config.prepareSave(); });
+    expect(sent()).toEqual({ ...source, enabled: true, block_response: 'nxdomain' });
+    await act(async () => { await config.commitPrepared(prepared); });
+    expect(request.mock.calls.some(([path, method]) => path === 'config' && method === 'PUT')).toBe(true);
+    expect(request.mock.calls.filter(([path]) => path === 'filter/subscriptions/prepare')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Block response: NXDOMAIN' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Follow global setting' }));
+    await act(async () => { await config.preview(); });
+    expect(sent()).toEqual({ ...source, enabled: true });
+  });
+
   it('shows local null witnesses separately from a subscription whose ID is local', async () => {
     let local = true;
     const request = vi.fn(async () => ({ generation: 3, decision: 'blocked', witness: { source_id: local ? null : 'local', rule: '.example.com', scope: 'suffix' } }));

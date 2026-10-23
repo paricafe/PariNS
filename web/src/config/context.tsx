@@ -93,6 +93,7 @@ interface ConfigContextValue {
 type OptionalListener = 'dot' | 'doh' | 'doq';
 const ConfigContext = createContext<ConfigContextValue | null>(null);
 const fieldByPath = new Map(Object.values(settingPages).flatMap((page) => page.groups.flatMap((group) => group.fields)).map((field) => [field.path, field]));
+const conditionalFields = [...fieldByPath.values()].filter((field) => field.when);
 const EMPTY_LISTENER = { listen: '', cert_file: '', key_file: '' };
 
 /** Number of unsaved changes shown to the user; zero means the draft is clean. */
@@ -260,6 +261,10 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       if (['dot', 'doh', 'doq'].includes(protocol) && !enabled) continue;
       const field = fieldByPath.get(path)!;
       next = setPath(next, path, convertFieldValue(field, raw));
+    }
+    // A field hidden by its condition, such as a custom block address under another block response, is removed.
+    for (const field of conditionalFields) {
+      if (getPath(next, field.when!.path) !== field.when!.value && getPath(next, field.path) != null) next = setPath(next, field.path, null);
     }
     if (draft.rules) {
       next = setPath(next, 'cache.rules', draft.rules.map((rule, index) => {

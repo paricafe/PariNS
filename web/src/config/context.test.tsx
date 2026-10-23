@@ -74,6 +74,26 @@ describe('single configuration draft', () => {
     expect(request.mock.calls.some(([path, method]) => path === 'config' && method === 'PUT')).toBe(false);
   });
 
+  it('previews the global block response and removes custom addresses once another response is chosen', async () => {
+    const filter = { enabled: true, block_exact: [], block_suffix: [], allow_exact: [], allow_suffix: [], block_response: 'custom_ip', block_ipv4: '192.0.2.1', blocked_ttl_secs: 10 };
+    const { api, request } = fixture(async (path, method) => {
+      if (path === 'config' && method === 'GET') return { toml: original, revision: 1, has_backup: false };
+      if (path === 'config/parse') return { toml: original, settings: { ...baseSettings, filter } };
+      if (path === 'config/preview') return { toml: edited, settings: { ...baseSettings, filter }, transport_change: null };
+      throw new Error(`Unexpected ${method} ${path}`);
+    });
+    const hook = mount(api);
+    await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+    act(() => {
+      hook.result.current.updateField('filter.block_ipv6', ' 2001:db8::1 ');
+      hook.result.current.updateField('filter.blocked_ttl_secs', '60');
+    });
+    await act(async () => { await hook.result.current.preview(); });
+    expect(request.mock.calls.at(-1)?.[2]).toEqual({ toml: original, changes: { filter: { block_ipv6: '2001:db8::1', blocked_ttl_secs: 60 } } });
+    act(() => hook.result.current.updateField('filter.block_response', 'nxdomain'));
+    await act(async () => { await hook.result.current.preview(); });
+    expect(request.mock.calls.at(-1)?.[2]).toEqual({ toml: edited, changes: { filter: { block_response: 'nxdomain', block_ipv4: null } } });
+  });
   it('projects a new console access name and confirms an HTTPS to HTTP save explicitly', async () => {
     const change = { to: 'http', next_origin: 'http://192.0.2.20:3000', requires_http_confirmation: true } as const;
     const { api, request } = fixture(async (path, method, body) => {

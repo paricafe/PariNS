@@ -7,6 +7,7 @@ export const subscriptionMessages = {
   name: ['名称', 'Name'], id: ['订阅 ID', 'Subscription ID'],
   idHelp: ['1–32 个小写字母、数字或连字符，用于区分订阅源。', '1–32 lowercase letters, digits or hyphens; identifies the source.'], url: ['HTTPS 地址', 'HTTPS URL'], format: ['规则格式', 'Rule format'],
   domain_list: ['域名列表（以点开头表示含子域名）', 'Domain list (a leading dot includes subdomains)'], hosts_blocklist: ['hosts 拦截列表', 'Hosts blocklist'],
+  blockResponse: ['拦截方式', 'Block response'], followGlobal: ['跟随全局设置', 'Follow global setting'],
   enabled: ['开启', 'On'], auto: ['自动更新', 'Automatic updates'], interval: ['更新间隔（小时）', 'Update interval (hours)'],
   remove: ['删除订阅源', 'Remove source'], refresh: ['立即更新', 'Update now'], refreshAll: ['全部更新', 'Update all'],
   refreshStatus: ['刷新状态', 'Refresh status'], prepared: ['已下载', 'Downloaded'], active: ['使用中', 'In use'], inactive: ['未开启', 'Off'],

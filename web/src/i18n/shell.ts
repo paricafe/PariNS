@@ -72,6 +72,7 @@ export const shellMessages = {
   validSaved: ['已保存的配置检查通过。', 'The saved configuration passed the check.'],
   lastUpdated: ['（显示的是 {time} 的数据）', '(showing data from {time})'],
   restoreDone: ['启动时恢复了 {restored} 条，跳过 {skipped} 条', 'Restored {restored} entries at start; skipped {skipped}'],
+  restoreDeadline: ['启动时恢复了最近用过的 {restored} 条；其余 {skipped} 条超出恢复时限，未装入', 'Restored the {restored} most recently used entries at start; {skipped} more did not fit in the restore time limit'],
   restoreNoSnapshot: ['上次没有正常停止，本次从空缓存开始', "The last stop wasn't clean, so the cache started empty"],
   restoreDisabled: ['已关闭，每次启动都从空缓存开始', 'Off; the cache starts empty every time'],
   restoreFormat: ['升级后快照格式已变化，本次从空缓存开始', 'The snapshot format changed with the upgrade, so the cache started empty'],

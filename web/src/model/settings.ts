@@ -13,6 +13,8 @@ export interface SettingField {
   advanced?: boolean;
   /** Presentation only: help that affects security or availability stays visible instead of behind ⓘ. */
   visibleHelp?: boolean;
+  /** Shown while the draft value at `path` equals `value`; otherwise the field is hidden and Save removes its value. */
+  when?: { path: string; value: string };
 }
 
 export interface SettingGroup {
@@ -48,11 +50,16 @@ const group = (id: string, fields: readonly SettingField[], optional?: SettingGr
   id, titleKey: `settings.group.${id}.title`, helpKey: `settings.group.${id}.help`,
   enableKey: `settings.group.${id}.enable`, fields, ...(optional ? { optional } : {}),
 });
+const shownWhen = (item: SettingField, path: string, value: string): SettingField => ({ ...item, when: { path, value } });
 const when = (item: SettingGroup, path: string, value: string): SettingGroup => ({ ...item, when: { path, value } });
 const quiet = ({ helpKey: _, ...rest }: SettingGroup): SettingGroup => rest;
 const page = (id: string, groups: readonly SettingGroup[]): SettingPage => ({
   id, titleKey: `settings.page.${id}.title`, introKey: `settings.page.${id}.intro`, groups,
 });
+
+/** Answers to a blocked query: `[filter].block_response`, and the optional mode of a subscription source. */
+export const BLOCK_RESPONSES = ["nodata", "null_ip", "custom_ip", "nxdomain", "refused"] as const;
+export type BlockResponse = typeof BLOCK_RESPONSES[number];
 
 export const settingPages = {
   dns: page("dns", [
@@ -73,26 +80,26 @@ export const settingPages = {
     quiet(group("listeners", [visible(field("listen", "text", true)), number("query_timeout_ms", 1, 60000), advanced(number("tcp_io_timeout_ms", 1, 60000))])),
   ]),
   cache: page("cache", [
-    group("persistence", [field("cache.persistence.enabled", "checkbox"), number("cache.persistence.max_bytes", 1048576, 536870912)]),
+    group("persistence", [field("cache.persistence.enabled", "checkbox"), number("cache.persistence.max_bytes", 1048576, 68719476736)]),
     quiet(group("cache", [
-      field("cache.enabled", "checkbox"), number("cache.max_entries", 1, 262144),
-      number("cache.max_bytes", 512, 1073741824, true), advanced(number("cache.max_variants", 1, 256, true)),
-      advanced(number("cache.shards", 1, 64, true)), advanced(number("cache.negative_percent", 0, 90, true)),
-      number("cache.max_ttl_secs", 1, 86400), number("cache.negative_ttl_cap_secs", 1, 86400),
+      field("cache.enabled", "checkbox"), number("cache.max_entries", 1, 16777216),
+      number("cache.max_bytes", 512, 68719476736, true), advanced(number("cache.max_variants", 1, 4096, true)),
+      advanced(number("cache.shards", 1, 256, true)), advanced(number("cache.negative_percent", 0, 90, true)),
+      number("cache.max_ttl_secs", 1, 604800), number("cache.negative_ttl_cap_secs", 1, 604800),
     ])),
     group("prefetch", [
       field("cache.prefetch.enabled", "checkbox"), number("cache.prefetch.min_hits", 1, 1000000),
-      number("cache.prefetch.remaining_percent", 1, 90), advanced(number("cache.prefetch.max_inflight", 1, 256)),
-      advanced(number("cache.prefetch.rate_per_sec", 1, 10000)), advanced(number("cache.prefetch.backoff_secs", 1, 3600)),
+      number("cache.prefetch.remaining_percent", 1, 90), advanced(number("cache.prefetch.max_inflight", 1, 4096)),
+      advanced(number("cache.prefetch.rate_per_sec", 1, 100000)), advanced(number("cache.prefetch.backoff_secs", 1, 86400)),
     ]),
     group("stale", [
-      field("cache.stale.enabled", "checkbox"), number("cache.stale.retention_secs", 1, 604800),
-      number("cache.stale.reply_ttl_secs", 1, 300),
+      field("cache.stale.enabled", "checkbox"), number("cache.stale.retention_secs", 1, 2592000),
+      number("cache.stale.reply_ttl_secs", 1, 3600),
     ]),
     group("ecs", [field("ecs.enabled", "checkbox"), number("ecs.ipv4_prefix", 0, 32, true), number("ecs.ipv6_prefix", 0, 128)]),
     group("ecsSharing", [
-      field("cache.ecs_sharing.enabled", "checkbox"), number("cache.ecs_sharing.min_networks", 2, 8, true),
-      advanced(number("cache.ecs_sharing.revoke_cooldown_secs", 60, 604800, true)),
+      field("cache.ecs_sharing.enabled", "checkbox"), number("cache.ecs_sharing.min_networks", 2, 64, true),
+      advanced(number("cache.ecs_sharing.revoke_cooldown_secs", 60, 2592000, true)),
     ]),
   ]),
   filters: page("filters", [
@@ -101,6 +108,12 @@ export const settingPages = {
       field("filter.enabled", "checkbox"), field("filter.block_exact", "lines"),
       field("filter.block_suffix", "lines"), field("filter.allow_exact", "lines"),
       field("filter.allow_suffix", "lines"),
+    ]),
+    group("blockResponse", [
+      select("filter.block_response", BLOCK_RESPONSES),
+      shownWhen(field("filter.block_ipv4", "nullable", true), "filter.block_response", "custom_ip"),
+      shownWhen(field("filter.block_ipv6", "nullable", true), "filter.block_response", "custom_ip"),
+      number("filter.blocked_ttl_secs", 1, 86400, true),
     ]),
     group("subscriptionLimits", [field("filter_subscriptions.enabled", "checkbox", true), number("filter_subscriptions.max_rules", 1, 5000000), number("filter_subscriptions.max_memory_bytes", 1, 536870912), number("filter_subscriptions.max_disk_bytes", 262144, 2147483648)]),
   ]),

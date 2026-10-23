@@ -90,15 +90,17 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
   const t = (key: string) => translate(key, language);
   const value = (field: SettingField) => draft.fields[field.path] ?? fieldDisplayValue(getPath(draft.settings, field.path), field);
   const recursive = (draft.fields['resolution.mode'] ?? getPath(draft.settings, 'resolution.mode')) === 'recursive';
+  const hasError = (field: SettingField) => error instanceof ModelError && error.path === field.path;
+  // A conditional group or field stays visible while it holds a validation error, so focus can reach it.
+  const shown = (condition: { path: string; value: string } | undefined) => !condition || (draft.fields[condition.path] ?? getPath(draft.settings, condition.path)) === condition.value;
   return <div className="settings-stack">{page.groups.map((group) => {
-    // A conditional group stays visible while one of its fields holds a validation error, so focus can reach it.
-    if (group.when && (draft.fields[group.when.path] ?? getPath(draft.settings, group.when.path)) !== group.when.value
-      && !(error instanceof ModelError && group.fields.some((field) => error.path === field.path))) return null;
+    if (!shown(group.when) && !group.fields.some(hasError)) return null;
     const enabled = group.optional ? draft.optional[group.optional] ?? getPath(draft.settings, group.optional) !== null : true;
     const filterExternal = group.id === 'filterRules' && Boolean(draft.fields.filter_file ?? getPath(draft.settings, 'filter_file'));
     const disabled = locked || !enabled || filterExternal;
-    const main = group.fields.filter((field) => !field.advanced);
-    const more = group.fields.filter((field) => field.advanced);
+    const visible = group.fields.filter((field) => shown(field.when) || hasError(field));
+    const main = visible.filter((field) => !field.advanced);
+    const more = visible.filter((field) => field.advanced);
     const open = moreOpen.has(group.id);
     const headingId = `group-${group.id}`;
     const rows = (fields: readonly SettingField[]) => fields.map((field) => <FieldRow key={field.path} field={field} language={language} disabled={disabled} value={value(field)} onChange={(next) => updateField(field.path, next)} />);
@@ -152,7 +154,7 @@ function CacheRules({ language }: { language: Language }) {
   const labels: [keyof CacheRuleDraft, string][] = [['name', 'name'], ['suffix', 'match'], ['qtype', 'qtype'], ['bypass', 'behavior'], ['max_ttl_secs', 'positiveTtl'], ['negative_ttl_cap_secs', 'negativeTtl'], ['prefetch', 'prefetch'], ['stale', 'stale']];
   return <section className="panel">
     <div className="heading-row"><div className="row-label"><h2>{t('rules')}</h2><InfoTip text={t('rulesHelp')} label={translate('shell.about', language, { label: t('rules') })} /></div>
-      <button type="button" className="button secondary" disabled={locked || rules.length >= 256} onClick={() => setRules([...rules, cacheRuleDraft(defaultCacheRule())])}>{t('addRule')}</button></div>
+      <button type="button" className="button secondary" disabled={locked || rules.length >= 4096} onClick={() => setRules([...rules, cacheRuleDraft(defaultCacheRule())])}>{t('addRule')}</button></div>
     {rules.length === 0 && <p className="muted">{t('noRules')}</p>}
     <div className="rule-list"><AnimatePresence initial={false}>{rules.map((rule, index) => <motion.fieldset className="rule-row" disabled={locked} key={index}
       initial={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} animate={{ opacity: 1, height: 'auto', transitionEnd: { overflow: 'visible' } }} exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><legend>{t('rule').replace('{number}', String(index + 1))}</legend>
@@ -171,9 +173,12 @@ function CacheRules({ language }: { language: Language }) {
 interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
 /** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
-function restoreSummary(report: SnapshotReport, language: Language): string {
+export function restoreSummary(report: SnapshotReport, language: Language): string {
   const reason = report.reason;
-  if (reason === null) return translate('shell.restoreDone', language, { restored: formatNumber(report.restored, language), skipped: formatNumber(report.skipped, language) });
+  const counts = { restored: formatNumber(report.restored, language), skipped: formatNumber(report.skipped, language) };
+  if (reason === null) return translate('shell.restoreDone', language, counts);
+  // Running out of time keeps the entries already loaded.
+  if (reason === 'deadline') return translate('shell.restoreDeadline', language, counts);
   const key = reason === 'no_clean_snapshot' ? 'restoreNoSnapshot' : reason === 'persistence_disabled' ? 'restoreDisabled'
     : reason.startsWith('unsupported snapshot version') ? 'restoreFormat' : reason.startsWith('snapshot policy mismatch') ? 'restorePolicy' : 'restoreFailed';
   return translate(`shell.${key}`, language);

@@ -29,7 +29,8 @@
 .trend-cursor line { stroke: currentColor; stroke-opacity: .35; stroke-dasharray: 3 3; }
 .trend-cursor circle { stroke: var(--surface-strong); stroke-width: 2; }
 .trend-gap[data-active] { fill: var(--hover); }
-.trend-tip {
+/* Out of the document flow: the chart-scoped selector outranks the shared .glass position. */
+.trend-chart > .trend-tip {
   position: absolute; top: 0; left: 0; z-index: 2; pointer-events: none;
   min-width: 10rem; max-width: 100%; padding: 8px 12px;
   border-radius: var(--radius-sm); font-size: 12px; color: var(--text);

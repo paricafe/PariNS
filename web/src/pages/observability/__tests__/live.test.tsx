@@ -3,7 +3,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ApiClient } from "../../../session/client";
 import { LogsPage } from "../LogsPage";
-import { LiveLogClient, liveUrl, PING_MS, type LiveHandlers } from "../live";
+import { LiveLogClient, liveUrl, PING_MS, storedLiveInterval, type LiveHandlers } from "../live";
+import { STORAGE_KEYS } from "../../../appearance/preferences";
 import type { LogEntry, LogListResponse } from "../logs";
 import { storage } from './fixtures';
 
@@ -194,8 +195,37 @@ const detailButton = (name: string) => tableRow(name).querySelector('.log-detail
 const card = () => screen.queryByRole('dialog', { name: 'Query details' });
 const wait = (ms: number) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
 
+describe('LogsPage refresh interval', () => {
+  afterEach(() => localStorage.clear());
+
+  it('starts in manual mode without a connection and remembers the chosen interval', async () => {
+    const api = liveApi(() => page([entry], 3, 20));
+    const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
+    await waitFor(() => expect(screen.getAllByText('example.test').length).toBeGreaterThan(0));
+    expect(screen.getByRole('radio', { name: 'Manual' }).getAttribute('aria-checked')).toBe('true');
+    expect(FakeSocket.instances).toHaveLength(0);
+    fireEvent.click(screen.getByRole('radio', { name: '5 s' }));
+    expect(localStorage.getItem(STORAGE_KEYS.logRefresh)).toBe('5');
+    view.unmount();
+    render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
+    await waitFor(() => expect(screen.getByRole('radio', { name: '5 s' }).getAttribute('aria-checked')).toBe('true'));
+    fireEvent.click(screen.getByRole('radio', { name: 'Manual' }));
+    expect(localStorage.getItem(STORAGE_KEYS.logRefresh)).toBeNull();
+  });
+
+  it('falls back to manual for unreadable storage or an unknown stored value', () => {
+    localStorage.setItem(STORAGE_KEYS.logRefresh, '7');
+    expect(storedLiveInterval()).toBeNull();
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    expect(storedLiveInterval()).toBeNull();
+  });
+});
+
 describe('LogsPage live updates', () => {
-  it('subscribes with the default 3 s interval, resubscribes on change and inserts batches at the head', async () => {
+  beforeEach(() => localStorage.setItem(STORAGE_KEYS.logRefresh, '3'));
+  afterEach(() => localStorage.clear());
+
+  it('subscribes with the stored 3 s interval, resubscribes on change and inserts batches at the head', async () => {
     const { api, socket } = await mount();
     expect(socket.sent[0]).toEqual({ type: 'auth', binding: BINDING });
     expect(socket.ofType('subscribe')[0]).toEqual({ type: 'subscribe', interval: 3, cursor: 42, filter: { search: null, status: null, cache: null } });
@@ -288,6 +318,9 @@ describe('LogsPage live updates', () => {
 });
 
 describe('LogsPage detail card', () => {
+  beforeEach(() => localStorage.setItem(STORAGE_KEYS.logRefresh, '3'));
+  afterEach(() => localStorage.clear());
+
   it('opens on hover after a delay, stays while the pointer is inside, and closes after leaving', async () => {
     const { socket } = await mount(() => page([entry, row(41, 'second.test')]));
     act(() => socket.push({ type: 'entries', entries: [], cursor: 42, more: false }));

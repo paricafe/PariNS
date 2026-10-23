@@ -294,6 +294,33 @@ describe("LogsPage", () => {
     expect(screen.getByText("Query log cleared.")).toBeTruthy();
   });
 
+  it("names the matched rule, its source and the block response of a blocked query", async () => {
+    const blocked: LogEntry[] = [
+      { ...entry, id: 3, name: "ads.example", status: "blocked", cache: "blocked", answer: [], block: { rule: "ads.example", source_id: "natsuki", response: "custom_ip" } },
+      { ...entry, id: 2, name: "track.example", status: "blocked", cache: "blocked", answer: [], block: { rule: "track.example nxdomain", source_id: null, response: "nxdomain" } },
+      { ...entry, id: 1, name: "older.example" },
+    ];
+    const api = fakeApi(() => ({ page: { log_epoch: 3, storage, enabled: true, total: 3, entries: blocked, next_cursor: null } }));
+    const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} sourceNames={{ natsuki: "Natsuki List" }} />);
+    await waitFor(() => expect(screen.getAllByText("ads.example").length).toBeGreaterThan(0));
+    const card = (index: number, label = "Query details") => {
+      fireEvent.click(screen.getAllByRole("button", { name: label })[index]);
+      return document.getElementById(`log-detail-${blocked[index].id}`)?.textContent ?? "";
+    };
+    const custom = card(0);
+    expect(custom).toContain("Matching ruleads.example");
+    expect(custom).toContain("Rule sourceNatsuki List");
+    expect(custom).toContain("Block responseCustom IP");
+    const local = card(1);
+    expect(local).toContain("Rule sourceLocal rules");
+    expect(local).toContain("Block responseNXDOMAIN");
+    const older = card(2);
+    expect(older).toContain("older.example");
+    expect(older).not.toContain("Rule source");
+    view.rerender(<LogsPage api={api} language="zh-CN" onOpenSettings={() => {}} sourceNames={{ natsuki: "Natsuki List" }} />);
+    expect(card(1, "查询详情")).toContain("拦截方式域名不存在（NXDOMAIN）");
+  });
+
   it("switches language without re-requesting or losing the older page and translates failures at render time", async () => {
     const api = fakeApi((_path, body) => {
       const before = (body as { before_id: number | null }).before_id;

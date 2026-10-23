@@ -1,7 +1,16 @@
 import type { LogEntry } from './logs';
+import { STORAGE_KEYS, readPreference, writePreference } from '../../appearance/preferences';
 
 /** Seconds between pushes; null is manual mode, where the page closes the connection and refreshes through the list API. */
 export type LiveInterval = 1 | 3 | 5 | 10 | null;
+const INTERVALS: readonly LiveInterval[] = [1, 3, 5, 10];
+
+/** The administrator's last choice in this browser; manual by default and when storage is unavailable. */
+export function storedLiveInterval(): LiveInterval {
+  const stored = Number(readPreference(STORAGE_KEYS.logRefresh));
+  return INTERVALS.find((interval) => interval === stored) ?? null;
+}
+export const saveLiveInterval = (interval: LiveInterval) => writePreference(STORAGE_KEYS.logRefresh, interval === null ? null : String(interval));
 export interface LiveFilter { search: string | null; status: string | null; cache: string | null }
 export interface LiveSubscription { interval: LiveInterval; cursor: number | null; filter: LiveFilter }
 export interface LiveLogState { log: 'ok' | 'disabled' | 'unavailable' | 'checking'; log_epoch: number }

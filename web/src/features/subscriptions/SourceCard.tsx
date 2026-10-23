@@ -2,6 +2,7 @@ import { Switch } from '../../components/beui';
 import { Select } from '../../components/Popover';
 import { translate, formatDate, formatNumber, hasTranslation, type Language } from '../../i18n';
 import { SUBSCRIPTION_ID, subscriptionId, type SubscriptionDraft, type SubscriptionSource } from '../../model/subscriptions';
+import { BLOCK_RESPONSES, type BlockResponse } from '../../model';
 import type { Failure, SourceStatus } from './types';
 
 export function failureText(failure: Failure, language: Language) {
@@ -39,6 +40,12 @@ export function SourceCard({ source, index, status, language, locked, working, s
       <div className="field"><span>{t('format')}</span><Select label={t('format')} value={source.format} onChange={(format) => change({ ...source, format: format as SubscriptionDraft['format'] })}
         options={[{ value: 'domain_list', label: t('domain_list') }, { value: 'hosts_blocklist', label: t('hosts_blocklist') }]} /></div>
       <label className="field">{t('interval')}<input id={`setting-filter_subscriptions-sources-${index}-update_interval_hours`} inputMode="numeric" value={source.update_interval_hours} onChange={(event) => change({ ...source, update_interval_hours: event.target.value })} /></label>
+      <div className="field"><span>{t('blockResponse')}</span><Select id={`setting-filter_subscriptions-sources-${index}-block_response`} label={t('blockResponse')} value={source.block_response ?? ''}
+        onChange={(mode) => change({ ...source, block_response: (mode || null) as BlockResponse | null })}
+        options={[{ value: '', label: t('followGlobal') }, ...BLOCK_RESPONSES.map((mode) => ({ value: mode, label: translate(`settings.filter.block_response.${mode}`, language) }))]} /></div>
+      {source.block_response === 'custom_ip' && (['block_ipv4', 'block_ipv6'] as const).map((name) => <label className="field" key={name}>{translate(`settings.filter.${name}.label`, language)}
+        <input id={`setting-filter_subscriptions-sources-${index}-${name}`} value={source[name] ?? ''} autoComplete="off" spellCheck={false}
+          onChange={(event) => change({ ...source, [name]: event.target.value })} /></label>)}
       <Switch label={t('enabled')} checked={source.enabled} onCheckedChange={(enabled) => change({ ...source, enabled })} />
       <Switch label={t('auto')} checked={source.auto_update} onCheckedChange={(auto_update) => change({ ...source, auto_update })} />
       <details className="more-options wide" open={!SUBSCRIPTION_ID.test(source.id) || undefined}><summary>{translate('shell.moreOptions', language)}</summary>

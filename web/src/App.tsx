@@ -184,7 +184,7 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
       <div ref={routeContent} className="route-content"><Routes>
         <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
-        <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} />} />
+        <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} sourceNames={Object.fromEntries((config.draft?.savedSources ?? []).map((source) => [source.id, source.name]))} />} />
         {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'updates', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes></div>

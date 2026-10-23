@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Check, ChevronsUpDown } from 'lucide-react';
 import { SPRING_IOS_FAST } from './beui/motion';
@@ -13,9 +13,30 @@ function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, cl
   }, [open, root, close]);
 }
 
+/** Distance the menu keeps from the viewport edges. */
+const EDGE = 8;
+
 function Pop({ open, children, align = 'start', role, id, label, onKeyDown }: { open: boolean; children: ReactNode; align?: 'start' | 'end'; role: 'listbox' | 'menu'; id: string; label: string; onKeyDown(event: KeyboardEvent<HTMLElement>): void }) {
   const reduced = useReducedMotion();
-  return <AnimatePresence>{open && <motion.div key="pop" id={id} role={role} aria-label={label} tabIndex={-1} className="popover" data-align={align} onKeyDown={onKeyDown}
+  const menu = useRef<HTMLDivElement>(null);
+  const [placement, setPlacement] = useState({ align, shift: 0 });
+  // Opens on the preferred side of its control, flips when only the other side fits,
+  // and otherwise shifts back inside the viewport. Measured before paint.
+  useLayoutEffect(() => {
+    const element = menu.current;
+    const anchor = element?.parentElement;
+    if (!open || !element || !anchor) return;
+    const box = anchor.getBoundingClientRect();
+    const width = element.offsetWidth;
+    const right = document.documentElement.clientWidth - EDGE;
+    const fitsStart = box.left + width <= right;
+    const fitsEnd = box.right - width >= EDGE;
+    const side = align === 'start' ? (fitsStart || !fitsEnd ? 'start' : 'end') : (fitsEnd || !fitsStart ? 'end' : 'start');
+    const shift = side === 'start' ? Math.min(0, right - (box.left + width)) : Math.max(0, EDGE - (box.right - width));
+    setPlacement({ align: side, shift });
+  }, [open, align]);
+  const style = placement.align === 'start' ? { left: placement.shift } : { right: -placement.shift };
+  return <AnimatePresence>{open && <motion.div ref={menu} key="pop" id={id} role={role} aria-label={label} tabIndex={-1} className="popover" data-align={placement.align} style={style} onKeyDown={onKeyDown}
     initial={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.92, y: -4 }} animate={{ opacity: 1, scale: 1, y: 0 }}
     exit={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.96 }} transition={reduced ? { duration: 0.12 } : SPRING_IOS_FAST}>
     {children}

@@ -40,6 +40,26 @@ describe("configuration form model", () => {
     expect(convertFieldValue(depth, " 24 ")).toBe(24);
   });
 
+  it("offers the global block response after the local rules, with addresses only for a custom IP", () => {
+    const ids = settingPages.filters.groups.map((group) => group.id);
+    expect(ids.indexOf("blockResponse")).toBe(ids.indexOf("filterRules") + 1);
+    const fields = settingPages.filters.groups.find((group) => group.id === "blockResponse")!.fields;
+    expect(fields.map(({ path, type, min, max, when }) => ({ path, type, min, max, when }))).toEqual([
+      { path: "filter.block_response", type: "select", min: undefined, max: undefined, when: undefined },
+      { path: "filter.block_ipv4", type: "nullable", min: undefined, max: undefined, when: { path: "filter.block_response", value: "custom_ip" } },
+      { path: "filter.block_ipv6", type: "nullable", min: undefined, max: undefined, when: { path: "filter.block_response", value: "custom_ip" } },
+      { path: "filter.blocked_ttl_secs", type: "number", min: 1, max: 86400, when: undefined },
+    ]);
+    expect(fields[0].options?.map(([value]) => value)).toEqual(["nodata", "null_ip", "custom_ip", "nxdomain", "refused"]);
+    expect(() => convertFieldValue(fields[0], "drop")).toThrow(ModelError);
+    expect(convertFieldValue(fields[1], " ")).toBeNull();
+    expect(convertFieldValue(fields[1], " 192.0.2.1 ")).toBe("192.0.2.1");
+    expect(() => convertFieldValue(fields[3], "0")).toThrow(ModelError);
+    // Rule lines stay raw; Rust parses the optional block response after the domain.
+    const block = settingPages.filters.groups.find((group) => group.id === "filterRules")!.fields.find((field) => field.path === "filter.block_suffix")!;
+    expect(convertFieldValue(block, " track.example nxdomain \npage.example 192.0.2.10 2001:db8::10\n")).toEqual(["track.example nxdomain", "page.example 192.0.2.10 2001:db8::10"]);
+  });
+
   it("writes a touched nested path immutably and emits a sparse patch", () => {
     const base = { listen: "127.0.0.1:53", cache: { enabled: true, max_bytes: 1024 } };
     const changed = setPath(base, "cache.enabled", false);
@@ -118,7 +138,7 @@ describe("cache rule editor model", () => {
   });
 
   it("rejects invalid TTL and missing names at conversion", () => {
-    for (const ttl of ["0", "-1", "1.5", "1e3", "NaN", "86401"]) {
+    for (const ttl of ["0", "-1", "1.5", "1e3", "NaN", "604801"]) {
       const draft = { ...cacheRuleDraft(defaultCacheRule()), name: "example.test", max_ttl_secs: ttl };
       expect(() => decodeCacheRule(draft)).toThrowError(expect.objectContaining({ key: "views.ttlError" }));
     }
@@ -135,11 +155,11 @@ describe("unit field ranges", () => {
   };
 
   it("reports unit field bounds in their largest exact unit, in both languages", () => {
-    // 600 MB entered in the MB unit is above the 512 MiB snapshot limit.
-    const bytes = issue("cache.persistence.max_bytes", String(600 * 1024 ** 2));
+    // 65 GB is above the 64 GiB snapshot limit.
+    const bytes = issue("cache.persistence.max_bytes", String(65 * 1024 ** 3));
     expect(bytes.key).toBe("settings.validation.rangeUnit");
-    expect(presentIssue(bytes, "zh-CN")).toBe("请填写 1 MB 到 512 MB 之间的值。");
-    expect(presentIssue(bytes, "en")).toBe("Enter a value from 1 MB to 512 MB.");
+    expect(presentIssue(bytes, "zh-CN")).toBe("请填写 1 MB 到 64 GB 之间的值。");
+    expect(presentIssue(bytes, "en")).toBe("Enter a value from 1 MB to 64 GB.");
     const seconds = issue("statistics.retention_secs", "60");
     expect(presentIssue(seconds, "zh-CN")).toBe("请填写 1 小时 到 365 天 之间的值。");
     expect(presentIssue(seconds, "en")).toBe("Enter a value from 1 hour to 365 days.");
@@ -148,6 +168,6 @@ describe("unit field ranges", () => {
   it("keeps whole-number ranges for fields without units", () => {
     const plain = issue("cache.max_entries", "0");
     expect(plain.key).toBe("settings.validation.range");
-    expect(presentIssue(plain, "en")).toBe("Enter a whole number from 1 to 262144.");
+    expect(presentIssue(plain, "en")).toBe("Enter a whole number from 1 to 16777216.");
   });
 });

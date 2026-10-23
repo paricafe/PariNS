@@ -1,10 +1,18 @@
 import type { StorageStatus } from './storage';
 import type { CacheDecision, UpstreamAttempt } from './diagnostics';
+import type { BlockResponse } from '../../model';
 export interface LogAnswer {
   name: string;
   record_type: string;
   ttl: number;
   data: string;
+}
+
+/** The rule that blocked a query; `source_id` null means local rules. */
+export interface LogBlock {
+  rule: string;
+  source_id: string | null;
+  response: BlockResponse;
 }
 
 export interface LogEntry {
@@ -35,6 +43,8 @@ export interface LogEntry {
   recursion_desired: boolean;
   answer: LogAnswer[];
   answer_truncated: boolean;
+  /** Present on blocked queries; older entries omit it. */
+  block?: LogBlock | null;
 }
 
 export interface LogPage {

@@ -1,6 +1,6 @@
-// Browser-local appearance preferences. Only language, theme, background choice and
-// overlay strength live in localStorage (the custom image itself lives in IndexedDB,
-// see imageStore.ts). Never store credentials, session bindings, PEM, logs or drafts here.
+// Browser-local preferences. Only language, theme, background choice, overlay strength
+// and the query log refresh interval live in localStorage (the custom image itself lives
+// in IndexedDB, see imageStore.ts). Never store credentials, session bindings, PEM, logs or drafts here.
 // Every access tolerates unavailable or throwing storage: the console then runs with defaults.
 
 export type Theme = 'system' | 'light' | 'dark';
@@ -20,6 +20,7 @@ export const STORAGE_KEYS = {
   theme: 'parins-theme',
   background: 'parins-background',
   overlay: 'parins-background-overlay',
+  logRefresh: 'parins-log-refresh',
 } as const;
 
 const backgrounds: readonly string[] = [...SOLID_BACKGROUNDS, ...PATTERN_BACKGROUNDS, 'custom'];

@@ -37,7 +37,7 @@ export function cacheRuleDraft(rule: CacheRule): CacheRuleDraft {
 function ttl(value: string, field: "max_ttl_secs" | "negative_ttl_cap_secs"): number | null {
   const text = value.trim();
   if (!text) return null;
-  if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(Number(text)) || Number(text) < 1 || Number(text) > 86400) {
+  if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(Number(text)) || Number(text) < 1 || Number(text) > 604800) {
     throw new ModelError("views.ttlError", field);
   }
   return Number(text);

@@ -4,7 +4,7 @@ import { StaleRequest, type ApiClient } from "../../session/client";
 import { formatDate, formatNumber, presentIssue, translate, type Language } from "../../i18n";
 import { toConfigIssue, type ConfigIssue } from "../../config/context";
 import { pathLabel, statusLabel, type CacheFilter, type LogEntry, type LogFilter, type LogListResponse } from "./logs";
-import { LiveLogClient, type LiveInterval, type LiveLogState, type LiveStatus, type LiveSubscription } from "./live";
+import { LiveLogClient, saveLiveInterval, storedLiveInterval, type LiveInterval, type LiveLogState, type LiveStatus, type LiveSubscription } from "./live";
 import "./observability.css";
 import { Drawer, Tabs } from '../../components/beui';
 import { isUnknownStorageMutation } from './storage';
@@ -21,6 +21,8 @@ export interface LogsPageProps {
   api: ApiClient;
   language: Language;
   onOpenSettings: () => void;
+  /** Saved subscription source names by ID, for the rule source of a blocked query. */
+  sourceNames?: Readonly<Record<string, string>>;
 }
 
 function DetailRow({ label, children }: { label: string; children: ReactNode }) {
@@ -29,7 +31,7 @@ function DetailRow({ label, children }: { label: string; children: ReactNode }) 
   </div>;
 }
 
-function LogDetail({ entry, language }: { entry: LogEntry; language: Language }) {
+function LogDetail({ entry, language, sourceNames }: { entry: LogEntry; language: Language; sourceNames: Readonly<Record<string, string>> }) {
   const id = useId();
   const none = translate("views.none", language);
   const answer = entry.answer.map((record) => `${record.name} ${record.ttl} ${record.record_type} ${record.data}`).join("\n");
@@ -45,6 +47,11 @@ function LogDetail({ entry, language }: { entry: LogEntry; language: Language })
     <section aria-labelledby={`${id}-process`}><h3 id={`${id}-process`}>{translate("views.path", language)}</h3>
       <dl>
         <DetailRow label={translate("ui.result", language)}>{translate(statusLabel(entry.status), language)}</DetailRow>
+        {entry.block && <>
+          <DetailRow label={translate("subscriptions.witness", language)}><code>{entry.block.rule}</code></DetailRow>
+          <DetailRow label={translate("views.blockSource", language)}>{entry.block.source_id === null ? translate("subscriptions.local", language) : sourceNames[entry.block.source_id] || entry.block.source_id}</DetailRow>
+          <DetailRow label={translate("settings.filter.block_response.label", language)}>{translate(`settings.filter.block_response.${entry.block.response}`, language)}</DetailRow>
+        </>}
         <DetailRow label={translate("views.path", language)}>{translate(pathLabel(entry.cache), language)}</DetailRow>
         <DetailRow label={translate('reliability.lookup', language)}>{decisionLabel('lookup', entry.cache_lookup, language)}</DetailRow>
         <DetailRow label={translate('reliability.store', language)}>{decisionLabel('store', entry.cache_store, language)}</DetailRow>
@@ -85,7 +92,7 @@ const isFiltered = (filter: LogFilter) => filter.search !== '' || filter.status 
 const liveFilter = (filter: LogFilter) => ({ search: filter.search || null, status: filter.status, cache: filter.cache });
 const newest = (entries: readonly LogEntry[]) => entries.reduce((max, entry) => Math.max(max, entry.id), 0);
 
-export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
+export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: LogsPageProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [applied, setApplied] = useState<LogFilter>({ search: "", status: null, cache: null });
@@ -100,8 +107,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   const [unknownEpoch, setUnknownEpoch] = useState<number | null>(null);
   const [clearing, setClearing] = useState(false);
   const requestId = useRef(0);
-  // Live updates: page memory only, never persisted.
-  const [interval, setLiveInterval] = useState<LiveInterval>(3);
+  const [interval, setLiveInterval] = useState<LiveInterval>(storedLiveInterval);
   const [hidden, setHidden] = useState(() => document.visibilityState === "hidden");
   const [suspended, setSuspended] = useState(false);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('stopped');
@@ -338,7 +344,9 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
   }
 
   function chooseInterval(value: string) {
-    setLiveInterval(value === 'manual' ? null : Number(value) as LiveInterval);
+    const next = value === 'manual' ? null : Number(value) as LiveInterval;
+    setLiveInterval(next);
+    saveLiveInterval(next);
     setSuspended(false);
     setLiveStopped(false);
   }
@@ -450,7 +458,7 @@ export function LogsPage({ api, language, onOpenSettings }: LogsPageProps) {
     <AnimatePresence>{detail && detailEntry && openId !== null && <DetailPopover key={detail.id} id={detailId(detail.id)} label={translate("views.queryDetails", language)} anchor={detail.anchor} focus={detail.keyboard}
       onPointerEnter={(event) => { if (event.pointerType === 'mouse') cancelTimer(); }} onPointerLeave={hoverClose}
       onPointerDown={() => setDetail((current) => current && { ...current, pinned: true })} onKeyDown={cardKey}>
-      <LogDetail entry={detailEntry} language={language} />
+      <LogDetail entry={detailEntry} language={language} sourceNames={sourceNames} />
     </DetailPopover>}</AnimatePresence>
 
     {page?.next_cursor && <button type="button" onClick={() => void load(page.next_cursor, applied)} disabled={loading}

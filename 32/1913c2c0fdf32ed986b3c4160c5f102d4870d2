@@ -1,0 +1,41 @@
+src/filter_subscriptions/service/material.rs
+  s_cffe143f0c5c88::t_1aaa1033a86d2e 255-272
+CHANGELOG.md
+  s_cffe143f0c5c88::t_3127bc2e044e83 3-14
+src/filter_subscriptions/service.rs
+  s_cffe143f0c5c88::t_1aaa1033a86d2e 26
+src/manage/updates/operation.rs
+  s_cffe143f0c5c88::t_734ad9d7fcc24c 521,524-533,608-611
+  s_cffe143f0c5c88::t_0e77ac7eb1acdc 612-613
+src/manage/check.rs
+  s_cffe143f0c5c88::t_5762607df6f34b 197,199-202,206
+  s_cffe143f0c5c88::t_cd2d40890d6c80 9,31-33,38-48,50-54,63,69,75-80,83-89,93-101,140
+  s_cffe143f0c5c88::t_16a56aca790c82 182-196,198,203-205,207-241,243
+  s_cffe143f0c5c88::t_c91aa08e768054 55-62,70,74
+  s_cffe143f0c5c88::t_84e252f9cc60dc 242
+  s_cffe143f0c5c88::t_fcd612037af3e3 244
+AGENTS.md
+  s_cffe143f0c5c88::t_3127bc2e044e83 253-256
+guide/operations.md
+  s_cffe143f0c5c88::t_3127bc2e044e83 124-129
+src/update/ipc.rs
+  s_cffe143f0c5c88::t_16a56aca790c82 370-406
+  s_cffe143f0c5c88::t_dfe611fa2a7668 11-14,19-66
+  s_cffe143f0c5c88::t_5dd06b5b6e5068 83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "321913c2c0fdf32ed986b3c4160c5f102d4870d2",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

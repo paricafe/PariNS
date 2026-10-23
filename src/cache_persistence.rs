@@ -4,6 +4,7 @@
 
 use std::{
     fs::{self, File},
+    io::BufWriter,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::{Instant, SystemTime},
@@ -37,19 +38,28 @@ impl ConsumedSnapshot {
         &self.report
     }
 
+    /// Admits records until `deadline`; see `Cache::restore_clean_snapshot`.
     pub fn restore_into(
         mut self,
         cache: &Cache,
         fingerprint: &str,
         wall: SystemTime,
         now: Instant,
+        deadline: Instant,
         cancelled: &AtomicBool,
     ) -> SnapshotReport {
         let Some(ref mut file) = self.file else {
             return self.report;
         };
-        match cache.restore_clean_snapshot(file, fingerprint, wall, now, self.max_bytes, cancelled)
-        {
+        match cache.restore_clean_snapshot(
+            file,
+            fingerprint,
+            wall,
+            now,
+            self.max_bytes,
+            deadline,
+            cancelled,
+        ) {
             Ok(report) => report,
             Err(error) => SnapshotReport {
                 bytes: self.report.bytes,
@@ -118,7 +128,9 @@ impl CachePersistence {
     /// The caller must have stopped every foreground/flight/adapter/refresh
     /// writer, frozen management mutations, and selected the current generation.
     /// An aborted task is not proof of that condition. Never call on ordinary
-    /// Manager.stop, apply, rollback, or periodic timers.
+    /// Manager.stop, apply, rollback, or periodic timers. Writing stops at
+    /// `deadline`; the published snapshot is then complete but partial.
+    #[allow(clippy::too_many_arguments)]
     pub fn save_terminal(
         &self,
         cache: &Cache,
@@ -126,6 +138,7 @@ impl CachePersistence {
         settings: &CachePersistenceConfig,
         wall: SystemTime,
         now: Instant,
+        deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<SnapshotReport> {
         ensure!(
@@ -150,17 +163,24 @@ impl CachePersistence {
             std::process::id(),
             rand::random::<u64>()
         ));
-        let mut file =
+        let file =
             create_private(&temporary).context("create clean cache snapshot temporary file")?;
         let prepared = (|| -> Result<SnapshotReport> {
+            // One write per record would dominate the save time of a large cache.
+            let mut writer = BufWriter::with_capacity(1 << 20, file);
             let report = cache.write_clean_snapshot(
-                &mut file,
+                &mut writer,
                 fingerprint,
                 wall,
                 now,
                 settings.max_bytes,
+                deadline,
                 cancelled,
             )?;
+            let file = writer
+                .into_inner()
+                .map_err(|error| error.into_error())
+                .context("write clean cache snapshot")?;
             publish_clean(&file, &temporary, &clean, cancelled, || {
                 sync_directory(&self.directory)
             })?;

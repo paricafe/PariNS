@@ -6,6 +6,11 @@ use hickory_proto::rr::{
 };
 use std::io::Cursor;
 
+/// A deadline no test reaches.
+fn far() -> Instant {
+    Instant::now() + Duration::from_secs(3600)
+}
+
 const FP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn query(name: &str) -> Message {
@@ -33,6 +38,7 @@ fn encode(cache: &Cache, now: Instant) -> Vec<u8> {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
             now,
             1_048_576,
+            far(),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -46,6 +52,7 @@ fn restore(cache: &Cache, bytes: Vec<u8>, offline_ms: u64, now: Instant) -> Resu
         SystemTime::UNIX_EPOCH + Duration::from_millis(1_000_000 + offline_ms),
         now,
         1_048_576,
+        far(),
         &AtomicBool::new(false),
     )
 }
@@ -457,6 +464,7 @@ fn byte_budget_cancel_and_write_failure_are_explicit() {
             SystemTime::now(),
             now,
             HEADER_BYTES,
+            far(),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -472,6 +480,7 @@ fn byte_budget_cancel_and_write_failure_are_explicit() {
                 SystemTime::now(),
                 now,
                 HEADER_BYTES,
+                far(),
                 &AtomicBool::new(true)
             )
             .is_err()
@@ -498,6 +507,7 @@ fn byte_budget_cancel_and_write_failure_are_explicit() {
                 SystemTime::now(),
                 now,
                 1_048_576,
+                far(),
                 &AtomicBool::new(false)
             )
             .unwrap_err()
@@ -558,6 +568,7 @@ fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
             saved_at,
             now,
             1_048_576,
+            far(),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -569,6 +580,7 @@ fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
             saved_at,
             now,
             1_048_576,
+            far(),
             &AtomicBool::new(false),
         )
         .unwrap_err();
@@ -795,6 +807,7 @@ fn full_stream_bounds_and_read_faults_are_enforced() {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
             now,
             1_048_576,
+            far(),
             &AtomicBool::new(false),
         )
         .unwrap_err();
@@ -940,4 +953,140 @@ fn snapshot_lists_records_most_recently_used_first_across_shards() {
         .collect();
     assert_eq!(order.len(), 16);
     assert!(order.windows(2).all(|pair| pair[0] > pair[1]), "{order:?}");
+}
+
+/// Sleeps on every write, so a deadline stops the save part-way.
+struct SlowWriter(Cursor<Vec<u8>>);
+impl Write for SlowWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        std::thread::sleep(Duration::from_millis(20));
+        self.0.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl Seek for SlowWriter {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(position)
+    }
+}
+
+/// Fast while authenticating; once the restore seeks back to the first record
+/// to admit entries, reads return 64 bytes at a time and sleep.
+struct SlowAdmission {
+    inner: Cursor<Vec<u8>>,
+    slow: bool,
+}
+impl Read for SlowAdmission {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if !self.slow {
+            return self.inner.read(buffer);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        let length = buffer.len().min(64);
+        self.inner.read(&mut buffer[..length])
+    }
+}
+impl Seek for SlowAdmission {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.slow |= position == SeekFrom::Start(HEADER_BYTES as u64);
+        self.inner.seek(position)
+    }
+}
+
+/// Twenty entries in one shard, where use order is exact; the last inserted is
+/// the most recently used.
+fn twenty(now: Instant) -> (Cache, Vec<Message>) {
+    let cache = Cache::new(CacheConfig {
+        shards: 1,
+        ..CacheConfig::default()
+    });
+    let queries: Vec<_> = (0..20)
+        .map(|i| query(&format!("n{i}.deadline.test.")))
+        .collect();
+    for q in &queries {
+        insert(&cache, q, &answer(q, 60), Scope::NoEcs, now);
+    }
+    (cache, queries)
+}
+
+#[test]
+fn a_save_that_reaches_its_deadline_publishes_the_most_recent_entries_completely() {
+    let now = Instant::now();
+    let (cache, queries) = twenty(now);
+    let mut writer = SlowWriter(Cursor::new(Vec::new()));
+    let report = cache
+        .write_clean_snapshot(
+            &mut writer,
+            FP,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+            now,
+            1_048_576,
+            Instant::now() + Duration::from_millis(150),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(report.reason.as_deref(), Some("deadline"));
+    assert!(report.saved < 20, "{report:?}");
+    assert_eq!(report.saved + report.skipped, 20);
+    // The partial snapshot is complete: every written record restores.
+    let restored = Cache::new(CacheConfig::default());
+    let read = restore(&restored, writer.0.into_inner(), 0, now).unwrap();
+    assert_eq!((read.restored, read.reason), (report.saved, None));
+    if report.saved > 0 {
+        assert!(restored.peek(&queries[19], None, now, false).is_some());
+    }
+}
+
+#[test]
+fn a_restore_that_reaches_its_deadline_keeps_the_entries_it_admitted() {
+    let now = Instant::now();
+    let (cache, queries) = twenty(now);
+    let restored = Cache::new(CacheConfig::default());
+    let mut reader = SlowAdmission {
+        inner: Cursor::new(encode(&cache, now)),
+        slow: false,
+    };
+    let report = restored
+        .restore_clean_snapshot(
+            &mut reader,
+            FP,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+            now,
+            1_048_576,
+            Instant::now() + Duration::from_millis(300),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(report.reason.as_deref(), Some("deadline"));
+    assert!(report.restored < 20, "{report:?}");
+    assert_eq!(report.restored + report.skipped, 20);
+    assert_eq!(restored.snapshot()["entries"], report.restored);
+    if report.restored > 0 {
+        assert!(restored.peek(&queries[19], None, now, false).is_some());
+    }
+}
+
+#[test]
+fn a_restore_out_of_time_while_authenticating_admits_nothing() {
+    let now = Instant::now();
+    let (cache, _) = twenty(now);
+    let restored = Cache::new(CacheConfig::default());
+    let report = restored
+        .restore_clean_snapshot(
+            &mut Cursor::new(encode(&cache, now)),
+            FP,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+            now,
+            1_048_576,
+            Instant::now(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(
+        (report.restored, report.skipped, report.reason.as_deref()),
+        (0, 20, Some("deadline"))
+    );
+    assert_eq!(restored.snapshot()["entries"], 0);
 }

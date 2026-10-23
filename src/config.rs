@@ -168,6 +168,14 @@ impl Default for CoalescingConfig {
     }
 }
 
+/// Largest cache entry count; a clean snapshot can hold every entry of a full cache.
+pub(crate) const MAX_CACHE_ENTRIES: usize = 16 * 1024 * 1024;
+/// Largest cache and cache snapshot byte budget (64 GiB). Budgets are `usize`, and
+/// release builds are 64-bit.
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024 * 1024;
+/// Longest cache TTL cap, globally and per rule (7 days).
+const MAX_CACHE_TTL_SECS: u32 = 604_800;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
@@ -197,7 +205,7 @@ impl Default for CachePersistenceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_bytes: 32 * 1024 * 1024,
+            max_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -219,8 +227,8 @@ impl Default for PrefetchConfig {
             enabled: false,
             min_hits: 1,
             remaining_percent: 25,
-            max_inflight: 8,
-            rate_per_sec: 20,
+            max_inflight: 32,
+            rate_per_sec: 100,
             backoff_secs: 5,
         }
     }
@@ -281,12 +289,12 @@ impl Default for CacheConfig {
         Self {
             persistence: CachePersistenceConfig::default(),
             enabled: true,
-            max_entries: 32_768,
-            max_bytes: 32 * 1024 * 1024,
+            max_entries: 262_144,
+            max_bytes: 256 * 1024 * 1024,
             max_variants: 64,
-            max_ttl_secs: 3600,
-            negative_ttl_cap_secs: 300,
-            shards: 4,
+            max_ttl_secs: 86_400,
+            negative_ttl_cap_secs: 900,
+            shards: 16,
             negative_percent: 20,
             prefetch: PrefetchConfig::default(),
             stale: StaleConfig::default(),
@@ -400,8 +408,8 @@ impl Config {
         }
         crate::storage::RuntimeSettings::from_config(self).validate()?;
         ensure!(
-            (1024 * 1024..=512 * 1024 * 1024).contains(&self.cache.persistence.max_bytes),
-            "cache.persistence.max_bytes must be 1..=512 MiB"
+            (1024 * 1024..=MAX_CACHE_BYTES).contains(&self.cache.persistence.max_bytes),
+            "cache.persistence.max_bytes must be 1 MiB..=64 GiB"
         );
         self.upstreams.validate(self)?;
         self.recursion.validate()?;
@@ -419,26 +427,26 @@ impl Config {
             "invalid coalescing limits"
         );
         ensure!(
-            (1..=262_144).contains(&self.cache.max_entries),
-            "cache.max_entries must be in 1..=262144"
+            (1..=MAX_CACHE_ENTRIES).contains(&self.cache.max_entries),
+            "cache.max_entries must be in 1..=16777216"
         );
         ensure!(
-            (512..=1_073_741_824).contains(&self.cache.max_bytes),
-            "cache.max_bytes must be in 512..=1073741824"
+            (512..=MAX_CACHE_BYTES).contains(&self.cache.max_bytes),
+            "cache.max_bytes must be in 512..=68719476736"
         );
         ensure!(
-            (1..=256).contains(&self.cache.max_variants)
+            (1..=4096).contains(&self.cache.max_variants)
                 && self.cache.max_variants <= self.cache.max_entries,
             "invalid cache.max_variants"
         );
         ensure!(
-            (1..=86400).contains(&self.cache.max_ttl_secs)
-                && (1..=86400).contains(&self.cache.negative_ttl_cap_secs),
-            "cache TTL caps must be in 1..=86400"
+            (1..=MAX_CACHE_TTL_SECS).contains(&self.cache.max_ttl_secs)
+                && (1..=MAX_CACHE_TTL_SECS).contains(&self.cache.negative_ttl_cap_secs),
+            "cache TTL caps must be in 1..=604800"
         );
         ensure!(
-            (1..=64).contains(&self.cache.shards),
-            "cache.shards must be in 1..=64"
+            (1..=256).contains(&self.cache.shards),
+            "cache.shards must be in 1..=256"
         );
         ensure!(
             self.cache.negative_percent <= 90,
@@ -448,27 +456,27 @@ impl Config {
         ensure!(
             (1..=1_000_000).contains(&prefetch.min_hits)
                 && (1..=90).contains(&prefetch.remaining_percent)
-                && (1..=256).contains(&prefetch.max_inflight)
-                && (1..=10_000).contains(&prefetch.rate_per_sec)
-                && (1..=3600).contains(&prefetch.backoff_secs),
+                && (1..=4096).contains(&prefetch.max_inflight)
+                && (1..=100_000).contains(&prefetch.rate_per_sec)
+                && (1..=86_400).contains(&prefetch.backoff_secs),
             "invalid cache.prefetch limits"
         );
         ensure!(
-            (1..=604800).contains(&self.cache.stale.retention_secs)
-                && (1..=300).contains(&self.cache.stale.reply_ttl_secs),
+            (1..=2_592_000).contains(&self.cache.stale.retention_secs)
+                && (1..=3600).contains(&self.cache.stale.reply_ttl_secs),
             "invalid cache.stale limits"
         );
         // The cooldown floor equals the longest query deadline (60 s), so work
         // started before a revocation has normally finished before the name can
         // be relearned; at worst one late answer counts as one observation.
         ensure!(
-            (2..=8).contains(&self.cache.ecs_sharing.min_networks)
-                && (60..=604_800).contains(&self.cache.ecs_sharing.revoke_cooldown_secs),
+            (2..=64).contains(&self.cache.ecs_sharing.min_networks)
+                && (60..=2_592_000).contains(&self.cache.ecs_sharing.revoke_cooldown_secs),
             "invalid cache.ecs_sharing limits"
         );
         ensure!(
-            self.cache.rules.len() <= 256,
-            "cache.rules exceeds 256 rules"
+            self.cache.rules.len() <= 4096,
+            "cache.rules exceeds 4096 rules"
         );
         for rule in &self.cache.rules {
             ensure!(
@@ -487,7 +495,7 @@ impl Config {
                 [rule.max_ttl_secs, rule.negative_ttl_cap_secs]
                     .into_iter()
                     .flatten()
-                    .all(|ttl| (1..=86400).contains(&ttl)),
+                    .all(|ttl| (1..=MAX_CACHE_TTL_SECS).contains(&ttl)),
                 "invalid cache rule TTL cap"
             );
         }
@@ -673,14 +681,14 @@ mod tests {
             ("interval_secs = 0", "interval_secs = 3601"),
             ("ipv4_prefix = 24", "ipv4_prefix = 33"),
             ("ipv6_prefix = 56", "ipv6_prefix = 129"),
-            ("max_entries = 32768", "max_entries = 0"),
-            ("max_entries = 32768", "max_entries = 63"),
-            ("max_bytes = 33554432", "max_bytes = 511"),
-            ("max_variants = 64", "max_variants = 257"),
-            ("max_ttl_secs = 3600", "max_ttl_secs = 0"),
+            ("max_entries = 262144", "max_entries = 0"),
+            ("max_entries = 262144", "max_entries = 63"),
+            ("max_bytes = 268435456", "max_bytes = 511"),
+            ("max_variants = 64", "max_variants = 4097"),
+            ("max_ttl_secs = 86400", "max_ttl_secs = 0"),
             (
-                "negative_ttl_cap_secs = 300",
-                "negative_ttl_cap_secs = 86401",
+                "negative_ttl_cap_secs = 900",
+                "negative_ttl_cap_secs = 604801",
             ),
         ] {
             assert!(
@@ -722,15 +730,42 @@ mod tests {
         assert!(!cfg.cache.ecs_sharing.enabled);
         for (networks, cooldown, valid) in [
             (2, 60, true),
-            (8, 604_800, true),
+            (64, 2_592_000, true),
             (1, 3600, false),
-            (9, 3600, false),
+            (65, 3600, false),
             (3, 59, false),
-            (3, 604_801, false),
+            (3, 2_592_001, false),
         ] {
             cfg.cache.ecs_sharing.min_networks = networks;
             cfg.cache.ecs_sharing.revoke_cooldown_secs = cooldown;
             assert_eq!(cfg.validate().is_ok(), valid, "{networks} {cooldown}");
         }
+        cfg.cache.ecs_sharing.min_networks = 3;
+        cfg.cache.ecs_sharing.revoke_cooldown_secs = 3600;
+        let mut largest = cfg.clone();
+        largest.cache.max_entries = MAX_CACHE_ENTRIES;
+        largest.cache.max_bytes = MAX_CACHE_BYTES;
+        largest.cache.persistence.max_bytes = MAX_CACHE_BYTES;
+        largest.cache.max_variants = 4096;
+        largest.cache.shards = 256;
+        largest.cache.max_ttl_secs = MAX_CACHE_TTL_SECS;
+        largest.cache.stale.retention_secs = 2_592_000;
+        largest.cache.stale.reply_ttl_secs = 3600;
+        assert!(largest.validate().is_ok());
+        for change in [
+            |c: &mut Config| c.cache.max_entries = MAX_CACHE_ENTRIES + 1,
+            |c: &mut Config| c.cache.max_bytes = MAX_CACHE_BYTES + 1,
+            |c: &mut Config| c.cache.persistence.max_bytes = MAX_CACHE_BYTES + 1,
+            |c: &mut Config| c.cache.shards = 257,
+            |c: &mut Config| c.cache.max_ttl_secs = MAX_CACHE_TTL_SECS + 1,
+            |c: &mut Config| c.cache.stale.reply_ttl_secs = 3601,
+        ] {
+            let mut config = largest.clone();
+            change(&mut config);
+            assert!(config.validate().is_err());
+        }
+        // A full largest cache still splits into nonzero partitions without overflow.
+        let cache = crate::cache::Cache::new(largest.cache.clone());
+        assert_eq!(cache.snapshot()["shards"], 256);
     }
 }

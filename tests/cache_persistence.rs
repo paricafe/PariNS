@@ -17,6 +17,11 @@ use std::{
 
 const FP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+/// A deadline no test reaches.
+fn far() -> Instant {
+    Instant::now() + Duration::from_secs(3600)
+}
+
 fn filled() -> (Cache, Message, Instant) {
     let cache = Cache::new(CacheConfig::default());
     let mut query = Message::new(1, MessageType::Query, OpCode::Query);
@@ -63,7 +68,7 @@ fn clean_file_is_one_shot_and_tmp_is_never_a_recovery_source() {
     let wall = SystemTime::now();
     assert_eq!(
         owner
-            .save_terminal(&cache, FP, &settings, wall, now, &cancelled)
+            .save_terminal(&cache, FP, &settings, wall, now, far(), &cancelled)
             .unwrap()
             .saved,
         1
@@ -72,7 +77,7 @@ fn clean_file_is_one_shot_and_tmp_is_never_a_recovery_source() {
     assert!(clean.exists());
     assert!(
         owner
-            .save_terminal(&cache, FP, &settings, wall, now, &cancelled)
+            .save_terminal(&cache, FP, &settings, wall, now, far(), &cancelled)
             .is_err()
     );
     #[cfg(unix)]
@@ -96,6 +101,7 @@ fn clean_file_is_one_shot_and_tmp_is_never_a_recovery_source() {
         FP,
         wall + Duration::from_secs(2),
         now,
+        far(),
         &cancelled,
     );
     assert_eq!(report.restored, 1);
@@ -151,7 +157,7 @@ fn disabled_oversized_invalid_and_cancelled_files_are_consumed() {
         let owner = CachePersistence::new(dir.path());
         let candidate = owner.consume_startup(&settings).unwrap();
         assert!(!clean.exists());
-        let report = candidate.restore_into(&cache, FP, SystemTime::now(), now, &cancelled);
+        let report = candidate.restore_into(&cache, FP, SystemTime::now(), now, far(), &cancelled);
         assert!(report.reason.unwrap().contains(expected));
     }
 }
@@ -165,14 +171,30 @@ fn failed_startup_consumption_and_non_quiescent_cancel_do_not_publish() {
     let (cache, _, now) = filled();
     assert!(
         owner
-            .save_terminal(&cache, FP, &settings, SystemTime::now(), now, &cancel)
+            .save_terminal(
+                &cache,
+                FP,
+                &settings,
+                SystemTime::now(),
+                now,
+                far(),
+                &cancel
+            )
             .is_err()
     );
     fs::create_dir(dir.path().join(CLEAN_FILE)).unwrap();
     assert!(owner.consume_startup(&settings).is_err());
     assert!(
         owner
-            .save_terminal(&cache, FP, &settings, SystemTime::now(), now, &cancel)
+            .save_terminal(
+                &cache,
+                FP,
+                &settings,
+                SystemTime::now(),
+                now,
+                far(),
+                &cancel
+            )
             .is_err()
     );
     fs::remove_dir(dir.path().join(CLEAN_FILE)).unwrap();
@@ -180,7 +202,15 @@ fn failed_startup_consumption_and_non_quiescent_cancel_do_not_publish() {
     cancel.store(true, std::sync::atomic::Ordering::Release);
     assert!(
         owner
-            .save_terminal(&cache, FP, &settings, SystemTime::now(), now, &cancel)
+            .save_terminal(
+                &cache,
+                FP,
+                &settings,
+                SystemTime::now(),
+                now,
+                far(),
+                &cancel
+            )
             .is_err()
     );
     assert!(!dir.path().join(CLEAN_FILE).exists());

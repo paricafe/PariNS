@@ -206,6 +206,7 @@ async fn verified_dot_and_https_missing_ecs_padding_cache_and_clean_restart() {
                     &config.cache.persistence,
                     SystemTime::now(),
                     Instant::now(),
+                    Instant::now() + Duration::from_secs(3600),
                     &flag
                 )
                 .unwrap()
@@ -220,6 +221,7 @@ async fn verified_dot_and_https_missing_ecs_padding_cache_and_clean_restart() {
             &fingerprint,
             SystemTime::now(),
             Instant::now(),
+            Instant::now() + Duration::from_secs(3600),
             &flag,
         );
         assert_eq!(report.restored, 1, "{report:?}");

@@ -29,6 +29,12 @@ pub async fn consume(
     }
 }
 
+/// Restore admits the most recently used entries until `RESTORE_LOADING` and
+/// keeps them; the rest of `RESTORE_BUDGET` covers returning from the worker.
+/// Only a restore stuck past the budget (for example in IO) stops DNS startup.
+const RESTORE_BUDGET: Duration = Duration::from_secs(5);
+const RESTORE_LOADING: Duration = Duration::from_millis(4500);
+
 pub async fn restore(
     snapshot: ConsumedSnapshot,
     cache: Arc<Cache>,
@@ -36,16 +42,18 @@ pub async fn restore(
 ) -> Result<SnapshotReport> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = cancelled.clone();
+    let deadline = Instant::now() + RESTORE_LOADING;
     let work = tokio::task::spawn_blocking(move || {
         snapshot.restore_into(
             &cache,
             &fingerprint,
             SystemTime::now(),
             Instant::now(),
+            deadline,
             &flag,
         )
     });
-    match tokio::time::timeout(Duration::from_secs(5), work).await {
+    match tokio::time::timeout(RESTORE_BUDGET, work).await {
         Ok(result) => Ok(result?),
         Err(_) => {
             cancelled.store(true, Ordering::Release);
@@ -57,6 +65,9 @@ pub async fn restore(
 /// Cache snapshot save and runtime-data drain run in parallel, each bounded by
 /// this budget, so a slow save cannot starve the drain.
 const TERMINAL_BUDGET: Duration = Duration::from_secs(10);
+/// The save writes the most recently used entries until this point; the rest of
+/// `TERMINAL_BUDGET` covers fsync and publishing the complete, partial snapshot.
+const SAVE_WRITING: Duration = Duration::from_secs(8);
 /// The final storage close, after the save, drains only what arrived since.
 const CLOSE_BUDGET: Duration = Duration::from_secs(2);
 
@@ -97,6 +108,7 @@ pub async fn terminal(
                             &config.cache.persistence,
                             SystemTime::now(),
                             Instant::now(),
+                            started + SAVE_WRITING,
                             &flag,
                         )
                     })

@@ -23,7 +23,7 @@ pub(crate) const VERSION: u32 = 3;
 pub(crate) const CACHE_SEMANTICS: u32 = 4;
 const HEADER_BYTES: usize = 512;
 const MAX_RECORD_BYTES: usize = 96 * 1024;
-const MAX_RECORDS: usize = 1_000_000;
+const MAX_RECORDS: usize = crate::config::MAX_CACHE_ENTRIES;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SnapshotReport {
@@ -206,6 +206,9 @@ fn age_records(message: &mut Message, seconds: u32) {
 impl Cache {
     /// Streams records with a fixed-size header, without changing recency/hit counters.
     /// The caller owns quiescence and must run this synchronous work off Tokio workers.
+    /// Writing stops at `deadline`; the snapshot then holds the most recently used
+    /// entries written so far and is complete (reason `deadline`).
+    #[allow(clippy::too_many_arguments)]
     pub fn write_clean_snapshot<W: Write + Seek>(
         &self,
         writer: &mut W,
@@ -213,6 +216,7 @@ impl Cache {
         saved_at: SystemTime,
         now: Instant,
         max_bytes: usize,
+        deadline: Instant,
         cancel: &AtomicBool,
     ) -> Result<SnapshotReport> {
         cancelled(cancel)?;
@@ -240,8 +244,14 @@ impl Cache {
             );
         }
         entries.sort_by_cached_key(|e| std::cmp::Reverse(e.accessed.load(Ordering::Relaxed)));
-        for entry in entries {
+        let total = entries.len();
+        for (position, entry) in entries.into_iter().enumerate() {
             cancelled(cancel)?;
+            if Instant::now() >= deadline {
+                report.skipped += total - position;
+                report.reason = Some("deadline".into());
+                break;
+            }
             // Round upward to avoid extending the original fresh deadline by
             // truncating a fractional second at either snapshot boundary.
             let age = now.saturating_duration_since(entry.inserted);
@@ -306,8 +316,12 @@ impl Cache {
         Ok(report)
     }
 
-    /// Validates the complete bounded stream before admitting any record. No
-    /// disk lookup layer, request metrics, refresh work, or recency is restored.
+    /// Authenticates the complete bounded stream before admitting any record,
+    /// then admits records in file order (most recently used first) until
+    /// `deadline`; the rest are skipped with reason `deadline`. Running out of
+    /// time while authenticating admits nothing. No disk lookup layer, request
+    /// metrics, refresh work, or recency is restored.
+    #[allow(clippy::too_many_arguments)]
     pub fn restore_clean_snapshot<R: Read + Seek>(
         &self,
         reader: &mut R,
@@ -315,6 +329,7 @@ impl Cache {
         now_wall: SystemTime,
         now: Instant,
         max_bytes: usize,
+        deadline: Instant,
         cancel: &AtomicBool,
     ) -> Result<SnapshotReport> {
         cancelled(cancel)?;
@@ -341,25 +356,35 @@ impl Cache {
         let offline = (now_ns - header.saved_at_ns)
             .div_ceil(1_000_000_000)
             .min(u128::from(u32::MAX)) as u32;
-        // Pass one authenticates the entire payload, including semantic metadata,
-        // before any entry is inserted. Each allocation is one bounded record.
-        let mut hash = Sha256::new();
-        scan(reader, header.records, length, cancel, |line, record| {
-            hash.update(line);
-            record.decode()?;
-            Ok(())
-        })?;
-        ensure!(
-            digest(hash, &header) == header.checksum,
-            "snapshot checksum mismatch"
-        );
-        reader.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
         let mut report = SnapshotReport {
             saved: header.records,
             bytes: length,
             ..SnapshotReport::default()
         };
-        scan(reader, header.records, length, cancel, |_, record| {
+        let stopped = |processed: usize, report: &mut SnapshotReport| {
+            report.skipped += header.records - processed;
+            report.reason = Some("deadline".into());
+        };
+        // Pass one authenticates the entire framed payload before any entry is
+        // inserted. Each allocation is one bounded line.
+        let mut hash = Sha256::new();
+        if let Some(processed) = scan(reader, header.records, length, deadline, cancel, |line| {
+            hash.update(line);
+            Ok(())
+        })? {
+            debug_assert!(processed < header.records);
+            stopped(0, &mut report);
+            return Ok(report);
+        }
+        ensure!(
+            digest(hash, &header) == header.checksum,
+            "snapshot checksum mismatch"
+        );
+        reader.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
+        // The checksum binds every record to what this codec wrote, so a record
+        // that does not decode is a codec defect and ends the restore.
+        let admitted = scan(reader, header.records, length, deadline, cancel, |line| {
+            let record: Record = serde_json::from_slice(line).context("invalid snapshot record")?;
             let remaining = record.remaining_secs.saturating_sub(offline);
             let (query, mut response, scope) = record.decode()?;
             age_records(&mut response, offline);
@@ -374,22 +399,31 @@ impl Cache {
             }
             Ok(())
         })?;
+        if let Some(processed) = admitted {
+            stopped(processed, &mut report);
+        }
         Ok(report)
     }
 }
 
+/// Visits each framed record line; returns how many were visited when
+/// `deadline` stops the scan before the end.
 fn scan<R: Read>(
     reader: &mut R,
     count: usize,
     length: u64,
+    deadline: Instant,
     cancel: &AtomicBool,
-    mut visit: impl FnMut(&[u8], Record) -> Result<()>,
-) -> Result<()> {
+    mut visit: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<Option<usize>> {
     let mut reader = BufReader::new(reader.take(length - HEADER_BYTES as u64));
     let mut line = Vec::new();
     let mut consumed = HEADER_BYTES as u64;
-    for _ in 0..count {
+    for processed in 0..count {
         cancelled(cancel)?;
+        if Instant::now() >= deadline {
+            return Ok(Some(processed));
+        }
         line.clear();
         reader
             .by_ref()
@@ -400,13 +434,10 @@ fn scan<R: Read>(
             "invalid or oversized snapshot record"
         );
         consumed += line.len() as u64;
-        visit(
-            &line,
-            serde_json::from_slice(&line).context("invalid snapshot record")?,
-        )?;
+        visit(&line)?;
     }
     ensure!(consumed == length, "snapshot record count mismatch");
-    Ok(())
+    Ok(None)
 }
 
 /// Uses the actual loaded filter digest supplied by the current Resolver, never

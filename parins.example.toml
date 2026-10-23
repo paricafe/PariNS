@@ -85,21 +85,21 @@ ipv6_prefix = 56
 [cache]
 enabled = true
 # These limits are the defaults.
-max_entries = 32768
+max_entries = 262144
 # Serialized answers + conservative entry metadata, not total process RSS.
-max_bytes = 33554432
+max_bytes = 268435456
 max_variants = 64
-max_ttl_secs = 3600
-negative_ttl_cap_secs = 300
-shards = 4
+max_ttl_secs = 86400
+negative_ttl_cap_secs = 900
+shards = 16
 negative_percent = 20
 
 [cache.prefetch]
 enabled = false
 min_hits = 1
 remaining_percent = 25
-max_inflight = 8
-rate_per_sec = 20
+max_inflight = 32
+rate_per_sec = 100
 backoff_secs = 5
 
 # Share answers that proved identical across client networks (ECS-invariant names).
@@ -116,7 +116,7 @@ reply_ttl_secs = 30
 # Saves the cache at clean shutdown and restores it at the next start.
 [cache.persistence]
 enabled = true
-max_bytes = 33554432
+max_bytes = 268435456
 
 # Optional per-domain policies; exact before suffix, then most labels, qtype,
 # then first declaration. Missing optional fields inherit global cache settings.
@@ -131,6 +131,11 @@ max_bytes = 33554432
 # Any matching allow wins for that name, but not for a different CNAME target.
 [filter]
 enabled = false
+# How blocked queries are answered: nodata, null_ip, custom_ip, nxdomain or refused.
+# custom_ip takes block_ipv4 and/or block_ipv6. A block rule may name its own
+# method after the domain, e.g. "track.example nxdomain" or "page.example 192.0.2.10".
+block_response = "nodata"
+blocked_ttl_secs = 10
 block_exact = []
 block_suffix = []
 allow_exact = []

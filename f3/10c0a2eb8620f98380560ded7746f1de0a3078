@@ -1,0 +1,52 @@
+tests/cache_persistence.rs
+  s_cffe143f0c5c88::t_6f515a47d1539a 20-24,104,194
+  s_cffe143f0c5c88::t_ce0ba02471d442 71,80,160,174-182,189
+  s_cffe143f0c5c88::t_915189c25d5eda 190-193
+  s_cffe143f0c5c88::t_8556c1cc571b22 195-197
+  s_cffe143f0c5c88::t_70a6f3794eaad4 205-213
+src/runtime_lifecycle.rs
+  s_cffe143f0c5c88::t_971ac0627d1e1b 111
+  s_cffe143f0c5c88::t_e237da53894612 32-37,45,52,56,68-70
+src/config.rs
+  s_cffe143f0c5c88::t_87f2cc714d8d72 208,292-293,684-686
+  s_cffe143f0c5c88::t_ea55f166a83102 743-769
+  s_cffe143f0c5c88::t_f98eeb465f703b 171-178
+  s_cffe143f0c5c88::t_ef6ff3516de15c 687-688,690-691
+  s_cffe143f0c5c88::t_000d65a430f401 230-231,295-297,411-412,430-431,434-435,438,443-445,448-449,459-461,465-466,473-474,478-479,498
+  s_cffe143f0c5c88::t_50e46dede651e4 733,735,737
+parins.example.toml
+  s_cffe143f0c5c88::t_ef6ff3516de15c 92-94,101-102
+  s_cffe143f0c5c88::t_8c57e61118a171 134-138
+  s_cffe143f0c5c88::t_87f2cc714d8d72 88,90,119
+src/cache/persistence/tests.rs
+  s_cffe143f0c5c88::t_6f515a47d1539a 9-13
+  s_cffe143f0c5c88::t_7a00e1fb1fb95c 957-997,1000,1005-1090
+  s_cffe143f0c5c88::t_ae1bb818d9f619 998-999,1001-1004
+  s_cffe143f0c5c88::t_ce0ba02471d442 41,55,467,483,510,571,583,810
+  s_cffe143f0c5c88::t_7da20e2168df70 1091-1092
+src/cache/persistence.rs
+  s_cffe143f0c5c88::t_300e5020c14fa7 364
+  s_cffe143f0c5c88::t_72ac7fca732585 209-211,219,247-248,250-254,319-324,332,359-363,365-369,371,374-378,384-387,402-404,409-410,415,417-418,422,424-426,437,440
+  s_cffe143f0c5c88::t_f98eeb465f703b 26
+src/cache_persistence.rs
+  s_cffe143f0c5c88::t_d4aa2ce928da81 7,166,169-170,172,180-183
+  s_cffe143f0c5c88::t_e237da53894612 41,48,54-62,131-133,141,177
+tests/cache_encrypted.rs
+  s_cffe143f0c5c88::t_6f515a47d1539a 209,224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f310c0a2eb8620f98380560ded7746f1de0a3078",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

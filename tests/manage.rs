@@ -410,10 +410,27 @@ async fn descriptor_exhaustion_pauses_the_management_listener_without_exiting() 
     sleep(Duration::from_secs(1)).await;
     assert!(child.try_wait().unwrap().is_none(), "management exited");
     drop(idle);
-    server
-        .request("GET", "/api/session", None, None)
-        .await
-        .expect(200);
+    // The server sees the idle connections close asynchronously; until it does,
+    // a new connection can exceed the management connection budget and be dropped.
+    let request = server.wire("GET", "/api/session", None, None);
+    timeout(DEADLINE, async {
+        loop {
+            if let Ok(mut stream) = TcpStream::connect(address).await
+                && stream.write_all(&request).await.is_ok()
+            {
+                let mut response = String::new();
+                if stream.read_to_string(&mut response).await.is_ok()
+                    && parse_response(&response).status == 200
+                {
+                    break;
+                }
+            }
+            assert!(child.try_wait().unwrap().is_none(), "management exited");
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("management serves again once descriptors are free");
     assert!(child.try_wait().unwrap().is_none(), "management exited");
 }
 

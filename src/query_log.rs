@@ -171,19 +171,33 @@ pub(crate) struct Trace {
     pub block: Option<crate::policy::BlockTrace>,
 }
 
-/// A cancelled foreground future still has one terminal history entry. The
-/// original epoch prevents cancellation from repopulating a cleared log.
+/// A cancelled foreground future still has one terminal history entry, which
+/// keeps the decisions made before the cancellation. The original epoch
+/// prevents cancellation from repopulating a cleared log.
 pub(crate) struct Pending<'a> {
     log: &'a QueryLog,
     epoch: u64,
     started: Instant,
     entry: Option<Entry>,
+    pub(crate) trace: Trace,
+    resolved: bool,
 }
 
 impl Pending<'_> {
-    pub(crate) fn finish(mut self, response: Option<&Message>, trace: Trace) {
-        let mut entry = self.entry.take().expect("pending query log entry");
-        entry.finish(response, self.started.elapsed(), trace);
+    /// Completes the entry with the answer. `deliver` records it as answered;
+    /// dropping it first records the request as cancelled.
+    pub(crate) fn resolve(&mut self, response: Option<&Message>) {
+        let entry = self.entry.as_mut().expect("pending query log entry");
+        entry.finish(
+            response,
+            self.started.elapsed(),
+            std::mem::take(&mut self.trace),
+        );
+        self.resolved = true;
+    }
+
+    pub(crate) fn deliver(mut self) {
+        let entry = self.entry.take().expect("pending query log entry");
         self.log.record(self.epoch, entry);
     }
 }
@@ -191,14 +205,15 @@ impl Pending<'_> {
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
         if let Some(mut entry) = self.entry.take() {
-            entry.finish(
-                None,
-                self.started.elapsed(),
-                Trace {
-                    cache: Some("cancelled"),
-                    ..Default::default()
-                },
-            );
+            if !self.resolved {
+                entry.finish(
+                    None,
+                    self.started.elapsed(),
+                    std::mem::take(&mut self.trace),
+                );
+            }
+            entry.status = "dropped".into();
+            entry.cache = "cancelled".into();
             self.log.record(self.epoch, entry);
         }
     }
@@ -227,6 +242,8 @@ impl QueryLog {
                 peer,
                 transport,
             )),
+            trace: Trace::default(),
+            resolved: false,
         })
     }
     pub(crate) fn record(&self, epoch: u64, entry: Entry) {
@@ -338,6 +355,69 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_undelivered_answer_is_recorded_as_cancelled_with_its_decisions() {
+        use crate::cache::{LookupDecision, LookupOutcome};
+        use hickory_proto::{
+            op::{MessageType, OpCode, Query},
+            rr::{Name, RecordType},
+        };
+        let runtime =
+            crate::runtime_services::RuntimeServices::ephemeral(crate::storage::RuntimeSettings {
+                query_log: Settings {
+                    enabled: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let mut query = Message::new(7, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_ascii("late.test.").unwrap(),
+            RecordType::A,
+        ));
+        let response = crate::protocol::error_response(&query, ResponseCode::NoError);
+        let bytes = query.to_vec().unwrap();
+        for delivered in [false, true] {
+            let mut pending = runtime
+                .query_log
+                .pending(&bytes, "192.0.2.1".parse().unwrap(), "doh3")
+                .unwrap();
+            pending.trace.cache = Some("upstream");
+            pending.trace.cache_lookup = Some(LookupDecision {
+                outcome: LookupOutcome::Miss,
+                reason: None,
+            });
+            pending.resolve(Some(&response));
+            if delivered {
+                pending.deliver();
+            }
+        }
+        runtime.storage.flush().await.unwrap();
+        let page = runtime
+            .storage
+            .list_logs(ListOptions::default())
+            .await
+            .unwrap();
+        let [delivered, undelivered] = &page.entries[..] else {
+            panic!("expected two entries");
+        };
+        assert_eq!(
+            (delivered.status.as_str(), delivered.cache.as_str()),
+            ("success", "upstream")
+        );
+        assert_eq!(
+            (undelivered.status.as_str(), undelivered.cache.as_str()),
+            ("dropped", "cancelled")
+        );
+        for entry in [delivered, undelivered] {
+            assert_eq!(entry.rcode.as_deref(), Some("NOERROR"));
+            assert_eq!(
+                entry.cache_lookup.map(|lookup| lookup.outcome),
+                Some(LookupOutcome::Miss)
+            );
+        }
+    }
     #[tokio::test]
     async fn bounds_retention_and_clear_generation() {
         let runtime =

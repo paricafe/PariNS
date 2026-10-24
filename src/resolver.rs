@@ -56,6 +56,34 @@ impl Generation {
     }
 }
 
+/// A resolved request until its transport hands the answer over. Dropping it
+/// undelivered (a failed write, a peer that left, a deadline) counts the
+/// request as cancelled and records its history entry so.
+pub(crate) struct Delivery<'a> {
+    metrics: &'a Metrics,
+    log: Option<crate::query_log::Pending<'a>>,
+    delivered: bool,
+}
+
+impl Delivery<'_> {
+    pub(crate) fn delivered(mut self) {
+        self.delivered = true;
+        if let Some(log) = self.log.take() {
+            log.deliver();
+        }
+    }
+}
+
+impl Drop for Delivery<'_> {
+    fn drop(&mut self) {
+        self.metrics.inc(if self.delivered {
+            Counter::Completed
+        } else {
+            Counter::Cancelled
+        });
+    }
+}
+
 pub struct Reply {
     pub message: Message,
     pub udp_limit: usize,
@@ -248,12 +276,27 @@ impl Resolver {
         peer: IpAddr,
         transport: &str,
     ) -> Option<Reply> {
+        let (reply, delivery) = self.resolve_for_delivery(bytes, peer, transport).await;
+        delivery.delivered();
+        reply
+    }
+
+    /// Resolves a query whose answer the caller writes afterwards. The request
+    /// counts as completed, and its history entry as answered, only after
+    /// `Delivery::delivered`.
+    pub(crate) async fn resolve_for_delivery(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+    ) -> (Option<Reply>, Delivery<'_>) {
         let mut guard = self.metrics.track(Timer::Request);
-        let log = self.query_log.pending(bytes, peer, transport);
-        let mut trace = Trace::default();
-        let reply = self.resolve_inner(bytes, peer, &mut trace).await;
-        if let Some(log) = log {
-            log.finish(reply.as_ref().map(|r| &r.message), trace);
+        let mut log = self.query_log.pending(bytes, peer, transport);
+        let mut untraced = Trace::default();
+        let trace = log.as_mut().map_or(&mut untraced, |log| &mut log.trace);
+        let reply = self.resolve_inner(bytes, peer, trace).await;
+        if let Some(log) = &mut log {
+            log.resolve(reply.as_ref().map(|r| &r.message));
         }
         self.metrics
             .inc(match reply.as_ref().map(|r| r.message.response_code) {
@@ -264,8 +307,15 @@ impl Resolver {
                 Some(_) => Counter::ResponsesOther,
                 None => Counter::Dropped,
             });
-        guard.complete();
-        reply
+        guard.defer();
+        (
+            reply,
+            Delivery {
+                metrics: &self.metrics,
+                log,
+                delivered: false,
+            },
+        )
     }
 
     pub fn metrics(&self) -> &Arc<Metrics> {

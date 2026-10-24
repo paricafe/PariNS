@@ -243,7 +243,9 @@ service 16; idle ones close after 30 seconds. Treat the log as private browsing 
 The log keeps records until `max_entries`, `max_bytes`, `retention_secs` or the
 database limit is reached, whichever comes first; the page shows the actual oldest
 record and why older ones were removed. Queries cancelled after reaching the
-resolver are recorded as dropped. Prefetch is not logged. Query data never appears
+resolver are recorded as dropped, with the path **cancelled** and the cache lookup
+result made before the cancellation. A DoH3 answer that fails to write is recorded
+the same way. Prefetch is not logged. Query data never appears
 in metrics or the service log.
 
 **Statistics.** The **Overview** page shows totals, the cache hit rate, blocked
@@ -277,7 +279,7 @@ For DNS readiness, use `dns_health` in the console's authenticated `GET /api/sta
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `parins_requests_total`, `parins_completed_total`, `parins_cancelled_total` | counter | Queries entering the resolver; those that returned (any response code); those cancelled. |
+| `parins_requests_total`, `parins_completed_total`, `parins_cancelled_total` | counter | Queries entering the resolver; queries whose answer (any response code) went to the transport; queries cancelled before that. A DoH3 answer that fails to write counts as cancelled. |
 | `parins_responses_{noerror,nxdomain,servfail,refused,other}_total`, `parins_dropped_total` | counter | Responses by code; queries that ended without a response. |
 | `parins_cache_hits_total`, `parins_cache_misses_total` | counter | First cache lookup of a query (a miss includes a disabled or bypassed cache). |
 | `parins_cache_lookup_{fresh,stale,miss,bypass,disabled}_total` | counter | Cache lookups by outcome. |
@@ -291,7 +293,7 @@ For DNS readiness, use `dns_health` in the console's authenticated `GET /api/sta
 | `parins_udp_received_total`, `parins_tcp_received_total`, `parins_encrypted_received_total` | counter | Datagrams, TCP frames and encrypted DNS messages received. |
 | `parins_udp_dropped_total`, `parins_tcp_rejected_total`, `parins_encrypted_rejected_total`, `parins_connections_rejected_total` | counter | Admission rejections at the global limits. |
 | `parins_source_queries_rejected_total`, `parins_source_connections_rejected_total`, `parins_source_table_full_total` | counter | Per-client limit rejections; table-full is a subset. |
-| `parins_quic_{doq,doh3}_*_total` | counter | DoQ and DoH3 connection, handshake, stream and HTTP outcomes (for example `incoming`, `admission_global_rejected`, `handshake_established`, `handshake_tls`, `stream_cancelled`, `http_response_4xx`). `incoming` counts only validated client addresses. |
+| `parins_quic_{doq,doh3}_*_total` | counter | DoQ and DoH3 connection, handshake, stream and HTTP outcomes (for example `incoming`, `admission_global_rejected`, `handshake_established`, `handshake_tls`, `stream_cancelled`, `http_response_4xx`). `incoming` counts only validated client addresses. `stream_peer_cancelled` counts streams that the client stopped or reset; for DoH3 this includes an answer that fails to write for that reason. `http_request_failed` counts other DoH3 request failures. |
 | `parins_request_inflight`, `parins_upstream_inflight` | gauge | Queries and upstream operations in progress. |
 | `parins_request_duration_seconds`, `parins_upstream_duration_seconds` | histogram | Latency, with buckets at 1, 5, 10, 50, 100, 500, 1000 and 5000 ms. |
 

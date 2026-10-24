@@ -283,7 +283,7 @@ impl Metrics {
             metrics: self,
             timer,
             started: Instant::now(),
-            completed: false,
+            end: End::Cancelled,
         }
     }
 
@@ -308,13 +308,25 @@ pub struct Guard<'a> {
     metrics: &'a Metrics,
     timer: Timer,
     started: Instant,
-    completed: bool,
+    end: End,
+}
+
+enum End {
+    Cancelled,
+    Completed,
+    Deferred,
 }
 
 impl Guard<'_> {
     /// Mark a request as resolved (including DNS error responses), rather than cancelled.
     pub fn complete(&mut self) {
-        self.completed = true;
+        self.end = End::Completed;
+    }
+
+    /// Mark a request as resolved, but leave the completed or cancelled count
+    /// to the caller, which records it after the transport delivers the answer.
+    pub fn defer(&mut self) {
+        self.end = End::Deferred;
     }
 }
 
@@ -323,11 +335,11 @@ impl Drop for Guard<'_> {
         let micros = self.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
         self.metrics.latency[self.timer as usize].observe(micros);
         if matches!(self.timer, Timer::Request) {
-            self.metrics.inc(if self.completed {
-                Counter::Completed
-            } else {
-                Counter::Cancelled
-            });
+            match self.end {
+                End::Cancelled => self.metrics.inc(Counter::Cancelled),
+                End::Completed => self.metrics.inc(Counter::Completed),
+                End::Deferred => {}
+            }
         }
         self.metrics.inflight[self.timer as usize].fetch_sub(1, Relaxed);
     }
@@ -452,20 +464,22 @@ mod tests {
         let metrics = Metrics::default();
         let mut completed = metrics.track(Timer::Request);
         let cancelled = metrics.track(Timer::Request);
+        let mut deferred = metrics.track(Timer::Request);
         let upstream = metrics.track(Timer::Upstream);
-        assert_eq!(metrics.snapshot().request_inflight, 2);
+        assert_eq!(metrics.snapshot().request_inflight, 3);
         assert_eq!(metrics.snapshot().upstream_inflight, 1);
         completed.complete();
         completed.complete();
-        drop((completed, cancelled, upstream));
+        deferred.defer();
+        drop((completed, cancelled, deferred, upstream));
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.counters["requests"], 2);
+        assert_eq!(snapshot.counters["requests"], 3);
         assert_eq!(snapshot.counters["completed"], 1);
         assert_eq!(snapshot.counters["cancelled"], 1);
         assert_eq!(snapshot.counters["upstream_operations"], 1);
         assert_eq!(snapshot.request_inflight, 0);
         assert_eq!(snapshot.upstream_inflight, 0);
-        assert_eq!(snapshot.request_latency.count, 2);
+        assert_eq!(snapshot.request_latency.count, 3);
         assert_eq!(snapshot.upstream_latency.count, 1);
     }
 

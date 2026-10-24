@@ -41,6 +41,8 @@ struct Fixture {
     source_limits: Arc<parins::limits::Limiter>,
     resolver: Arc<Resolver>,
     queries: Arc<Semaphore>,
+    /// With held answers, each permit releases one upstream answer.
+    answers: Arc<Semaphore>,
 }
 
 #[tokio::test]
@@ -80,6 +82,20 @@ impl Fixture {
         settings: parins::limits::Settings,
         connection_capacity: usize,
     ) -> Self {
+        Self::build(protocol, drop_first, settings, connection_capacity, false).await
+    }
+
+    async fn with_held_answers(protocol: Protocol) -> Self {
+        Self::build(protocol, false, Default::default(), 1, true).await
+    }
+
+    async fn build(
+        protocol: Protocol,
+        drop_first: bool,
+        settings: parins::limits::Settings,
+        connection_capacity: usize,
+        hold_answers: bool,
+    ) -> Self {
         let identity = common::Identity::new(&["localhost"]);
         let cert = identity.der.clone();
         let tls = identity.server_config(&[match protocol {
@@ -95,6 +111,8 @@ impl Fixture {
         config.upstreams.servers = vec![udp.local_addr().unwrap().to_string()];
         let calls = Arc::new(AtomicUsize::new(0));
         let upstream_calls = calls.clone();
+        let answers = Arc::new(Semaphore::new(0));
+        let held = answers.clone();
         let upstream = tokio::spawn(async move {
             let mut buffer = [0u8; 65535];
             loop {
@@ -102,6 +120,9 @@ impl Fixture {
                 let previous = upstream_calls.fetch_add(1, Ordering::SeqCst);
                 if drop_first && previous == 0 {
                     continue;
+                }
+                if hold_answers {
+                    held.acquire().await.unwrap().forget();
                 }
                 let query = Message::from_vec(&buffer[..len]).unwrap();
                 let response = protocol::error_response(&query, ResponseCode::NoError)
@@ -138,6 +159,7 @@ impl Fixture {
             source_limits,
             resolver,
             queries,
+            answers,
         }
     }
 
@@ -604,6 +626,64 @@ async fn h3_connection_loss_cancels_inflight_dns_before_deadline() {
         .unwrap();
     fixture.close().await;
     client.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn h3_answer_to_a_stopped_stream_counts_as_cancelled() {
+    let fixture = Fixture::with_held_answers(Protocol::H3).await;
+    let client = fixture.client(Protocol::H3);
+    let connection = client
+        .connect(fixture.address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(connection.clone()))
+        .await
+        .unwrap();
+    let drive =
+        tokio::spawn(
+            async move { futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await },
+        );
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("https://localhost/dns-query")
+        .header("content-type", "application/dns-message")
+        .body(())
+        .unwrap();
+    let mut stream = sender.send_request(request).await.unwrap();
+    stream.send_data(Bytes::from(query(42))).await.unwrap();
+    stream.finish().await.unwrap();
+    fixture.wait_for_upstream_query().await;
+    // h3 does not report the STOP_SENDING while the server resolves; the
+    // answer released below then fails to write.
+    stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    fixture.answers.add_permits(1);
+    // Less than the 500ms adapter deadline.
+    let counters = timeout(Duration::from_millis(400), async {
+        loop {
+            let counters = fixture.resolver.metrics().snapshot().counters;
+            if counters["quic_doh3_stream_peer_cancelled"] == 1 {
+                break counters;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(counters["requests"], 1);
+    assert_eq!(counters["completed"], 0);
+    assert_eq!(counters["cancelled"], 1);
+    assert_eq!(counters["responses_noerror"], 1);
+    assert_eq!(counters["quic_doh3_http_request_failed"], 0);
+    assert_eq!(counters["quic_doh3_http_request_deadline"], 0);
+    drop((stream, sender));
+    connection.close(0u32.into(), b"done");
+    timeout(Duration::from_secs(1), drive)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.close().await;
 }
 
 #[tokio::test]

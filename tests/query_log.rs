@@ -550,6 +550,11 @@ async fn cancelled_foreground_is_logged_once_unless_cleared_while_pending() {
             assert_eq!(entry.name, "pending.test.");
             assert_eq!(entry.transport, "doh");
             assert!(entry.upstream.is_none() && entry.rcode.is_none() && entry.answer.is_empty());
+            // The cache lookup made before the cancellation stays visible.
+            assert_eq!(
+                entry.cache_lookup.map(|lookup| lookup.outcome),
+                Some(parins::cache::LookupOutcome::Miss)
+            );
         }
     }
 }

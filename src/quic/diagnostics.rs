@@ -215,6 +215,19 @@ pub(super) fn write_error(error: &anyhow::Error) -> Event {
     }
 }
 
+/// h3 reports a peer's STOP_SENDING or RESET_STREAM as `RemoteTerminate` at
+/// the next read or write of the request stream.
+pub(super) fn h3_error(error: &anyhow::Error) -> Event {
+    use h3::error::StreamError;
+    match error.downcast_ref::<StreamError>() {
+        Some(StreamError::RemoteTerminate { .. }) => Event::StreamPeerCancelled,
+        Some(StreamError::ConnectionError { .. } | StreamError::RemoteClosing { .. }) => {
+            Event::StreamConnectionLost
+        }
+        _ => Event::HttpRequestFailed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

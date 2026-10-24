@@ -323,7 +323,7 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
                         Ok(Ok(H3Outcome::ConnectionLost)) => guard.finish(Event::StreamConnectionLost),
                         // The guard records StreamShutdown on drop.
                         Ok(Ok(H3Outcome::Shutdown)) => {},
-                        Ok(Err(_)) => guard.finish(Event::HttpRequestFailed),
+                        Ok(Err(error)) => guard.finish(diagnostics::h3_error(&error)),
                         Err(_) => guard.finish(Event::HttpRequestDeadline),
                     }
                 });
@@ -389,18 +389,19 @@ async fn h3_request(
             .and_then(|v| v.to_str().ok()),
         &body,
     );
-    let (status, response) = match parsed {
+    let (status, response, delivery) = match parsed {
         // h3 0.0.8 does not expose response STOP_SENDING through RequestStream.
         // Whole-connection loss cancels immediately; a reset of only this H3
-        // stream is observed at response write or the enclosing I/O deadline.
+        // stream is observed at response write or the enclosing I/O deadline,
+        // and the undelivered request then counts as cancelled.
         Ok(query) => match tokio::select! {
-            response = ingress.handle_with_transport(&query, peer, "doh3") => response,
+            handled = ingress.handle_for_delivery(&query, peer, "doh3") => handled,
             _ = connection.closed() => return Ok(H3Outcome::ConnectionLost),
         } {
-            Some(response) => (200, response),
-            None => (400, Vec::new()),
+            (Some(response), delivery) => (200, response, delivery),
+            (None, delivery) => (400, Vec::new(), delivery),
         },
-        Err(status) => (status, Vec::new()),
+        Err(status) => (status, Vec::new(), None),
     };
     let mut headers = http::Response::builder()
         .status(status)
@@ -414,6 +415,9 @@ async fn h3_request(
         stream.send_data(Bytes::from(response)).await?;
     }
     stream.finish().await?;
+    if let Some(delivery) = delivery {
+        delivery.delivered();
+    }
     Ok(H3Outcome::Status(status))
 }
 

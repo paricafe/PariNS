@@ -3,7 +3,7 @@ use crate::limits::{Denied, Limiter, Permit};
 use crate::{
     metrics::Counter,
     protocol,
-    resolver::{ForcedShutdown, Resolver},
+    resolver::{Delivery, ForcedShutdown, Resolver},
 };
 use std::{net::IpAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -83,21 +83,41 @@ impl Ingress {
         peer: IpAddr,
         transport: &str,
     ) -> Option<Vec<u8>> {
+        let (response, delivery) = self.handle_for_delivery(bytes, peer, transport).await;
+        if let Some(delivery) = delivery {
+            delivery.delivered();
+        }
+        response
+    }
+
+    /// For an adapter that learns only while writing whether the peer still
+    /// wants the answer: a resolved request completes once the adapter reports
+    /// the returned delivery as delivered. Admission rejections have none.
+    pub(crate) async fn handle_for_delivery(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+    ) -> (Option<Vec<u8>>, Option<Delivery<'_>>) {
         self.resolver.metrics().inc(Counter::EncryptedReceived);
         let Some(_source) = self.admit_query(peer) else {
             self.resolver.metrics().inc(Counter::EncryptedRejected);
-            return self.rejected_reply(bytes, peer, transport);
+            return (self.rejected_reply(bytes, peer, transport), None);
         };
-        let permit = self.queries.clone().try_acquire_owned();
-        match permit {
-            Ok(ref _permit) => self
-                .resolver
-                .resolve_with_transport(bytes, peer, transport)
-                .await
-                .and_then(|r| r.padding.encode_response(&r.message, true).ok()),
+        match self.queries.clone().try_acquire_owned() {
+            Ok(_permit) => {
+                let (reply, delivery) = self
+                    .resolver
+                    .resolve_for_delivery(bytes, peer, transport)
+                    .await;
+                (
+                    reply.and_then(|r| r.padding.encode_response(&r.message, true).ok()),
+                    Some(delivery),
+                )
+            }
             Err(_) => {
                 self.resolver.metrics().inc(Counter::EncryptedRejected);
-                self.rejected_reply(bytes, peer, transport)
+                (self.rejected_reply(bytes, peer, transport), None)
             }
         }
     }

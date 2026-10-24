@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A DoH3 answer that fails to write because the client stopped or reset the
+  stream counts as cancelled, not completed, and as `stream_peer_cancelled`, not
+  `http_request_failed`. A connection loss at that point counts as
+  `stream_connection_lost`.
+- A cancelled query in the query log keeps the cache lookup result made before
+  the cancellation, so log rates can count it as a cache miss or hit.
+
 ## v0.1.26 — 2026-10-23
 
 ### Fixed

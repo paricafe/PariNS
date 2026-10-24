@@ -17,6 +17,11 @@
 - A cancelled query in the query log keeps the cache lookup result made before
   the cancellation, so log rates can count it as a cache miss or hit.
 
+### Security
+
+- Update tokio to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd` constructors violate
+  I/O safety).
+
 ## v0.1.26 — 2026-10-23
 
 ### Fixed

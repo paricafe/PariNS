@@ -16,6 +16,8 @@
   `stream_connection_lost`.
 - A cancelled query in the query log keeps the cache lookup result made before
   the cancellation, so log rates can count it as a cache miss or hit.
+- The operations guide now states that `upstream_failures` includes SERVFAIL
+  answers from the upstream.
 
 ### Security
 

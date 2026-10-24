@@ -287,7 +287,7 @@ For DNS readiness, use `dns_health` in the console's authenticated `GET /api/sta
 | `parins_cache_reason_*_total` | counter | Why a lookup bypassed or a store skipped: `unsupported_query`, `unsupported_edns`, `ecs_unusable`, `ttl_zero`, `negative_without_soa`, `uncacheable_response`, `policy_disabled`, `capacity`, `variant_limit`, `epoch_changed`. |
 | `parins_query_blocked_total`, `parins_response_blocked_total` | counter | Blocked by query name; blocked by a name in the answer's CNAME chain. |
 | `parins_flight_{leaders,joined,rejected,bypassed}_total` | counter | Query coalescing: shared, joined, refused at a limit, not eligible. |
-| `parins_upstream_operations_total`, `parins_upstream_failures_total`, `parins_upstream_timeouts_total`, `parins_ecs_retries_total` | counter | Upstream operations (TCP fallback and ECS retry stay inside one), failed exchanges (not DNS error codes), timeouts, ECS `/0` retries. |
+| `parins_upstream_operations_total`, `parins_upstream_failures_total`, `parins_upstream_timeouts_total`, `parins_ecs_retries_total` | counter | Upstream operations (TCP fallback and ECS retry stay inside one), failed exchanges (transport failures and SERVFAIL answers from the upstream), timeouts, ECS `/0` retries. |
 | `parins_upstream_attempt_{succeeded,failed,cancelled,skipped}_total` | counter | Individual upstream attempts by outcome. |
 | `parins_upstream_attempt_reason_*_total` | counter | Attempt end reasons: `deadline`, `connect_io`, `tls`, `http_status`, `protocol_invalid`, `peer_closed`, `caller_cancelled`, `shutdown`, `internal`. |
 | `parins_udp_received_total`, `parins_tcp_received_total`, `parins_encrypted_received_total` | counter | Datagrams, TCP frames and encrypted DNS messages received. |

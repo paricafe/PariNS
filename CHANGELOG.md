@@ -23,6 +23,9 @@
 
 - Update tokio to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd` constructors violate
   I/O safety).
+- Update the console's test dependency undici to 8.12.3 for GHSA-xjj6-f33q-929c,
+  GHSA-4qv8-2p9j-2685 and GHSA-f72v-6w45-q472. The shipped console is not
+  affected.
 
 ## v0.1.26 — 2026-10-23
 

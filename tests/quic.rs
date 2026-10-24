@@ -176,15 +176,14 @@ impl Fixture {
         assert_eq!(self.queries.available_permits(), 7);
     }
 
+    /// The client's request and budgets are released at once; its sent
+    /// upstream query may go on to fill the cache.
     async fn wait_for_cancelled_query(&self) {
         // Less than both the 500ms adapter and 2000ms resolver deadlines.
         timeout(Duration::from_millis(200), async {
             loop {
                 let metrics = self.resolver.metrics().snapshot();
-                if metrics.upstream_inflight == 0
-                    && metrics.request_inflight == 0
-                    && self.queries.available_permits() == 8
-                {
+                if metrics.request_inflight == 0 && self.queries.available_permits() == 8 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -228,17 +227,22 @@ impl Fixture {
 }
 
 fn query(id: u16) -> Vec<u8> {
+    named_query(id, "example.test.")
+}
+
+fn named_query(id: u16, name: &str) -> Vec<u8> {
     let mut message = Message::new(id, MessageType::Query, OpCode::Query);
     message.metadata.recursion_desired = true;
-    message.add_query(Query::query(
-        Name::from_ascii("example.test.").unwrap(),
-        RecordType::A,
-    ));
+    message.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
     message.to_vec().unwrap()
 }
 
 fn frame(id: u16) -> Vec<u8> {
-    let query = query(id);
+    named_frame(id, "example.test.")
+}
+
+fn named_frame(id: u16, name: &str) -> Vec<u8> {
+    let query = named_query(id, name);
     let mut frame = (query.len() as u16).to_be_bytes().to_vec();
     frame.extend(query);
     frame
@@ -549,10 +553,13 @@ async fn doq_inflight_stop_sending_cancels_dns_and_preserves_connection() {
             .try_query(fixture.address.ip())
             .is_ok()
     );
-    // The first query really reached the upstream, but its stream-local
-    // cancellation must not poison either the connection or singleflight key.
+    // The sent query (whose answer this upstream drops) goes on to fill the
+    // cache within the resolver deadline; the connection keeps serving.
+    assert_eq!(fixture.resolver.refresh_snapshot().active, 1);
     let (mut send, mut recv) = connection.open_bi().await.unwrap();
-    send.write_all(&frame(0)).await.unwrap();
+    send.write_all(&named_frame(0, "other.test."))
+        .await
+        .unwrap();
     send.finish().unwrap();
     let response = timeout(Duration::from_secs(1), recv.read_to_end(65537))
         .await

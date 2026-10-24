@@ -9,11 +9,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures_util::FutureExt;
+use futures_util::{
+    FutureExt,
+    future::{BoxFuture, Shared},
+};
 use hickory_proto::op::{Message, ResponseCode};
 
 use crate::{
-    cache::Cache,
+    cache::{Cache, LookupOutcome},
     config::{CacheConfig, CoalescingConfig, Config, EcsConfig, ResolutionMode},
     ecs::{self, Context},
     filter_subscriptions::handle::PolicyHandle,
@@ -161,7 +164,11 @@ impl Source {
         match self {
             Self::Forward(pool) => pool.exchange_observed(query, deadline, operation).await,
             Self::Recursive(recursion) => Ok(crate::upstreams::Exchange {
-                message: tokio::time::timeout_at(deadline, recursion.exchange(query)).await??,
+                message: {
+                    // A started recursion has its queries in flight at once.
+                    operation.mark_sent();
+                    tokio::time::timeout_at(deadline, recursion.exchange(query)).await??
+                },
                 upstream: "recursive".into(),
             }),
         }
@@ -489,7 +496,9 @@ impl Resolver {
                     epoch,
                     metrics: self.metrics.clone(),
                     trace_enabled: self.query_log.begin().is_some(),
+                    sent: Default::default(),
                 };
+                let sent = work.sent.clone();
                 let flights = generation.flights(epoch, &self.coalescing);
                 let metrics = self.metrics.clone();
                 generation
@@ -497,14 +506,14 @@ impl Resolver {
                     .schedule(&outbound, epoch, &cache.config().prefetch, || {
                         // Explicitly disabling coalescing also disables sharing with
                         // foreground misses; the refresh owner's own limits still apply.
-                        let joined = flights.join(&outbound, work.run(true).boxed());
+                        let joined = flights.join(&outbound, work.run(true).boxed(), sent);
                         metrics.inc(match &joined {
-                            Ok((_, role)) => flight_counter(role),
+                            Ok((_, role, _)) => flight_counter(role),
                             Err(()) => Counter::FlightRejected,
                         });
                         async move {
                             match joined {
-                                Ok((future, _)) => future.await.admitted,
+                                Ok((future, _, _)) => future.await.admitted,
                                 Err(()) => false,
                             }
                         }
@@ -528,6 +537,7 @@ impl Resolver {
         }
         self.metrics.inc(Counter::CacheMisses);
         let wire_query = outbound.clone();
+        let sent = Arc::new(AtomicBool::new(false));
         let exchange = Exchange {
             upstream: self.upstream.clone(),
             timeout: self.timeout,
@@ -538,13 +548,24 @@ impl Resolver {
             epoch,
             metrics: self.metrics.clone(),
             trace_enabled: self.query_log.begin().is_some(),
+            sent: sent.clone(),
         };
         let work = exchange.run(false).boxed();
         let flights = generation.flights(epoch, &self.coalescing);
-        let result = match flights.join(&wire_query, work) {
-            Ok((future, role)) => {
+        let result = match flights.join(&wire_query, work, sent) {
+            Ok((future, role, sent)) => {
                 self.metrics.inc(flight_counter(&role));
-                let result = future.await;
+                let mut waiting = Waiting {
+                    future: Some(future),
+                    sent,
+                    fill: (cached.decision.outcome == LookupOutcome::Miss).then(|| Fill {
+                        refresh: &generation.refresh,
+                        query: &wire_query,
+                        epoch,
+                        config: &cache.config().prefetch,
+                    }),
+                };
+                let result = waiting.result().await;
                 if !result.cached {
                     use crate::query_log::UpstreamRelation as Relation;
                     trace.upstream_relation = Some(match role {
@@ -663,6 +684,52 @@ struct Exchange {
     epoch: u64,
     metrics: Arc<Metrics>,
     trace_enabled: bool,
+    /// Set once a query of this operation reached a source.
+    sent: Arc<AtomicBool>,
+}
+
+/// A foreground caller's share of upstream work. A caller that leaves last,
+/// after the query was sent, hands the work to the generation's bounded refresh
+/// owner, which lets it finish only to fill the cache. Unsent work, work over
+/// that budget and work of a stopped generation are cancelled with the caller.
+struct Waiting<'a> {
+    future: Option<Shared<BoxFuture<'static, Answer>>>,
+    sent: Arc<AtomicBool>,
+    fill: Option<Fill<'a>>,
+}
+
+struct Fill<'a> {
+    refresh: &'a Arc<refresh::Refresh>,
+    query: &'a Message,
+    epoch: u64,
+    config: &'a crate::config::PrefetchConfig,
+}
+
+impl Waiting<'_> {
+    async fn result(&mut self) -> Answer {
+        let answer = self
+            .future
+            .as_mut()
+            .expect("unfinished upstream work")
+            .await;
+        self.future = None;
+        answer
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        // Other callers keep shared work running without a refresh slot.
+        if let (Some(future), Some(fill)) = (self.future.take(), self.fill.take())
+            && self.sent.load(Ordering::Acquire)
+            && future.strong_count() == Some(1)
+        {
+            fill.refresh
+                .schedule(fill.query, fill.epoch, fill.config, || async move {
+                    future.await.admitted
+                });
+        }
+    }
 }
 
 impl Exchange {
@@ -699,7 +766,8 @@ impl Exchange {
             Some(Arc::new(move |attempt| {
                 metrics.record_upstream_attempt(attempt)
             })),
-        );
+        )
+        .reporting_sent(self.sent.clone());
         let mut retried = false;
         let mut endpoint = None;
         let deadline = tokio::time::Instant::now() + self.timeout;

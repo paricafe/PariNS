@@ -510,11 +510,18 @@ async fn cancelled_foreground_is_logged_once_unless_cleared_while_pending() {
     let (resolver, services) = with_log(&config);
     let resolver = std::sync::Arc::new(resolver);
     for clear in [false, true] {
+        // The first query's sent work goes on in the background; a second
+        // query of the same name would join it instead of sending.
+        let name = if clear {
+            "cleared.test."
+        } else {
+            "pending.test."
+        };
         let resolver_task = resolver.clone();
         let task = tokio::spawn(async move {
             resolver_task
                 .resolve_with_transport(
-                    &query("pending.test.").to_vec().unwrap(),
+                    &query(name).to_vec().unwrap(),
                     "192.0.2.10".parse().unwrap(),
                     "doh",
                 )

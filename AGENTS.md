@@ -131,8 +131,15 @@ until preview/validation.
   select addresses.
 - `[upstreams]` is the only upstream configuration; DoT pool controls are under
   `[upstreams.dot_pool]`. Pool endpoints need equivalent policies, explicit hostname
-  bootstrap and authenticated encrypted transports. Parallel losers cancel with the
-  caller; failed DNS responses never preempt usable answers.
+  bootstrap and authenticated encrypted transports. Parallel losers cancel when the
+  operation ends; failed DNS responses never preempt usable answers.
+- When the last caller of upstream work leaves after its query was sent (in
+  recursive mode, after resolution started), the work finishes in the cache
+  generation's prefetch budget (`max_inflight`, `rate_per_sec`), only to fill the
+  cache with normal admission and within the original deadline; it keeps its
+  coalescing group until it ends. Unsent work, work
+  over that budget and work of a replaced or stopped generation cancel with the
+  caller. Details: `src/resolver.rs` (`Waiting`).
 - Recursion admits every authoritative query attempt through one global rate bucket
   and concurrency limit before the server's attempt timeout starts, so queueing never
   counts against or penalizes a server; a token is taken only when it is used, and
@@ -147,7 +154,7 @@ until preview/validation.
   query is never resent or replayed, with one exception: when a reused idle DoT pool
   connection turns out to be closed by the server (EOF, reset, aborted, broken pipe
   or not connected), the query is retried once on a new connection within its
-  deadline; cancelling a request releases only its stream. DoH transports normalize
+  deadline; cancelling an attempt releases only its stream. DoH transports normalize
   HTTP Age into RR TTLs; cache code has no HTTP policy. Details:
   `src/upstreams/h3.rs`, `src/upstreams/transport.rs`.
 - DNS terminal health is published once per generation to readiness and storage

@@ -6,7 +6,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RecordType},
+    rr::{Name, RData, Record, RecordType, rdata::A},
 };
 use parins::{config::Config, doh, ecs, ingress::Ingress, protocol, resolver::Resolver};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -337,7 +337,7 @@ async fn incomplete_body_expires_and_shutdown_releases_admission() {
 }
 
 #[tokio::test]
-async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
+async fn resetting_last_h2_waiter_releases_budget_and_its_sent_query_fills_the_cache() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let resolver = Arc::new(common::resolver(
         upstream.local_addr().unwrap(),
@@ -382,7 +382,7 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
     let (response, mut sender) = client.send_request(request, false).unwrap();
     sender.send_data(Bytes::from(query()), true).unwrap();
     let mut buffer = [0; 4096];
-    let (_, upstream_peer) = timeout(Duration::from_secs(2), upstream.recv_from(&mut buffer))
+    let (length, upstream_peer) = timeout(Duration::from_secs(2), upstream.recv_from(&mut buffer))
         .await
         .unwrap()
         .unwrap();
@@ -399,10 +399,42 @@ async fn resetting_last_h2_waiter_cancels_upstream_and_releases_query_budget() {
     let snapshot = resolver.metrics().snapshot();
     assert_eq!(snapshot.counters["cancelled"], 1);
     assert_eq!(snapshot.request_inflight, 0);
-    assert_eq!(snapshot.upstream_inflight, 0);
     assert!(source_limits.try_query(address.ip()).is_ok());
-    // No detached shared operation retains the last waiter's UDP socket.
-    let _released_socket = UdpSocket::bind(upstream_peer).await.unwrap();
+    // The sent query goes on in the refresh budget, only to fill the cache.
+    assert_eq!(snapshot.upstream_inflight, 1);
+    assert_eq!(resolver.refresh_snapshot().active, 1);
+    let sent = protocol::decode(&buffer[..length]).unwrap();
+    let mut answer = protocol::error_response(&sent, ResponseCode::NoError);
+    answer.add_answer(Record::from_rdata(
+        Name::from_ascii("doh.test.").unwrap(),
+        300,
+        RData::A(A::new(192, 0, 2, 1)),
+    ));
+    upstream
+        .send_to(&answer.to_vec().unwrap(), upstream_peer)
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(1), async {
+        while resolver.refresh_snapshot().active != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let snapshot = resolver.metrics().snapshot();
+    assert_eq!(snapshot.upstream_inflight, 0);
+    assert_eq!(snapshot.counters["cache_store_admitted"], 1);
+    assert_eq!(resolver.refresh_snapshot().success, 1);
+    // The next query of the same key is a cache hit without upstream IO.
+    let reply = resolver
+        .resolve_with_transport(&query(), address.ip(), "doh")
+        .await
+        .unwrap();
+    assert_eq!(reply.message.answers.len(), 1);
+    assert_eq!(
+        resolver.metrics().snapshot().counters["upstream_operations"],
+        1
+    );
     stop.send(true).unwrap();
     timeout(Duration::from_secs(2), server)
         .await

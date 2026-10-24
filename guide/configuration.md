@@ -312,8 +312,8 @@ Both are off by default.
 | `enabled` | `false` | | Refresh hot positive answers in the background. |
 | `min_hits` | `1` | 1–1000000 | Cache hits an entry needs before it is prefetched. |
 | `remaining_percent` | `25` | 1–90 | Refresh when less than this share of the TTL remains. |
-| `max_inflight` | `32` | 1–4096 | Refreshes running at once. |
-| `rate_per_sec` | `100` | 1–100000 | Refreshes started per second. |
+| `max_inflight` | `32` | 1–4096 | Refreshes running at once, including cache fills for cancelled queries. |
+| `rate_per_sec` | `100` | 1–100000 | Refreshes and cache fills started per second. |
 | `backoff_secs` | `5` | 1–86400 | Wait before refreshing the same entry again after a failure. |
 
 `[cache.stale]`:
@@ -332,6 +332,10 @@ Behavior:
   namespaces.
 - Refreshes are cancelled when the cache is replaced or DNS stops. With coalescing
   on, a client query for an entry being refreshed joins that refresh.
+- When a client cancels a cache miss after PariNS sent the upstream query, the
+  query finishes in the background and its answer can fill the cache. This uses
+  the `max_inflight` and `rate_per_sec` limits above, also when prefetch is off.
+  Over those limits, the upstream query is cancelled with the client.
 
 ## Query coalescing
 
@@ -348,7 +352,10 @@ ID, ECS echo and filtering.
 
 At either limit, new queries get SERVFAIL without upstream traffic. Queries with
 Cookie or unknown EDNS options, or a class other than IN, are not shared. Cancelling
-one caller does not cancel the others; the request ends when the last caller leaves.
+one caller does not cancel the others. When the last caller leaves, the upstream
+request ends, or continues only to fill the cache (see
+[Prefetch and serve stale](#prefetch-and-serve-stale)). A request that continues
+keeps its place in `max_groups` until it ends.
 
 ## Filtering and subscriptions
 

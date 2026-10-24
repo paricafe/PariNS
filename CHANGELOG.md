@@ -4,6 +4,12 @@
 
 ### Changed
 
+- When a client cancels a cache miss after PariNS sent the upstream query (in
+  recursive mode, after resolution started), the query finishes in the
+  background within its deadline and its answer can fill the cache. These fills
+  share the prefetch limits `max_inflight` and `rate_per_sec`, also when prefetch
+  is off; over the limits, or when DNS stops or the cache is replaced, the
+  upstream query is cancelled with the client.
 - A DoH3 answer that fails to write because the client stopped or reset the
   stream counts as cancelled, not completed, and as `stream_peer_cancelled`, not
   `http_request_failed`. A connection loss at that point counts as

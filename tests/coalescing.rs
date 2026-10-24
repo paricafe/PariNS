@@ -128,7 +128,7 @@ async fn cancelling_first_waiter_does_not_cancel_the_other() {
 }
 
 #[tokio::test]
-async fn budgets_reject_without_extra_io_and_last_cancel_releases_capacity() {
+async fn budgets_reject_without_extra_io_and_capacity_returns_when_the_work_ends() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = config(&socket);
     cfg.coalescing.max_groups = 1;
@@ -138,7 +138,7 @@ async fn budgets_reject_without_extra_io_and_last_cancel_releases_capacity() {
     let b = query(2, "192.0.3.10");
     let mut first = Box::pin(resolver.resolve(&a, "192.0.2.10".parse().unwrap()));
     assert!(poll!(&mut first).is_pending());
-    let _ = receive_while(&socket, &mut first).await;
+    let (sent, upstream) = receive_while(&socket, &mut first).await;
     let mut second = Box::pin(resolver.resolve(&a, "192.0.2.10".parse().unwrap()));
     assert!(poll!(&mut second).is_pending());
     for (wire, peer) in [(&a, "192.0.2.10"), (&b, "192.0.3.10")] {
@@ -156,7 +156,17 @@ async fn budgets_reject_without_extra_io_and_last_cancel_releases_capacity() {
         resolver.metrics().snapshot().counters["upstream_operations"],
         1
     );
+    // The sent query goes on to fill the cache and keeps its group until it ends.
     drop((first, second));
+    assert_eq!(resolver.refresh_snapshot().active, 1);
+    respond(&socket, &sent, upstream).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while resolver.refresh_snapshot().active != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(resolver.metrics().snapshot().upstream_inflight, 0);
     let mut next = Box::pin(resolver.resolve(&b, "192.0.3.10".parse().unwrap()));
     assert!(poll!(&mut next).is_pending());

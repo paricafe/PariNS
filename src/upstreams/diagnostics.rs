@@ -88,13 +88,25 @@ struct OperationInner {
     // No request detail vector or mutex is allocated when logging is off.
     trace: Option<Mutex<Trace>>,
     observer: Option<Observer>,
+    sent: Option<Arc<AtomicBool>>,
 }
 impl Operation {
     pub fn new(trace_enabled: bool, observer: Option<Observer>) -> Self {
         Self(Arc::new(OperationInner {
             trace: trace_enabled.then(|| Mutex::new(Trace::default())),
             observer,
+            sent: None,
         }))
+    }
+    /// Sets `sent` once a query of this operation has reached a source.
+    pub(crate) fn reporting_sent(mut self, sent: Arc<AtomicBool>) -> Self {
+        Arc::get_mut(&mut self.0).expect("unshared operation").sent = Some(sent);
+        self
+    }
+    pub(crate) fn mark_sent(&self) {
+        if let Some(sent) = &self.0.sent {
+            sent.store(true, Ordering::Release);
+        }
     }
     pub fn trace(&self) -> Option<Trace> {
         self.0
@@ -253,6 +265,9 @@ impl Attempt {
         self.connection = Some(connection);
     }
     pub(crate) fn stage(&mut self, stage: Stage) {
+        if matches!(stage, Stage::ResponseHeaders | Stage::ResponseRead) {
+            self.scope.operation.mark_sent();
+        }
         self.stage = stage;
         self.reason = None;
         self.code = None;

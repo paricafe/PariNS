@@ -4,7 +4,10 @@
 use crate::config::CoalescingConfig;
 use futures_util::future::{BoxFuture, FutureExt, Shared, WeakShared};
 use hickory_proto::op::Message;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, atomic::AtomicBool},
+};
 
 /// Raw shared work result. Per-client stale fallback is intentionally not shared.
 #[derive(Clone)]
@@ -23,6 +26,8 @@ pub struct Answer {
     pub prefetch: bool,
 }
 type Work = BoxFuture<'static, Answer>;
+/// Shared work and the flag it sets once its query reached a source.
+type Group = (WeakShared<Work>, Arc<AtomicBool>);
 pub enum Role {
     Bypass,
     Leader,
@@ -31,7 +36,7 @@ pub enum Role {
 
 pub struct Flights {
     config: CoalescingConfig,
-    groups: Mutex<HashMap<Vec<u8>, WeakShared<Work>>>,
+    groups: Mutex<HashMap<Vec<u8>, Group>>,
 }
 
 impl Flights {
@@ -43,26 +48,39 @@ impl Flights {
     }
 
     /// Noneligible requests bypass sharing; overload fails without extra IO.
-    pub fn join(&self, query: &Message, work: Work) -> Result<(Shared<Work>, Role), ()> {
+    /// `sent` is the flag that `work` sets once its query reached a source; a
+    /// joined caller gets the flag of the work it joins.
+    pub fn join(
+        &self,
+        query: &Message,
+        work: Work,
+        sent: Arc<AtomicBool>,
+    ) -> Result<(Shared<Work>, Role, Arc<AtomicBool>), ()> {
         let Some(key) = self.config.enabled.then(|| key(query)).flatten() else {
-            return Ok((work.shared(), Role::Bypass));
+            return Ok((work.shared(), Role::Bypass, sent));
         };
         let mut groups = self.groups.lock().expect("flight lock poisoned");
         // Reap completed/dead weak entries before applying the group budget.
-        groups.retain(|_, weak| weak.upgrade().is_some_and(|f| f.peek().is_none()));
-        if let Some(shared) = groups.get(&key).and_then(WeakShared::upgrade) {
+        groups.retain(|_, (weak, _)| weak.upgrade().is_some_and(|f| f.peek().is_none()));
+        if let Some((shared, sent)) = groups
+            .get(&key)
+            .and_then(|(weak, sent)| Some((weak.upgrade()?, sent.clone())))
+        {
             // All new clones are made under this lock. Other callers can only drop.
             if shared.strong_count().unwrap_or(0) > self.config.max_waiters {
                 return Err(());
             }
-            return Ok((shared, Role::Joined));
+            return Ok((shared, Role::Joined, sent));
         }
         if groups.len() >= self.config.max_groups {
             return Err(());
         }
         let shared = work.shared();
-        groups.insert(key, shared.downgrade().expect("unpolled work"));
-        Ok((shared, Role::Leader))
+        groups.insert(
+            key,
+            (shared.downgrade().expect("unpolled work"), sent.clone()),
+        );
+        Ok((shared, Role::Leader, sent))
     }
 }
 

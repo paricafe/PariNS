@@ -80,15 +80,16 @@ until preview/validation.
   snapshot.
 - AD is answered only for Secure data from the validating recursor, only to clients
   that set DO or AD, and never after filtering rewrote the answer. The cache keeps
-  the source's AD bit with the entry and never replays it as stored.
+  the source's AD bit with the entry and never replays it as stored. A stale answer
+  never carries AD, on every fallback path.
 - Match DNS names by labels, including escaped labels, never presentation suffixes.
 - Preserve positive and negative eligibility and TTL rules. Fresh lifetime, stale
   retention and stale reply TTL are separate; never silently extend TTLs. Stale
   serving applies only to supported upstream failures, never from negative answers
   or another privacy namespace.
 - A SERVFAIL the source answered (in recursive mode also Bogus, referral loops and
-  exhausted query budgets) is cached for `servfail_ttl_secs` (RFC 9520) in the
-  negative budget, keyed like an answer but only for the exact sent network,
+  exhausted query budgets) is cached for `servfail_ttl_secs` (RFC 9520), also
+  bounded by the cache rule's `negative_ttl_cap_secs`, in the negative budget, keyed like an answer but only for the exact sent network,
   never a learned or response scope. It never replaces an answer and any newer
   answer supersedes it; timeouts, transport failures and cancelled work are never
   cached. A hit sends no upstream query and falls back to usable stale data as the
@@ -115,14 +116,16 @@ until preview/validation.
   exact, local suffix, subscription exact, subscription suffix; longest suffix;
   configured source order); slots carry the methods, and the index keeps a covered
   block rule only when it can answer differently. Block answers carry EDE 15 for
-  EDNS clients. Details: `src/policy.rs`, `src/policy/response.rs`.
+  EDNS clients; their SOA owner is the rule name when the rule matched the question
+  name, otherwise the question name. Details: `src/policy.rs`, `src/policy/response.rs`.
 - Cache byte accounting is not process RSS. Keep separate positive and negative
   budgets; document capacity/utilization trade-offs when changing them.
 - Consume a clean cache snapshot durably before serving; publish one only at
   terminal, quiescent shutdown, never after apply/rollback or abnormal termination.
   Save and restore run most recently used first and stop at their deadline; a save
-  publishes a complete snapshot of what it wrote, a restore keeps what it loaded,
-  and a damaged snapshot loads nothing.
+  publishes a complete snapshot of what it wrote, a restore keeps what it loaded in
+  its saved use order (below any later use), and a damaged snapshot, including one
+  with a record that does not decode, loads nothing.
 
 ## Concurrency, listeners and upstreams
 
@@ -157,7 +160,10 @@ until preview/validation.
   which is always answered as SERVFAIL with EDE 6.
 - H3 preference applies only to HTTPS endpoints within the resolver deadline. Only
   an H3 failure before the query was sent falls back to verified H2; a failure after
-  sending is that query's upstream failure. Any H3 failure starts a bounded cooldown.
+  sending is that query's upstream failure. Only pre-send and connection failures
+  start a cooldown, doubling from 2 to 30 seconds and resetting after a successful
+  answer. A stream failure on a live connection does not cool the endpoint down;
+  an old connection's result never changes its replacement's cooldown.
   A hostname endpoint tries its next address only when nothing was sent. A sent
   query is never resent or replayed, with one exception: when a reused idle DoT pool
   connection turns out to be closed by the server (EOF, reset, aborted, broken pipe
@@ -176,14 +182,16 @@ until preview/validation.
   ready only with every listener up, otherwise degraded and not ready; an adapter's
   drain forces a stop (and the upstream pool down) only when the generation is
   stopping. Per-connection accept errors keep a listener (and the management
-  listener) serving, and descriptor exhaustion pauses it briefly. QUIC answers
+  listener) serving, a panicked query or connection task ends only itself (logged
+  and counted), and descriptor exhaustion pauses it briefly. QUIC answers
   unvalidated Initials with a stateless Retry; only validated connections take the
   global slot and source budget. DoH advertises Alt-Svc h3 only while DoH3 serves.
   Supervisors belong to the generation and stop with it. An applied configuration
   must bind every listener before it is persisted; only (re)starts of the saved
   configuration run degraded. A generation that fails
-  to start for another reason is retried by one process-owned managed task that
-  yields to mutations and restarts only the saved revision. Saved local rules that
+  to start for another reason, or a running generation that ends without a stop
+  request (a panic or a fatal listener error), is retried by one process-owned
+  managed task that yields to mutations and restarts only the saved revision. Saved local rules that
   fail to compile keep DNS stopped on every start path (startup, retry, apply
   rollback); only an applied configuration whose rules compile starts it. Details:
   `src/server.rs`, `src/manage/dns_retry.rs`.
@@ -237,10 +245,20 @@ until preview/validation.
   publish candidate certificate changes. The worker opens and integrity-checks an
   existing database in the background (`checking`), so DNS startup never waits for
   it; only shutdown interrupts the check, and writes meanwhile use the bounded queue.
-  Cleanup runs per `storage.cleanup_interval_secs`, after a write over a capacity
-  bound, and on explicit flush or shutdown. At terminal shutdown the cache save and
+  SQLite uses WAL with FULL synchronization; private-file checks and the database
+  budget include its sidecars. The worker serializes queued structured log entries;
+  producers charge their retained memory, and transports record delivery only after
+  a successful write. Row-limit eviction shares the insert transaction. Capacity
+  trims do not vacuum; periodic cleanup, reduced limits and explicit flush reclaim
+  pages. Log searches yield the worker after 500 ms, and live polls skip SQLite
+  when no new log ID was committed. Terminal shutdown flushes first, so the close
+  only commits what arrived since and truncates the WAL. At shutdown the cache save and
   the storage drain run in parallel with separate budgets; storage closes (releasing
   the runtime lock) only after the save.
+- Refresh rejection reasons and useful/unused refresh counts belong to the cache
+  generation, outside persisted statistics and snapshots. A refreshed entry settles
+  once: a fresh foreground hit is useful; expiration or removal without one is
+  unused. Inspection, snapshotting and internal peeks never settle an entry.
 - Management uses HTTP on its one listener until inbound DoH is enabled, which
   selects the validated DoH identity for HTTPS; `[doh].http3` shares the DoH address
   and actual port over UDP. Management and DNS keep separate ports, ALPN and routes.

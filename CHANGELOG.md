@@ -4,6 +4,10 @@
 
 ### Added
 
+- Prefetch diagnostics separate duplicate, cooldown and budget refusals, and
+  cache fills refused after the caller left. `/metrics` and cache status report
+  refreshed entries used before expiry and those removed without use. These
+  counters belong to the current cache generation and are not persisted.
 - An upstream SERVFAIL is cached for `cache.servfail_ttl_secs` (default 30
   seconds, 0–300, 0 turns it off), following RFC 9520. While it lasts, the same
   query from the same network gets a usable stale answer if serve stale has one,
@@ -13,14 +17,103 @@
   never replaces an answer, and a new answer replaces it at once. The query log
   shows it as **Cached failure**, and the cache status reports `servfail_entries`
   and `servfail_hits`.
+- `/metrics` counts DNS and admin task panics (`parins_query_task_panics_total`),
+  failed DoH TLS handshakes (`parins_doh_tls_handshake_failures_total`),
+  handshake timeouts (`parins_doh_tls_handshake_timeouts_total`) and DoH
+  connections without HTTP/2 (`parins_doh_alpn_mismatches_total`). The statistics
+  database does not keep these counters.
 
 ### Changed
 
+- Query-log storage uses WAL with FULL synchronization, cached statements and
+  row-limit eviction in the insert transaction. DNS sends replies before it
+  queues structured records for the storage worker to serialize. Capacity trims
+  no longer vacuum on each write; log searches yield after 500 ms, and idle live
+  log subscriptions skip database reads until another record commits.
+- HTTP/3 connection and pre-send failures back off from 2 to 30 seconds, resetting
+  after a successful answer. A stream reset or HTTP error on a live connection
+  no longer moves later queries to HTTP/2. Sent queries are still never resent.
 - After a successful installation, the install script removes its copy of the
   candidate program (`.update/install-preflight`) and keeps only the newest two
   `.install-backup.*` directories. It removes only directories and files it
   created, owned by root and not links; online update copies stay. `--dry-run`
   and `--root` print what would be removed.
+- The management console downloads less. The build stores Brotli and gzip
+  copies of `app.js` and `app.css`, and the server sends the best one that the
+  browser accepts. The page names each file with a content version, so the
+  browser keeps the files for a year and fetches only the page and the API data
+  on later visits. After an update, the new version makes the browser fetch the
+  new files. The page and all API responses stay `no-store`, and API responses
+  are not compressed.
+- The installer removes old installer data while it holds the installation lock.
+- Only the highest release version becomes the latest GitHub release, and the
+  release workflow publishes only tags on `main`.
+- First-time setup checks the username format in step 1. It keeps a
+  configuration that you edited by hand when you go back to the network step; if
+  you change the network settings, it asks before it generates the configuration
+  again.
+- The console shows text for all software update and download error codes.
+
+### Fixed
+
+- The management console no longer logs Content Security Policy errors when
+  the theme button changes the theme. The button animation inserted an empty
+  `<style>` element, which `style-src 'self'` blocks. The policy is unchanged.
+- The management console has a tab icon (`/favicon.svg`), so browsers no longer
+  get a 404 for `/favicon.ico`.
+- A theme change in a background tab no longer logs an unhandled
+  `TimeoutError`. A hidden page changes the theme without the cross-fade, and a
+  cross-fade that the browser skips or stops only loses the animation.
+- After a cache snapshot restore, the most recently used entries are evicted last
+  and keep their order in the next snapshot. A snapshot with a record that does
+  not decode restores no entries.
+- In recursive mode, a stale answer never carries the AD bit, also when a cached
+  SERVFAIL falls back to it.
+- A truncated UDP reply keeps the Extended DNS Error of the original answer when
+  it fits, for example EDE 15 for a blocked answer.
+- When a CNAME target is blocked, the SOA record of the block answer uses the
+  question name as its owner.
+- When two requests leave the same sent upstream query at the same time, the
+  query still finishes to fill the cache.
+- A panic in one query or connection task no longer stops its listener (plain
+  DNS, DoT, DoH, DoQ, DoH3 and the admin listener). PariNS logs and counts it.
+- When the DNS task ends without a stop request, PariNS restarts the saved
+  configuration automatically.
+- Storage status no longer holds its lock during SQLite queries and file reads,
+  shows the end of a capacity cleanup at once, and stays `cleaning` after a write
+  while a cleanup is pending.
+- Configuration validation and setup preview read certificates and compile rules
+  without the management lock, so status and sign-in stay responsive. They wait
+  up to 60 seconds for a running subscription update instead of answering busy.
+- An unreadable rollback copy no longer stops the management process. The log and
+  the status API give the reason, and rollback is unavailable until the next
+  apply.
+- Certificate import reads only the files that can hold the new identity. An
+  unrelated file no longer blocks it, and a read error names the file.
+- Console files are cached for a year only when the request names the current
+  file version, and they answer HEAD requests.
+- The updater refuses a new update while an earlier update needs manual recovery,
+  and keeps the saved copy of the previous program.
+- The updater consumes each request before it checks the system units, so a
+  failed check ends the request and the request path keeps working.
+- An update that the updater could not start ends with a reason. The console no
+  longer shows it as in progress until a restart.
+- After an interrupted update, the updater keeps a healthy previous program
+  running.
+- The query log's answer source filter does not apply search text that you did
+  not submit. The activity chart keeps its time axis until the data for a new
+  range arrives, and its range buttons wrap on narrow screens.
+- In the console, collapsed sections are skipped by the keyboard and screen
+  readers, and Escape closes an open information tip from any focus position.
+
+### Security
+
+- A `filter_file` error gives the position and the program's own reason, never
+  file text. In managed mode, `filter_file` cannot name a PariNS state file, such
+  as `state.json`, `turnstile.json` or the certificate directory.
+- Turnstile accepts a test-key answer only when the saved secret is a Cloudflare
+  test secret.
+- Session tokens, bindings and user names are compared in constant time.
 
 ## v0.1.27 — 2026-10-24
 

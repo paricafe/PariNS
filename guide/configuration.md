@@ -81,8 +81,11 @@ Behavior:
 - **HTTP/3** (`prefer_h3`): connecting and sending over HTTP/3 has a budget of
   250 ms, or half the remaining query time if that is shorter. A failure before the
   query was sent falls back to verified HTTP/2. A failure after sending is that
-  query's upstream failure, with no HTTP/2 resend. Any HTTP/3 failure pauses HTTP/3
-  for that endpoint for 30 seconds. A definite refusal such as 405 stops HTTP/3 for
+  query's upstream failure, with no HTTP/2 resend. Only a connection failure or a
+  failure before sending pauses HTTP/3 for that endpoint: 2 seconds at first,
+  doubling to 30 seconds after consecutive failures. A successful HTTP/3 answer
+  resets that delay. A stream reset or HTTP 5xx/429 on a live connection does not
+  pause other requests. A definite refusal such as 405 stops HTTP/3 for
   that endpoint until the upstream pool is rebuilt by the next DNS restart. Alternate
   ports from Alt-Svc or HTTPS/SVCB records are not used.
 - DoH sends RFC 8484 GET requests. An unusually large query can exceed an upstream's
@@ -432,7 +435,9 @@ CNAME chain is checked too, so allowing a name does not allow a blocked CNAME ta
 If saved local rules cannot be compiled (for example, an unreadable `filter_file`),
 DNS stays stopped on every start path (startup, retry, and rollback after a failed
 apply) and the status shows the reason. Fix the rules and apply the configuration
-again.
+again. A `filter_file` error gives the position (a line and column, or a list and
+entry number) and the program's own reason, never the file text. In managed mode, `filter_file` must not name a file or
+directory that PariNS keeps in the state directory.
 
 `[filter_subscriptions]`:
 

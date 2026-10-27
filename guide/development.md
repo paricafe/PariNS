@@ -12,7 +12,8 @@ full CI gate.
 
 The console is a React and TypeScript app in `web/`. Its build output in `web/dist/`
 is embedded into the Rust binary, so build it before compiling Rust. Production runs
-only the Rust binary.
+only the Rust binary. `npm run build` also writes Brotli and gzip copies of
+`app.js` and `app.css` and adds a content version to each address in `index.html`.
 
 Run the checks that match your change:
 

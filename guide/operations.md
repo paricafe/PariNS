@@ -164,6 +164,60 @@ superseded and settings unlock without a restart. The installer refuses if the
 installed program is not the one the updater recorded; that case needs a restore
 from backup.
 
+**The update stays in progress.** If the updater cannot read its journal when it
+receives a request, it cannot record an outcome. The console then shows the update
+as in progress, and configuration changes stay locked. A restart does not change
+this. The service log shows `PariNS updater: journal unreadable`. To recover:
+
+1. Read the cause with
+   `sudo journalctl -u parins-updater.service | grep 'journal unreadable'`.
+2. Correct the cause, for example a full disk or wrong permissions on
+   `/var/lib/parins-updater`.
+3. Do not edit or delete `/var/lib/parins-updater/journal.json`.
+4. Run the [install command](deployment.md#install) for the current or a newer
+   release.
+
+When that installation passes its readiness check, the update is closed and
+settings unlock. If the installer also cannot read the journal, restore
+`/var/lib/parins-updater` from a backup.
+
+**The service does not start after a restart.** This occurs when an update stops in
+manual recovery after it replaced the program. The updater records the previous
+program, but `/opt/parins-managed/parins` is the new program. At each start,
+`parins-update-recovery.service` fails with `unknown installed binary`, and
+`parins-managed.service` does not start. The installer also refuses this state. The
+updater keeps a verified copy of the recorded program. To start the service again,
+put that copy back:
+
+1. Show the status with `sudo cat /var/lib/parins-updater/status.json`.
+2. Make sure that `capability.reason` is `manual_recovery_required`.
+3. Write down `last_operation.operation_id` (the ID) and `installed.sha256` (the
+   recorded digest).
+4. Calculate the digest of the copy. Replace `ID` with the ID:
+
+   ```sh
+   sudo sha256sum /opt/parins-managed/.update/ID/previous
+   ```
+
+5. If the file does not exist or the digest is different, stop. Restore the program
+   from your backup.
+6. Put the copy in place:
+
+   ```sh
+   sudo install -m 0755 /opt/parins-managed/.update/ID/previous /opt/parins-managed/.parins.restore
+   sudo mv -f /opt/parins-managed/.parins.restore /opt/parins-managed/parins
+   ```
+
+7. Start the recovery check and the service:
+
+   ```sh
+   sudo systemctl restart parins-update-recovery.service
+   sudo systemctl start parins-managed.service
+   ```
+
+8. Do the manual recovery above: run the install command for the current or a newer
+   release.
+
 The installer pauses the update request path while it runs. If it reports that the
 program is installed but the request path is not enabled, the installation is
 complete; run the command it prints:
@@ -209,7 +263,7 @@ permissions:
 
 | Path | Content |
 | --- | --- |
-| `state.json` | Administrator hash, current and previous (rollback) configuration, revision. |
+| `state.json` | Administrator hash, current and previous (rollback) configuration, revision. If the rollback copy cannot be read, the service log and the status API (`rollback_unavailable`) give the reason, and rollback is unavailable until the next apply. |
 | `turnstile.json` | Turnstile site key and secret key, when human verification is on. |
 | `setup-token` | One-time setup token, before setup. |
 | `certificates/` | Imported certificate identities. |
@@ -244,8 +298,8 @@ The log keeps records until `max_entries`, `max_bytes`, `retention_secs` or the
 database limit is reached, whichever comes first; the page shows the actual oldest
 record and why older ones were removed. Queries cancelled after reaching the
 resolver are recorded as dropped, with the path **cancelled** and the cache lookup
-result made before the cancellation. A DoH3 answer that fails to write is recorded
-the same way. Prefetch is not logged. Query data never appears
+result made before the cancellation. This includes an answer that fails to write
+on any transport. Prefetch is not logged. Query data never appears
 in metrics or the service log.
 
 **Statistics.** The **Overview** page shows totals, the cache hit rate, blocked
@@ -255,12 +309,25 @@ of their own: fresh and stale cache hits plus queries that joined an identical q
 in progress. The **Cache** page lists those parts separately. Totals and trends
 survive restarts and contain no names or client addresses.
 
-**Storage.** One worker owns the SQLite database; DNS never waits for it. When the
-write queue is full, new records are dropped and counted. Cleanup runs every
-`cleanup_interval_secs`, right after a write that exceeds a capacity limit, and at an
-explicit flush or shutdown. At shutdown, the cache snapshot save and the storage
+**Storage.** One worker serializes records and owns the SQLite database; DNS sends
+its answer before it queues the completed record. When the bounded memory queue
+is full, new records are dropped and counted. Row-limit eviction shares the insert
+transaction. Other capacity trims run after a write when needed; periodic cleanup
+and reduced limits reclaim unused pages. An explicit flush also runs cleanup.
+Name searches have a 500 ms budget; an interrupted search uses the existing busy
+message so that writes can resume. At shutdown, the cache snapshot save and the storage
 drain run in parallel, each with its own time budget. Clearing logs, totals or trends
 affects only that kind of data.
+
+The database uses WAL with FULL synchronization. The private `observability.sqlite3-wal`
+and `observability.sqlite3-shm` files count toward the database limit. Keep them with
+the database while the service runs; do not copy or remove them separately. Normal
+shutdown checkpoints and truncates the WAL. The database format is unchanged, and
+the prior version can open it and return to its own journal mode.
+
+Refresh diagnostics reset when the cache generation changes and are not saved
+with statistics or snapshots. Inspection does not mark an entry as used; unused
+expired entries are counted when a lookup or cleanup encounters them.
 
 The storage status shows a low-space warning when free space falls below 10% or
 below the database limit plus twice the snapshot limit plus 64 MiB.
@@ -279,7 +346,7 @@ For DNS readiness, use `dns_health` in the console's authenticated `GET /api/sta
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `parins_requests_total`, `parins_completed_total`, `parins_cancelled_total` | counter | Queries entering the resolver; queries whose answer (any response code) went to the transport; queries cancelled before that. A DoH3 answer that fails to write counts as cancelled. |
+| `parins_requests_total`, `parins_completed_total`, `parins_cancelled_total` | counter | Queries entering the resolver; queries whose answer (any response code) was written to the transport; queries cancelled before that, including failed writes. |
 | `parins_responses_{noerror,nxdomain,servfail,refused,other}_total`, `parins_dropped_total` | counter | Responses by code; queries that ended without a response. |
 | `parins_cache_hits_total`, `parins_cache_misses_total` | counter | First cache lookup of a query (a miss includes a disabled or bypassed cache). |
 | `parins_cache_lookup_{fresh,stale,miss,bypass,disabled}_total` | counter | Cache lookups by outcome. |
@@ -287,6 +354,10 @@ For DNS readiness, use `dns_health` in the console's authenticated `GET /api/sta
 | `parins_cache_reason_*_total` | counter | Why a lookup bypassed or a store skipped: `unsupported_query`, `unsupported_edns`, `ecs_unusable`, `ttl_zero`, `negative_without_soa`, `uncacheable_response`, `policy_disabled`, `capacity`, `variant_limit`, `epoch_changed`. |
 | `parins_query_blocked_total`, `parins_response_blocked_total` | counter | Blocked by query name; blocked by a name in the answer's CNAME chain. |
 | `parins_flight_{leaders,joined,rejected,bypassed}_total` | counter | Query coalescing: shared, joined, refused at a limit, not eligible. |
+| `parins_refresh_active` | gauge | Background refreshes and cache fills in progress in the current cache generation. |
+| `parins_refresh_{scheduled,success,failure}_total` | counter | Background work started; work that stored an answer; work that stored none. |
+| `parins_refresh_rejected_{duplicate,cooldown,budget}_total`, `parins_refresh_cancelled_fill_rejected_total` | counter | Prefetch refusals by reason; sent queries whose departed caller could not hand them to the background budget. |
+| `parins_refresh_{useful,unused}_total` | counter | Refreshed entries used by a fresh foreground lookup, or expired/removed without one. Each entry settles once. |
 | `parins_upstream_operations_total`, `parins_upstream_failures_total`, `parins_upstream_timeouts_total`, `parins_ecs_retries_total` | counter | Upstream operations (TCP fallback and ECS retry stay inside one), failed exchanges (transport failures and SERVFAIL answers from the upstream), timeouts, ECS `/0` retries. |
 | `parins_upstream_attempt_{succeeded,failed,cancelled,skipped}_total` | counter | Individual upstream attempts by outcome. |
 | `parins_upstream_attempt_reason_*_total` | counter | Attempt end reasons: `deadline`, `connect_io`, `tls`, `http_status`, `protocol_invalid`, `peer_closed`, `caller_cancelled`, `shutdown`, `internal`. |

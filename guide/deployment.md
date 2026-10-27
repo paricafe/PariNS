@@ -66,7 +66,7 @@ sudo sh install.sh
 
 | Path | Content |
 | --- | --- |
-| `/opt/parins-managed/parins` | The program. Backups of replaced files go to `/opt/parins-managed/.install-backup.*`; after a successful installation the installer keeps the newest two and removes its copy of the candidate program. |
+| `/opt/parins-managed/parins` | The program. Backups of replaced files go to `/opt/parins-managed/.install-backup.*`. When the installer replaces the files, it keeps the newest two backups and removes its copy of the candidate program. |
 | `/usr/libexec/parins-updater` | The root update helper. |
 | `/etc/systemd/system/` | `parins-managed.service`, `parins-updater.service`, `parins-updater.path`, `parins-update-recovery.service` |
 | `/var/lib/parins-managed` | Private state, created by systemd for the service's dynamic user (stored under `/var/lib/private/parins-managed`). |

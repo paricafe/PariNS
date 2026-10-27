@@ -4,10 +4,10 @@ import { formatDate, formatNumber, translate, type Language } from "../../i18n";
 import { TrendChart } from "./TrendChart";
 import { averageLatencyMillis, cacheHitRate, histogramRows, type ListenerStatus, type StatsView, type StatusView } from "./metrics";
 import "./observability.css";
-import { Tabs } from '../../components/beui';
 import { Odometer } from '../../components/Odometer';
 import { Disclosure } from '../../components/Disclosure';
 import { InfoTip } from '../../components/InfoTip';
+import { Segmented } from '../../components/Segmented';
 import { StorageStatusPanel } from './StorageStatusPanel';
 import { CacheDiagnosticsPanel } from './CacheDiagnosticsPanel';
 import { TransportDiagnostics } from './TransportDiagnostics';
@@ -99,6 +99,8 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [query, setQuery] = useState<Record<string, string>>({ range: '1h' });
+  // The range of the samples on screen: the chart keeps its axis until the new range's samples arrive.
+  const [shown, setShown] = useState(query);
   const [rangeError, setRangeError] = useState(false);
   const [refreshKey, refresh] = useState(0);
   const upstreamSamples = useRef<UpstreamSample[]>([]);
@@ -132,7 +134,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
       statsBusy = true;
       try {
         const next = await api.request<StatsView>("stats", 'GET', undefined, undefined, { query });
-        if (active) { setStats(next); setStatsFailed(false); lastStats = Date.now(); }
+        if (active) { setStats(next); setShown(query); setStatsFailed(false); lastStats = Date.now(); }
       } catch {
         if (active) setStatsFailed(true);
       } finally { statsBusy = false; }
@@ -152,7 +154,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
   const running = status?.running === true;
   const counters = stats?.totals.metrics.counters;
   const latency = stats?.totals.metrics.request_latency;
-  const hours = query.range === 'custom' ? (Number(query.to_ms) - Number(query.from_ms)) / 3_600_000 : query.range === '7d' ? 168 : query.range === '24h' ? 24 : 1;
+  const hours = shown.range === 'custom' ? (Number(shown.to_ms) - Number(shown.from_ms)) / 3_600_000 : shown.range === '7d' ? 168 : shown.range === '24h' ? 24 : 1;
   const hitRate = cacheHitRate(counters);
   const average = averageLatencyMillis(latency);
   const blocked = counters ? (counters.query_blocked ?? 0) + (counters.response_blocked ?? 0) : null;
@@ -230,7 +232,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
         <div className="panel-head">
           <h2 id="parins-trend-title">{t("ui.activity")}</h2>
         </div>
-        <Tabs label={t('ui.trendRange')} items={['1h', '24h', '7d', 'custom'].map((range, index) => ({ value: range, label: t(`storage.${['hour1', 'hour24', 'day7', 'custom'][index]}`) }))} value={range} onChange={(next) => { setRange(next); setRangeError(false); if (next !== 'custom') setQuery({ range: next }); }} />
+        <Segmented className="trend-range" label={t('ui.trendRange')} options={['1h', '24h', '7d', 'custom'].map((range, index) => ({ value: range, label: t(`storage.${['hour1', 'hour24', 'day7', 'custom'][index]}`) }))} value={range} onChange={(next) => { setRange(next); setRangeError(false); if (next !== 'custom') setQuery({ range: next }); }} />
         {range === 'custom' && <form className="custom-range" onSubmit={(event) => {
           event.preventDefault(); const from = new Date(customFrom).getTime(); const to = new Date(customTo).getTime();
           if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || from < 0) { setRangeError(true); return; }
@@ -238,7 +240,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
         }}><label className="field">{t('storage.from')}<input type="datetime-local" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} required /></label><label className="field">{t('storage.to')}<input type="datetime-local" value={customTo} onChange={(event) => setCustomTo(event.target.value)} required /></label><button className="button secondary" type="submit">{t('ui.filter')}</button></form>}
         {rangeError && <p role="alert" className="error small">{t('storage.rangeInvalid')}</p>}
         <div className="trend-body">{statsFailed && <p role="status" className="muted small">{t("app.statsUnavailable")}</p>}
-          <TrendChart samples={stats?.samples ?? []} hours={hours} end={query.range === 'custom' ? Number(query.to_ms) : undefined} language={language} /></div>
+          <TrendChart samples={stats?.samples ?? []} hours={hours} end={shown.range === 'custom' ? Number(shown.to_ms) : undefined} language={language} /></div>
         <div className="trend-legend">
           {(["legendRequests", "legendCache", "legendBlocked"] as const).map((key, index) => <span key={key} data-series={index}>{t(`ui.${key}`)}</span>)}
         </div>
@@ -250,7 +252,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
       </section>
     </div>
 
-    <Disclosure title={t('shell.advanced')} help={t('shell.advancedHelp')}>
+    <Disclosure title={t('shell.advanced')}>
       <div className="advanced-stack">
         {status && <p className="small muted">{t('reliability.runtimeGeneration', { time: formatDate(status.dns_health.changed_at_ms, language, { dateStyle: 'short', timeStyle: 'medium' }) })}{status.dns_health.code && <> · <code>{status.dns_health.code}</code></>}</p>}
         <p className="small muted">{t("ui.statsHelp")}{stats && <> {t('storage.totalsSince', { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</>}</p>

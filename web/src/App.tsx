@@ -207,7 +207,7 @@ function RootView() {
     <a href="#main-content" className="skip-link" onClick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>{t('ui.skip')}</a>
     {state.phase !== 'ready' && <header className="auth-topbar"><a href="/#/overview" className="brand-link"><span className="brand-mark" aria-hidden="true">P</span>PariNS</a><Preferences appearance={appearance} /></header>}
     <ConfigProvider api={api} active={state.phase === 'ready'} refreshSession={recheck}><UpdatesProvider active={state.phase === 'ready'}>{state.phase === 'ready' ? <ConfirmProvider language={appearance.language}><ReadyConsole appearance={appearance} /></ConfirmProvider>
-      : state.phase === 'setup' ? <main id="main-content" tabIndex={-1}><SetupPage language={appearance.language} /></main>
+      : state.phase === 'setup' ? <main id="main-content" tabIndex={-1}><ConfirmProvider language={appearance.language}><SetupPage language={appearance.language} /></ConfirmProvider></main>
         : state.phase === 'login' ? <main id="main-content" tabIndex={-1}><LoginPage language={appearance.language} /></main>
           : <main id="main-content" tabIndex={-1} className="state-page"><div className="state-card"><h1>{t('ui.title')}</h1>
             <p role="status">{t(stateText)}</p>

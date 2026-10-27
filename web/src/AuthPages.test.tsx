@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { SessionProvider, useSession } from './session/context';
 import { SetupPage } from './AuthPages';
+import { ConfirmProvider } from './components/ConfirmProvider';
 import type { Language } from './i18n';
 
 const template = 'listen = "127.0.0.1:5353"\nmax_tcp_connections = 64\n\n[upstreams]\nservers = ["udp://127.0.0.1:5354"]\nmode = "weighted"\nprefer_h3 = false\nbootstrap = []\n';
@@ -11,7 +12,7 @@ const json = (value: unknown, status = 200) => ({ ok: status < 400, status, json
 
 function Harness({ language }: { language: Language }) {
   const { state } = useSession();
-  return state.phase === 'setup' ? <SetupPage language={language} /> : null;
+  return state.phase === 'setup' ? <ConfirmProvider language={language}><SetupPage language={language} /></ConfirmProvider> : null;
 }
 function requests(setup: () => Response) {
   const fetcher = vi.fn(async (url: string, _init?: RequestInit) => {
@@ -32,6 +33,10 @@ async function account() {
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
   await screen.findByRole('radiogroup', { name: 'DNS listener' });
 }
+beforeAll(() => {
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+});
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('first-run setup wizard', () => {
@@ -86,6 +91,34 @@ describe('first-run setup wizard', () => {
     expect(((await screen.findByLabelText(/^上游 DNS/)) as HTMLSelectElement).value).toBe('alidns');
   });
 
+  it('keeps a configuration edited by hand unless the network settings change', async () => {
+    requests(() => json({}));
+    render(<SessionProvider><Harness language="en" /></SessionProvider>);
+    await account();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    const editor = await screen.findByLabelText('TOML configuration') as HTMLTextAreaElement;
+    const edited = `${editor.value}# edited\n`;
+    fireEvent.change(editor, { target: { value: edited } });
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+    expect((await screen.findByLabelText('TOML configuration') as HTMLTextAreaElement).value).toBe(edited);
+    expect(screen.getByText(/edited by hand/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'LAN & internet (:53)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect((await screen.findByRole('dialog')).textContent).toContain('The network settings changed.');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByRole('radiogroup', { name: 'DNS listener' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Regenerate' }));
+    const regenerated = await screen.findByLabelText('TOML configuration') as HTMLTextAreaElement;
+    expect(regenerated.value).toContain('listen = "0.0.0.0:53"');
+    expect(regenerated.value).not.toContain('# edited');
+    expect(screen.getByText('0.0.0.0:53')).toBeTruthy();
+  });
+
   it('names the first missing or invalid account detail', async () => {
     requests(() => json({}));
     render(<SessionProvider><Harness language="en" /></SessionProvider>);
@@ -97,6 +130,8 @@ describe('first-run setup wizard', () => {
     fireEvent.change(token, { target: { value: 'a'.repeat(64) } });
     fireEvent.change(screen.getByLabelText('Admin username'), { target: { value: ' ' } });
     await submitted('Enter a username.');
+    fireEvent.change(screen.getByLabelText('Admin username'), { target: { value: 'admin user' } });
+    await submitted('The username must be 1–64 English letters, digits, hyphens or underscores.');
     fireEvent.change(screen.getByLabelText('Admin username'), { target: { value: 'admin' } });
     fireEvent.change(screen.getByLabelText('Admin password'), { target: { value: 'short' } });
     await submitted('The password needs at least 12 characters.');

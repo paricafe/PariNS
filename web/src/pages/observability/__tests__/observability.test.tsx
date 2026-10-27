@@ -208,11 +208,31 @@ describe("OverviewPage", () => {
     expect(screen.queryByText('Settings')).toBeNull();
     expect(screen.getByText("2.50 ms")).toBeTruthy();
     expect(screen.getAllByText("5").length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("tab", { name: "Last 7 days" }));
-    expect(screen.getByRole("tab", { name: "Last 7 days" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("radio", { name: "Last 7 days" }));
+    expect(screen.getByRole("radio", { name: "Last 7 days" }).getAttribute("aria-checked")).toBe("true");
     expect(api.request).toHaveBeenCalledWith('stats', 'GET', undefined, undefined, { query: { range: '7d' } });
     fireEvent.click(screen.getByRole("button", { name: /Upstreams & listeners/ }));
     expect(openDns).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the trend axis of the samples on screen until the new range arrives", async () => {
+    let finish!: (value: unknown) => void;
+    const now = Date.now();
+    const sample = (ago: number): HistorySample => ({ timestamp_ms: now - ago, elapsed_seconds: 60, running: true, generation: 1, requests: 60, cache_hits: 30, blocked: 3 });
+    const recent = { ...stats, samples: [sample(120_000), sample(60_000), sample(0)] };
+    const request = vi.fn(async (path: string, _method?: string, _body?: unknown, _signal?: unknown, options?: { query?: { range: string } }) => {
+      if (path === 'status') return status;
+      return options?.query?.range === '7d' ? new Promise((resolve) => { finish = resolve; }) : recent;
+    });
+    render(<OverviewPage api={{ request } as unknown as ApiClient} language="en" onOpenDns={() => {}} />);
+    const chart = () => screen.getByRole('group', { name: /^Queries, cache hits and blocks/ });
+    await waitFor(() => expect(request).toHaveBeenCalledWith('stats', 'GET', undefined, undefined, { query: { range: '1h' } }));
+    await waitFor(() => expect(chart().getAttribute('aria-label')).toContain('last 1 hours'));
+    fireEvent.click(screen.getByRole("radio", { name: "Last 7 days" }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    expect(chart().getAttribute('aria-label')).toContain('last 1 hours');
+    await act(async () => { finish(recent); });
+    expect(chart().getAttribute('aria-label')).toContain('last 168 hours');
   });
 
   it("retains last good status and offers refresh on a later read failure", async () => {
@@ -243,7 +263,9 @@ describe("LogsPage", () => {
     const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getAllByText('fresh.test').length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole('button', { name: /Older queries/ }));
-    fireEvent.click(screen.getByRole('tab', { name: 'Stale hit' }));
+    // Text typed but not filtered stays out of the request.
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'typed.test' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Stale hit' }));
     await waitFor(() => expect(screen.getAllByText('stale.test').length).toBeGreaterThan(0));
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: 'stale', before_id: null, limit: 50 });
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });

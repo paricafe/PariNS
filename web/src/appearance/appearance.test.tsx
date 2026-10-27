@@ -96,6 +96,33 @@ describe('theme button', () => {
     expect(Object.keys(localStorage).sort()).toEqual([STORAGE_KEYS.language]);
   });
 
+  it('animates only a visible page and contains a rejected transition', async () => {
+    const rejected = () => Promise.reject(new DOMException('Transition was aborted', 'TimeoutError'));
+    const startViewTransition = vi.fn((update: () => void) => { update(); return { ready: rejected(), finished: rejected() }; });
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    Object.defineProperty(document, 'startViewTransition', { configurable: true, value: startViewTransition });
+    try {
+      render(<Harness />);
+      const button = () => screen.getByRole('button', { name: /^(Theme|主题)/ });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      fireEvent.click(button());
+      expect(startViewTransition).not.toHaveBeenCalled();
+      expect(appearance.theme).toBe('light');
+      delete (document as { visibilityState?: unknown }).visibilityState;
+      expect(document.visibilityState).toBe('visible');
+      fireEvent.click(button());
+      expect(startViewTransition).toHaveBeenCalledOnce();
+      expect(appearance.theme).toBe('dark');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      delete (document as { startViewTransition?: unknown }).startViewTransition;
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+  });
+
   it('works with defaults when storage throws', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied'); });
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied'); });

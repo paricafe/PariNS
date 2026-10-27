@@ -44,6 +44,8 @@ export const viewsMessages = {
   on: ["开启", "On"],
   off: ["关闭", "Off"],
   removeRule: ["删除规则", "Remove rule"],
+  moveRuleUp: ["上移规则 {number}", "Move rule {number} up"],
+  moveRuleDown: ["下移规则 {number}", "Move rule {number} down"],
   addRule: ["添加规则", "Add rule"],
   statsUnavailable: ["DNS 运行后可查看缓存用量。", "Cache usage is available while DNS is running."],
   entryBudget: ["条目用量（含已过期、尚未清理的条目）", "Entries used (including expired entries not yet removed)"],

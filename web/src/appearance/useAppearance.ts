@@ -14,15 +14,21 @@ const prefersDark = () => typeof matchMedia === 'function' && matchMedia('(prefe
 const prefersReducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 const resolveDark = (theme: Theme, systemDark: boolean) => theme === 'dark' || theme === 'system' && systemDark;
 
+interface ViewTransition { ready: Promise<void>; finished: Promise<void> }
+
 /**
  * Cross-fades the whole page between the old and new theme (View Transitions animate
  * snapshots with opacity only). The DOM is not remounted, so controls, drafts, focus and
- * the session are untouched; without support or with reduced motion the change is instant.
+ * the session are untouched; without support, with reduced motion or on a hidden page
+ * (which does not render, so the transition would time out) the change is instant.
  */
 function withThemeTransition(update: () => void) {
-  const start = (document as Document & { startViewTransition?: (callback: () => void) => unknown }).startViewTransition;
-  if (typeof start !== 'function' || prefersReducedMotion()) { update(); return; }
-  start.call(document, () => flushSync(update));
+  const start = (document as Document & { startViewTransition?: (callback: () => void) => ViewTransition }).startViewTransition;
+  if (typeof start !== 'function' || prefersReducedMotion() || document.visibilityState !== 'visible') { update(); return; }
+  const transition = start.call(document, () => flushSync(update));
+  // A skipped or timed-out transition only loses the animation; the theme still changes.
+  transition.ready.catch(() => {});
+  transition.finished.catch(() => {});
 }
 
 export function useAppearance() {

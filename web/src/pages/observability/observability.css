@@ -24,6 +24,8 @@
 }
 
 /* Trend chart hover: reference line, snapped markers and a glass tooltip kept inside the chart. */
+/* The four ranges wrap on narrow screens instead of scrolling, so every range and its focus ring stay visible. */
+.beui-tabs.trend-range { flex-wrap: wrap; overflow: visible; border-radius: 18px; }
 .trend-chart { position: relative; border-radius: var(--radius-sm); }
 .trend-chart:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .trend-cursor line { stroke: currentColor; stroke-opacity: .35; stroke-dasharray: 3 3; }

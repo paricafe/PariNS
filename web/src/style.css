@@ -261,8 +261,8 @@ h3 { font-size: 15px; }
 .topbar { position: sticky; top: 0; z-index: 30; height: 64px; display: flex; align-items: center; gap: 12px; padding: 0 28px; background: color-mix(in srgb, var(--canvas) 62%, transparent); -webkit-backdrop-filter: blur(14px) saturate(150%); backdrop-filter: blur(14px) saturate(150%); border-bottom: 1px solid var(--edge-soft); }
 .topbar-title { font-weight: 650; font-size: 14px; color: var(--muted); }
 .preferences { display: flex; align-items: center; gap: 6px; }
-.theme-button { position: relative; overflow: visible; }
-.theme-button-icon { display: grid; place-items: center; }
+.theme-button { position: relative; overflow: visible; display: inline-grid; place-items: center; }
+.theme-button-icon { display: grid; place-items: center; grid-area: 1 / 1; }
 .preferences select { min-height: 34px; border-radius: var(--radius-pill); border-color: var(--edge-soft); background: var(--surface); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font-size: 13px; padding: 5px 12px; }
 .main-content { width: min(100%, 1280px); margin: 0 auto; padding: 24px 32px 112px; min-height: calc(100vh - 64px); }
 .page-stack, .settings-stack { display: grid; gap: 18px; }

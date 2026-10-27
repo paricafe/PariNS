@@ -6,7 +6,7 @@ import { toConfigIssue, useConfig } from '../../config/context';
 import { presentIssue, translate, type Language } from '../../i18n';
 import { StaleRequest } from '../../session/client';
 import { useSession } from '../../session/context';
-import { passwordProblem } from './password';
+import { passwordProblem, validUsername } from './password';
 import { TurnstilePanel, type TurnstileView } from './TurnstilePanel';
 
 function AccountForm({ language, setBusy }: { language: Language; setBusy: (busy: boolean) => void }) {
@@ -36,7 +36,7 @@ function AccountForm({ language, setBusy }: { language: Language; setBusy: (busy
     if (mutation.current || username === null || config.busy || config.locked) return;
     const trigger = event.currentTarget instanceof HTMLFormElement ? event.currentTarget.querySelector<HTMLElement>('button[type="submit"]') ?? undefined : undefined;
     setError(null);
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(username)) { setError('account.usernameInvalid'); return; }
+    if (!validUsername(username)) { setError('account.usernameInvalid'); return; }
     // The same 12–256 byte limit as Rust.
     const problem = passwordProblem(newPassword);
     if (problem) { setError(problem); return; }

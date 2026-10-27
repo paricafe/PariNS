@@ -6,7 +6,7 @@ import { toConfigIssue, type ConfigIssue } from "../../config/context";
 import { pathLabel, statusLabel, type CacheFilter, type LogEntry, type LogFilter, type LogListResponse } from "./logs";
 import { LiveLogClient, saveLiveInterval, storedLiveInterval, type LiveInterval, type LiveLogState, type LiveStatus, type LiveSubscription } from "./live";
 import "./observability.css";
-import { Drawer, Tabs } from '../../components/beui';
+import { Drawer } from '../../components/beui';
 import { isUnknownStorageMutation } from './storage';
 import { decisionLabel, diagnosticLabel, scopeNote } from './diagnostics';
 import { UpstreamAttempts } from './TransportDiagnostics';
@@ -323,9 +323,8 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
       },
     };
   }
-  /** Pressing inside a hover card pins it, so selecting text never closes it. */
+  /** The card lives in a body portal; Tab returns to its button instead of the end of the page. */
   function cardKey(event: KeyboardEvent<HTMLElement>) {
-    // The card lives in a body portal; Tab returns to its button instead of the end of the page.
     if (event.key === 'Tab') { event.preventDefault(); closeDetail(true); }
   }
 
@@ -400,8 +399,9 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
             options={statuses.map((status) => ({ value: status, label: translate(status ? `ui.${status}` : "ui.allResults", language) }))} /></div>
         <button type="submit" className="button primary">{translate("ui.filter", language)}</button>
       </form>
-      <Tabs label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} items={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
-        const filter = { search: search.trim(), status: statusFilter || null, cache: cache === 'all' ? null : cache as CacheFilter };
+      <Segmented label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} options={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
+        // Uncommitted search and result fields apply only through Filter.
+        const filter = { ...appliedRef.current, cache: cache === 'all' ? null : cache as CacheFilter };
         appliedRef.current = filter; setApplied(filter); setNotice(''); setDetail(null); void load(null, filter);
       }} />
     </div>
@@ -455,6 +455,7 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
               </tr>)}</tbody></table>
           </div>
         </>}
+    {/* Pressing inside a hover card pins it, so selecting text never closes it. */}
     <AnimatePresence>{detail && detailEntry && openId !== null && <DetailPopover key={detail.id} id={detailId(detail.id)} label={translate("views.queryDetails", language)} anchor={detail.anchor} focus={detail.keyboard}
       onPointerEnter={(event) => { if (event.pointerType === 'mouse') cancelTimer(); }} onPointerLeave={hoverClose}
       onPointerDown={() => setDetail((current) => current && { ...current, pinned: true })} onKeyDown={cardKey}>

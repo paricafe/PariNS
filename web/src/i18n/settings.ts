@@ -2,7 +2,7 @@ export const settingsMessages = {
   "page.dns.title": ["上游与监听", "Upstreams & listeners"],
   "page.dns.intro": ["DNS 的监听地址和解析方式：转发给上游，或从根服务器递归解析。", "Where DNS listens and how it resolves names: forwarding to upstreams, or recursive resolution from the root."],
   "page.cache.title": ["缓存", "Cache"],
-  "page.cache.intro": ["缓存答案以加快重复查询，并可按域名设置规则、检查缓存内容。", "Caches answers to speed up repeat queries, with per-domain rules and cache inspection."],
+  "page.cache.intro": ["缓存答案以加快重复查询。", "Caches answers to speed up repeat queries."],
   "page.filters.title": ["拦截规则", "Blocking rules"],
   "page.filters.intro": ["拦截指定的域名；放行规则优先于拦截规则。", "Blocks the domains you choose; allow rules take precedence over block rules."],
   "page.security.title": ["加密与证书", "Encryption & certificates"],

@@ -161,7 +161,7 @@ export const appMessages = {
   "startFailed": ["无法连接 PariNS，请确认服务正在运行。", "Can't connect to PariNS. Check that the service is running."],
   "setupTokenRequired": ["请填写设置令牌。", "Enter the setup token."],
   "usernameRequired": ["请填写用户名。", "Enter a username."],
-  "advancedIntro": ["直接编辑完整的 TOML 配置。", "Edit the full TOML configuration directly."],
+  "draftChanged": ["操作期间配置有改动，请重试。", "The configuration changed during this operation. Try again."],
   "loginOptionsFailed": ["无法读取登录方式，暂时不能登录。", "Couldn't load the sign-in options, so signing in isn't available yet."],
   "cookieUnavailable": ["登录失败：浏览器没有保存登录 Cookie。请允许此站点的 Cookie 后重试。", "Sign-in failed because the browser didn't keep the sign-in Cookie. Allow Cookies for this site and try again."],
   "logoutUnknown": ["无法确认是否已退出。请检查与 PariNS 的连接后再核对。", "Sign-out couldn't be confirmed. Check the connection to PariNS, then check again."],

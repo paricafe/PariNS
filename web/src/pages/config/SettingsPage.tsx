@@ -125,13 +125,12 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
 function TomlChanges({ language }: { language: Language }) {
   const { draft } = useConfig();
   const [open, setOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement>(null);
   const t = (key: string) => translate(key, language);
   const diff = useMemo(() => open && draft ? lineDiff(draft.original, draft.toml) : [], [open, draft?.original, draft?.toml]);
   if (!draft) return null;
   return <>
-    <button ref={trigger} type="button" className="button secondary" disabled={draft.toml === draft.original} onClick={() => setOpen(true)}>{t('app.showChanges')}</button>
-    <Drawer open={open} variant="sheet" className="diff-sheet" title={t('app.diffTitle')} closeLabel={t('ui.closeDialog')} onClose={() => { setOpen(false); requestAnimationFrame(() => trigger.current?.focus()); }}>
+    <button type="button" className="button secondary" disabled={draft.toml === draft.original} onClick={() => setOpen(true)}>{t('app.showChanges')}</button>
+    <Drawer open={open} variant="sheet" className="diff-sheet" title={t('app.diffTitle')} closeLabel={t('ui.closeDialog')} onClose={() => setOpen(false)}>
       <p className="muted small">{t('app.diffHelp')}</p>
       {draft.previewTransportChange && <TransportHint change={draft.previewTransportChange} language={language} />}
       {diff.some((line) => line.kind !== 'same') ? <pre className="diff-lines"><code>{diff.map((line, index) => <span className={`diff-${line.kind}`} key={index}>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text || ' '}</span>)}</code></pre>
@@ -140,13 +139,22 @@ function TomlChanges({ language }: { language: Language }) {
   </>;
 }
 
-function CacheRules({ language }: { language: Language }) {
+export function CacheRules({ language }: { language: Language }) {
   const { draft, locked, setRules } = useConfig();
   const reduced = useReducedMotion();
+  // Row keys follow add, move and remove, so a removed row is the one that animates out.
+  const keys = useRef<number[]>([]);
+  const serial = useRef(0);
   const t = (key: string) => translate(`views.${key}`, language);
   if (!draft) return null;
   const rules = draft.rules ?? configList(draft.settings, 'cache.rules').map((rule) => cacheRuleDraft(rule));
+  if (keys.current.length !== rules.length) keys.current = rules.map(() => serial.current++);
   const update = (index: number, key: keyof CacheRuleDraft, value: string) => setRules(rules.map((rule, at) => at === index ? { ...rule, [key]: value } : rule));
+  const move = (index: number, to: number) => {
+    const next = [...rules]; [next[index], next[to]] = [next[to], next[index]];
+    const order = [...keys.current]; [order[index], order[to]] = [order[to], order[index]];
+    keys.current = order; setRules(next);
+  };
   const choices: Partial<Record<keyof CacheRuleDraft, readonly [string, string][]>> = {
     suffix: [['false', 'exact'], ['true', 'suffix']], bypass: [['false', 'allow'], ['true', 'bypass']],
     prefetch: [['', 'inherit'], ['true', 'on'], ['false', 'off']], stale: [['', 'inherit'], ['true', 'on'], ['false', 'off']],
@@ -154,19 +162,19 @@ function CacheRules({ language }: { language: Language }) {
   const labels: [keyof CacheRuleDraft, string][] = [['name', 'name'], ['suffix', 'match'], ['qtype', 'qtype'], ['bypass', 'behavior'], ['max_ttl_secs', 'positiveTtl'], ['negative_ttl_cap_secs', 'negativeTtl'], ['prefetch', 'prefetch'], ['stale', 'stale']];
   return <section className="panel">
     <div className="heading-row"><div className="row-label"><h2>{t('rules')}</h2><InfoTip text={t('rulesHelp')} label={translate('shell.about', language, { label: t('rules') })} /></div>
-      <button type="button" className="button secondary" disabled={locked || rules.length >= 4096} onClick={() => setRules([...rules, cacheRuleDraft(defaultCacheRule())])}>{t('addRule')}</button></div>
+      <button type="button" className="button secondary" disabled={locked || rules.length >= 4096} onClick={() => { keys.current = [...keys.current, serial.current++]; setRules([...rules, cacheRuleDraft(defaultCacheRule())]); }}>{t('addRule')}</button></div>
     {rules.length === 0 && <p className="muted">{t('noRules')}</p>}
-    <div className="rule-list"><AnimatePresence initial={false}>{rules.map((rule, index) => <motion.fieldset className="rule-row" disabled={locked} key={index}
-      initial={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} animate={{ opacity: 1, height: 'auto', transitionEnd: { overflow: 'visible' } }} exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><legend>{t('rule').replace('{number}', String(index + 1))}</legend>
+    <div className="rule-list"><AnimatePresence initial={false}>{rules.map((rule, index) => { const id = keys.current[index]; const number = { number: index + 1 }; return <motion.fieldset className="rule-row" disabled={locked} key={id}
+      initial={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} animate={{ opacity: 1, height: 'auto', transitionEnd: { overflow: 'visible' } }} exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><legend>{translate('views.rule', language, number)}</legend>
       <div className="fields-grid">{labels.map(([key, label]) => <div className="field" key={key}>
-        <label htmlFor={`rule-${index}-${key}`}>{t(label)}</label>
-        {choices[key] ? <Segmented id={`rule-${index}-${key}`} label={t(label)} value={rule[key]} disabled={locked} onChange={(value) => update(index, key, value)} options={choices[key]!.map(([value, option]) => ({ value, label: t(option) }))} />
-          : <input id={`rule-${index}-${key}`} value={rule[key]} inputMode={key.endsWith('_secs') ? 'numeric' : undefined} spellCheck={false} autoComplete="off" onChange={(event) => update(index, key, event.target.value)} />}
+        <label htmlFor={`rule-${id}-${key}`}>{t(label)}</label>
+        {choices[key] ? <Segmented id={`rule-${id}-${key}`} label={t(label)} value={rule[key]} disabled={locked} onChange={(value) => update(index, key, value)} options={choices[key]!.map(([value, option]) => ({ value, label: t(option) }))} />
+          : <input id={`rule-${id}-${key}`} value={rule[key]} inputMode={key.endsWith('_secs') ? 'numeric' : undefined} spellCheck={false} autoComplete="off" onChange={(event) => update(index, key, event.target.value)} />}
       </div>)}</div>
-      <div className="rule-actions"><button type="button" className="button quiet" disabled={locked || index === 0} onClick={() => { const next = [...rules]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; setRules(next); }}>↑</button>
-        <button type="button" className="button quiet" disabled={locked || index === rules.length - 1} onClick={() => { const next = [...rules]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; setRules(next); }}>↓</button>
-        <button type="button" className="button quiet" disabled={locked} onClick={() => setRules(rules.filter((_, at) => at !== index))}>{t('removeRule')}</button></div>
-    </motion.fieldset>)}</AnimatePresence></div>
+      <div className="rule-actions"><button type="button" className="button quiet" aria-label={translate('views.moveRuleUp', language, number)} disabled={locked || index === 0} onClick={() => move(index, index - 1)}>↑</button>
+        <button type="button" className="button quiet" aria-label={translate('views.moveRuleDown', language, number)} disabled={locked || index === rules.length - 1} onClick={() => move(index, index + 1)}>↓</button>
+        <button type="button" className="button quiet" disabled={locked} onClick={() => { keys.current = keys.current.filter((_, at) => at !== index); setRules(rules.filter((_, at) => at !== index)); }}>{t('removeRule')}</button></div>
+    </motion.fieldset>; })}</AnimatePresence></div>
   </section>;
 }
 
@@ -362,7 +370,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
     ? (Object.entries(settingPages).find(([, page]) => page.groups.some((group) => group.fields.some((field) => error.path === field.path || error.path?.startsWith(`${field.path}.`))))?.[0] as SettingPageId | undefined)
       ?? (error.path.startsWith('cache.rules.') ? 'cache' : error.path.startsWith('filter_subscriptions.') ? 'filters' : 'dns')
     : 'dns';
-  const intro = pageId === 'advanced' ? t('app.advancedIntro') : t(settingPages[pageId].introKey);
+  const intro = pageId === 'advanced' ? null : t(settingPages[pageId].introKey);
   const title = pageId === 'advanced' ? t('app.advanced') : t(settingPages[pageId].titleKey);
   if (pageId !== 'advanced' && needsParse) return <div className="page-stack"><h1>{title}</h1><p className="notice" role="status">{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate('/advanced')}>{t('app.returnToToml')}</button></div>;
   // A check without saving belongs with the raw TOML editor; settings pages simply save.
@@ -385,7 +393,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
       } catch (reason) { setError(toConfigIssue(reason)); }
     })() },
   ];
-  return <div className="page-stack"><header className="page-head large-title"><div><h1>{title}</h1><p className="muted">{intro}</p></div>
+  return <div className="page-stack"><header className="page-head large-title"><div><h1>{title}</h1>{intro && <p className="muted">{intro}</p>}</div>
       <Menu label={t('shell.more')} icon={<Ellipsis size={17} aria-hidden="true" />} actions={actions} /></header>
     {error && <div className="notice error" role="alert">{presentIssue(error, language)}<button type="button" onClick={() => setError(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
     {notice && <div className="notice" role="status">{notice}<button type="button" onClick={() => setNotice(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}

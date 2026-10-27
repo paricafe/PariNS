@@ -4,10 +4,11 @@ import { hasTranslation, translate, type Language } from './i18n';
 import { ApiError, CookieUnavailable } from './session/client';
 import { useSession } from './session/context';
 import { TurnstileWidget } from './features/account/Turnstile';
-import { passwordProblem } from './features/account/password';
+import { passwordProblem, validUsername } from './features/account/password';
 import { reloadConsole } from './features/updates/reload';
 import { Segmented } from './components/Segmented';
 import { Switch } from './components/beui';
+import { useConfirm } from './components/ConfirmProvider';
 
 function present(error: unknown, language: Language): string {
   if (error instanceof CookieUnavailable) return translate('app.cookieUnavailable', language);
@@ -87,6 +88,7 @@ function listenerInUse(error: unknown): error is ApiError {
 
 export function SetupPage({ language }: { language: Language }) {
   const { api, setup } = useSession();
+  const confirm = useConfirm();
   const [template, setTemplate] = useState<string | null>(null);
   const [step, setStep] = useState(0);
   const [token, setToken] = useState(''); const [username, setUsername] = useState('admin');
@@ -103,24 +105,30 @@ export function SetupPage({ language }: { language: Language }) {
   const upstreams = preset === 'custom'
     ? { servers: lines(servers), bootstrap: lines(bootstrap), mode, prefer_h3: preferH3 }
     : { ...PRESETS[preset], mode: 'weighted', prefer_h3: false };
-  const next = () => {
+  const next = async (trigger?: HTMLElement) => {
     setError(null);
     if (step === 0) {
-      // These match Rust's byte limits and name the first missing step.
+      // These match Rust's rules and name the first missing step.
       const problem = !token.trim() ? 'app.setupTokenRequired' : !username.trim() ? 'app.usernameRequired'
+        : !validUsername(username.trim()) ? 'account.usernameInvalid'
         : passwordProblem(password) ?? (password !== confirmPassword ? 'account.mismatch' : null);
       if (problem) { setError(translate(problem, language)); return; }
     }
     if (step === 1) {
       if (!upstreams.servers.length) { setError(translate('settings.validation.required', language)); return; }
       if (!template) { setError(translate('app.startFailed', language)); return; }
-      try { const candidate = networkTemplate(template, listen, upstreams); setToml(candidate); setGenerated(candidate); }
+      let candidate: string;
+      try { candidate = networkTemplate(template, listen, upstreams); }
       catch (reason) { setError(present(reason, language)); return; }
+      // A configuration edited by hand in the review step is kept unless the network settings changed.
+      if (toml !== generated && candidate !== generated && !await confirm(translate('shell.setupRegenerate', language), 'shell.regenerate', trigger)) return;
+      if (toml === generated || candidate !== generated) { setToml(candidate); setGenerated(candidate); }
     }
     setStep((current) => Math.min(current + 1, 2));
   };
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); if (step < 2) { next(); return; }
+    event.preventDefault();
+    if (step < 2) { void next((event.nativeEvent as SubmitEvent).submitter ?? undefined); return; }
     setBusy(true); setError(null);
     try { await setup(username.trim(), password, toml, token.trim()); setToken(''); setPassword(''); setConfirmPassword(''); }
     catch (reason) {

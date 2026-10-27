@@ -102,9 +102,9 @@ export function UpdatePanel({ language }: { language: Language }) {
       {applicable && <Button variant="primary" onClick={(event) => void begin(event.currentTarget)}>{t('updateNow')}</Button>}
       {(updates.unknown || updates.disconnected || updates.pending || view?.active_operation) && <button type="button" className="button quiet" onClick={() => void updates.refresh()}>{t('checkResult')}</button>}
     </div>}
-    <Drawer open={draftPrompt} variant="sheet" title={t('drafts')} closeLabel={translate('ui.closeDialog', language)} onClose={() => setDraftPrompt(false)}>
+    <Drawer open={draftPrompt} variant="sheet" title={t('draftsTitle')} closeLabel={translate('ui.closeDialog', language)} onClose={() => setDraftPrompt(false)}>
       <p>{t('drafts')}</p>{draftError && <p role="alert" className="error">{t('readFailed')}</p>}
-      <div className="button-group"><Button variant="secondary" onClick={() => { setDraftPrompt(false); window.setTimeout(() => document.querySelector<HTMLElement>('.save-bar button.primary')?.focus(), 0); }}>{t('keepDraft')}</Button>
+      <div className="button-group"><Button variant="secondary" onClick={() => setDraftPrompt(false)}>{t('keepDraft')}</Button>
         <Button variant="primary" disabled={config.busy} onClick={() => { setDraftError(false); void config.reload().then(() => setDraftPrompt(false)).catch(() => setDraftError(true)); }}>{t('discardDraft')}</Button></div>
     </Drawer>
   </section>;

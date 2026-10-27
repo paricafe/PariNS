@@ -12,12 +12,18 @@ export function InfoTip({ text, label }: { text: string; label: string }) {
   useEffect(() => {
     if (!open) return;
     const down = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
+    // Escape closes the open tip from any focus position, before an enclosing dialog or card sees it.
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopPropagation(); setOpen(false);
+    };
     document.addEventListener('pointerdown', down);
-    return () => document.removeEventListener('pointerdown', down);
+    document.addEventListener('keydown', key, true);
+    return () => { document.removeEventListener('pointerdown', down); document.removeEventListener('keydown', key, true); };
   }, [open]);
   return <span ref={root} className="info-tip">
     <button type="button" className="info-button" aria-label={label} aria-expanded={open} aria-controls={id}
-      onClick={() => setOpen(!open)} onKeyDown={(event) => { if (event.key === 'Escape' && open) { event.stopPropagation(); setOpen(false); } }}>
+      onClick={() => setOpen(!open)}>
       <Info size={15} aria-hidden="true" />
     </button>
     <AnimatePresence>{open && <motion.span id={id} role="note" className="info-bubble"

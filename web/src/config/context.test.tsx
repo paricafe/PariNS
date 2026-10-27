@@ -2,7 +2,8 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, type ApiClient } from '../session/client';
-import { ConfigProvider, useConfig } from './context';
+import { ConfigProvider, toConfigIssue, useConfig } from './context';
+import { presentIssue } from '../i18n';
 
 const original = 'max_inflight = 10\n';
 const edited = 'max_inflight = 11\n';
@@ -41,6 +42,8 @@ describe('single configuration draft', () => {
     expect(hook.result.current.draft).toBe(before);
     expect(hook.result.current.locked).toBe(true);
     expect(hook.result.current.busy).toBe(true);
+    const refused = await hook.result.current.prepareSave().catch((reason: unknown) => reason);
+    expect(presentIssue(toConfigIssue(refused), 'en')).toBe('Another change is in progress. Try again shortly.');
     act(() => hook.result.current.setUpdateLocked(false));
     expect(hook.result.current.locked).toBe(false);
     hook.unmount();
@@ -216,7 +219,7 @@ describe('single configuration draft', () => {
     act(() => { pending = hook.result.current.preview(); });
     act(() => hook.result.current.updateField('max_inflight', '12'));
     release({ toml: edited, settings: { ...baseSettings, max_inflight: 11 } });
-    await expect(pending).rejects.toThrow('Draft changed');
+    await expect(pending).rejects.toThrow('app.draftChanged');
     expect(hook.result.current.draft?.fields.max_inflight).toBe('12');
     expect(hook.result.current.draft?.toml).toBe(original);
   });
@@ -320,7 +323,7 @@ describe('single configuration draft', () => {
     act(() => { pending = hook.result.current.validate(); });
     act(() => hook.result.current.updateField('max_inflight', '12'));
     release({ restart_required: true });
-    await expect(pending).rejects.toThrow('Draft changed');
+    await expect(pending).rejects.toThrow('app.draftChanged');
   });
 
   it('freezes an uncertain rollback and never retries it during reconciliation', async () => {

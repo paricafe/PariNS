@@ -56,8 +56,14 @@ describe('software update presentation', () => {
     const current = fixture(); mocks.request.mockResolvedValue(current); mocks.config.dirty = true;
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    const update = screen.getByRole('button', { name: 'Update now' });
+    update.focus(); fireEvent.click(update);
+    expect(screen.getByRole('dialog', { name: 'Unsaved changes' }).textContent).toContain('Save or discard them before confirming the update.');
+    // Keeping the draft closes the sheet; the sheet returns focus to its trigger.
+    fireEvent.click(screen.getByRole('button', { name: 'Save my changes first' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(update);
+    fireEvent.click(update);
     expect(mocks.confirm).not.toHaveBeenCalled();
     expect(mocks.request.mock.calls.some(([path]) => path === 'updates/apply')).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));

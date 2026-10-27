@@ -144,7 +144,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   const updateLock = useRef(false);
   const [updateLocked, setUpdateLockedState] = useState(false);
   const setUpdateLocked = useCallback((locked: boolean) => { updateLock.current = locked; setUpdateLockedState(locked); }, []);
-  const assertVersion = (expected: number) => { if (expected !== version.current) throw new Error('Draft changed during this operation; preview again'); };
+  const assertVersion = (expected: number) => { if (expected !== version.current) throw new Error('app.draftChanged'); };
 
   const reload = useCallback(async () => {
     const owner = version.current;
@@ -218,7 +218,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, []);
 
   const importCertificate = useCallback(async (target: OptionalListener, certificate: string, privateKey: string) => {
-    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
+    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('api.BUSY');
     const enabled = draft.optional[target] ?? getPath(draft.settings, target) !== null;
     if (!enabled) throw new Error('app.enableListener');
     writeLock.current = true;
@@ -347,7 +347,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [api, draft]);
 
   const prepareSave = useCallback(async (): Promise<PreparedSave> => {
-    if (!draft || draft.unknownApply || draft.conflict || writeLock.current || updateLock.current) throw new Error('Resolve the previous operation before saving');
+    if (!draft || draft.unknownApply || draft.conflict || writeLock.current || updateLock.current) throw new Error('api.BUSY');
     setBusy(true); setError(null);
     const before = version.current;
     try {
@@ -467,7 +467,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [api, draft, refreshSession]);
 
   const previewRollback = useCallback(async (): Promise<PreparedRollback | null> => {
-    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
+    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('api.BUSY');
     const owner = version.current;
     try {
       const result = await api.request<{ transport_change: TransportChange | null }>('config/rollback/preview', 'POST', { revision: draft.revision });
@@ -482,7 +482,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   }, [api, busy, draft, syncWithServer]);
 
   const rollback = useCallback(async (prepared: PreparedRollback): Promise<CommitResult> => {
-    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('Configuration is busy');
+    if (!draft || writeLock.current || updateLock.current || busy) throw new Error('api.BUSY');
     assertVersion(prepared.version);
     writeLock.current = true;
     setBusy(true); setError(null);

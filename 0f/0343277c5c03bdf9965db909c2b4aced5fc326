@@ -1,0 +1,81 @@
+web/src/config/context.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 5-6,45-46,222,326
+web/src/i18n/views.ts
+  s_cffe143f0c5c88::t_6f4076282fb0be 47-48
+web/src/components/InfoTip.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 15-19,21-22,26
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 211-212,218-237,266-268
+web/src/components/Disclosure.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 1-17
+web/src/App.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 210
+web/src/features/updates/UpdatePanel.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 105,107
+web/src/config/context.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 147,221,350,470,485
+web/src/i18n/settings.ts
+  s_cffe143f0c5c88::t_6f4076282fb0be 5
+web/src/appearance/appearance.test.tsx
+  s_cffe143f0c5c88::t_2aa8b262b9b2f9 99-125
+web/src/components/ConfirmProvider.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 7
+web/src/pages/config/CacheRules.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 1-27
+web/src/components/ThemeButton.tsx
+  s_cffe143f0c5c88::t_1b7dc3e3b97d6b 26
+  s_cffe143f0c5c88::t_76370e632409b3 12-16
+web/src/components/InfoTip.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 1-18
+web/src/i18n/__tests__/updateCodes.test.ts
+  s_cffe143f0c5c88::t_6f4076282fb0be 1-52
+web/src/pages/observability/__tests__/live.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 279
+web/src/pages/observability/observability.css
+  s_cffe143f0c5c88::t_4e0c8ad1e43df6 27-28
+web/src/features/account/AccountControls.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 9,39
+web/src/features/account/password.ts
+  s_cffe143f0c5c88::t_6f4076282fb0be 6-8
+web/src/i18n/console.ts
+  s_cffe143f0c5c88::t_6f4076282fb0be 164
+web/src/AuthPages.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 7,11,91,108,111,113,120-121,123-125,130-131
+web/src/components/Disclosure.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 5,10,13
+web/src/features/updates/updates.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 59-66
+web/src/appearance/useAppearance.ts
+  s_cffe143f0c5c88::t_2aa8b262b9b2f9 17-18,22-23,26-31
+web/src/pages/observability/OverviewPage.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 10,102-103,137,157,243,255
+  s_cffe143f0c5c88::t_4e0c8ad1e43df6 235
+web/src/pages/config/SettingsPage.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 132-133,142,145-147,151,153-157,165,167-168,170-172,174-177,373,396
+web/src/pages/observability/LogsPage.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 9,326,402-404,458
+web/src/i18n/updates.ts
+  s_cffe143f0c5c88::t_6f4076282fb0be 17,62-77
+web/src/AuthPages.test.tsx
+  s_cffe143f0c5c88::t_6f4076282fb0be 3,6,15,36-39,94-121,133-134
+web/src/i18n/shell.ts
+  s_cffe143f0c5c88::t_6f4076282fb0be 46-47
+web/src/style.css
+  s_cffe143f0c5c88::t_1b7dc3e3b97d6b 264-265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0f0343277c5c03bdf9965db909c2b4aced5fc326",
+  "prompts": {},
+  "sessions": {
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

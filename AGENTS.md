@@ -281,6 +281,8 @@ until preview/validation.
   for normal SIGTERM. Unknown helper outcomes never unlock by timeout. The root
   journal is the sole installed anchor. Root records an application-initiated Abort
   as `aborted`; the application keeps its own abort reason. Details: `src/update/executor/mod.rs`.
+- Releases that require new root updater behavior raise the helper protocol so
+  older helpers require the complete installer before an online update.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners; it also validates the saved rollback copy. Candidate preflight runs as the app user; root never
   executes the candidate. The preflight compares only digests of version-independent

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.1.28 — 2026-10-27
+
+### Upgrade
+
+- This release requires updater protocol 3. Run the complete installer once to
+  replace both PariNS and its root updater; older helpers report that a manual
+  installation is required. Later releases can use online updates with this helper.
+
 ### Added
 
 - Prefetch diagnostics separate duplicate, cooldown and budget refusals, and

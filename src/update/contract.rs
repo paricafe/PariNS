@@ -1,4 +1,6 @@
 //! Pure shared release contracts. Neither parsing nor validation performs I/O.
+//! The helper protocol also identifies required updater behavior. Raising it
+//! makes older helpers require the complete installer before an online update.
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
@@ -7,7 +9,7 @@ use super::build_info::BuildInfo;
 
 pub const REPOSITORY: &str = "paricafe/PariNS";
 pub const UPDATE_PROTOCOL: u32 = 1;
-pub const HELPER_PROTOCOL: u32 = 2;
+pub const HELPER_PROTOCOL: u32 = 3;
 pub const INSTALL_CONTRACT: &str = "linux-managed-updater-v1";
 // The complete bidirectional state/TOML/database/payload contract, not merely
 // a database schema version.
@@ -401,6 +403,10 @@ mod tests {
     #[test]
     fn whole_durable_contract_not_cache_format_gates_rollback() {
         let (mut manifest, mut build, _) = fixture();
+        assert_eq!(
+            manifest.check_compatible(&build, HELPER_PROTOCOL - 1),
+            Err(ContractError::ManualRequired)
+        );
         assert!(manifest.check_compatible(&build, HELPER_PROTOCOL).is_ok());
         manifest.cache_snapshot_format += 1;
         assert!(manifest.check_compatible(&build, HELPER_PROTOCOL).is_ok());

@@ -459,10 +459,8 @@ async fn connection(
             result = timeout(ingress.io_timeout, tcp::read_frame(&mut stream)) => result??,
         };
         // Once admitted, a query can finish during the server's bounded shutdown grace.
-        let Some(response) = ingress
-            .handle_with_transport(&bytes, peer.ip(), "dot")
-            .await
-        else {
+        let (response, delivery) = ingress.handle_for_delivery(&bytes, peer.ip(), "dot").await;
+        let Some(response) = response else {
             return Ok(());
         };
         timeout(ingress.io_timeout, async {
@@ -470,5 +468,8 @@ async fn connection(
             stream.flush().await
         })
         .await??;
+        if let Some(delivery) = delivery {
+            delivery.delivered();
+        }
     }
 }

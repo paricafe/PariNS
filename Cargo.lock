@@ -654,6 +654,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashlink"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+dependencies = [
+ "hashbrown",
+]
+
+[[package]]
 name = "hickory-net"
 version = "0.26.3"
 source = "git+https://github.com/Natsuki-Kaede/hickory-dns?rev=b3f813236f2982ce0f0a2b42383f64d8f7281a67#b3f813236f2982ce0f0a2b42383f64d8f7281a67"
@@ -1522,6 +1531,7 @@ dependencies = [
  "bitflags",
  "fallible-iterator",
  "fallible-streaming-iterator",
+ "hashlink",
  "libsqlite3-sys",
  "smallvec",
 ]

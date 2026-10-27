@@ -120,10 +120,11 @@ async fn work_over_the_refresh_budget_is_cancelled() {
     // Only the first fill fits in the one refresh slot.
     until(|| resolver.metrics().snapshot().upstream_inflight == 1).await;
     let refresh = resolver.refresh_snapshot();
-    assert_eq!((refresh.active, refresh.rejected), (1, 1));
+    assert_eq!((refresh.active, refresh.cancelled_fill_rejected), (1, 1));
     answer(&upstream, &query, peer).await;
     until(|| resolver.refresh_snapshot().active == 0).await;
     assert_eq!(counter(&resolver, "cache_store_admitted"), 1);
+    assert_eq!(resolver.cache().refresh_outcomes(), (0, 0));
 }
 
 #[tokio::test]

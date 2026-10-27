@@ -1,7 +1,8 @@
-//! Private runtime storage. One SQLite owner; DNS producers never wait for IO.
-//! Retention cleanup runs every `storage.cleanup_interval_secs`, right after a
-//! write that leaves a capacity bound exceeded, and on explicit flush. Shutdown
-//! follows the terminal flush and commits only what arrived since.
+//! Private runtime storage. One SQLite WAL owner; DNS producers enqueue bounded
+//! structured entries and never wait for serialization or IO. Row-limit eviction
+//! shares the insert transaction. Capacity trims do not vacuum; periodic cleanup,
+//! reduced limits and explicit flush reclaim pages. Shutdown follows the terminal
+//! flush, commits what arrived since and checkpoints the WAL before releasing its lock.
 mod database;
 pub(crate) use database::DATABASE_FORMAT;
 mod observation;
@@ -259,6 +260,7 @@ pub(super) struct Shared {
     status: Mutex<Status>,
     enabled: AtomicBool,
     log_epoch: AtomicU64,
+    latest_log_id: AtomicU64,
     queue_entries: AtomicUsize,
     queue_bytes: AtomicU64,
     limit_entries: AtomicUsize,
@@ -270,7 +272,7 @@ pub(super) struct Shared {
 }
 pub(super) struct LogItem {
     epoch: u64,
-    payload: Vec<u8>,
+    entry: Entry,
     charge: u64,
     enqueued_at: Instant,
 }
@@ -330,6 +332,7 @@ impl Handle {
         let shared = Arc::new(Shared {
             enabled: AtomicBool::new(settings.query_log.enabled),
             log_epoch: AtomicU64::new(PENDING_LOG_EPOCH),
+            latest_log_id: AtomicU64::new(0),
             limit_entries: AtomicUsize::new(settings.storage.queue_max_entries),
             limit_bytes: AtomicU64::new(settings.storage.queue_max_bytes),
             desired: Mutex::new(Desired { settings, revision }),
@@ -410,12 +413,7 @@ impl Handle {
         if !s.enabled.load(Ordering::Acquire) || epoch != s.log_epoch.load(Ordering::Acquire) {
             return;
         }
-        let Ok(mut payload) = serde_json::to_vec(&entry) else {
-            s.dropped.record(&s.dropped.entry_too_large);
-            return;
-        };
-        payload.shrink_to_fit();
-        let charge = (payload.capacity() + std::mem::size_of::<LogItem>()) as u64;
+        let charge = entry_charge(&entry);
         if charge > 131072 {
             s.dropped.record(&s.dropped.entry_too_large);
             return;
@@ -449,7 +447,7 @@ impl Handle {
             .logs
             .try_send(LogItem {
                 epoch,
-                payload,
+                entry,
                 charge,
                 enqueued_at: Instant::now(),
             })
@@ -501,6 +499,10 @@ impl Handle {
         self.request(|reply| Command::Newer(after_id, filter, reply))
             .await
     }
+    /// The latest committed log ID; reading it never enters the SQLite queue.
+    pub fn latest_log_id(&self) -> u64 {
+        self.0.shared.latest_log_id.load(Ordering::Acquire)
+    }
     pub fn log_enabled(&self) -> bool {
         self.0.shared.enabled.load(Ordering::Acquire)
     }
@@ -523,6 +525,53 @@ impl Handle {
     pub async fn shutdown(&self) -> Result<()> {
         self.request(Command::Shutdown).await
     }
+}
+
+/// Queue accounting covers the owned structure and every heap allocation.
+/// Serialization, including its exact stored-byte charge, belongs to the worker.
+fn entry_charge(entry: &Entry) -> u64 {
+    let strings = [
+        &entry.client,
+        &entry.name,
+        &entry.qtype,
+        &entry.transport,
+        &entry.status,
+        &entry.cache,
+    ];
+    let mut bytes =
+        std::mem::size_of::<LogItem>() + strings.iter().map(|s| s.capacity()).sum::<usize>();
+    for value in [
+        &entry.rcode,
+        &entry.cache_scope,
+        &entry.upstream,
+        &entry.incoming_ecs,
+        &entry.outgoing_ecs,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        bytes = bytes.saturating_add(value.capacity());
+    }
+    bytes = bytes
+        .saturating_add(entry.answer.capacity() * std::mem::size_of::<crate::query_log::Record>());
+    for record in &entry.answer {
+        bytes = bytes.saturating_add(
+            record.name.capacity() + record.record_type.capacity() + record.data.capacity(),
+        );
+    }
+    if let Some(attempts) = &entry.upstream_attempts {
+        bytes = bytes.saturating_add(
+            attempts.capacity()
+                * std::mem::size_of::<crate::upstreams::diagnostics::AttemptRecord>(),
+        );
+    }
+    if let Some(block) = &entry.block {
+        bytes = bytes.saturating_add(block.rule.capacity() + block.response.capacity());
+        if let Some(source) = &block.source_id {
+            bytes = bytes.saturating_add(source.capacity());
+        }
+    }
+    bytes as u64
 }
 
 fn status(shared: &Shared) -> Status {
@@ -558,7 +607,12 @@ fn private_directory(path: &Path) -> anyhow::Result<(PathBuf, File)> {
     // Managed mode validates its owned `runtime` child before calling us.
     // All component files are checked only inside the resolved private root.
     let (dir, lock) = crate::private_files::lock_private_dir(path, "runtime")?;
-    for name in ["observability.sqlite3", "observability.sqlite3-journal"] {
+    for name in [
+        "observability.sqlite3",
+        "observability.sqlite3-journal",
+        "observability.sqlite3-wal",
+        "observability.sqlite3-shm",
+    ] {
         crate::private_files::checked_open(&dir.join(name), false)?;
     }
     Ok((dir, lock))

@@ -1,6 +1,7 @@
 //! Bounded background refresh for one cache generation. Work over the in-flight
 //! or rate limit is rejected at once, and cancelling or shutting down the
-//! generation aborts its tasks.
+//! generation aborts its tasks. Prefetch rejections are counted by reason; a
+//! rejected cache fill is counted on its own, because its query was already sent.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -24,7 +25,19 @@ pub(super) struct Refresh {
     scheduled: AtomicU64,
     success: AtomicU64,
     failure: AtomicU64,
-    rejected: AtomicU64,
+    rejected_duplicate: AtomicU64,
+    rejected_cooldown: AtomicU64,
+    rejected_budget: AtomicU64,
+    cancelled_fill_rejected: AtomicU64,
+}
+
+/// Why work enters the refresh owner.
+#[derive(Clone, Copy)]
+pub(super) enum Purpose {
+    /// A fresh hit near expiry renews its entry.
+    Prefetch,
+    /// A caller left after its query was sent; the work only fills the cache.
+    Fill,
 }
 
 #[derive(Default)]
@@ -42,7 +55,14 @@ pub struct Snapshot {
     pub scheduled: u64,
     pub success: u64,
     pub failure: u64,
-    pub rejected: u64,
+    /// Prefetches refused because the same key is already refreshing.
+    pub rejected_duplicate: u64,
+    /// Prefetches refused because the key failed within `backoff_secs`.
+    pub rejected_cooldown: u64,
+    /// Prefetches refused by `max_inflight` or `rate_per_sec`.
+    pub rejected_budget: u64,
+    /// Sent queries of departed callers that the owner refused to finish.
+    pub cancelled_fill_rejected: u64,
 }
 
 impl Refresh {
@@ -53,7 +73,10 @@ impl Refresh {
             scheduled: self.scheduled.load(Relaxed),
             success: self.success.load(Relaxed),
             failure: self.failure.load(Relaxed),
-            rejected: self.rejected.load(Relaxed),
+            rejected_duplicate: self.rejected_duplicate.load(Relaxed),
+            rejected_cooldown: self.rejected_cooldown.load(Relaxed),
+            rejected_budget: self.rejected_budget.load(Relaxed),
+            cancelled_fill_rejected: self.cancelled_fill_rejected.load(Relaxed),
         }
     }
 
@@ -62,6 +85,7 @@ impl Refresh {
         query: &Message,
         epoch: u64,
         config: &PrefetchConfig,
+        purpose: Purpose,
         work: impl FnOnce() -> F,
     ) where
         F: Future<Output = bool> + Send + 'static,
@@ -81,13 +105,27 @@ impl Refresh {
         {
             state.starts.pop_front();
         }
-        if state.closed
-            || state.active.len() >= config.max_inflight
+        // A stopping generation is not a refresh decision and is not counted.
+        if state.closed {
+            return;
+        }
+        let rejected = if state.active.contains(&key) {
+            Some(&self.rejected_duplicate)
+        } else if state.cooldown.contains_key(&key) {
+            Some(&self.rejected_cooldown)
+        } else if state.active.len() >= config.max_inflight
             || state.starts.len() >= config.rate_per_sec as usize
-            || state.active.contains(&key)
-            || state.cooldown.contains_key(&key)
         {
-            self.rejected.fetch_add(1, Relaxed);
+            Some(&self.rejected_budget)
+        } else {
+            None
+        };
+        if let Some(reason) = rejected {
+            match purpose {
+                Purpose::Prefetch => reason,
+                Purpose::Fill => &self.cancelled_fill_rejected,
+            }
+            .fetch_add(1, Relaxed);
             return;
         }
         state.active.insert(key.clone());
@@ -184,19 +222,78 @@ mod tests {
         }
     }
 
+    fn query(name: &str) -> Message {
+        let mut query = Message::new(0, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
+        query
+    }
+
+    fn counts(refresh: &Refresh) -> [u64; 4] {
+        let s = refresh.snapshot();
+        [
+            s.rejected_duplicate,
+            s.rejected_cooldown,
+            s.rejected_budget,
+            s.cancelled_fill_rejected,
+        ]
+    }
+
+    #[tokio::test]
+    async fn rejections_are_counted_by_reason_and_fills_on_their_own() {
+        let refresh = Arc::new(Refresh::default());
+        let config = PrefetchConfig {
+            max_inflight: 2,
+            ..PrefetchConfig::default()
+        };
+        let pending = || std::future::pending::<bool>();
+        let refused = || async { panic!("rejected work must not start") };
+        refresh.schedule(&query("a.test."), 0, &config, Purpose::Prefetch, pending);
+        refresh.schedule(&query("a.test."), 0, &config, Purpose::Prefetch, refused);
+        assert_eq!(counts(&refresh), [1, 0, 0, 0]);
+        refresh.schedule(&query("b.test."), 0, &config, Purpose::Prefetch, || async {
+            false
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while refresh.snapshot().failure == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed refresh completes");
+        refresh.schedule(&query("b.test."), 0, &config, Purpose::Prefetch, refused);
+        assert_eq!(counts(&refresh), [1, 1, 0, 0]);
+        // Another epoch is another key; it takes the second slot.
+        refresh.schedule(&query("b.test."), 1, &config, Purpose::Prefetch, pending);
+        refresh.schedule(&query("c.test."), 0, &config, Purpose::Prefetch, refused);
+        assert_eq!(counts(&refresh), [1, 1, 1, 0]);
+        // Every refused fill discards a sent query, whatever the reason.
+        refresh.schedule(&query("c.test."), 0, &config, Purpose::Fill, refused);
+        refresh.schedule(&query("a.test."), 0, &config, Purpose::Fill, refused);
+        assert_eq!(counts(&refresh), [1, 1, 1, 2]);
+        let snapshot = refresh.snapshot();
+        assert_eq!((snapshot.active, snapshot.scheduled), (2, 3));
+
+        let refresh = Arc::new(Refresh::default());
+        let config = PrefetchConfig {
+            rate_per_sec: 1,
+            ..PrefetchConfig::default()
+        };
+        refresh.schedule(&query("a.test."), 0, &config, Purpose::Prefetch, pending);
+        refresh.schedule(&query("b.test."), 0, &config, Purpose::Prefetch, refused);
+        assert_eq!(counts(&refresh), [0, 0, 1, 0]);
+        refresh.cancel();
+    }
+
     #[tokio::test]
     async fn cancel_and_owner_drop_destroy_pending_network_work() {
         for drop_owner in [false, true] {
             let refresh = Arc::new(Refresh::default());
-            let mut query = Message::new(0, MessageType::Query, OpCode::Query);
-            query.add_query(Query::query(
-                Name::from_ascii("cancel.test.").unwrap(),
-                RecordType::A,
-            ));
+            let query = query("cancel.test.");
             let dropped = Arc::new(AtomicBool::new(false));
             let guard = Dropped(dropped.clone());
             let (started, ready) = tokio::sync::oneshot::channel();
-            refresh.schedule(&query, 0, &PrefetchConfig::default(), || async move {
+            let config = PrefetchConfig::default();
+            refresh.schedule(&query, 0, &config, Purpose::Prefetch, || async move {
                 let _guard = guard;
                 let _ = started.send(());
                 std::future::pending::<bool>().await
@@ -209,11 +306,11 @@ mod tests {
                 refresh.shutdown().await;
                 assert_eq!(refresh.snapshot().active, 0);
                 assert_eq!(refresh.snapshot().failure, 0);
-                refresh.schedule(&query, 0, &PrefetchConfig::default(), || async {
+                refresh.schedule(&query, 0, &config, Purpose::Prefetch, || async {
                     panic!("a closed owner must not start work");
                 });
                 assert_eq!(refresh.snapshot().scheduled, 1);
-                assert_eq!(refresh.snapshot().rejected, 1);
+                assert_eq!(counts(&refresh), [0; 4]);
             }
             tokio::time::timeout(Duration::from_secs(1), async {
                 while !dropped.load(Relaxed) {

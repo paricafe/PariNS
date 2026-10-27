@@ -169,9 +169,15 @@ pub fn decode(bytes: &[u8]) -> Result<Message> {
 }
 
 pub fn request(bytes: &[u8]) -> Request {
-    let query = match decode(bytes) {
-        Ok(query) => query,
-        Err(_) => {
+    request_from_decoded(bytes, decode(bytes).ok())
+}
+
+/// Classifies a message already decoded for request logging. Invalid wire data
+/// still uses its header, when readable, to construct the protocol error.
+pub(crate) fn request_from_decoded(bytes: &[u8], query: Option<Message>) -> Request {
+    let query = match query {
+        Some(query) => query,
+        None => {
             let Ok(header) = Header::read(&mut BinDecoder::new(bytes)) else {
                 return Request::Drop;
             };

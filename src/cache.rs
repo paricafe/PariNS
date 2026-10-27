@@ -3,13 +3,18 @@
 //! When `[cache.ecs_sharing]` is enabled, each shard also owns the bounded
 //! classification records that may store a missing-ECS answer once per family
 //! (`Scope::Learned`); see `sharing` for the learning and revocation rules.
+//! An entry written by a prefetch refresh is settled once: `refresh_useful`
+//! when an observed lookup first returns it fresh, `refresh_unused` when an
+//! observed lookup first returns it stale or it leaves the cache unseen
+//! (retention expiry, eviction, invalidation or replacement). Entries still
+//! waiting when a generation ends are not counted.
 
 use std::{
     collections::{HashMap, hash_map::RandomState},
     hash::BuildHasher,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -105,10 +110,24 @@ struct Entry {
     /// a stale source, never prefetched and never written to a snapshot.
     failure: Option<Failure>,
     prefetch: bool,
+    /// Written by a prefetch refresh and not yet settled as useful or unused.
+    /// Read and cleared only under the shard lock.
+    refreshed: AtomicBool,
     hits: AtomicU64,
     accessed: AtomicU64,
     charge: usize,
     charged: Arc<AtomicUsize>,
+}
+
+impl Entry {
+    /// True once for a refreshed entry; the caller holds the shard lock.
+    fn settle_refresh(&self) -> bool {
+        let refreshed = self.refreshed.load(Ordering::Relaxed);
+        if refreshed {
+            self.refreshed.store(false, Ordering::Relaxed);
+        }
+        refreshed
+    }
 }
 
 impl Drop for Entry {
@@ -162,36 +181,6 @@ struct Shard {
 }
 
 impl Shard {
-    fn remove(&mut self, part: usize, id: u64) {
-        if let Some(entry) = self.partitions[part].lru.pop(&id) {
-            self.learned -= usize::from(matches!(entry.scope, Scope::Learned { .. }));
-            self.failures -= usize::from(entry.failure.is_some());
-            let empty = if let Some(ids) = self.buckets.get_mut(&entry.key) {
-                ids.retain(|entry| entry.id != id);
-                ids.is_empty()
-            } else {
-                false
-            };
-            if empty {
-                self.buckets.remove(&entry.key);
-            }
-        }
-    }
-
-    fn prune(&mut self, key: &Key, now: Instant) {
-        let expired: Vec<_> = self
-            .buckets
-            .get(key)
-            .into_iter()
-            .flatten()
-            .filter(|e| now.saturating_duration_since(e.inserted) >= e.retention)
-            .map(|e| (usize::from(e.negative), e.id))
-            .collect();
-        for (part, id) in expired {
-            self.remove(part, id);
-        }
-    }
-
     fn select(
         &self,
         key: &Key,
@@ -266,6 +255,8 @@ pub struct Cache {
     rules: Vec<Rule>,
     epoch: AtomicU64,
     bypasses: AtomicU64,
+    refresh_useful: AtomicU64,
+    refresh_unused: AtomicU64,
     diagnostics: decision::Diagnostics,
 }
 
@@ -342,6 +333,8 @@ impl Cache {
             rules,
             epoch: AtomicU64::new(0),
             bypasses: AtomicU64::new(0),
+            refresh_useful: AtomicU64::new(0),
+            refresh_unused: AtomicU64::new(0),
             diagnostics: decision::Diagnostics::default(),
         }
     }
@@ -355,6 +348,39 @@ impl Cache {
 
     fn shard(&self, key: &Key) -> usize {
         self.hasher.hash_one(key) as usize % self.shards.len()
+    }
+
+    fn remove(&self, shard: &mut Shard, part: usize, id: u64) {
+        if let Some(entry) = shard.partitions[part].lru.pop(&id) {
+            if entry.settle_refresh() {
+                self.refresh_unused.fetch_add(1, Ordering::Relaxed);
+            }
+            shard.learned -= usize::from(matches!(entry.scope, Scope::Learned { .. }));
+            shard.failures -= usize::from(entry.failure.is_some());
+            let empty = if let Some(ids) = shard.buckets.get_mut(&entry.key) {
+                ids.retain(|entry| entry.id != id);
+                ids.is_empty()
+            } else {
+                false
+            };
+            if empty {
+                shard.buckets.remove(&entry.key);
+            }
+        }
+    }
+
+    fn prune(&self, shard: &mut Shard, key: &Key, now: Instant) {
+        let expired: Vec<_> = shard
+            .buckets
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|e| now.saturating_duration_since(e.inserted) >= e.retention)
+            .map(|e| (usize::from(e.negative), e.id))
+            .collect();
+        for (part, id) in expired {
+            self.remove(shard, part, id);
+        }
     }
 
     fn policy(&self, key: &Key, name: &Name) -> Policy {
@@ -415,6 +441,14 @@ impl Cache {
         object.insert("ecs_shared_entries".into(), json!(entries));
         object.insert("ecs_sharing_revocations".into(), json!(revocations));
         value
+    }
+
+    /// Refreshed entries settled as useful and as unused.
+    pub fn refresh_outcomes(&self) -> (u64, u64) {
+        (
+            self.refresh_useful.load(Ordering::Relaxed),
+            self.refresh_unused.load(Ordering::Relaxed),
+        )
     }
 
     fn sharing_counts(&self) -> (u64, usize, u64) {
@@ -482,9 +516,11 @@ impl Cache {
                 .lock()
                 .expect("cache shard poisoned");
             let Some((part, id)) = shard.select(&key, outgoing, now, allow_stale) else {
-                shard.prune(&key, now);
-                if observe && !allow_stale {
-                    shard.counts.misses += 1;
+                if observe {
+                    self.prune(&mut shard, &key, now);
+                    if !allow_stale {
+                        shard.counts.misses += 1;
+                    }
                 }
                 return LookupResult::empty(LookupOutcome::Miss, None);
             };
@@ -493,10 +529,18 @@ impl Cache {
                 let clock = shard.clock;
                 let entry = Arc::clone(shard.partitions[part].lru.get(&id).unwrap());
                 entry.accessed.store(clock, Ordering::Relaxed);
-                if now.saturating_duration_since(entry.inserted) < entry.lifetime {
+                let fresh = now.saturating_duration_since(entry.inserted) < entry.lifetime;
+                if fresh {
                     shard.counts.hits += 1;
                 } else {
                     shard.counts.stale_hits += 1;
+                }
+                if entry.settle_refresh() {
+                    if fresh {
+                        self.refresh_useful.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.refresh_unused.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 shard.counts.shared_hits += u64::from(matches!(entry.scope, Scope::Learned { .. }));
                 shard.counts.failure_hits += u64::from(entry.failure.is_some());
@@ -591,7 +635,22 @@ impl Cache {
         now: Instant,
         epoch: u64,
     ) -> StoreDecision {
-        let decision = self.admit(query, response, scope, now, epoch, None);
+        let decision = self.admit(query, response, scope, now, epoch, Origin::Answer);
+        self.diagnostics.store(decision);
+        decision
+    }
+
+    /// Stores an answer like `insert_decision_if_epoch`, marked as written by a
+    /// prefetch refresh for the `refresh_useful` and `refresh_unused` counts.
+    pub fn insert_refresh_if_epoch(
+        &self,
+        query: &Message,
+        response: &Message,
+        scope: Scope,
+        now: Instant,
+        epoch: u64,
+    ) -> StoreDecision {
+        let decision = self.admit(query, response, scope, now, epoch, Origin::Refresh);
         self.diagnostics.store(decision);
         decision
     }
@@ -603,8 +662,12 @@ impl Cache {
         scope: Scope,
         now: Instant,
         epoch: u64,
-        restore: Option<Restore>,
+        origin: Origin,
     ) -> StoreDecision {
+        let restore = match origin {
+            Origin::Restore(restore) => Some(restore),
+            Origin::Answer | Origin::Refresh => None,
+        };
         let restoring = restore.is_some();
         let Some(key) = Key::of(query) else {
             return StoreDecision::skipped(query_rejection(query));
@@ -651,7 +714,7 @@ impl Cache {
             shard.counts.rejections += u64::from(!restoring);
             return StoreDecision::skipped(DecisionReason::EpochChanged);
         }
-        shard.prune(&key, now);
+        self.prune(&mut shard, &key, now);
         // Classification follows the epoch check under the same lock, so work
         // older than an invalidation never teaches or refills shared state.
         let scope = if learning {
@@ -707,7 +770,7 @@ impl Cache {
             .collect();
         let superseded = !replaced.is_empty();
         for (p, id) in replaced {
-            shard.remove(p, id);
+            self.remove(&mut shard, p, id);
         }
         let (wire, lifetime, negative) = match prepared {
             Ok(prepared) => prepared,
@@ -730,6 +793,7 @@ impl Cache {
                 negative,
                 failure: None,
                 prefetch: policy.prefetch,
+                refreshed: matches!(origin, Origin::Refresh),
                 accessed: restore.map(|restore| restore.accessed),
             },
             now,
@@ -805,7 +869,7 @@ impl Cache {
             shard.counts.rejections += 1;
             return StoreDecision::skipped(DecisionReason::EpochChanged);
         }
-        shard.prune(&key, now);
+        self.prune(&mut shard, &key, now);
         let overlapping = || {
             shard
                 .buckets
@@ -825,7 +889,7 @@ impl Cache {
             .collect();
         let superseded = !replaced.is_empty();
         for id in replaced {
-            shard.remove(1, id);
+            self.remove(&mut shard, 1, id);
         }
         let lifetime = Duration::from_secs(u64::from(lifetime));
         self.place(
@@ -839,6 +903,7 @@ impl Cache {
                 negative: true,
                 failure: Some(failure),
                 prefetch: false,
+                refreshed: false,
                 accessed: None,
             },
             now,
@@ -864,6 +929,7 @@ impl Cache {
             negative,
             failure,
             prefetch,
+            refreshed,
             accessed,
         } = stored;
         let charge = charge(&wire, &key);
@@ -885,7 +951,7 @@ impl Cache {
                 return StoreDecision::rejected(DecisionReason::VariantLimit, superseded);
             };
             let (p, id) = (usize::from(entry.negative), entry.id);
-            shard.remove(p, id);
+            self.remove(shard, p, id);
             shard.counts.evictions += 1;
         }
         loop {
@@ -899,7 +965,7 @@ impl Cache {
                 shard.counts.rejections += 1;
                 return StoreDecision::rejected(DecisionReason::Capacity, superseded);
             };
-            shard.remove(part, id);
+            self.remove(shard, part, id);
             shard.counts.evictions += 1;
         }
         shard.clock += 1;
@@ -920,6 +986,7 @@ impl Cache {
             negative,
             failure,
             prefetch,
+            refreshed: AtomicBool::new(refreshed),
             hits: AtomicU64::new(0),
             accessed: AtomicU64::new(accessed.unwrap_or(id)),
             charge,
@@ -979,7 +1046,7 @@ impl Cache {
                 .collect();
             removed += matches.len();
             for (part, id) in matches {
-                shard.remove(part, id);
+                self.remove(shard, part, id);
             }
             shard.sharing.invalidate(name.as_ref(), kind, scope);
         }
@@ -1018,7 +1085,8 @@ impl Cache {
             "shards":self.shards.len(),"epoch":self.epoch(),
             "ecs_shared_hits":counts.shared_hits,"ecs_shared_entries":learned,
             "ecs_sharing_revocations":counts.revocations,
-            "servfail_entries":failures,"servfail_hits":counts.failure_hits})
+            "servfail_entries":failures,"servfail_hits":counts.failure_hits,
+            "refresh_useful":self.refresh_useful.load(Ordering::Relaxed),"refresh_unused":self.refresh_unused.load(Ordering::Relaxed)})
     }
 
     pub fn inspect(&self, name: &Name, kind: Option<RecordType>, now: Instant) -> Value {
@@ -1125,8 +1193,18 @@ struct Stored {
     negative: bool,
     failure: Option<Failure>,
     prefetch: bool,
+    refreshed: bool,
     /// A restored entry's use stamp; the entry starts least recently used.
     accessed: Option<u64>,
+}
+
+/// Who supplies an answer to `Cache::admit`.
+#[derive(Clone, Copy)]
+enum Origin {
+    Answer,
+    /// A prefetch refresh; the entry waits to be settled as useful or unused.
+    Refresh,
+    Restore(Restore),
 }
 
 /// A snapshot record's admission: its remaining fresh lifetime in seconds and

@@ -466,7 +466,14 @@ impl Live {
     ) -> Result<(), End> {
         let mut state = State::current(&self.services);
         let mut newer = None;
-        if state.log == "ok" {
+        if state.log == "ok"
+            && (refresh
+                || subscription.cursor.is_none()
+                || sent.is_none_or(|previous| previous.log_epoch != state.log_epoch)
+                || subscription
+                    .cursor
+                    .is_some_and(|cursor| self.services.storage.latest_log_id() > cursor))
+        {
             let _permit = self.queries.acquire().await.map_err(|_| None)?;
             match self
                 .services

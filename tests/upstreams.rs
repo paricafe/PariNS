@@ -710,6 +710,7 @@ async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
             request = server.accept() => {
                 let Ok(Some(request)) = request else { break };
                 count += 1;
+                let connection = connection.clone();
                 handlers.spawn(async move {
                     let (request, mut stream) = request.resolve_request().await.unwrap();
                     assert_eq!(request.method(), "GET");
@@ -725,10 +726,14 @@ async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
                         stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
                         return;
                     }
+                    if case == 14 {
+                        connection.close(0x100u32.into(), b"test connection failure");
+                        return;
+                    }
                     if case == 8 { tokio::time::sleep(Duration::from_millis(350)).await; }
                     if case == 10 { response.metadata.response_code = ResponseCode::ServFail; }
                     let mut headers = http::Response::builder()
-                        .status(match case { 1 => 302, 11 => 405, _ => 200 })
+                        .status(match case { 1 => 302, 11 => 405, 12 => 503, 13 => 429, _ => 200 })
                         .header("content-type", if case == 2 { "text/plain" } else { "application/dns-message" });
                     if case == 9 { headers = headers.header("x-large", "a".repeat(17 * 1024)); }
                     let headers = headers.body(()).unwrap();
@@ -1074,75 +1079,302 @@ async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
     tcp_server.await.unwrap();
 }
 
-/// A sent H3 request that fails (bad status, invalid answer, stream reset) is
-/// this query's upstream failure: it is never resent over H2. The cooldown then
-/// moves the next query to H2 without trying H3.
+/// A failure of a sent stream does not resend the query or retire its connection.
 #[tokio::test]
-async fn h3_failure_after_sending_is_not_resent_and_cools_down_to_h2() {
+async fn h3_stream_failures_are_not_resent_and_do_not_cool_down() {
     use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome, Reason};
-    // Case 8 (a slow answer) stays on H3; see h3_slow_answer_completes_on_h3.
-    for case in (1..=9).filter(|case| *case != 8) {
+    for case in (1..=7).chain([12, 13]) {
         let (_dir, ca, tls) = identity(b"h3");
         let (endpoint, listener) = dual_endpoint(&tls).await;
         let address = endpoint.local_addr().unwrap();
-        let mut h2_tls = (*tls).clone();
-        h2_tls.alpn_protocols = vec![b"h2".to_vec()];
         let quic_server = tokio::spawn(serve_h3(endpoint, case));
-        let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 1));
         let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
-        let settings = &mut config.upstreams;
-        settings.ca_file = Some(ca);
-        settings.prefer_h3 = true;
+        config.upstreams.ca_file = Some(ca);
+        config.upstreams.prefer_h3 = true;
         let client = client(&config).unwrap();
-        let q = query();
-        let exchange = |operation| {
-            timeout(
-                Duration::from_secs(2),
-                client.exchange_observed(
-                    &q,
-                    tokio::time::Instant::now() + Duration::from_secs(1),
-                    operation,
+        for _ in 0..2 {
+            let operation = Operation::new(true, None);
+            assert!(
+                client
+                    .exchange_observed(
+                        &query(),
+                        tokio::time::Instant::now() + Duration::from_secs(1),
+                        &operation,
+                    )
+                    .await
+                    .is_err(),
+                "case {case}",
+            );
+            let trace = operation.trace().unwrap();
+            assert_eq!(
+                trace.attempts.len(),
+                1,
+                "case {case}: no H2 resend or cooldown"
+            );
+            assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+            assert_eq!(trace.attempts[0].outcome, Outcome::Failed);
+            match case {
+                1 | 12 | 13 => {
+                    assert_eq!(trace.attempts[0].reason, Some(Reason::HttpStatus));
+                    assert_eq!(
+                        trace.attempts[0].code,
+                        Some(match case {
+                            1 => 302,
+                            12 => 503,
+                            _ => 429,
+                        })
+                    );
+                }
+                2..=6 => assert_eq!(
+                    trace.attempts[0].reason,
+                    Some(Reason::ProtocolInvalid),
+                    "case {case}"
                 ),
-            )
-        };
-        let failed = Operation::new(true, None);
-        assert!(exchange(&failed).await.unwrap().is_err(), "case {case}");
-        let trace = failed.trace().unwrap();
-        assert_eq!(trace.attempts.len(), 1, "case {case}: no H2 resend");
-        assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
-        assert_eq!(trace.attempts[0].outcome, Outcome::Failed);
-        let cooled = Operation::new(true, None);
-        assert_eq!(
-            exchange(&cooled).await.unwrap().unwrap().message.id,
-            123,
-            "case {case}"
-        );
-        let next = cooled.trace().unwrap();
-        assert_eq!(next.attempts[0].outcome, Outcome::Skipped);
-        assert_eq!(next.attempts[1].protocol, Some(ActualProtocol::Doh2));
-        assert_eq!(next.attempts[1].outcome, Outcome::Succeeded);
-        match case {
-            1 => {
-                assert_eq!(trace.attempts[0].reason, Some(Reason::HttpStatus));
-                assert_eq!(trace.attempts[0].code, Some(302));
+                _ => {}
             }
-            2..=6 => assert_eq!(
-                trace.attempts[0].reason,
-                Some(Reason::ProtocolInvalid),
-                "case {case}"
-            ),
-            _ => {}
         }
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
         drop(client);
         assert_eq!(
             timeout(Duration::from_secs(2), quic_server)
                 .await
                 .unwrap()
                 .unwrap(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn h3_connection_failure_cools_down_then_retries_after_two_seconds() {
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome};
+    let (_dir, ca, tls) = identity(b"h3");
+    let (endpoint, listener) = dual_endpoint(&tls).await;
+    let address = endpoint.local_addr().unwrap();
+    let mut h2_tls = (*tls).clone();
+    h2_tls.alpn_protocols = vec![b"h2".to_vec()];
+    let failed_server = tokio::spawn(serve_h3(endpoint.clone(), 14));
+    let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 1));
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.prefer_h3 = true;
+    let client = client(&config).unwrap();
+    let failed = Operation::new(true, None);
+    assert!(
+        client
+            .exchange_observed(
+                &query(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &failed
+            )
+            .await
+            .is_err()
+    );
+    let trace = failed.trace().unwrap();
+    assert_eq!(
+        trace.attempts.len(),
+        1,
+        "a sent query is not resent over H2"
+    );
+    assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+    assert_eq!(failed_server.await.unwrap(), 1);
+    let healthy_server = tokio::spawn(serve_h3(endpoint, 0));
+    let cooled = Operation::new(true, None);
+    assert!(
+        client
+            .exchange_observed(
+                &query(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &cooled
+            )
+            .await
+            .is_ok()
+    );
+    let trace = cooled.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 2);
+    assert_eq!(trace.attempts[0].outcome, Outcome::Skipped);
+    assert_eq!(trace.attempts[1].protocol, Some(ActualProtocol::Doh2));
+    tcp_server.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2050)).await;
+    let retried = Operation::new(true, None);
+    assert!(
+        client
+            .exchange_observed(
+                &query(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &retried
+            )
+            .await
+            .is_ok()
+    );
+    let trace = retried.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 1);
+    assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+    assert_eq!(trace.attempts[0].outcome, Outcome::Succeeded);
+    drop(client);
+    assert_eq!(
+        timeout(Duration::from_secs(2), healthy_server)
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn h3_failed_handshake_after_bootstrap_rotation_cools_down() {
+    use hickory_proto::rr::{
+        RData, Record,
+        rdata::{A, AAAA},
+    };
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Cover both a live old connection and one removed by the cache lookup.
+    for close_old in [false, true] {
+        let (_dir, ca, tls) = identity(b"h3");
+        let old_endpoint = h3_endpoint(&tls);
+        let port = old_endpoint.local_addr().unwrap().port();
+        let silent = UdpSocket::bind(("::1", port)).await.unwrap();
+        let listener = TcpListener::bind(("::1", port)).await.unwrap();
+        let bootstrap = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rotated = Arc::new(AtomicBool::new(false));
+        let current = rotated.clone();
+        let mut config = config(
+            vec![format!("https://resolver.test:{port}")],
+            Mode::Weighted,
+        );
+        config.upstreams.ca_file = Some(ca);
+        config.upstreams.prefer_h3 = true;
+        config.upstreams.bootstrap = vec![bootstrap.local_addr().unwrap()];
+        let bootstrap_server = tokio::spawn(async move {
+            for _ in 0..6 {
+                let mut bytes = [0; 65535];
+                let (n, peer) = bootstrap.recv_from(&mut bytes).await.unwrap();
+                let mut response = Message::from_vec(&bytes[..n]).unwrap();
+                response.metadata.message_type = MessageType::Response;
+                let question = &response.queries[0];
+                let data = match (current.load(Ordering::SeqCst), question.query_type()) {
+                    (false, RecordType::A) => Some(RData::A(A::new(127, 0, 0, 1))),
+                    (true, RecordType::AAAA) => Some(RData::AAAA(AAAA("::1".parse().unwrap()))),
+                    _ => None,
+                };
+                if let Some(data) = data {
+                    response.add_answer(Record::from_rdata(question.name().clone(), 0, data));
+                }
+                bootstrap
+                    .send_to(&response.to_vec().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        let old_server = tokio::spawn(serve_h3(old_endpoint.clone(), 0));
+        let mut h2_tls = (*tls).clone();
+        h2_tls.alpn_protocols = vec![b"h2".to_vec()];
+        let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 2));
+        let client = client(&config).unwrap();
+        assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
+        if close_old {
+            old_endpoint.close(0u32.into(), b"test old connection closed");
+            // Let the peer close arrive before the new-address lookup.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        rotated.store(true, Ordering::SeqCst);
+        for attempt in 0..2 {
+            let operation = Operation::new(true, None);
+            assert!(
+                client
+                    .exchange_observed(
+                        &query(),
+                        tokio::time::Instant::now() + Duration::from_secs(2),
+                        &operation
+                    )
+                    .await
+                    .is_ok()
+            );
+            let trace = operation.trace().unwrap();
+            let h3 = trace
+                .attempts
+                .iter()
+                .find(|item| item.protocol == Some(ActualProtocol::Doh3))
+                .unwrap();
+            assert_eq!(
+                h3.outcome,
+                if attempt == 0 {
+                    Outcome::Failed
+                } else {
+                    Outcome::Skipped
+                },
+                "close_old={close_old}, attempt={attempt}: {trace:?}"
+            );
+            assert_eq!(
+                trace.attempts.last().unwrap().protocol,
+                Some(ActualProtocol::Doh2)
+            );
+        }
+        // The first failed handshake sent a QUIC probe to the new address.
+        assert!(
+            timeout(
+                Duration::from_millis(100),
+                silent.recv_from(&mut [0; 65535])
+            )
+            .await
+            .is_ok()
+        );
+        drop(client);
+        assert_eq!(
+            timeout(Duration::from_secs(2), old_server)
+                .await
+                .unwrap()
+                .unwrap(),
             1
         );
         tcp_server.await.unwrap();
+        bootstrap_server.await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn h3_oversized_headers_after_sending_are_not_resent() {
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation};
+    let (_dir, ca, tls) = identity(b"h3");
+    let (endpoint, listener) = dual_endpoint(&tls).await;
+    let address = endpoint.local_addr().unwrap();
+    let server = tokio::spawn(serve_h3(endpoint, 9));
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.prefer_h3 = true;
+    let client = client(&config).unwrap();
+    let operation = Operation::new(true, None);
+    assert!(
+        client
+            .exchange_observed(
+                &query(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &operation
+            )
+            .await
+            .is_err()
+    );
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 1);
+    assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+    assert!(
+        timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+    drop(client);
+    assert_eq!(
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]

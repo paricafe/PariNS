@@ -36,6 +36,7 @@ struct Database {
     /// Records queued before the asynchronous open learned the stored epoch
     /// belong to it until the first clear after open.
     opened_log_epoch: u64,
+    coverage: Coverage,
 }
 
 /// SQLite VM operations between cancellation checks of the existing-file check.
@@ -106,7 +107,7 @@ pub(super) fn run(
                 // The terminal flush already cleaned up; closing commits only
                 // what arrived since.
                 let result = if let Some(db) = database.as_mut() {
-                    let result = db.drain(&shared, &logs);
+                    let result = db.drain(&shared, &logs).and_then(|()| db.checkpoint(true));
                     db.report_error(&shared, &result);
                     db.update_status(&shared);
                     result
@@ -146,17 +147,26 @@ pub(super) fn run(
                 db.report_error(&shared, &result);
                 last_flush = Instant::now();
             }
-            if db.last_cleanup.elapsed()
-                >= Duration::from_secs(db.settings.storage.cleanup_interval_secs)
+            let cleanup_due = db.last_cleanup.elapsed()
+                >= Duration::from_secs(db.settings.storage.cleanup_interval_secs);
+            if cleanup_due
                 || shared
                     .status
                     .lock()
                     .expect("storage status")
                     .capacity_pending
             {
-                let result = db.cleanup();
+                let result = if cleanup_due || db.settings_pending {
+                    db.cleanup()
+                } else {
+                    db.trim_capacity()
+                };
                 db.report_error(&shared, &result);
-                db.last_cleanup = Instant::now();
+                if cleanup_due {
+                    db.last_cleanup = Instant::now();
+                }
+                let refreshed = db.refresh_log_state(&shared);
+                db.report_error(&shared, &refreshed);
                 // Publish the outcome at once: a stale capacity_pending would
                 // repeat the cleanup on every pass until the next refresh.
                 db.update_status(&shared);
@@ -260,18 +270,12 @@ fn record_cleanup(conn: &Connection, reason: CleanupReason, removed: u64, at: u6
     if removed == 0 {
         return Ok(());
     }
-    conn.execute(
-        "UPDATE metadata SET value=value+?1 WHERE key=?2",
-        params![removed, reason.key()],
-    )?;
-    conn.execute(
-        "UPDATE metadata SET value=? WHERE key='cleanup_last_reason'",
-        [reason.code()],
-    )?;
-    conn.execute(
-        "UPDATE metadata SET value=? WHERE key='cleanup_last_at_ms'",
-        [at],
-    )?;
+    conn.prepare_cached("UPDATE metadata SET value=value+?1 WHERE key=?2")?
+        .execute(params![removed, reason.key()])?;
+    conn.prepare_cached("UPDATE metadata SET value=? WHERE key='cleanup_last_reason'")?
+        .execute([reason.code()])?;
+    conn.prepare_cached("UPDATE metadata SET value=? WHERE key='cleanup_last_at_ms'")?
+        .execute([at])?;
     Ok(())
 }
 
@@ -392,17 +396,18 @@ impl Database {
             checked?;
             conn.progress_handler(0, None::<fn() -> bool>)?;
         }
-        conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-2048;")?;
+        if fresh {
+            // WAL initializes the database header, so set auto-vacuum first.
+            conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
+        }
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-2048; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576;")?;
         if fresh {
             // auto_vacuum must precede the first table. Tables and the format
             // row commit together, so a crash never leaves an unformatted file.
-            conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
             let tx = conn.transaction()?;
             tx.execute_batch(SCHEMA)?;
-            tx.execute(
-                "INSERT INTO metadata VALUES('format',?1)",
-                [DATABASE_FORMAT],
-            )?;
+            tx.prepare_cached("INSERT INTO metadata VALUES('format',?1)")?
+                .execute([DATABASE_FORMAT])?;
             tx.commit()?;
         }
         // Read stored state first; publish it below under short locks.
@@ -444,6 +449,7 @@ impl Database {
             settings_pending: true,
             reset_clock_ms: 0,
             opened_log_epoch: log_epoch,
+            coverage: Coverage::default(),
         };
         let initial = {
             let mut owner = shared.stats.lock().expect("statistics owner");
@@ -469,16 +475,16 @@ impl Database {
         };
         if let Some(totals) = initial {
             database.reset_clock_ms = database.cleanup_now();
-            database.conn.execute(
-                "INSERT INTO statistics_totals VALUES(1,?1,?2,?3,0,?4,?5)",
-                params![
+            database
+                .conn
+                .prepare_cached("INSERT INTO statistics_totals VALUES(1,?1,?2,?3,0,?4,?5)")?
+                .execute(params![
                     totals.epoch,
                     totals.since_ms,
                     database.run_id,
                     serde_json::to_vec(&totals)?,
                     database.reset_clock_ms
-                ],
-            )?;
+                ])?;
         }
         {
             let mut status = shared.status.lock().expect("storage status");
@@ -488,9 +494,11 @@ impl Database {
             status.history_epoch = history_epoch;
         }
         shared.log_epoch.store(log_epoch, Ordering::Release);
+        database.refresh_log_state(shared)?;
         database.set_page_cap()?;
         let cleanup = database.cleanup();
         database.report_error(shared, &cleanup);
+        database.refresh_log_state(shared)?;
         database.update_status(shared);
         Ok(database)
     }
@@ -506,6 +514,8 @@ impl Database {
         drop(desired);
         let result = self.set_page_cap().and_then(|_| self.cleanup());
         self.report_error(shared, &result);
+        let refreshed = self.refresh_log_state(shared);
+        self.report_error(shared, &refreshed);
         self.update_status(shared);
     }
     fn cleanup_now(&mut self) -> u64 {
@@ -528,12 +538,130 @@ impl Database {
                 .query_row("PRAGMA freelist_count", [], |r| r.get(0))?,
         ))
     }
+    fn disk_bytes(&self) -> Result<u64> {
+        if let Some(dir) = &self.directory {
+            Ok([
+                "observability.sqlite3",
+                "observability.sqlite3-wal",
+                "observability.sqlite3-shm",
+            ]
+            .iter()
+            .map(|name| {
+                std::fs::metadata(dir.join(name))
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            })
+            .sum())
+        } else {
+            let (size, pages, _) = self.page_info()?;
+            Ok(size * pages)
+        }
+    }
     fn set_page_cap(&self) -> Result<()> {
         let (size, count, _) = self.page_info()?;
         // SQLite cannot reduce below current size. Freeze growth until bounded
         // cleanup reaches the desired cap; status retains capacity_pending.
-        let cap = (self.settings.storage.max_database_bytes / size).max(count);
+        let cap = (self
+            .settings
+            .storage
+            .max_database_bytes
+            .saturating_sub(1_048_576)
+            / size)
+            .max(count);
         self.conn.pragma_update(None, "max_page_count", cap)?;
+        Ok(())
+    }
+    fn checkpoint(&self, truncate: bool) -> Result<()> {
+        if self.directory.is_some() {
+            let mode = if truncate { "TRUNCATE" } else { "PASSIVE" };
+            let (busy, _, _): (u64, u64, u64) =
+                self.conn
+                    .query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?;
+            if truncate && busy != 0 {
+                return Err(Error::StorageUnavailable("WAL checkpoint is busy".into()));
+            }
+        }
+        Ok(())
+    }
+    fn refresh_log_state(&mut self, shared: &Shared) -> Result<()> {
+        let first: Option<u64> = self
+            .conn
+            .query_row(
+                "SELECT time_ms FROM query_log ORDER BY time_ms LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let last: Option<u64> = self
+            .conn
+            .query_row(
+                "SELECT time_ms FROM query_log ORDER BY time_ms DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        self.coverage = Coverage {
+            earliest_time_ms: first,
+            latest_time_ms: last,
+            span_ms: first.zip(last).map(|(a, b)| b.saturating_sub(a)),
+        };
+        let latest: u64 =
+            self.conn
+                .query_row("SELECT COALESCE(MAX(id),0) FROM query_log", [], |r| {
+                    r.get(0)
+                })?;
+        shared.latest_log_id.store(latest, Ordering::Release);
+        Ok(())
+    }
+    /// Capacity trims on the write path never vacuum the database.
+    fn trim_capacity(&mut self) -> Result<()> {
+        let now = self.cleanup_now();
+        let tx = self.conn.transaction()?;
+        let count = epoch(&tx, "log_count")?;
+        let bytes = epoch(&tx, "log_bytes")?;
+        let (n, reason) = if count > self.settings.query_log.max_entries as u64 {
+            (
+                (count - self.settings.query_log.max_entries as u64).min(256),
+                CleanupReason::EntryLimit,
+            )
+        } else if bytes > self.settings.query_log.max_bytes {
+            (
+                oldest_log_count(&tx, bytes - self.settings.query_log.max_bytes)? as u64,
+                CleanupReason::ByteLimit,
+            )
+        } else {
+            (0, CleanupReason::DatabaseLimit)
+        };
+        if n > 0 {
+            let removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT ?)")?.execute([n])?;
+            record_cleanup(&tx, reason, removed as u64, now)?;
+        }
+        let points = epoch(&tx, "point_count")?;
+        if points > self.settings.statistics.max_samples as u64 {
+            let removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT ?)")?.execute([(points - self.settings.statistics.max_samples as u64).min(256)])?;
+            record_cleanup(&tx, CleanupReason::EntryLimit, removed as u64, now)?;
+        }
+        tx.commit()?;
+        let (size, pages, free) = self.page_info()?;
+        let cap = self
+            .settings
+            .storage
+            .max_database_bytes
+            .saturating_sub(1_048_576)
+            / size;
+        if pages.saturating_sub(free) + 32 >= cap {
+            let tx = self.conn.transaction()?;
+            let mut removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT 256)")?.execute([])?;
+            if removed == 0 {
+                removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT 256)")?.execute([])?;
+            }
+            record_cleanup(&tx, CleanupReason::DatabaseLimit, removed as u64, now)?;
+            tx.commit()?;
+        }
+        // Reclaim the WAL before treating the database itself as over capacity.
+        self.checkpoint(true)?;
         Ok(())
     }
     fn cleanup(&mut self) -> Result<()> {
@@ -541,37 +669,33 @@ impl Database {
         let cutoff = now.saturating_sub(self.settings.query_log.retention_secs * 1000);
         let point_cutoff = now.saturating_sub(self.settings.statistics.retention_secs * 1000);
         let tx = self.conn.transaction()?;
-        let removed = tx.execute("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log WHERE retention_ms <= ? ORDER BY retention_ms LIMIT 256)", [cutoff])?;
+        let removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log WHERE retention_ms <= ? ORDER BY retention_ms LIMIT 256)")?.execute( [cutoff])?;
         record_cleanup(&tx, CleanupReason::Age, removed as u64, now)?;
         let (count, bytes) = (epoch(&tx, "log_count")?, epoch(&tx, "log_bytes")?);
         let overflow = count
             .saturating_sub(self.settings.query_log.max_entries as u64)
             .min(256);
         if overflow > 0 {
-            let removed = tx.execute(
-                "DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT ?)",
+            let removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT ?)")?.execute(
                 [overflow],
             )?;
             record_cleanup(&tx, CleanupReason::EntryLimit, removed as u64, now)?;
         } else if bytes > self.settings.query_log.max_bytes {
             let count = oldest_log_count(&tx, bytes - self.settings.query_log.max_bytes)?;
-            let removed = tx.execute(
-                "DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT ?)",
+            let removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT ?)")?.execute(
                 [count],
             )?;
             record_cleanup(&tx, CleanupReason::ByteLimit, removed as u64, now)?;
         }
-        let removed = tx.execute("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points WHERE retention_ms <= ? ORDER BY retention_ms LIMIT 256)", [point_cutoff])?;
+        let removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points WHERE retention_ms <= ? ORDER BY retention_ms LIMIT 256)")?.execute( [point_cutoff])?;
         record_cleanup(&tx, CleanupReason::Age, removed as u64, now)?;
         let points = epoch(&tx, "point_count")?;
         if points > self.settings.statistics.max_samples as u64 {
-            let removed = tx.execute("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT ?)", [(points - self.settings.statistics.max_samples as u64).min(256)])?;
+            let removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT ?)")?.execute( [(points - self.settings.statistics.max_samples as u64).min(256)])?;
             record_cleanup(&tx, CleanupReason::EntryLimit, removed as u64, now)?;
         }
-        tx.execute(
-            "UPDATE metadata SET value=? WHERE key='clock_lower_ms'",
-            [now],
-        )?;
+        tx.prepare_cached("UPDATE metadata SET value=? WHERE key='clock_lower_ms'")?
+            .execute([now])?;
         tx.commit()?;
         self.conn.execute_batch("PRAGMA incremental_vacuum(256)")?;
         let (size, pages, free) = self.page_info()?;
@@ -580,14 +704,15 @@ impl Database {
             || (pages <= desired && pages.saturating_sub(free) + 32 >= desired && free < 32)
         {
             let tx = self.conn.transaction()?;
-            let mut removed = tx.execute("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT 256)", [])?;
+            let mut removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT 256)")?.execute( [])?;
             if removed == 0 {
-                removed = tx.execute("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT 256)", [])?;
+                removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT 256)")?.execute( [])?;
             }
             record_cleanup(&tx, CleanupReason::DatabaseLimit, removed as u64, now)?;
             tx.commit()?;
         }
         self.conn.execute_batch("PRAGMA incremental_vacuum(256)")?;
+        self.checkpoint(true)?;
         self.set_page_cap()?;
         Ok(())
     }
@@ -626,13 +751,15 @@ impl Database {
                 }
             }
         } else {
+            self.refresh_log_state(shared)?;
             self.committed(shared);
         }
         // Age expiry waits for the cleanup interval; only a write that leaves
         // a bound exceeded, or the file near its cap, cleans up right away.
         result.and_then(|_| {
             if self.capacity_pressure()? {
-                self.cleanup()
+                self.trim_capacity()?;
+                self.refresh_log_state(shared)
             } else {
                 Ok(())
             }
@@ -647,7 +774,9 @@ impl Database {
             return Ok(true);
         }
         let (size, pages, free) = self.page_info()?;
-        Ok(pages.saturating_sub(free) + 32 >= limits.storage.max_database_bytes / size)
+        Ok(pages.saturating_sub(free) + 32
+            >= limits.storage.max_database_bytes.saturating_sub(1_048_576) / size
+            || self.disk_bytes()? > limits.storage.max_database_bytes)
     }
     fn write_batch(
         &mut self,
@@ -660,25 +789,61 @@ impl Database {
         let tx = self.conn.transaction()?;
         let log_epoch = epoch(&tx, "log_epoch")?;
         let history_epoch = epoch(&tx, "history_epoch")?;
-        for item in batch {
-            if item.epoch != log_epoch
-                && !(item.epoch == PENDING_LOG_EPOCH && log_epoch == self.opened_log_epoch)
-            {
-                continue;
+        let mut inserted = 0u64;
+        {
+            let mut insert = tx.prepare_cached("INSERT INTO query_log(epoch,time_ms,retention_ms,name,client,qtype,upstream,status,cache,charge,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?;
+            for item in batch {
+                if item.epoch != log_epoch
+                    && !(item.epoch == PENDING_LOG_EPOCH && log_epoch == self.opened_log_epoch)
+                {
+                    continue;
+                }
+                let e = &item.entry;
+                let payload = serde_json::to_vec(e)?;
+                if payload.len() > 131072 {
+                    shared.dropped.record(&shared.dropped.entry_too_large);
+                    continue;
+                }
+                let retention_ms = retention_now
+                    .saturating_sub(
+                        item.enqueued_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+                    )
+                    .saturating_sub(e.duration_ms.max(0.0) as u64);
+                insert.execute(params![
+                    log_epoch,
+                    e.time_ms,
+                    retention_ms,
+                    e.name,
+                    e.client,
+                    e.qtype,
+                    e.upstream,
+                    e.status,
+                    e.cache,
+                    payload.len(),
+                    payload
+                ])?;
+                inserted += 1;
             }
-            let e: Entry = serde_json::from_slice(&item.payload)?;
-            let retention_ms = retention_now
-                .saturating_sub(item.enqueued_at.elapsed().as_millis().min(u64::MAX as u128) as u64)
-                .saturating_sub(e.duration_ms.max(0.0) as u64);
-            tx.execute("INSERT INTO query_log(epoch,time_ms,retention_ms,name,client,qtype,upstream,status,cache,charge,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![log_epoch,e.time_ms,retention_ms,e.name,e.client,e.qtype,e.upstream,e.status,e.cache,item.payload.len(),item.payload])?;
+        }
+        let overflow = epoch(&tx, "log_count")?
+            .saturating_sub(self.settings.query_log.max_entries as u64)
+            .min(inserted);
+        if overflow > 0 {
+            let removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT ?)")?.execute([overflow])?;
+            record_cleanup(
+                &tx,
+                CleanupReason::EntryLimit,
+                removed as u64,
+                retention_now,
+            )?;
         }
         if let Some(cp) = latest
             && cp.run_id == self.run_id
         {
             // Adopt this exclusive process's run only as part of its first
             // committed checkpoint. Merely opening history need not write it.
-            tx.execute("UPDATE statistics_totals SET run_id=?1,seq=0 WHERE id=1 AND epoch=?2 AND run_id<>?1",params![cp.run_id,cp.totals.epoch])?;
-            tx.execute("UPDATE statistics_totals SET since_ms=?1,seq=?2,payload=?3 WHERE id=1 AND epoch=?4 AND run_id=?5 AND seq<?2", params![cp.totals.since_ms,cp.seq,serde_json::to_vec(&cp.totals)?,cp.totals.epoch,cp.run_id])?;
+            tx.prepare_cached("UPDATE statistics_totals SET run_id=?1,seq=0 WHERE id=1 AND epoch=?2 AND run_id<>?1")?.execute(params![cp.run_id,cp.totals.epoch])?;
+            tx.prepare_cached("UPDATE statistics_totals SET since_ms=?1,seq=?2,payload=?3 WHERE id=1 AND epoch=?4 AND run_id=?5 AND seq<?2")?.execute( params![cp.totals.since_ms,cp.seq,serde_json::to_vec(&cp.totals)?,cp.totals.epoch,cp.run_id])?;
         }
         for point in points {
             if point.history_epoch != history_epoch {
@@ -688,17 +853,15 @@ impl Database {
                 retention_now.saturating_sub(
                     point.sampled_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
                 );
-            tx.execute(
-                "INSERT OR IGNORE INTO statistics_points VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
+            tx.prepare_cached("INSERT OR IGNORE INTO statistics_points VALUES(?1,?2,?3,?4,?5,?6)")?
+                .execute(params![
                     point.history_epoch,
                     point.run_id,
                     point.seq,
                     point.timestamp_ms,
                     retention_ms,
                     serde_json::to_vec(point)?
-                ],
-            )?;
+                ])?;
         }
         tx.commit()?;
         shared.log_epoch.store(log_epoch, Ordering::Release);
@@ -751,6 +914,8 @@ impl Database {
                     Ok(())
                 });
                 self.report_error(shared, &result);
+                let refreshed = self.refresh_log_state(shared);
+                self.report_error(shared, &refreshed);
                 self.update_status(shared);
                 let _ = reply.send(result);
             }
@@ -780,9 +945,9 @@ impl Database {
         }
         Ok(())
     }
-    /// Every query-log read shares one deadline and the same filter semantics.
-    fn bounded<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
-        let deadline = Instant::now() + Duration::from_secs(2);
+    /// A slow scan yields to writes and uses the existing busy response.
+    fn bounded<T>(&self, budget: Duration, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        let deadline = Instant::now() + budget;
         self.conn
             .progress_handler(1000, Some(move || Instant::now() >= deadline))?;
         let result = read();
@@ -797,24 +962,81 @@ impl Database {
         filter: ListOptions,
         limit: usize,
     ) -> Result<Vec<Entry>> {
-        let search = filter.search.unwrap_or_default().to_ascii_lowercase();
-        // A plain lower bound lets SQLite scan only rows newer than a live cursor.
-        let after = if after_id.is_some() {
-            "id>?6"
-        } else {
-            "?6 IS NULL"
+        let mut clauses = Vec::new();
+        let mut values = Vec::<rusqlite::types::Value>::new();
+        if let Some(before) = before_id {
+            values.push((before as i64).into());
+            clauses.push(format!("id < ?{}", values.len()));
+        }
+        if let Some(after) = after_id {
+            values.push((after as i64).into());
+            clauses.push(format!("id > ?{}", values.len()));
+        }
+        if let Some(status) = filter.status {
+            values.push(status.into());
+            clauses.push(format!("status = ?{}", values.len()));
+        }
+        let cached = filter.cache.as_deref() == Some("cached");
+        if let Some(cache) = filter.cache {
+            match cache.as_str() {
+                "cached" => {}
+                "non_cached" => {
+                    clauses.push("cache NOT IN ('fresh','stale','servfail')".to_owned())
+                }
+                _ => {
+                    values.push(cache.into());
+                    clauses.push(format!("cache = ?{}", values.len()));
+                }
+            }
+        }
+        if let Some(search) = filter.search.filter(|s| !s.is_empty()) {
+            // Reuse one numbered parameter for the four searchable columns.
+            let p = values.len() + 1;
+            clauses.push(format!("(instr(lower(name),?{p})>0 OR instr(client,?{p})>0 OR instr(lower(coalesce(upstream,'')),?{p})>0 OR instr(lower(qtype),?{p})>0)"));
+            values.push(search.to_ascii_lowercase().into());
+        }
+        let select = |extra: Option<&str>| {
+            let mut terms = clauses.clone();
+            if let Some(extra) = extra {
+                terms.push(extra.to_owned());
+            }
+            let predicate = if terms.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", terms.join(" AND "))
+            };
+            format!(
+                "SELECT id,payload FROM query_log{predicate} ORDER BY id DESC LIMIT {}",
+                limit + 1
+            )
         };
-        let mut statement = self.conn.prepare(&format!("SELECT id,payload FROM query_log WHERE (?1 IS NULL OR id<?1) AND {after} AND (?2 IS NULL OR status=?2) AND (?3 IS NULL OR (?3='cached' AND cache IN ('fresh','stale','servfail')) OR (?3='non_cached' AND cache NOT IN ('fresh','stale','servfail')) OR cache=?3) AND (?4='' OR instr(lower(name),?4)>0 OR instr(client,?4)>0 OR instr(lower(coalesce(upstream,'')),?4)>0 OR instr(lower(qtype),?4)>0) ORDER BY id DESC LIMIT ?5"))?;
-        let mut rows = statement.query(params![
-            before_id,
-            filter.status,
-            filter.cache,
-            search,
-            limit + 1,
-            after_id
-        ])?;
+        // Bound each cache-key lookup before merging. A single IN query sorts
+        // every cached row because its index starts with cache, not id.
+        let sql = if cached {
+            let branches = ["cache='fresh'", "cache='stale'", "cache='servfail'"]
+                .map(|term| format!("SELECT id,payload FROM ({})", select(Some(term))));
+            format!(
+                "SELECT id,payload FROM ({}) ORDER BY id DESC LIMIT {}",
+                branches.join(" UNION ALL "),
+                limit + 1
+            )
+        } else {
+            select(None)
+        };
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        let mut rows = statement.query(rusqlite::params_from_iter(values))?;
         let mut entries = Vec::with_capacity(limit + 1);
-        while let Some(row) = rows.next()? {
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(rusqlite::Error::SqliteFailure(code, _))
+                    if code.code == rusqlite::ErrorCode::OperationInterrupted =>
+                {
+                    return Err(Error::Busy);
+                }
+                Err(error) => return Err(error.into()),
+            };
             let id = row.get(0)?;
             let bytes: Vec<u8> = row.get(1)?;
             let mut entry: Entry = serde_json::from_slice(&bytes)?;
@@ -824,7 +1046,7 @@ impl Database {
         Ok(entries)
     }
     fn list(&self, shared: &Shared, options: ListOptions) -> Result<Page> {
-        self.bounded(|| {
+        self.bounded(Duration::from_millis(500), || {
             let total = epoch(&self.conn, "log_count")? as usize;
             let log_epoch = epoch(&self.conn, "log_epoch")?;
             let limit = options.limit.unwrap_or(50);
@@ -847,7 +1069,7 @@ impl Database {
         })
     }
     fn newer(&self, after_id: Option<u64>, filter: ListOptions) -> Result<Newer> {
-        self.bounded(|| {
+        self.bounded(Duration::from_millis(500), || {
             let log_epoch = epoch(&self.conn, "log_epoch")?;
             let scanned_to: u64 =
                 self.conn
@@ -863,7 +1085,11 @@ impl Database {
                     scanned_to,
                 });
             };
-            let mut entries = self.select(None, Some(after_id), filter, NEWER_LIMIT)?;
+            let mut entries = if scanned_to <= after_id {
+                Vec::new()
+            } else {
+                self.select(None, Some(after_id), filter, NEWER_LIMIT)?
+            };
             let more = entries.len() > NEWER_LIMIT;
             entries.truncate(NEWER_LIMIT);
             Ok(Newer {
@@ -877,11 +1103,13 @@ impl Database {
     fn clear_logs(&mut self, shared: &Shared, expected: u64) -> Result<ClearResult> {
         let tx = self.conn.transaction()?;
         let next = check_epoch(&tx, "log_epoch", expected)?;
-        let removed = tx.execute("DELETE FROM query_log", [])? as u64;
+        let removed = tx.prepare_cached("DELETE FROM query_log")?.execute([])? as u64;
         record_cleanup(&tx, CleanupReason::Manual, removed, unix_ms())?;
-        tx.execute("UPDATE metadata SET value=? WHERE key='log_epoch'", [next])?;
+        tx.prepare_cached("UPDATE metadata SET value=? WHERE key='log_epoch'")?
+            .execute([next])?;
         tx.commit()?;
         shared.log_epoch.store(next, Ordering::Release);
+        self.refresh_log_state(shared)?;
         let mut status = shared.status.lock().expect("storage status");
         status.log_epoch = next;
         status.last_commit_at_ms = Some(unix_ms());
@@ -909,15 +1137,11 @@ impl Database {
             since_ms: since,
             metrics: Metrics::default().snapshot(),
         };
-        tx.execute(
-            "UPDATE metadata SET value=? WHERE key='totals_epoch'",
-            [next],
-        )?;
-        tx.execute("UPDATE statistics_totals SET epoch=?1,since_ms=?2,run_id=?3,seq=0,payload=?4,reset_clock_ms=?5 WHERE id=1", params![next,since,run_id,serde_json::to_vec(&totals)?,reset_clock_ms])?;
-        tx.execute(
-            "UPDATE metadata SET value=? WHERE key='clock_lower_ms'",
-            [reset_clock_ms],
-        )?;
+        tx.prepare_cached("UPDATE metadata SET value=? WHERE key='totals_epoch'")?
+            .execute([next])?;
+        tx.prepare_cached("UPDATE statistics_totals SET epoch=?1,since_ms=?2,run_id=?3,seq=0,payload=?4,reset_clock_ms=?5 WHERE id=1")?.execute( params![next,since,run_id,serde_json::to_vec(&totals)?,reset_clock_ms])?;
+        tx.prepare_cached("UPDATE metadata SET value=? WHERE key='clock_lower_ms'")?
+            .execute([reset_clock_ms])?;
         tx.commit()?;
         self.reset_clock_ms = reset_clock_ms;
         shared
@@ -940,12 +1164,12 @@ impl Database {
         };
         let tx = self.conn.transaction()?;
         let next = check_epoch(&tx, "history_epoch", expected)?;
-        let removed = tx.execute("DELETE FROM statistics_points", [])? as u64;
+        let removed = tx
+            .prepare_cached("DELETE FROM statistics_points")?
+            .execute([])? as u64;
         record_cleanup(&tx, CleanupReason::Manual, removed, unix_ms())?;
-        tx.execute(
-            "UPDATE metadata SET value=? WHERE key='history_epoch'",
-            [next],
-        )?;
+        tx.prepare_cached("UPDATE metadata SET value=? WHERE key='history_epoch'")?
+            .execute([next])?;
         tx.commit()?;
         shared
             .stats
@@ -980,10 +1204,10 @@ impl Database {
         let width = (to.saturating_sub(from).max(1))
             .div_ceil(options.max_points.unwrap_or(1000) as u64)
             .max(1);
-        let samples = self.bounded(|| -> Result<Vec<Point>> {
+        let samples = self.bounded(Duration::from_secs(2), || -> Result<Vec<Point>> {
             let shape = shared.metrics.snapshot();
             let mut points: BTreeMap<u64, Point> = BTreeMap::new();
-            let mut statement = self.conn.prepare("SELECT payload FROM statistics_points WHERE time_ms>=?1 AND time_ms<=?2 ORDER BY time_ms")?;
+            let mut statement = self.conn.prepare_cached("SELECT payload FROM statistics_points WHERE time_ms>=?1 AND time_ms<=?2 ORDER BY time_ms")?;
             let mut rows = statement.query(params![from, to])?;
             while let Some(row) = rows.next()? {
                 let bytes: Vec<u8> = row.get(0)?;
@@ -1045,9 +1269,18 @@ impl Database {
                 std::fs::metadata(dir.join("observability.sqlite3"))
                     .map(|m| m.len())
                     .ok(),
-                std::fs::metadata(dir.join("observability.sqlite3-journal"))
-                    .map(|m| m.len())
-                    .unwrap_or(0),
+                [
+                    "observability.sqlite3-journal",
+                    "observability.sqlite3-wal",
+                    "observability.sqlite3-shm",
+                ]
+                .iter()
+                .map(|name| {
+                    std::fs::metadata(dir.join(name))
+                        .map(|m| m.len())
+                        .unwrap_or(0)
+                })
+                .sum::<u64>(),
                 std::fs::symlink_metadata(dir.join("dns-cache-clean.snapshot"))
                     .ok()
                     .filter(|m| m.is_file())
@@ -1058,30 +1291,7 @@ impl Database {
         let log_count = epoch(&self.conn, "log_count").ok();
         let log_bytes = epoch(&self.conn, "log_bytes").ok();
         let point_count = epoch(&self.conn, "point_count").ok();
-        let earliest = self
-            .conn
-            .query_row(
-                "SELECT time_ms FROM query_log ORDER BY time_ms LIMIT 1",
-                [],
-                |r| r.get::<_, u64>(0),
-            )
-            .optional();
-        let latest = self
-            .conn
-            .query_row(
-                "SELECT time_ms FROM query_log ORDER BY time_ms DESC LIMIT 1",
-                [],
-                |r| r.get::<_, u64>(0),
-            )
-            .optional();
-        let coverage = match (earliest, latest) {
-            (Ok(earliest), Ok(latest)) => Some(Coverage {
-                earliest_time_ms: earliest,
-                latest_time_ms: latest,
-                span_ms: earliest.zip(latest).map(|(a, b)| b.saturating_sub(a)),
-            }),
-            _ => None,
-        };
+        let coverage = self.coverage.clone();
         let cleanup = self.cleanup_status().ok();
         let expired = self.settings_pending && {
             let now = self
@@ -1123,6 +1333,8 @@ impl Database {
         if let Some((database, journal, snapshot)) = files {
             status.database_bytes = database.unwrap_or(status.database_bytes);
             status.journal_bytes = journal;
+            status.capacity_pending |= status.database_bytes.saturating_add(journal)
+                > self.settings.storage.max_database_bytes;
             status.cache_snapshot_bytes = snapshot;
         }
         if let Some(count) = log_count {
@@ -1134,9 +1346,7 @@ impl Database {
         if let Some(count) = point_count {
             status.history_samples = count;
         }
-        if let Some(coverage) = coverage {
-            status.query_log_coverage = coverage;
-        }
+        status.query_log_coverage = coverage;
         if let Some(cleanup) = cleanup {
             status.cleanup = cleanup;
         }

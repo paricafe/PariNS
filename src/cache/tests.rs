@@ -1,5 +1,6 @@
 use super::*;
 mod ecs_sharing;
+mod refresh_outcomes;
 mod reliability;
 mod servfail;
 use hickory_proto::{

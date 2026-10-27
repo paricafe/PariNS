@@ -925,7 +925,7 @@ fn learned_entries_round_trip_without_restoring_classification() {
         v6,
         now,
         cache.epoch(),
-        Some(Restore {
+        Origin::Restore(Restore {
             remaining: 60,
             accessed: 1,
         }),
@@ -1163,4 +1163,21 @@ fn a_restore_out_of_time_while_authenticating_admits_nothing() {
         (0, 20, Some("deadline"))
     );
     assert_eq!(restored.snapshot()["entries"], 0);
+}
+
+#[test]
+fn a_clean_snapshot_neither_settles_nor_restores_refresh_tracking() {
+    let cache = Cache::new(CacheConfig::default());
+    let q = query("prefetched.test.");
+    let now = Instant::now();
+    cache.insert_refresh_if_epoch(&q, &answer(&q, 60), Scope::NoEcs, now, cache.epoch());
+    let bytes = encode(&cache, now);
+    assert_eq!(cache.refresh_outcomes(), (0, 0));
+    let restored = Cache::new(CacheConfig::default());
+    assert_eq!(restore(&restored, bytes, 0, now).unwrap().restored, 1);
+    assert!(restored.lookup(&q, None, now, false).is_some());
+    restored.invalidate(None, None, None);
+    assert_eq!(restored.refresh_outcomes(), (0, 0));
+    assert!(cache.lookup(&q, None, now, false).is_some());
+    assert_eq!(cache.refresh_outcomes(), (1, 0));
 }

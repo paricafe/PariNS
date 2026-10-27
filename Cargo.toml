@@ -32,7 +32,7 @@ idna = "1"
 ipnet = "2"
 lru = "0.18.4"
 rand = "0.10"
-rusqlite = { version = "0.40.2", default-features = false, features = ["libsqlite3-sys", "bundled", "hooks", "fallible_uint", "limits"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["libsqlite3-sys", "bundled", "hooks", "fallible_uint", "limits", "cache"] }
 rustix = { version = "1", features = ["fs", "process"] }
 sha2 = "0.10"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }

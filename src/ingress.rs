@@ -103,7 +103,7 @@ impl Ingress {
 
     /// For an adapter that learns only while writing whether the peer still
     /// wants the answer: a resolved request completes once the adapter reports
-    /// the returned delivery as delivered. Admission rejections have none.
+    /// the returned delivery as delivered. Rejected queries only record history.
     pub(crate) async fn handle_for_delivery(
         &self,
         bytes: &[u8],
@@ -113,7 +113,7 @@ impl Ingress {
         self.resolver.metrics().inc(Counter::EncryptedReceived);
         let Some(_source) = self.admit_query(peer) else {
             self.resolver.metrics().inc(Counter::EncryptedRejected);
-            return (self.rejected_reply(bytes, peer, transport), None);
+            return self.rejected_reply(bytes, peer, transport);
         };
         match self.queries.clone().try_acquire_owned() {
             Ok(_permit) => {
@@ -128,17 +128,28 @@ impl Ingress {
             }
             Err(_) => {
                 self.resolver.metrics().inc(Counter::EncryptedRejected);
-                (self.rejected_reply(bytes, peer, transport), None)
+                self.rejected_reply(bytes, peer, transport)
             }
         }
     }
 
-    fn rejected_reply(&self, bytes: &[u8], peer: IpAddr, transport: &str) -> Option<Vec<u8>> {
+    fn rejected_reply(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+    ) -> (Option<Vec<u8>>, Option<Delivery<'_>>) {
         let reply = rejected_response(bytes);
-        self.resolver
-            .log_rejected(bytes, peer, transport, reply.as_ref().map(|(r, _)| r));
-        let (reply, padding) = reply?;
-        padding.encode_response(&reply, true).ok()
+        let delivery = self.resolver.rejected_for_delivery(
+            bytes,
+            peer,
+            transport,
+            reply.as_ref().map(|(r, _)| r),
+        );
+        (
+            reply.and_then(|(reply, padding)| padding.encode_response(&reply, true).ok()),
+            Some(delivery),
+        )
     }
 }
 

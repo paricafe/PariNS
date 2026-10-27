@@ -271,8 +271,8 @@ async fn doq_request(
     ensure_no_keepalive(&frame[2..])?;
     guard.event(Event::StreamFullFrame);
     *stage = 1;
-    let response = tokio::select! {
-        response = ingress.handle_with_transport(&frame[2..], peer, "doq") => response,
+    let (response, delivery) = tokio::select! {
+        response = ingress.handle_for_delivery(&frame[2..], peer, "doq") => response,
         _ = send.stopped() => {guard.finish(Event::StreamPeerCancelled);return Ok(());},
     };
     *stage = 2;
@@ -284,6 +284,9 @@ async fn doq_request(
             .await?;
         send.write_all(&response).await?;
         send.finish()?;
+        if let Some(delivery) = delivery {
+            delivery.delivered();
+        }
         guard.finish(Event::StreamResponseHandedToTransport);
     } else {
         send.reset(VarInt::from_u32(2))?;

@@ -262,14 +262,18 @@ async fn request_task(
         Ok(bytes) => bytes,
         Err(status) => return send(&mut respond, status, Vec::new(), h3_port).await,
     };
-    let response = tokio::select! {
-        response = ingress.handle_with_transport(&bytes, peer, "doh") => response,
+    let (response, delivery) = tokio::select! {
+        response = ingress.handle_for_delivery(&bytes, peer, "doh") => response,
         _ = std::future::poll_fn(|cx| respond.poll_reset(cx)) => return Ok(()),
     };
     match response {
         Some(bytes) => send(&mut respond, 200, bytes, h3_port).await,
         None => send(&mut respond, 400, Vec::new(), h3_port).await,
+    }?;
+    if let Some(delivery) = delivery {
+        delivery.delivered();
     }
+    Ok(())
 }
 
 /// Reads the body until END_STREAM; `Some(413)` stops early at the size limit.

@@ -63,8 +63,9 @@ pub fn render(metrics: &Metrics) -> String {
     output + &render_extra(&diagnostics)
 }
 
-/// Counters and gauges outside the persisted snapshot: listener diagnostics and
-/// the generation-scoped counters of the recursive resolution source.
+/// Counters and gauges outside the persisted snapshot: listener diagnostics,
+/// the counters of the recursive resolution source and the prefetch counters
+/// of the current cache generation.
 fn render_extra(metrics: &[(&str, &str, u64, bool)]) -> String {
     let mut output = String::new();
     for (name, help, value, gauge) in metrics {
@@ -142,7 +143,8 @@ async fn connection(mut stream: TcpStream, mut ingress: Ingress) -> Result<()> {
             200,
             "text/plain; version=0.0.4; charset=utf-8",
             render(ingress.resolver.metrics())
-                + &render_extra(&ingress.resolver.recursion_metrics()),
+                + &render_extra(&ingress.resolver.recursion_metrics())
+                + &render_extra(&ingress.resolver.refresh_metrics()),
         ),
         Ok(_) => (404, "text/plain; charset=utf-8", "not found\n".into()),
         Err(status) => (status, "text/plain; charset=utf-8", String::new()),

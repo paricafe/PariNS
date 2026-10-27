@@ -417,7 +417,7 @@ impl Cache {
                         scope,
                         now,
                         self.epoch(),
-                        Some(Restore {
+                        Origin::Restore(Restore {
                             remaining,
                             accessed,
                         }),
@@ -452,7 +452,7 @@ impl Cache {
                 })
                 .collect();
             for (part, id) in loaded {
-                shard.remove(part, id);
+                self.remove(&mut shard, part, id);
             }
         }
     }

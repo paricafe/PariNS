@@ -655,7 +655,7 @@ async fn private_component_permissions_links_and_database_pragmas() {
     inspect(&runtime.storage, |conn| {
         assert_eq!(
             conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))?,
-            "delete"
+            "wal"
         );
         assert_eq!(
             conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, u64>(0))?,
@@ -857,9 +857,9 @@ fn abrupt_exit_child() {
         let runtime = RuntimeServices::open(Path::new(&path),settings(),1).unwrap();
         runtime.storage.record_log(0,entry("fresh")); runtime.metrics.inc(Counter::Requests); runtime.storage.flush().await.unwrap();
         inspect(&runtime.storage, |conn| {
-            conn.execute_batch("PRAGMA cache_size=1; BEGIN IMMEDIATE; UPDATE query_log SET name='not-committed.test'; UPDATE metadata SET value=999 WHERE key='log_epoch';")?;
-            // Exit without dropping the connection, worker or runtime. A hot
-            // rollback journal, if spilled, belongs to SQLite recovery.
+            conn.execute_batch("PRAGMA wal_autocheckpoint=0; UPDATE metadata SET value=7 WHERE key='cleanup_manual'; PRAGMA cache_size=1; BEGIN IMMEDIATE; UPDATE query_log SET name='not-committed.test'; UPDATE metadata SET value=999 WHERE key='log_epoch';")?;
+            // Exit without dropping the connection. Reopening recovers committed
+            // WAL frames and discards the unfinished transaction.
             std::process::exit(23);
         }).await.unwrap();
     });
@@ -893,6 +893,7 @@ async fn abrupt_process_exit_keeps_committed_data_and_rolls_back_partial_transac
     assert_eq!(page.log_epoch, 0);
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].name, "example.test.");
+    assert_eq!(runtime.storage.status().cleanup.removed.manual, 7);
     assert_eq!(
         runtime
             .storage
@@ -1285,4 +1286,225 @@ async fn shutdown_releases_directory_lock_even_with_a_duplicated_descriptor() {
     checked(&reopened).await;
     reopened.storage.shutdown().await.unwrap();
     drop(duplicate);
+}
+
+#[tokio::test]
+async fn wal_sidecars_are_private_and_shutdown_checkpoints_before_rollback_policy_opens() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = private_dir();
+    let runtime = RuntimeServices::open(directory.path(), settings(), 1).unwrap();
+    runtime.storage.record_log(0, entry("fresh"));
+    runtime.storage.flush().await.unwrap();
+    inspect(&runtime.storage, |conn| {
+        assert_eq!(
+            conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))?,
+            "wal"
+        );
+        conn.execute_batch("UPDATE metadata SET value=value+1 WHERE key='clock_lower_ms'")?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let db = directory.path().join("observability.sqlite3");
+    for suffix in ["-wal", "-shm"] {
+        let path = db.with_file_name(format!("observability.sqlite3{suffix}"));
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    runtime.storage.shutdown().await.unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let path = db.with_file_name(format!("observability.sqlite3{suffix}"));
+        assert!(std::fs::metadata(path).map_or(true, |m| m.len() == 0));
+    }
+    // The previous version uses this pragma after its read-only format check.
+    let previous = rusqlite::Connection::open(&db).unwrap();
+    previous
+        .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL")
+        .unwrap();
+    assert_eq!(
+        previous
+            .query_row("SELECT count(*) FROM query_log", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        previous
+            .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wal_sidecars_reject_links_and_public_permissions_before_sqlite_opens() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for suffix in ["-wal", "-shm"] {
+        for unsafe_kind in ["symlink", "hardlink", "permissions"] {
+            let root = private_dir();
+            let path = root.path().join(format!("observability.sqlite3{suffix}"));
+            let target = root.path().join("external");
+            crate::private_files::create_private(&target).unwrap();
+            match unsafe_kind {
+                "symlink" => symlink(&target, &path).unwrap(),
+                "hardlink" => std::fs::hard_link(&target, &path).unwrap(),
+                _ => {
+                    crate::private_files::create_private(&path).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+            }
+            assert!(
+                Handle::open(root.path(), settings(), 1, Arc::new(Metrics::default())).is_err(),
+                "{suffix} {unsafe_kind}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn full_log_trims_old_rows_in_the_same_commit_without_advancing_cleanup_clock() {
+    let mut settings = settings();
+    settings.query_log.max_entries = 2;
+    settings.storage.flush_interval_ms = 100;
+    settings.storage.cleanup_interval_secs = 3600;
+    let runtime = RuntimeServices::ephemeral(settings);
+    let (send, receive) = mpsc::channel();
+    inspect(&runtime.storage, move |conn| {
+        send.send(conn.query_row(
+            "SELECT value FROM metadata WHERE key='clock_lower_ms'",
+            [],
+            |r| r.get::<_, u64>(0),
+        )?)
+        .unwrap();
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let floor = receive.recv().unwrap();
+    for n in 0..6 {
+        let mut row = entry("fresh");
+        row.name = format!("row{n}.test.");
+        runtime.storage.record_log(0, row);
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while runtime.storage.status().pending_entries > 0 {
+        assert!(Instant::now() < deadline, "periodic batch did not commit");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    inspect(&runtime.storage, move |conn| {
+        let count: u64 = conn.query_row("SELECT count(*) FROM query_log", [], |r| r.get(0))?;
+        assert_eq!(count, 2);
+        let oldest: String =
+            conn.query_row("SELECT name FROM query_log ORDER BY id LIMIT 1", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(oldest, "row4.test.");
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM metadata WHERE key='clock_lower_ms'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )?,
+            floor
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(runtime.storage.latest_log_id() >= 6);
+    runtime.storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn latest_committed_log_id_ignores_uncommitted_queue_and_updates_after_clear() {
+    let runtime = RuntimeServices::ephemeral(settings());
+    assert_eq!(runtime.storage.latest_log_id(), 0);
+    let (release, paused) = pause(&runtime.storage).await;
+    runtime.storage.record_log(0, entry("fresh"));
+    assert_eq!(runtime.storage.latest_log_id(), 0);
+    release.send(()).unwrap();
+    paused.await.unwrap().unwrap();
+    runtime.storage.flush().await.unwrap();
+    assert_eq!(runtime.storage.latest_log_id(), 1);
+    runtime.storage.clear_logs(0).await.unwrap();
+    assert_eq!(runtime.storage.latest_log_id(), 0);
+    runtime.storage.record_log(1, entry("fresh"));
+    runtime.storage.flush().await.unwrap();
+    assert_eq!(runtime.storage.latest_log_id(), 2);
+    runtime.storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn structured_queue_accounts_nested_allocations_before_worker_serializes() {
+    let runtime = RuntimeServices::ephemeral(settings());
+    let (release, paused) = pause(&runtime.storage).await;
+    let mut e = entry("fresh");
+    e.answer = Vec::with_capacity(100);
+    let expected = entry_charge(&e);
+    runtime.storage.record_log(0, e.clone());
+    // Clone may compact capacity; the actual queued structure must be charged.
+    assert_eq!(
+        runtime.storage.status().pending_bytes,
+        entry_charge(&e.clone())
+    );
+    assert!(
+        expected
+            >= std::mem::size_of::<LogItem>() as u64
+                + 100 * std::mem::size_of::<crate::query_log::Record>() as u64
+    );
+    let mut oversized = e;
+    oversized.answer = Vec::with_capacity(10000);
+    runtime.storage.record_log(0, oversized);
+    assert_eq!(
+        runtime.storage.status().dropped_by_reason.entry_too_large,
+        1
+    );
+    release.send(()).unwrap();
+    paused.await.unwrap().unwrap();
+    runtime.storage.flush().await.unwrap();
+    assert_eq!(runtime.storage.status().query_log_entries, 1);
+    runtime.storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_slow_search_yields_to_writes_with_the_existing_busy_response() {
+    let runtime = RuntimeServices::ephemeral(settings());
+    runtime.storage.record_log(0, entry("fresh"));
+    runtime.storage.flush().await.unwrap();
+    inspect(&runtime.storage, |conn| {
+        conn.execute_batch(
+            "ALTER TABLE query_log RENAME TO real_log;
+            CREATE VIEW query_log AS WITH RECURSIVE n(v) AS
+              (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<1000000000)
+            SELECT real_log.id,real_log.payload,printf('test-%d',n.v) AS name,
+              real_log.client,real_log.upstream,real_log.qtype FROM real_log,n;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let began = Instant::now();
+    let result = runtime
+        .storage
+        .list_logs(ListOptions {
+            search: Some("no-such-name".into()),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Busy)), "{result:?}");
+    assert!(began.elapsed() < Duration::from_millis(1500));
+    assert_eq!(runtime.storage.status().health, "healthy");
+    inspect(&runtime.storage, |conn| {
+        conn.execute_batch("DROP VIEW query_log; ALTER TABLE real_log RENAME TO query_log;")?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    runtime.storage.record_log(0, entry("fresh"));
+    runtime.storage.flush().await.unwrap();
+    assert_eq!(runtime.storage.status().query_log_entries, 2);
+    runtime.storage.shutdown().await.unwrap();
 }

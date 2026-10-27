@@ -24,7 +24,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{Semaphore, watch},
     task::JoinSet,
     time::timeout,
@@ -910,10 +910,12 @@ async fn serve_plain(
                     if bytes == tests::PANIC_DATAGRAM {
                         panic!("test query task panic");
                     }
-                    if let Some(reply) = resolver.resolve_with_transport(&bytes, peer.ip(), "udp").await
+                    let (reply, delivery) = resolver.resolve_for_delivery(&bytes, peer.ip(), "udp").await;
+                    if let Some(reply) = reply
                         && let Ok(bytes) = protocol::encode_udp(&reply.message, reply.udp_limit)
+                        && matches!(timeout(io_timeout, socket.reply(&bytes, peer, source_address)).await, Ok(Ok(_)))
                     {
-                        let _ = timeout(io_timeout, socket.reply(&bytes, peer, source_address)).await;
+                        delivery.delivered();
                     }
                 });
             }
@@ -939,7 +941,7 @@ fn emit_metrics(metrics: &Metrics, run_id: u64, started: std::time::Instant, rea
 }
 
 async fn serve_tcp(
-    mut stream: TcpStream,
+    mut stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     peer: std::net::IpAddr,
     mut ingress: crate::ingress::Ingress,
 ) {
@@ -955,16 +957,16 @@ async fn serve_tcp(
         resolver.metrics().inc(Counter::TcpReceived);
         let source = ingress.admit_query(peer);
         let permit = ingress.queries.clone().try_acquire_owned();
-        let response = match (source.as_ref(), &permit) {
-            (Some(_), Ok(_)) => resolver
-                .resolve_with_transport(&bytes, peer, "tcp")
-                .await
-                .map(|reply| reply.message),
+        let (response, delivery) = match (source.as_ref(), &permit) {
+            (Some(_), Ok(_)) => {
+                let (reply, delivery) = resolver.resolve_for_delivery(&bytes, peer, "tcp").await;
+                (reply.map(|reply| reply.message), Some(delivery))
+            }
             _ => {
                 resolver.metrics().inc(Counter::TcpRejected);
                 let reply = crate::ingress::rejected_response(&bytes).map(|(reply, _)| reply);
-                resolver.log_rejected(&bytes, peer, "tcp", reply.as_ref());
-                reply
+                let delivery = resolver.rejected_for_delivery(&bytes, peer, "tcp", reply.as_ref());
+                (reply, Some(delivery))
             }
         };
         let Some(response) = response else { return };
@@ -978,6 +980,9 @@ async fn serve_tcp(
         ) {
             return;
         }
+        if let Some(delivery) = delivery {
+            delivery.delivered();
+        }
     }
 }
 
@@ -988,6 +993,113 @@ mod tests {
 
     /// A UDP payload that makes its query task panic.
     pub(super) const PANIC_DATAGRAM: &[u8] = b"parins-panic";
+
+    #[tokio::test]
+    async fn tcp_counts_and_logs_only_after_the_frame_is_written() {
+        use hickory_proto::{
+            op::Query,
+            rr::{Name, RecordType},
+        };
+        use tokio::io::AsyncWriteExt;
+
+        for (admitted, delivered) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+            config.query_log.enabled = true;
+            config.filter = toml::from_str("enabled=true\nblock_exact=['delivery.test']").unwrap();
+            let services = crate::runtime_services::RuntimeServices::ephemeral(
+                crate::storage::RuntimeSettings::from_config(&config),
+            );
+            let resolver = Arc::new(Resolver::with_services(&config, services.clone()).unwrap());
+            let metrics = resolver.metrics().clone();
+            let (_stop, stopped) = watch::channel(false);
+            let ingress = crate::ingress::Ingress {
+                resolver,
+                queries: Arc::new(Semaphore::new(usize::from(admitted))),
+                connections: Arc::new(Semaphore::new(1)),
+                source_limits: Arc::new(crate::limits::Limiter::new(&Default::default())),
+                stop: stopped,
+                io_timeout: Duration::from_secs(5),
+                shutdown_grace: Duration::from_millis(100),
+                max_streams: 1,
+            };
+            // One byte cannot hold even the frame length: writing the answer
+            // stays pending until the client reads or closes the connection.
+            let (mut client, server) = tokio::io::duplex(1);
+            let task = tokio::spawn(serve_tcp(server, "127.0.0.1".parse().unwrap(), ingress));
+            let mut query = hickory_proto::op::Message::new(
+                7,
+                hickory_proto::op::MessageType::Query,
+                hickory_proto::op::OpCode::Query,
+            );
+            query.add_query(Query::query(
+                Name::from_ascii("delivery.test.").unwrap(),
+                RecordType::A,
+            ));
+            let bytes = query.to_vec().unwrap();
+            client
+                .write_all(&(bytes.len() as u16).to_be_bytes())
+                .await
+                .unwrap();
+            client.write_all(&bytes).await.unwrap();
+            timeout(Duration::from_secs(2), async {
+                while metrics.snapshot().counters[if admitted {
+                    "responses_noerror"
+                } else {
+                    "tcp_rejected"
+                }] == 0
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(metrics.snapshot().counters["completed"], 0);
+            services.storage.flush().await.unwrap();
+            assert!(
+                services
+                    .storage
+                    .list_logs(Default::default())
+                    .await
+                    .unwrap()
+                    .entries
+                    .is_empty()
+            );
+            if delivered {
+                let bytes = timeout(Duration::from_secs(2), tcp::read_frame(&mut client))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(protocol::decode(&bytes).unwrap().id, 7);
+            }
+            drop(client);
+            timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            let counters = metrics.snapshot().counters;
+            assert_eq!(counters["requests"], u64::from(admitted));
+            assert_eq!(counters["completed"], u64::from(admitted && delivered));
+            assert_eq!(counters["cancelled"], u64::from(admitted && !delivered));
+            services.storage.flush().await.unwrap();
+            let page = services
+                .storage
+                .list_logs(Default::default())
+                .await
+                .unwrap();
+            assert_eq!(page.entries.len(), 1);
+            assert_eq!(
+                page.entries[0].cache,
+                if !delivered {
+                    "cancelled"
+                } else if admitted {
+                    "blocked"
+                } else {
+                    "error"
+                }
+            );
+            assert_eq!(page.entries[0].name, "delivery.test.");
+        }
+    }
 
     #[tokio::test]
     async fn a_panicking_query_task_leaves_the_plain_listener_serving() {

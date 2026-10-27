@@ -9,7 +9,12 @@
 //! back to the verified H2 path. A sent request waits for its answer until the
 //! resolver deadline; a failure after sending (an HTTP error status, stream reset,
 //! or the connection's idle timeout) is this query's upstream failure, with no H2
-//! resend. Any H3 failure starts the cooldown. A definite 4xx (not
+//! resend. A failure before sending or a failed connection (handshake failure,
+//! connection closed or idle timeout) starts the cooldown; a sent request that
+//! fails while its connection stays open (stream reset, HTTP error status, invalid
+//! answer) does not. The cooldown starts at 2 seconds, doubles on each further
+//! failure up to 30 seconds, and clears after an H3 answer. Failures during a
+//! cooldown do not extend it; outcomes from a replaced connection do not change it. A definite 4xx (not
 //! 408/414/421/425/429/431) also stops H3 for that endpoint until the pool
 //! generation is replaced, so later queries go straight to H2. H2 and H3 share one
 //! RFC 8484 GET builder. Cancelling a request releases its stream without breaking
@@ -42,13 +47,36 @@ pub(super) struct Client {
     connecting: tokio::sync::Mutex<()>,
 }
 
+const COOLDOWN_FIRST: Duration = Duration::from_secs(2);
+const COOLDOWN_MAX: Duration = Duration::from_secs(30);
+
 #[derive(Default)]
 struct State {
     connection: Option<Arc<Connection>>,
     retry_after: Option<Instant>,
+    /// Cooldowns started since the last H3 answer; sets the next cooldown.
+    failures: u32,
     /// A definite 4xx (for example 405) will not change on retry: stop trying
     /// HTTP/3 for this endpoint until the pool generation is replaced.
     refused: Option<u16>,
+}
+
+impl State {
+    /// Skipped attempts and other requests on the same failed connection end
+    /// during the cooldown they caused and must not extend it.
+    fn connection_failed(&mut self, now: Instant) {
+        if self.retry_after.is_some_and(|until| until > now) {
+            return;
+        }
+        let cooldown = (COOLDOWN_FIRST * 2u32.pow(self.failures.min(4))).min(COOLDOWN_MAX);
+        self.failures = self.failures.saturating_add(1);
+        self.retry_after = Some(now + cooldown);
+    }
+
+    fn answered(&mut self) {
+        self.failures = 0;
+        self.retry_after = None;
+    }
 }
 
 /// Client errors that a retry cannot fix. 408, 421, 425 and 429 invite a retry;
@@ -131,10 +159,18 @@ impl Client {
         if budget.is_zero() {
             return Err(not_sent(anyhow::anyhow!("HTTP/3 deadline exhausted")));
         }
+        let mut connection = None;
         let mut sent = false;
         let request = timeout(
             budget,
-            self.send(spec, query, address, &mut attempt, &mut sent),
+            self.send(
+                spec,
+                query,
+                address,
+                &mut attempt,
+                &mut connection,
+                &mut sent,
+            ),
         )
         .await;
         let request = match request {
@@ -152,14 +188,34 @@ impl Client {
             Err(error) => Err(error),
         };
         attempt.finish(&result);
-        if result.is_err() {
+        {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            // Skipped requests must not extend the cooldown indefinitely.
-            if state
-                .retry_after
-                .is_none_or(|until| until <= Instant::now())
-            {
-                state.retry_after = Some(Instant::now() + Duration::from_secs(30));
+            // An attempt records the connection it used, or the cache state
+            // before its handshake. Its outcome cannot change a replacement.
+            let current = match (&connection, &state.connection) {
+                (Some(used), Some(current)) => Arc::ptr_eq(used, current),
+                (None, None) => true,
+                _ => false,
+            };
+            if current {
+                match &result {
+                    Ok(_) => state.answered(),
+                    // The connection still works: only this sent request failed.
+                    Err(error)
+                        if sent
+                            && !matches!(
+                                error.downcast_ref::<h3::error::StreamError>(),
+                                Some(
+                                    h3::error::StreamError::ConnectionError { .. }
+                                        | h3::error::StreamError::RemoteClosing { .. }
+                                )
+                            )
+                            && connection.as_ref().is_some_and(|connection| {
+                                connection.quic.close_reason().is_none()
+                                    && !connection.driver.is_finished()
+                            }) => {}
+                    Err(_) => state.connection_failed(Instant::now()),
+                }
             }
         }
         // Only a request that never reached the transport may be carried by H2.
@@ -174,7 +230,11 @@ impl Client {
             .is_some_and(|until| until > Instant::now())
     }
 
-    fn cached(&self, address: SocketAddr) -> Option<Arc<Connection>> {
+    fn cached(
+        &self,
+        address: SocketAddr,
+        observed: &mut Option<Arc<Connection>>,
+    ) -> Option<Arc<Connection>> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state
             .connection
@@ -183,8 +243,10 @@ impl Client {
         {
             state.connection = None;
         }
-        state
-            .connection
+        // A failed handshake for another bootstrap address still belongs to
+        // this observed cache state, unless a later attempt replaces it.
+        *observed = state.connection.clone();
+        observed
             .as_ref()
             .filter(|c| c.quic.remote_address() == address)
             .cloned()
@@ -195,8 +257,9 @@ impl Client {
         spec: &Endpoint,
         address: SocketAddr,
         attempt: &mut Attempt,
+        observed: &mut Option<Arc<Connection>>,
     ) -> Result<Arc<Connection>> {
-        if let Some(connection) = self.cached(address) {
+        if let Some(connection) = self.cached(address, observed) {
             return Ok(connection);
         }
         attempt.stage(Stage::Wait);
@@ -205,7 +268,7 @@ impl Client {
             attempt.skipped();
             anyhow::bail!("HTTP/3 cooling down");
         }
-        if let Some(connection) = self.cached(address) {
+        if let Some(connection) = self.cached(address, observed) {
             return Ok(connection);
         }
         let bind = if address.is_ipv4() {
@@ -255,6 +318,7 @@ impl Client {
             usage,
             driver,
         });
+        *observed = Some(connection.clone());
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -268,9 +332,10 @@ impl Client {
         query: &Message,
         address: SocketAddr,
         attempt: &mut Attempt,
+        used: &mut Option<Arc<Connection>>,
         sent: &mut bool,
     ) -> Result<(RequestGuard, Message, InFlight)> {
-        let connection = self.connection(spec, address, attempt).await?;
+        let connection = self.connection(spec, address, attempt, used).await?;
         let mut sender = connection.sender.clone();
         let in_flight = InFlight::new(&connection.usage);
         let (request, outbound) = super::transport::doh_get(spec, query)?;
@@ -306,5 +371,31 @@ impl Client {
         let response = doh_answer(&bytes, outbound, query, age, attempt)?;
         stream.1 = true;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_failures_back_off_to_30_seconds_and_reset_after_an_answer() {
+        let mut state = State::default();
+        let mut now = Instant::now();
+        let mut cooldowns = Vec::new();
+        for _ in 0..6 {
+            state.connection_failed(now);
+            let until = state.retry_after.unwrap();
+            // Another failure during the cooldown neither extends nor doubles it.
+            state.connection_failed(until - Duration::from_millis(1));
+            assert_eq!(state.retry_after, Some(until));
+            cooldowns.push((until - now).as_secs());
+            now = until;
+        }
+        assert_eq!(cooldowns, [2, 4, 8, 16, 30, 30]);
+        state.answered();
+        assert_eq!(state.retry_after, None);
+        state.connection_failed(now);
+        assert_eq!(state.retry_after, Some(now + COOLDOWN_FIRST));
     }
 }

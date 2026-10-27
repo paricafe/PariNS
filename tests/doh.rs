@@ -86,6 +86,116 @@ fn certificates() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
 }
 
 #[tokio::test]
+async fn h2_counts_and_logs_delivery_after_response_flow_control() {
+    for delivered in [false, true] {
+        let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+        config.query_log.enabled = true;
+        config.filter = toml::from_str("enabled=true\nblock_exact=['doh.test']").unwrap();
+        let services = parins::runtime_services::RuntimeServices::ephemeral(
+            parins::storage::RuntimeSettings::from_config(&config),
+        );
+        let resolver = Arc::new(Resolver::with_services(&config, services.clone()).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = watch::channel(false);
+        let ingress = Ingress {
+            source_limits: Arc::new(parins::limits::Limiter::new(&Default::default())),
+            resolver: resolver.clone(),
+            queries: Arc::new(Semaphore::new(1)),
+            connections: Arc::new(Semaphore::new(1)),
+            stop: stopped,
+            io_timeout: Duration::from_secs(5),
+            shutdown_grace: Duration::from_millis(100),
+            max_streams: 1,
+        };
+        let (server_tls, client_tls) = certificates();
+        let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
+        let tls = TlsConnector::from(client_tls)
+            .connect(
+                "localhost".try_into().unwrap(),
+                TcpStream::connect(address).await.unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut builder = h2::client::Builder::new();
+        if !delivered {
+            builder.initial_window_size(0);
+        }
+        let (mut client, connection) = builder.handshake::<_, Bytes>(tls).await.unwrap();
+        let driver = tokio::spawn(connection);
+        let request = http::Request::builder()
+            .uri(format!(
+                "https://localhost/dns-query?dns={}",
+                URL_SAFE_NO_PAD.encode(query())
+            ))
+            .body(())
+            .unwrap();
+        let (response, mut sender) = client.send_request(request, true).unwrap();
+        let response = timeout(Duration::from_secs(2), response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body();
+        if delivered {
+            let bytes = timeout(Duration::from_secs(2), body.data())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(protocol::decode(&bytes).unwrap().id, 123);
+        } else {
+            // HEADERS fit, but a zero response window prevents sending DNS DATA.
+            assert_eq!(resolver.metrics().snapshot().counters["completed"], 0);
+            services.storage.flush().await.unwrap();
+            assert!(
+                services
+                    .storage
+                    .list_logs(Default::default())
+                    .await
+                    .unwrap()
+                    .entries
+                    .is_empty()
+            );
+            sender.send_reset(h2::Reason::CANCEL);
+        }
+        timeout(Duration::from_secs(2), async {
+            while resolver.metrics().snapshot().counters
+                [if delivered { "completed" } else { "cancelled" }]
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let counters = resolver.metrics().snapshot().counters;
+        assert_eq!(counters["completed"], u64::from(delivered));
+        assert_eq!(counters["cancelled"], u64::from(!delivered));
+        services.storage.flush().await.unwrap();
+        let page = services
+            .storage
+            .list_logs(Default::default())
+            .await
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(
+            page.entries[0].cache,
+            if delivered { "blocked" } else { "cancelled" }
+        );
+        drop(body);
+        drop(client);
+        driver.abort();
+        stop.send(true).unwrap();
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn real_h2_tls_get_post_errors_and_shutdown() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();

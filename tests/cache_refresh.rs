@@ -334,6 +334,9 @@ async fn prefetch_deduplicates_and_replaces_hot_entry() {
         RData::A(A::new(192, 0, 2, 42))
     );
     assert_eq!(resolver.refresh_snapshot().active, 0);
+    assert_eq!(resolver.cache().refresh_outcomes(), (1, 0));
+    resolve(&resolver, &query).await;
+    assert_eq!(resolver.cache().refresh_outcomes(), (1, 0));
     resolver.shutdown_refresh().await;
 }
 
@@ -350,7 +353,7 @@ async fn failed_prefetch_backs_off_and_limits_are_bounded() {
         resolve(&resolver, &query).await;
     }
     assert_eq!(resolver.refresh_snapshot().scheduled, 1);
-    assert!(resolver.refresh_snapshot().rejected >= 10);
+    assert!(resolver.refresh_snapshot().rejected_cooldown >= 10);
     resolver.shutdown_refresh().await;
 
     let mut config = upstream.config();

@@ -1,4 +1,6 @@
 //! Shared query semantics and one deadline for the complete upstream operation.
+//! Request logging uses the decoded query. Transports retain its Delivery until
+//! their response write succeeds; an abandoned delivery records cancellation.
 
 use std::{
     net::IpAddr,
@@ -21,7 +23,7 @@ use crate::{
     metrics::{Counter, Metrics, Timer},
     policy::Policy,
     protocol::{self, Request},
-    query_log::{Entry, QueryLog, Trace},
+    query_log::{QueryLog, Trace},
 };
 
 mod refresh;
@@ -56,11 +58,10 @@ impl Generation {
     }
 }
 
-/// A resolved request until its transport hands the answer over. Dropping it
-/// undelivered (a failed write, a peer that left, a deadline) counts the
-/// request as cancelled and records its history entry so.
+/// A response until its transport hands it over. Dropping it undelivered records
+/// cancellation; admitted requests also update the completion counters.
 pub(crate) struct Delivery<'a> {
-    metrics: &'a Metrics,
+    metrics: Option<&'a Metrics>,
     log: Option<crate::query_log::Pending<'a>>,
     delivered: bool,
 }
@@ -76,11 +77,13 @@ impl Delivery<'_> {
 
 impl Drop for Delivery<'_> {
     fn drop(&mut self) {
-        self.metrics.inc(if self.delivered {
-            Counter::Completed
-        } else {
-            Counter::Cancelled
-        });
+        if let Some(metrics) = self.metrics {
+            metrics.inc(if self.delivered {
+                Counter::Completed
+            } else {
+                Counter::Cancelled
+            });
+        }
     }
 }
 
@@ -267,10 +270,28 @@ impl Resolver {
         transport: &str,
         reply: Option<&Message>,
     ) {
-        if let Some(epoch) = self.query_log.begin() {
-            let mut entry = Entry::request(protocol::decode(bytes).ok().as_ref(), peer, transport);
-            entry.finish(reply, Duration::ZERO, Trace::default());
-            self.query_log.record(epoch, entry);
+        self.rejected_for_delivery(bytes, peer, transport, reply)
+            .delivered();
+    }
+
+    /// Admission failures have history but never entered the request counters.
+    /// Keep their history pending until a reply is written, or a silent drop is final.
+    pub(crate) fn rejected_for_delivery(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+        reply: Option<&Message>,
+    ) -> Delivery<'_> {
+        let query = protocol::decode(bytes).ok();
+        let mut log = self.query_log.pending(query.as_ref(), peer, transport);
+        if let Some(log) = &mut log {
+            log.resolve(reply);
+        }
+        Delivery {
+            metrics: None,
+            log,
+            delivered: false,
         }
     }
 
@@ -295,10 +316,12 @@ impl Resolver {
         transport: &str,
     ) -> (Option<Reply>, Delivery<'_>) {
         let mut guard = self.metrics.track(Timer::Request);
-        let mut log = self.query_log.pending(bytes, peer, transport);
+        let query = protocol::decode(bytes).ok();
+        let mut log = self.query_log.pending(query.as_ref(), peer, transport);
         let mut untraced = Trace::default();
         let trace = log.as_mut().map_or(&mut untraced, |log| &mut log.trace);
-        let reply = self.resolve_inner(bytes, peer, trace).await;
+        let request = protocol::request_from_decoded(bytes, query);
+        let reply = self.resolve_inner(request, peer, trace).await;
         if let Some(log) = &mut log {
             log.resolve(reply.as_ref().map(|r| &r.message));
         }
@@ -315,7 +338,7 @@ impl Resolver {
         (
             reply,
             Delivery {
-                metrics: &self.metrics,
+                metrics: Some(&self.metrics),
                 log,
                 delivered: false,
             },
@@ -359,6 +382,78 @@ impl Resolver {
             Source::Recursive(recursion) => recursion.metrics(),
             Source::Forward(_) => Vec::new(),
         }
+    }
+    /// Prefetch counters of the current cache generation, for `/metrics`.
+    pub fn refresh_metrics(&self) -> Vec<(&'static str, &'static str, u64, bool)> {
+        let generation = self
+            .generation
+            .read()
+            .expect("cache generation poisoned")
+            .clone();
+        let refresh = generation.refresh.snapshot();
+        let (useful, unused) = generation.cache.refresh_outcomes();
+        vec![
+            (
+                "refresh_active",
+                "Running background refreshes and cache fills.",
+                refresh.active as u64,
+                true,
+            ),
+            (
+                "refresh_scheduled",
+                "Started background refreshes and cache fills.",
+                refresh.scheduled,
+                false,
+            ),
+            (
+                "refresh_success",
+                "Background refreshes and cache fills that stored an answer.",
+                refresh.success,
+                false,
+            ),
+            (
+                "refresh_failure",
+                "Background refreshes and cache fills that stored no answer.",
+                refresh.failure,
+                false,
+            ),
+            (
+                "refresh_rejected_duplicate",
+                "Prefetches refused because the same key was already refreshing.",
+                refresh.rejected_duplicate,
+                false,
+            ),
+            (
+                "refresh_rejected_cooldown",
+                "Prefetches refused because the key failed within the backoff.",
+                refresh.rejected_cooldown,
+                false,
+            ),
+            (
+                "refresh_rejected_budget",
+                "Prefetches refused by the in-flight or rate limit.",
+                refresh.rejected_budget,
+                false,
+            ),
+            (
+                "refresh_cancelled_fill_rejected",
+                "Sent queries of departed callers that the refresh budget refused to finish.",
+                refresh.cancelled_fill_rejected,
+                false,
+            ),
+            (
+                "refresh_useful",
+                "Refreshed entries that a lookup returned before they expired.",
+                useful,
+                false,
+            ),
+            (
+                "refresh_unused",
+                "Refreshed entries that expired or left the cache before a lookup returned them.",
+                unused,
+                false,
+            ),
+        ]
     }
     pub fn recursion_diagnostics(&self) -> Option<serde_json::Value> {
         match &*self.upstream {
@@ -429,7 +524,12 @@ impl Resolver {
         }
     }
 
-    async fn resolve_inner(&self, bytes: &[u8], peer: IpAddr, trace: &mut Trace) -> Option<Reply> {
+    async fn resolve_inner(
+        &self,
+        request: Request,
+        peer: IpAddr,
+        trace: &mut Trace,
+    ) -> Option<Reply> {
         // One immutable generation governs this request, including across awaits.
         // Keep the generation owner, not just its index, across every await.
         let policy_generation = self.policy.snapshot();
@@ -441,7 +541,7 @@ impl Resolver {
             .clone();
         let cache = generation.cache.clone();
         let epoch = cache.epoch();
-        let query = match protocol::request(bytes) {
+        let query = match request {
             Request::Drop => return None,
             Request::Reply(message, padding) => {
                 return Some(Reply {
@@ -502,9 +602,12 @@ impl Resolver {
                 let sent = work.sent.clone();
                 let flights = generation.flights(epoch, &self.coalescing);
                 let metrics = self.metrics.clone();
-                generation
-                    .refresh
-                    .schedule(&outbound, epoch, &cache.config().prefetch, || {
+                generation.refresh.schedule(
+                    &outbound,
+                    epoch,
+                    &cache.config().prefetch,
+                    refresh::Purpose::Prefetch,
+                    || {
                         // Explicitly disabling coalescing also disables sharing with
                         // foreground misses; the refresh owner's own limits still apply.
                         let joined = flights.join(&outbound, work.run(true).boxed(), sent);
@@ -518,7 +621,8 @@ impl Resolver {
                                 Err(()) => false,
                             }
                         }
-                    });
+                    },
+                );
             }
             // A cached failure replies with a usable stale answer, as the
             // failure it records would have; it sends no upstream query.
@@ -747,10 +851,13 @@ impl Drop for Waiting<'_> {
             && self.sent.load(Ordering::Acquire)
             && let Some(mut hold) = hold.leave()
         {
-            fill.refresh
-                .schedule(fill.query, fill.epoch, fill.config, || async move {
-                    hold.result().await.admitted
-                });
+            fill.refresh.schedule(
+                fill.query,
+                fill.epoch,
+                fill.config,
+                refresh::Purpose::Fill,
+                || async move { hold.result().await.admitted },
+            );
         }
     }
 }
@@ -888,6 +995,14 @@ impl Exchange {
                                     } else {
                                         Failure::StaleFallback
                                     },
+                                )
+                            } else if refreshing {
+                                self.cache.insert_refresh_if_epoch(
+                                    &self.query,
+                                    &response,
+                                    scope,
+                                    Instant::now(),
+                                    self.epoch,
                                 )
                             } else {
                                 self.cache.insert_decision_if_epoch(

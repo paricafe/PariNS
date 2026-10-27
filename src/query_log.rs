@@ -228,7 +228,7 @@ impl QueryLog {
     }
     pub(crate) fn pending(
         &self,
-        bytes: &[u8],
+        query: Option<&Message>,
         peer: IpAddr,
         transport: &str,
     ) -> Option<Pending<'_>> {
@@ -237,11 +237,7 @@ impl QueryLog {
             log: self,
             epoch,
             started: Instant::now(),
-            entry: Some(Entry::request(
-                crate::protocol::decode(bytes).ok().as_ref(),
-                peer,
-                transport,
-            )),
+            entry: Some(Entry::request(query, peer, transport)),
             trace: Trace::default(),
             resolved: false,
         })
@@ -377,11 +373,10 @@ mod tests {
             RecordType::A,
         ));
         let response = crate::protocol::error_response(&query, ResponseCode::NoError);
-        let bytes = query.to_vec().unwrap();
         for delivered in [false, true] {
             let mut pending = runtime
                 .query_log
-                .pending(&bytes, "192.0.2.1".parse().unwrap(), "doh3")
+                .pending(Some(&query), "192.0.2.1".parse().unwrap(), "doh3")
                 .unwrap();
             pending.trace.cache = Some("upstream");
             pending.trace.cache_lookup = Some(LookupDecision {

@@ -1,0 +1,31 @@
+src/update/contract.rs
+  s_e9dff4e9f414a4::t_c7b4aea63229f4 2-3,12,406-409
+AGENTS.md
+  s_e9dff4e9f414a4::t_c7b4aea63229f4 284-285
+scripts/bootstrap.sh
+  s_e9dff4e9f414a4::t_c7b4aea63229f4 11-12,41
+guide/operations.md
+  s_e9dff4e9f414a4::t_c7b4aea63229f4 140-142
+CHANGELOG.md
+  s_e9dff4e9f414a4::t_c7b4aea63229f4 5-12
+Cargo.toml
+  s_e9dff4e9f414a4::t_c7b4aea63229f4 3
+Cargo.lock
+  s_e9dff4e9f414a4::t_860d226bd3ec2b 1236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0d732b6488fad9782d978aeeeaed2d34dd162616",
+  "prompts": {},
+  "sessions": {
+    "s_e9dff4e9f414a4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15955-0f7e-7513-97db-a2e5db926352",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

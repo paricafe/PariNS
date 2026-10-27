@@ -221,6 +221,7 @@ per client network so each network gets the answer the upstream gave for it.
 | `max_variants` | `64` | 1–4096, at most `max_entries` | ECS variants kept for one question. |
 | `max_ttl_secs` | `86400` | 1–604800 | Cap on positive answer TTLs. |
 | `negative_ttl_cap_secs` | `900` | 1–604800 | Cap on NXDOMAIN and NODATA TTLs. |
+| `servfail_ttl_secs` | `30` | 0–300 | How long an upstream SERVFAIL is cached; `0` turns this off. |
 | `shards` | `16` | 1–256 | Independently locked cache partitions. |
 | `negative_percent` | `20` | 0–90 | Share of entries and bytes reserved for negative answers. |
 
@@ -277,9 +278,9 @@ Behavior:
   evidence lasts one hour, then must be confirmed again. The learning table holds at
   most 65,536 names, is not saved in snapshots, and is cleared with the cache.
   The **Cache** page shows each name as observing, shared or revoked.
-- **Eligibility.** Truncated answers, SERVFAIL and REFUSED, zero TTLs, negative
-  answers without a SOA, and queries with Cookie or unknown EDNS options are not
-  cached. Negative TTLs are the smallest of the SOA TTL, the SOA MINIMUM and
+- **Eligibility.** Truncated answers, REFUSED, zero TTLs, negative answers without
+  a SOA, and queries with Cookie or unknown EDNS options are not cached. SERVFAIL
+  is cached only as a failure (see below). Negative TTLs are the smallest of the SOA TTL, the SOA MINIMUM and
   `negative_ttl_cap_secs`. A CNAME chain ending in NXDOMAIN or NODATA is cached only
   when the chain is unambiguous and backed by a matching SOA. Lower TTLs are never
   raised.
@@ -297,6 +298,18 @@ Behavior:
   after 8 seconds and publishes what it wrote, and restoring stops after 4.5
   seconds and keeps what it loaded, so DNS starts normally. Entries that did not
   fit are reported as skipped with the reason `deadline`.
+- **Failures.** A SERVFAIL that the upstream sent is cached for
+  `servfail_ttl_secs` ([RFC 9520](https://www.rfc-editor.org/rfc/rfc9520)), at most
+  `negative_ttl_cap_secs`. In recursive mode this also applies to DNSSEC Bogus
+  answers and to resolutions that failed on a referral loop or a query budget.
+  Timeouts and other transport failures are not cached. A cached failure applies
+  only to the network that the query was sent with, even when the upstream
+  answered with a wider ECS scope. While it lasts, PariNS answers with a usable
+  stale answer if serve stale has one (never for DNSSEC Bogus), otherwise with
+  SERVFAIL and the upstream's Extended DNS Errors, and sends no upstream query. A
+  failure never replaces a cached answer, and a new answer replaces the failure at
+  once. Failures count against the negative budget, are never prefetched and are
+  not saved in snapshots. The query log shows them as **Cached failure**.
 - Changing only cache settings replaces the cache without restarting listeners.
 
 ## Prefetch and serve stale

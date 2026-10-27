@@ -86,6 +86,14 @@ until preview/validation.
   retention and stale reply TTL are separate; never silently extend TTLs. Stale
   serving applies only to supported upstream failures, never from negative answers
   or another privacy namespace.
+- A SERVFAIL the source answered (in recursive mode also Bogus, referral loops and
+  exhausted query budgets) is cached for `servfail_ttl_secs` (RFC 9520) in the
+  negative budget, keyed like an answer but only for the exact sent network,
+  never a learned or response scope. It never replaces an answer and any newer
+  answer supersedes it; timeouts, transport failures and cancelled work are never
+  cached. A hit sends no upstream query and falls back to usable stale data as the
+  failure would (never for Bogus). It is never prefetched, a stale source or saved
+  in a snapshot. Details: `src/cache.rs` (`admit_failure`).
 - Classify responses once for admission and snapshot restoration. A nonempty negative
   answer needs an unambiguous same-class CNAME chain and equivalent covering SOAs for
   its terminal name; it keeps the question, ECS namespace, negative budget and

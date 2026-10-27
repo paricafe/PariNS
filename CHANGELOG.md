@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- An upstream SERVFAIL is cached for `cache.servfail_ttl_secs` (default 30
+  seconds, 0–300, 0 turns it off), following RFC 9520. While it lasts, the same
+  query from the same network gets a usable stale answer if serve stale has one,
+  otherwise SERVFAIL, without another upstream query. In recursive mode this also
+  covers DNSSEC Bogus answers and resolutions that failed on a referral loop or a
+  query budget. Timeouts and transport failures are not cached. A cached failure
+  never replaces an answer, and a new answer replaces it at once. The query log
+  shows it as **Cached failure**, and the cache status reports `servfail_entries`
+  and `servfail_hits`.
+
+### Changed
+
+- After a successful installation, the install script removes its copy of the
+  candidate program (`.update/install-preflight`) and keeps only the newest two
+  `.install-backup.*` directories. It removes only directories and files it
+  created, owned by root and not links; online update copies stay. `--dry-run`
+  and `--root` print what would be removed.
+
 ## v0.1.27 — 2026-10-24
 
 ### Changed

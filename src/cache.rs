@@ -18,7 +18,7 @@ use hickory_proto::{
     op::{Edns, Message, Query, ResponseCode},
     rr::{
         DNSClass, Name, RData, RecordType,
-        rdata::opt::{ClientSubnet, EdnsCode},
+        rdata::opt::{ClientSubnet, EdnsCode, EdnsOption},
     },
 };
 use lru::LruCache;
@@ -113,6 +113,9 @@ struct Entry {
     lifetime: Duration,
     retention: Duration,
     negative: bool,
+    /// An upstream SERVFAIL (RFC 9520), kept in the negative partition. Never
+    /// a stale source, never prefetched and never written to a snapshot.
+    failure: Option<Failure>,
     prefetch: bool,
     hits: AtomicU64,
     accessed: AtomicU64,
@@ -155,6 +158,7 @@ struct Counts {
     rejections: u64,
     shared_hits: u64,
     revocations: u64,
+    failure_hits: u64,
 }
 
 struct Shard {
@@ -165,12 +169,15 @@ struct Shard {
     sharing: sharing::Table,
     /// Current `Scope::Learned` entries; every removal goes through `remove`.
     learned: usize,
+    /// Current failure entries, maintained like `learned`.
+    failures: usize,
 }
 
 impl Shard {
     fn remove(&mut self, part: usize, id: u64) {
         if let Some(entry) = self.partitions[part].lru.pop(&id) {
             self.learned -= usize::from(matches!(entry.scope, Scope::Learned { .. }));
+            self.failures -= usize::from(entry.failure.is_some());
             let empty = if let Some(ids) = self.buckets.get_mut(&entry.key) {
                 ids.retain(|entry| entry.id != id);
                 ids.is_empty()
@@ -210,11 +217,16 @@ impl Shard {
             .filter_map(|entry| {
                 let age = now.saturating_duration_since(entry.inserted);
                 let fresh = age < entry.lifetime;
-                (entry.scope.matches(outgoing) && age < entry.retention && (fresh || allow_stale))
-                    .then_some((
-                        (fresh, entry.scope.prefix_len()),
-                        (usize::from(entry.negative), entry.id),
-                    ))
+                // Only a stale fallback allows stale data, and a cached failure
+                // is never an answer to fall back on.
+                (entry.scope.matches(outgoing)
+                    && age < entry.retention
+                    && (fresh || allow_stale)
+                    && !(allow_stale && entry.failure.is_some()))
+                .then_some((
+                    (fresh, entry.scope.prefix_len()),
+                    (usize::from(entry.negative), entry.id),
+                ))
             })
             .max_by_key(|(rank, _)| *rank)
             .map(|(_, id)| id)
@@ -237,6 +249,15 @@ struct Policy {
     stale: bool,
 }
 
+/// What a cached upstream SERVFAIL allows when it is hit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// A usable stale answer replies instead, as it would for the failure.
+    StaleFallback,
+    /// Always answered as the cached SERVFAIL (DNSSEC Bogus).
+    Final,
+}
+
 pub struct Hit {
     pub message: Message,
     pub scope: Scope,
@@ -245,6 +266,8 @@ pub struct Hit {
     /// The source's AD bit when the answer was stored; never replayed in
     /// `message`. Only a validating source makes it meaningful.
     pub authentic: bool,
+    /// A cached upstream SERVFAIL.
+    pub failure: Option<Failure>,
 }
 
 pub struct Cache {
@@ -296,6 +319,7 @@ impl Cache {
                     counts: Counts::default(),
                     sharing: sharing::Table::new(sharing::capacity(config.max_entries, count)),
                     learned: 0,
+                    failures: 0,
                 })
             })
             .collect();
@@ -486,6 +510,7 @@ impl Cache {
                     shard.counts.stale_hits += 1;
                 }
                 shard.counts.shared_hits += u64::from(matches!(entry.scope, Scope::Learned { .. }));
+                shard.counts.failure_hits += u64::from(entry.failure.is_some());
                 entry
             } else {
                 Arc::clone(shard.partitions[part].lru.peek(&id).unwrap())
@@ -531,6 +556,12 @@ impl Cache {
             response_edns
                 .set_max_payload(MAX_UDP_PAYLOAD)
                 .set_dnssec_ok(edns.flags().dnssec_ok);
+            // A cached failure replays the source's Extended DNS Errors.
+            if entry.failure.is_some() {
+                for option in extended_errors(&message) {
+                    response_edns.options_mut().insert(option);
+                }
+            }
             message.edns = Some(response_edns);
         }
         LookupResult {
@@ -540,6 +571,7 @@ impl Cache {
                 stale,
                 refresh,
                 authentic,
+                failure: entry.failure,
             }),
             decision: LookupDecision {
                 outcome: if stale {
@@ -695,6 +727,156 @@ impl Cache {
             Ok(prepared) => prepared,
             Err(reason) => return StoreDecision::rejected(reason, superseded),
         };
+        let lifetime = Duration::from_secs(u64::from(lifetime));
+        let retention = if policy.stale && !negative {
+            lifetime + Duration::from_secs(self.config.stale.retention_secs)
+        } else {
+            lifetime
+        };
+        self.place(
+            &mut shard,
+            key,
+            Stored {
+                wire,
+                scope,
+                lifetime,
+                retention,
+                negative,
+                failure: None,
+                prefetch: policy.prefetch,
+            },
+            now,
+            superseded,
+        )
+    }
+
+    /// Stores an upstream SERVFAIL for `servfail_ttl_secs` in the namespace of
+    /// exactly the sent query (RFC 9520). It never replaces or removes an
+    /// answer: a fresh overlapping answer refuses it, and stale answers stay
+    /// for fallback. A later answer supersedes it like any older knowledge.
+    pub fn insert_failure_if_epoch(
+        &self,
+        query: &Message,
+        response: &Message,
+        scope: Scope,
+        now: Instant,
+        epoch: u64,
+        failure: Failure,
+    ) -> StoreDecision {
+        let decision = self.admit_failure(query, response, scope, now, epoch, failure);
+        self.diagnostics.store(decision);
+        decision
+    }
+
+    fn admit_failure(
+        &self,
+        query: &Message,
+        response: &Message,
+        scope: Scope,
+        now: Instant,
+        epoch: u64,
+        failure: Failure,
+    ) -> StoreDecision {
+        let Some(key) = Key::of(query) else {
+            return StoreDecision::skipped(query_rejection(query));
+        };
+        let policy = self.policy(&key, query.queries[0].name());
+        if policy.bypass {
+            return StoreDecision::skipped(DecisionReason::PolicyDisabled);
+        }
+        let lifetime = self
+            .config
+            .servfail_ttl_secs
+            .min(policy.negative_ttl_cap_secs);
+        if response.response_code != ResponseCode::ServFail
+            || response.truncation
+            || response.signature.is_some()
+            || !superseding_edns(response)
+            || lifetime == 0
+        {
+            return StoreDecision::skipped(DecisionReason::UncacheableResponse);
+        }
+        let mut stored = protocol::error_response(query, ResponseCode::ServFail);
+        let errors = extended_errors(response);
+        if !errors.is_empty() {
+            let edns = stored.edns.get_or_insert_with(|| {
+                let mut edns = Edns::new();
+                edns.set_max_payload(MAX_UDP_PAYLOAD);
+                edns
+            });
+            for option in errors {
+                edns.options_mut().insert(option);
+            }
+        }
+        let Ok(wire) = stored.to_vec() else {
+            return StoreDecision::skipped(DecisionReason::UncacheableResponse);
+        };
+        let mut shard = self.shards[self.shard(&key)]
+            .lock()
+            .expect("cache shard poisoned");
+        if epoch != self.epoch() {
+            shard.counts.rejections += 1;
+            return StoreDecision::skipped(DecisionReason::EpochChanged);
+        }
+        shard.prune(&key, now);
+        let overlapping = || {
+            shard
+                .buckets
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .filter(|e| scopes_overlap(e.scope, scope))
+        };
+        if overlapping()
+            .any(|e| e.failure.is_none() && now.saturating_duration_since(e.inserted) < e.lifetime)
+        {
+            return StoreDecision::skipped(DecisionReason::UncacheableResponse);
+        }
+        let replaced: Vec<_> = overlapping()
+            .filter(|e| e.failure.is_some())
+            .map(|e| e.id)
+            .collect();
+        let superseded = !replaced.is_empty();
+        for id in replaced {
+            shard.remove(1, id);
+        }
+        let lifetime = Duration::from_secs(u64::from(lifetime));
+        self.place(
+            &mut shard,
+            key,
+            Stored {
+                wire,
+                scope,
+                lifetime,
+                retention: lifetime,
+                negative: true,
+                failure: Some(failure),
+                prefetch: false,
+            },
+            now,
+            superseded,
+        )
+    }
+
+    /// Publishes one prepared entry under its shard lock, within the variant
+    /// ceiling and the partition budget.
+    fn place(
+        &self,
+        shard: &mut Shard,
+        key: Key,
+        stored: Stored,
+        now: Instant,
+        superseded: bool,
+    ) -> StoreDecision {
+        let Stored {
+            wire,
+            scope,
+            lifetime,
+            retention,
+            negative,
+            failure,
+            prefetch,
+        } = stored;
         let charge = charge(&wire, &key);
         let part = usize::from(negative);
         if charge > shard.partitions[part].max_bytes || shard.partitions[part].max_entries == 0 {
@@ -734,15 +916,10 @@ impl Cache {
         shard.clock += 1;
         let id = shard.clock;
         let key = Arc::new(key);
-        let lifetime = Duration::from_secs(u64::from(lifetime));
-        let retention = if policy.stale && !negative {
-            lifetime + Duration::from_secs(self.config.stale.retention_secs)
-        } else {
-            lifetime
-        };
         let charged = Arc::clone(&shard.partitions[part].charged);
         charged.fetch_add(charge, Ordering::Relaxed);
         shard.learned += usize::from(matches!(scope, Scope::Learned { .. }));
+        shard.failures += usize::from(failure.is_some());
         let entry = Arc::new(Entry {
             id,
             key: Arc::clone(&key),
@@ -752,7 +929,8 @@ impl Cache {
             lifetime,
             retention,
             negative,
-            prefetch: policy.prefetch,
+            failure,
+            prefetch,
             hits: AtomicU64::new(0),
             accessed: AtomicU64::new(id),
             charge,
@@ -818,7 +996,7 @@ impl Cache {
     /// Charge includes entry allocations still held by readers; it is not RSS.
     pub fn snapshot(&self) -> Value {
         let mut counts = Counts::default();
-        let (mut positive, mut negative, mut bytes, mut learned) = (0, 0, 0, 0);
+        let (mut positive, mut negative, mut bytes, mut learned, mut failures) = (0, 0, 0, 0, 0);
         for shard in &self.shards {
             let shard = shard.lock().expect("cache shard poisoned");
             positive += shard.partitions[0].lru.len();
@@ -835,7 +1013,9 @@ impl Cache {
             counts.rejections += shard.counts.rejections;
             counts.shared_hits += shard.counts.shared_hits;
             counts.revocations += shard.counts.revocations;
+            counts.failure_hits += shard.counts.failure_hits;
             learned += shard.learned;
+            failures += shard.failures;
         }
         json!({"entries":positive+negative,"bytes":bytes,"positive_entries":positive,
             "negative_entries":negative,"hits":counts.hits,"stale_hits":counts.stale_hits,
@@ -844,7 +1024,8 @@ impl Cache {
             "max_entries":self.config.max_entries,"max_bytes":self.config.max_bytes,
             "shards":self.shards.len(),"epoch":self.epoch(),
             "ecs_shared_hits":counts.shared_hits,"ecs_shared_entries":learned,
-            "ecs_sharing_revocations":counts.revocations})
+            "ecs_sharing_revocations":counts.revocations,
+            "servfail_entries":failures,"servfail_hits":counts.failure_hits})
     }
 
     pub fn inspect(&self, name: &Name, kind: Option<RecordType>, now: Instant) -> Value {
@@ -876,7 +1057,7 @@ impl Cache {
             json!({"name":e.key.name.to_ascii(),"qtype":e.key.kind.to_string(),
                 "dnssec_ok":e.key.dnssec_ok,"checking_disabled":e.key.checking_disabled,
                 "recursion_desired":e.key.recursion_desired,"edns":e.key.edns,
-                "scope":e.scope.tag(),"negative":e.negative,
+                "scope":e.scope.tag(),"negative":e.negative,"servfail":e.failure.is_some(),
                 "fresh_remaining_secs":e.lifetime.saturating_sub(age).as_secs(),
                 "retention_remaining_secs":e.retention.saturating_sub(age).as_secs(),
                 "hits":e.hits.load(Ordering::Relaxed),"bytes":e.charge,
@@ -940,6 +1121,28 @@ fn scopes_overlap(a: Scope, b: Scope) -> bool {
         }
         _ => a == b,
     }
+}
+
+/// One entry prepared for `Cache::place`.
+struct Stored {
+    wire: Vec<u8>,
+    scope: Scope,
+    lifetime: Duration,
+    retention: Duration,
+    negative: bool,
+    failure: Option<Failure>,
+    prefetch: bool,
+}
+
+/// The Extended DNS Error options (RFC 8914) of `message`.
+fn extended_errors(message: &Message) -> Vec<EdnsOption> {
+    message
+        .edns
+        .iter()
+        .flat_map(|edns| &edns.options().options)
+        .filter(|(code, _)| *code == EdnsCode::Unknown(15))
+        .map(|(_, option)| option.clone())
+        .collect()
 }
 
 /// The single positive/negative classification used by admission and sharing.

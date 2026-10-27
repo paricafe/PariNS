@@ -130,18 +130,26 @@ impl Context {
         ))
     }
 
+    /// The namespace of exactly the sent query: a cached upstream failure
+    /// never takes a response scope, so it never spans other networks.
+    pub fn source_scope(&self) -> Option<Scope> {
+        match self.outgoing {
+            None => Some(Scope::NoEcs),
+            Some(sent) if sent.source_prefix() == 0 => Some(Scope::Privacy {
+                ipv4: sent.addr().is_ipv4(),
+            }),
+            Some(sent) => IpNet::new(sent.addr(), sent.source_prefix())
+                .ok()
+                .map(|network| Scope::ExactSource(network.trunc())),
+        }
+    }
+
     /// Storage and downstream scopes come from the same response decision.
     /// The caller still excludes the original namespace after a privacy retry.
     pub fn response_scope(&self, response: &Message) -> ResponseScope {
         let received = subnet(response);
         let cache = match (self.outgoing, received) {
-            (None, None) => Some(Scope::NoEcs),
-            (Some(sent), None) if sent.source_prefix() == 0 => Some(Scope::Privacy {
-                ipv4: sent.addr().is_ipv4(),
-            }),
-            (Some(sent), None) => IpNet::new(sent.addr(), sent.source_prefix())
-                .ok()
-                .map(|network| Scope::ExactSource(network.trunc())),
+            (_, None) => self.source_scope(),
             (Some(sent), Some(received))
                 if received.addr() == sent.addr()
                     && received.source_prefix() == sent.source_prefix()

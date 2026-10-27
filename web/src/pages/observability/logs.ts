@@ -64,7 +64,7 @@ const statusKeys: Record<string, string> = {
   success: "views.success", blocked: "views.blocked", error: "views.error", dropped: "views.dropped",
 };
 const pathKeys: Record<string, string> = {
-  upstream: "views.pathUpstream", fresh: "views.pathFresh", stale: "views.pathStale",
+  upstream: "views.pathUpstream", fresh: "views.pathFresh", stale: "views.pathStale", servfail: "views.pathServfail",
   blocked: "views.pathBlocked", error: "views.pathError", cancelled: "views.pathCancelled",
 };
 

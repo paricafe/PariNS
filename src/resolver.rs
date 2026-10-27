@@ -16,7 +16,7 @@ use futures_util::{
 use hickory_proto::op::{Message, ResponseCode};
 
 use crate::{
-    cache::{Cache, LookupOutcome},
+    cache::{Cache, Failure, LookupOutcome},
     config::{CacheConfig, CoalescingConfig, Config, EcsConfig, ResolutionMode},
     ecs::{self, Context},
     filter_subscriptions::handle::PolicyHandle,
@@ -481,9 +481,13 @@ impl Resolver {
         let cached = cache.lookup_with_decision(&query, context.outgoing, Instant::now(), false);
         self.metrics.record_cache_lookup(cached.decision);
         trace.cache_lookup = Some(cached.decision);
-        if let Some(hit) = cached.hit {
+        if let Some(mut hit) = cached.hit {
             trace.cache_scope = Some(hit.scope.tag());
-            trace.cache = Some("fresh");
+            trace.cache = Some(if hit.failure.is_some() {
+                "servfail"
+            } else {
+                "fresh"
+            });
             self.metrics.inc(Counter::CacheHits);
             if hit.refresh {
                 let work = Exchange {
@@ -518,6 +522,20 @@ impl Resolver {
                             }
                         }
                     });
+            }
+            // A cached failure replies with a usable stale answer, as the
+            // failure it records would have; it sends no upstream query.
+            if hit.failure == Some(Failure::StaleFallback)
+                && let crate::cache::LookupResult {
+                    hit: Some(stale),
+                    decision,
+                } = cache.lookup_with_decision(&query, context.outgoing, Instant::now(), true)
+            {
+                self.metrics.record_cache_lookup(decision);
+                trace.cache_lookup = Some(decision);
+                trace.cache_scope = Some(stale.scope.tag());
+                trace.cache = Some(if stale.stale { "stale" } else { "fresh" });
+                hit = stale;
             }
             let mut authentic = self.authentic(&query, hit.authentic);
             let (mut message, scope) = (hit.message, hit.scope);
@@ -596,7 +614,12 @@ impl Resolver {
             }
         };
         trace.cache = Some(if result.cached {
-            "fresh"
+            // The cache stores SERVFAIL only as a cached failure.
+            if matches!(&result.response, Ok((m, _)) if m.response_code == ResponseCode::ServFail) {
+                "servfail"
+            } else {
+                "fresh"
+            }
         } else if result.response.is_err() {
             "error"
         } else {
@@ -746,7 +769,8 @@ impl Exchange {
             message.metadata.authentic_data = hit.authentic;
             return Answer {
                 response: Ok((message, hit.scope.reply_scope(self.context.outgoing))),
-                stale_eligible: false,
+                // A cached failure lets each caller fall back like the failure would.
+                stale_eligible: hit.failure == Some(Failure::StaleFallback),
                 admitted: false,
                 upstream: None,
                 outgoing_ecs: None,
@@ -841,23 +865,47 @@ impl Exchange {
         match result {
             Ok(response) => {
                 let decision = self.context.response_scope(&response);
+                let servfail = response.response_code == ResponseCode::ServFail;
                 let store = (!retried).then(|| {
-                    let store = decision.cache.map_or_else(
+                    // A failure is cached only for the exact sent network.
+                    let scope = if servfail {
+                        self.context.source_scope()
+                    } else {
+                        decision.cache
+                    };
+                    let store = scope.map_or_else(
                         || self.cache.record_unusable_scope(),
                         |scope| {
-                            self.cache.insert_decision_if_epoch(
-                                &self.query,
-                                &response,
-                                scope,
-                                Instant::now(),
-                                self.epoch,
-                            )
+                            if servfail {
+                                self.cache.insert_failure_if_epoch(
+                                    &self.query,
+                                    &response,
+                                    scope,
+                                    Instant::now(),
+                                    self.epoch,
+                                    if bogus {
+                                        Failure::Final
+                                    } else {
+                                        Failure::StaleFallback
+                                    },
+                                )
+                            } else {
+                                self.cache.insert_decision_if_epoch(
+                                    &self.query,
+                                    &response,
+                                    scope,
+                                    Instant::now(),
+                                    self.epoch,
+                                )
+                            }
                         },
                     );
                     self.metrics.record_cache_store(store);
                     store
                 });
-                let admitted = store.is_some_and(|store| store.admitted());
+                // Refresh and cache fill succeed only with an answer; a cached
+                // failure is still a failure for their accounting.
+                let admitted = !servfail && store.is_some_and(|store| store.admitted());
                 let scope = if retried { None } else { decision.reply };
                 Answer {
                     response: Ok((response, scope)),

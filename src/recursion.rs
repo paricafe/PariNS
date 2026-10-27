@@ -499,6 +499,17 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
         Err(error) => match classify(error) {
             Failure::Negative(negative) => (negative.code, Vec::new(), negative.authorities),
             Failure::Bogus => return bogus(query, scope),
+            // A referral loop or an exhausted query budget is a definitive
+            // answer for this question: SERVFAIL, which the cache may keep
+            // briefly (RFC 9520). Timeouts and other errors are not cached.
+            Failure::Other(_, kind @ (FailKind::Referral | FailKind::Budget)) => {
+                return Outcome {
+                    response: Ok(header(query, ResponseCode::ServFail)),
+                    kind: Kind::Failed(kind),
+                    proof: None,
+                    scope: None,
+                };
+            }
             Failure::Other(error, kind) => {
                 return Outcome {
                     response: Err(error),

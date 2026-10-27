@@ -358,6 +358,8 @@ async fn servfail_and_timeout_keep_trace_factual() {
     config.query_log.enabled = true;
     config.ecs.enabled = true;
     config.query_timeout_ms = 30;
+    // The second query must reach the upstream again.
+    config.cache.servfail_ttl_secs = 0;
     let (resolver, services) = with_log(&config);
     let q = query("error.test.").to_vec().unwrap();
     let serve = async {

@@ -91,6 +91,8 @@ max_bytes = 268435456
 max_variants = 64
 max_ttl_secs = 86400
 negative_ttl_cap_secs = 900
+# Upstream SERVFAIL answers are cached this long (RFC 9520); 0 disables it.
+servfail_ttl_secs = 30
 shards = 16
 negative_percent = 20
 

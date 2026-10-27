@@ -112,6 +112,7 @@ export const settingsMessages = {
   "cache.negative_percent.help": ["为 NXDOMAIN/NODATA 答案单独预留的容量，避免挤占正缓存。", "Capacity reserved for NXDOMAIN/NODATA answers so they don't crowd out positive entries."],
   "cache.max_ttl_secs.label": ["最大 TTL", "Maximum TTL"],
   "cache.negative_ttl_cap_secs.label": ["负缓存最大 TTL", "Maximum negative TTL"],
+  "cache.servfail_ttl_secs.label": ["SERVFAIL 缓存 TTL", "SERVFAIL cache TTL"],
 
   "group.prefetch.title": ["预取", "Prefetch"],
   "group.prefetch.help": ["常用条目临近过期时在后台刷新，刷新期间继续用缓存回答。", "Refreshes popular entries in the background shortly before they expire, while the cache keeps answering."],

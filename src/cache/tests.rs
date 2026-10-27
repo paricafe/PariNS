@@ -1,6 +1,7 @@
 use super::*;
 mod ecs_sharing;
 mod reliability;
+mod servfail;
 use hickory_proto::{
     op::{MessageType, OpCode, Query},
     rr::{

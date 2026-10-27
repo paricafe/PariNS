@@ -78,6 +78,7 @@ export const viewsMessages = {
   pathUpstream: ["上游", "Upstream"],
   pathFresh: ["有效命中", "Fresh hit"],
   pathStale: ["过期命中", "Stale hit"],
+  pathServfail: ["失败缓存", "Cached failure"],
   pathBlocked: ["拦截规则", "Blocking rule"],
   blockSource: ["规则来源", "Rule source"],
   pathError: ["查询失败", "Query failed"],

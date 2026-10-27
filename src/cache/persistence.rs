@@ -240,7 +240,9 @@ impl Cache {
                 shard
                     .partitions
                     .iter()
-                    .flat_map(|p| p.lru.iter().map(|(_, e)| Arc::clone(e))),
+                    .flat_map(|p| p.lru.iter().map(|(_, e)| Arc::clone(e)))
+                    // A cached failure is short-lived and never restored.
+                    .filter(|e| e.failure.is_none()),
             );
         }
         entries.sort_by_cached_key(|e| std::cmp::Reverse(e.accessed.load(Ordering::Relaxed)));

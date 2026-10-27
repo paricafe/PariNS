@@ -186,6 +186,8 @@ pub struct CacheConfig {
     pub max_variants: usize,
     pub max_ttl_secs: u32,
     pub negative_ttl_cap_secs: u32,
+    /// How long an upstream SERVFAIL is cached (RFC 9520); 0 disables it.
+    pub servfail_ttl_secs: u32,
     pub shards: usize,
     pub negative_percent: u8,
     pub prefetch: PrefetchConfig,
@@ -294,6 +296,7 @@ impl Default for CacheConfig {
             max_variants: 64,
             max_ttl_secs: 86_400,
             negative_ttl_cap_secs: 900,
+            servfail_ttl_secs: 30,
             shards: 16,
             negative_percent: 20,
             prefetch: PrefetchConfig::default(),
@@ -443,6 +446,10 @@ impl Config {
             (1..=MAX_CACHE_TTL_SECS).contains(&self.cache.max_ttl_secs)
                 && (1..=MAX_CACHE_TTL_SECS).contains(&self.cache.negative_ttl_cap_secs),
             "cache TTL caps must be in 1..=604800"
+        );
+        ensure!(
+            self.cache.servfail_ttl_secs <= 300,
+            "cache.servfail_ttl_secs must be in 0..=300"
         );
         ensure!(
             (1..=256).contains(&self.cache.shards),

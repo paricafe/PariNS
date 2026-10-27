@@ -800,7 +800,7 @@ impl Database {
         } else {
             "?6 IS NULL"
         };
-        let mut statement = self.conn.prepare(&format!("SELECT id,payload FROM query_log WHERE (?1 IS NULL OR id<?1) AND {after} AND (?2 IS NULL OR status=?2) AND (?3 IS NULL OR (?3='cached' AND cache IN ('fresh','stale')) OR (?3='non_cached' AND cache NOT IN ('fresh','stale')) OR cache=?3) AND (?4='' OR instr(lower(name),?4)>0 OR instr(client,?4)>0 OR instr(lower(coalesce(upstream,'')),?4)>0 OR instr(lower(qtype),?4)>0) ORDER BY id DESC LIMIT ?5"))?;
+        let mut statement = self.conn.prepare(&format!("SELECT id,payload FROM query_log WHERE (?1 IS NULL OR id<?1) AND {after} AND (?2 IS NULL OR status=?2) AND (?3 IS NULL OR (?3='cached' AND cache IN ('fresh','stale','servfail')) OR (?3='non_cached' AND cache NOT IN ('fresh','stale','servfail')) OR cache=?3) AND (?4='' OR instr(lower(name),?4)>0 OR instr(client,?4)>0 OR instr(lower(coalesce(upstream,'')),?4)>0 OR instr(lower(qtype),?4)>0) ORDER BY id DESC LIMIT ?5"))?;
         let mut rows = statement.query(params![
             before_id,
             filter.status,

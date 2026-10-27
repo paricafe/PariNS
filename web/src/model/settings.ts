@@ -86,6 +86,7 @@ export const settingPages = {
       number("cache.max_bytes", 512, 68719476736, true), advanced(number("cache.max_variants", 1, 4096, true)),
       advanced(number("cache.shards", 1, 256, true)), advanced(number("cache.negative_percent", 0, 90, true)),
       number("cache.max_ttl_secs", 1, 604800), number("cache.negative_ttl_cap_secs", 1, 604800),
+      number("cache.servfail_ttl_secs", 0, 300),
     ])),
     group("prefetch", [
       field("cache.prefetch.enabled", "checkbox"), number("cache.prefetch.min_hits", 1, 1000000),

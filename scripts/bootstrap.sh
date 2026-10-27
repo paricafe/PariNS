@@ -8,8 +8,8 @@ umask 077
 fail() { printf 'PariNS bootstrap: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh' \
-        '       sudo sh bootstrap.sh [--version v0.1.28] [--dry-run]' \
-        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.28] [--dry-run]' \
+        '       sudo sh bootstrap.sh [--version v0.1.29] [--dry-run]' \
+        '       sh bootstrap.sh --root EXISTING_PRIVATE_DIRECTORY [--version v0.1.29] [--dry-run]' \
         'Options also work when piped: ... | sudo sh -s -- --dry-run' \
         'Linux x86_64/aarch64 and systemd are required for live installation.' \
         '--root stages files only; no service or candidate binary is executed.'
@@ -38,7 +38,7 @@ cleanup() {
     exit "$status"
 }
 main() {
-    version=v0.1.28 root= dry_run=false
+    version=v0.1.29 root= dry_run=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--root)
@@ -52,7 +52,7 @@ main() {
     done
     printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'version must be vMAJOR.MINOR.PATCH'
     [ "$(printf '%s' "$version" | wc -l | tr -d ' ')" = 0 ] || fail 'invalid version'
-    for command in curl tar awk grep mktemp stat find id uname mkdir rm sh; do
+    for command in curl tar awk grep mktemp stat find id uname mkdir rm chmod sh; do
         command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"
     done
     command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || fail 'sha256sum or shasum is required'
@@ -126,6 +126,8 @@ main() {
         expected=$(awk -v name="$name" '$2 == name {print tolower($1)}' "$package/SHA256SUMS")
         [ -n "$expected" ] && [ "$(digest "$package/$name")" = "$expected" ] || fail "package checksum mismatch: $name"
     done
+    # The installer invokes the verified helper during live preflight.
+    chmod 0700 "$package/parins" "$package/parins-updater"
     set --
     if [ -n "$root" ]; then set -- "$@" --root "$root"; fi
     if "$dry_run"; then set -- "$@" --dry-run; fi

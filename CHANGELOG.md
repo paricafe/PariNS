@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v0.1.29 — 2026-10-27
+
+### Upgrade
+
+- This release includes the runtime, storage and console changes from v0.1.28.
+  Install it with the complete installer when upgrading from updater protocol 2;
+  it keeps updater protocol 3 introduced in v0.1.28.
+
+### Fixed
+
+- The quick-start bootstrap gives the verified program and updater executable
+  permissions before invoking the installer. Previously live installation could
+  stop with `Permission denied` while checking the updater, before replacing the
+  installed program.
+
 ## v0.1.28 — 2026-10-27
 
 ### Upgrade

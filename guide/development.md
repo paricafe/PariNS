@@ -119,6 +119,8 @@ systemd in staged directories (`--root`). They cover these contracts:
 - The bootstrap uses the Cargo version and the default, unpinned entry point.
   `sh scripts/test-bootstrap.sh --package ARCHIVE.tar.gz` stages a real native package
   the same way.
+- Extracted programs receive executable permissions after checksum verification,
+  so the installer can run the helper during live preflight.
 - Archives with unexpected paths, links, special files or checksum mismatches are
   rejected before anything is extracted or installed.
 - Older, modified, symlinked or unknown layouts are rejected before any write, with a

@@ -110,6 +110,18 @@ expect_failure() {
     fi
     [ ! -e "$fixture/refused/opt" ]
 }
+# Live installation invokes the verified helper from the extracted package.
+cp "$package/install.sh" "$fixture/installer"
+printf '%s\n' '#!/bin/sh
+set -eu
+package=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+for program in parins parins-updater; do
+    [ -x "$package/$program" ] || { printf "Bootstrap program is not executable: %s\n" "$program" >&2; exit 1; }
+done' > "$package/install.sh"
+manifest
+pack
+sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage"
+cp "$fixture/installer" "$package/install.sh"
 manifest
 pack
 sh "$repo/scripts/bootstrap.sh" --help | grep -Fq -- "[--version $version]"

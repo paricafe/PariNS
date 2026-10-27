@@ -195,6 +195,12 @@ install_service() {
     fi
     sudo systemctl is-active --quiet parins-managed.service
     sudo cmp "$binary" /opt/parins-managed/parins
+    # A committed install keeps no preflight copy and at most two backups. The
+    # official-A updater suite runs the immutable v0.1.5 installer.
+    if ! "$official_updater_check"; then
+        sudo test ! -e /opt/parins-managed/.update/install-preflight
+        [ "$(sudo find /opt/parins-managed -maxdepth 1 -name '.install-backup.*' -type d | wc -l)" -le 2 ]
+    fi
 }
 expect_fresh_install_message() {
     # The official-A updater suite runs the immutable v0.1.5 installer, whose

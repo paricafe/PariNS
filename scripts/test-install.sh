@@ -176,6 +176,31 @@ mv "$stage/var/lib/parins-managed" "$stage/var/lib/private/parins-managed"
 ln -s private/parins-managed "$stage/var/lib/parins-managed"
 sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary"
 [ "$(sed -n 1p "$stage/var/lib/parins-managed/state.json")" = 'private existing state' ]
+# Leftovers of earlier runs: the preflight copy and backups beyond the newest
+# two. Staging and dry runs only print them; look-alike names, links and online
+# update copies are never listed.
+managed="$(CDPATH= cd -- "$stage/opt/parins-managed" && pwd -P)"
+rm -rf "$managed"/.install-backup.*
+for backup in OLD001:202601010000 OLD002:202601020000 OLD003:202601030000 OLD004:202601040000; do
+    mkdir "$managed/.install-backup.${backup%%:*}"
+    touch -t "${backup#*:}" "$managed/.install-backup.${backup%%:*}"
+done
+mkdir "$managed/.install-backup.keep-me" "$fixture/linked-backup"
+ln -s "$fixture/linked-backup" "$managed/.install-backup.LINK01"
+mkdir -p "$managed/.update/operation-1"
+printf 'candidate\n' > "$managed/.update/install-preflight"
+printf 'candidate\n' > "$managed/.update/.install-preflight.TMP001"
+leftover_lines() { grep '^Would remove old installer data: ' "$1" | sed 's/^Would remove old installer data: //' | sort; }
+printf '%s\n' "$managed/.install-backup.OLD001" "$managed/.install-backup.OLD002" "$managed/.install-backup.OLD003" \
+    "$managed/.update/.install-preflight.TMP001" "$managed/.update/install-preflight" | sort > "$fixture/expected-leftovers"
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" --dry-run > "$fixture/leftovers-dry-run.log"
+leftover_lines "$fixture/leftovers-dry-run.log" | cmp - "$fixture/expected-leftovers"
+sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary" > "$fixture/leftovers-staging.log"
+leftover_lines "$fixture/leftovers-staging.log" | cmp - "$fixture/expected-leftovers"
+for kept in .install-backup.OLD001 .install-backup.OLD004 .install-backup.keep-me .install-backup.LINK01 .update/operation-1 .update/install-preflight; do
+    [ -e "$managed/$kept" ]
+done
+[ "$(find "$managed" -maxdepth 1 -name '.install-backup.??????' -type d | wc -l)" -eq 5 ]
 # Every rejected preflight must precede replacement, backups and service calls.
 cp "$stage/opt/parins-managed/parins" "$fixture/preflight-binary"
 cp "$stage/etc/systemd/system/parins-managed.service" "$fixture/preflight-unit"

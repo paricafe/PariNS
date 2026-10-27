@@ -35,6 +35,22 @@ done
 owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1"; }
 links() { stat -c %h "$1" 2>/dev/null || stat -f %l "$1"; }
 digest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+# Data that earlier installer runs left: the candidate copy for the read-only
+# preflight, and install backups beyond the newest $1. Only an entry with the
+# installer's own name pattern and type, not a link and owned by the installing
+# user is listed. Online update copies under .update/<operation> are not.
+leftovers() {
+    keep=$1 user=$(id -u)
+    for path in "$bin_dir/.update/install-preflight" "$bin_dir/.update/.install-preflight."*; do
+        if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(owner "$path")" = "$user" ]; then printf '%s\n' "$path"; fi
+    done
+    # Newest first; mktemp names hold only letters and digits.
+    ls -dt -- "$bin_dir"/.install-backup.* 2>/dev/null | while IFS= read -r path; do
+        case "${path##*/}" in .install-backup.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;; *) continue ;; esac
+        [ -d "$path" ] && [ ! -L "$path" ] && [ "$(owner "$path")" = "$user" ] || continue
+        if [ "$keep" -gt 0 ]; then keep=$((keep - 1)); elif [ "$path" != "${backup:-}" ]; then printf '%s\n' "$path"; fi
+    done
+}
 expected_owner=0
 if [ -n "$root" ]; then
     case "$root" in /*) ;; *) fail 'staging root must be absolute' ;; esac
@@ -247,6 +263,8 @@ if [ -z "$root" ]; then
 fi
 printf 'Install %s -> %s\nRegister %s\n' "$binary" "$binary_target" "$unit_target"
 if "$dry_run"; then
+    # After an installation, its own backup is the newest of the two kept.
+    leftovers 1 | while IFS= read -r path; do printf 'Would remove old installer data: %s\n' "$path"; done
     printf '%s\n' 'Dry run: no files or services changed.'
     exit 0
 fi
@@ -479,6 +497,15 @@ fresh_guidance() {
         'DNS starts after setup: point your clients at this server and open the DNS ports you enable (53 for plain DNS) in your firewall.'
 }
 committed=true
+leftovers 2 | while IFS= read -r path; do
+    if [ -n "$root" ]; then
+        printf 'Would remove old installer data: %s\n' "$path"
+    elif rm -rf -- "$path"; then
+        printf 'Removed old installer data: %s\n' "$path"
+    else
+        printf 'Could not remove old installer data: %s\n' "$path" >&2
+    fi
+done
 printf 'Installed. Backup: %s\n' "$backup"
 if [ -n "$root" ]; then
     printf 'Staged for inspection under %s.\n' "$root"

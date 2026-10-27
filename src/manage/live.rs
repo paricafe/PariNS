@@ -22,7 +22,7 @@
 //!   requests, leaving its bounded control queue to other operations. State
 //!   comes from the cached storage status. Manager is locked only to clone
 //!   RuntimeServices before the upgrade, never across socket IO.
-use super::{ApiError, SESSION_LIFETIME, Shared, Snapshot, error};
+use super::{ApiError, SESSION_LIFETIME, Shared, Snapshot, error, secret_matches};
 use crate::{query_log::ListOptions, runtime_services::RuntimeServices};
 use axum::{
     body::Body,
@@ -352,7 +352,7 @@ impl Live {
     async fn serve(&mut self, socket: &mut Socket) -> End {
         match timeout(AUTH_TIMEOUT, socket.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str(&text) {
-                Ok(Incoming::Auth { binding }) if binding == self.binding => {}
+                Ok(Incoming::Auth { binding }) if secret_matches(&binding, &self.binding) => {}
                 _ => return Some(4401),
             },
             Ok(None) => return None,

@@ -477,6 +477,37 @@ impl Service {
         expected_revision: u64,
     ) -> Result<ConfigCandidate> {
         let lease = self.acquire()?;
+        self.prepare_config_leased(settings, source, expected_revision, lease)
+            .await
+    }
+
+    /// Like `prepare_config_from_source`, for a check that changes nothing: it
+    /// waits up to `wait` for the worker (a subscription refresh or another
+    /// candidate) instead of answering busy at once.
+    pub async fn check_config_from_source(
+        self: &Arc<Self>,
+        settings: Settings,
+        source: crate::policy::LocalPolicySource,
+        expected_revision: u64,
+        wait: std::time::Duration,
+    ) -> Result<ConfigCandidate> {
+        self.check_open()?;
+        let permit = tokio::time::timeout(wait, self.worker.clone().acquire_owned())
+            .await
+            .map_err(|_| Failure::new("busy"))?
+            .map_err(|_| Failure::new("busy"))?;
+        let lease = Arc::new(Lease { _permit: permit });
+        self.prepare_config_leased(settings, source, expected_revision, lease)
+            .await
+    }
+
+    async fn prepare_config_leased(
+        self: &Arc<Self>,
+        settings: Settings,
+        source: crate::policy::LocalPolicySource,
+        expected_revision: u64,
+        lease: Arc<Lease>,
+    ) -> Result<ConfigCandidate> {
         self.check_revision(expected_revision)?;
         let owner = self.clone();
         let keep = lease.clone();

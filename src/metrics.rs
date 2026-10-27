@@ -118,6 +118,32 @@ pub enum Counter {
     CacheReasonEpochChanged,
 }
 
+/// Process-local listener diagnostics, exposed only on `/metrics`. They stay out
+/// of `Snapshot`, so the persisted statistics keep their fixed counter set.
+#[derive(Clone, Copy, Debug)]
+pub enum Diagnostic {
+    QueryTaskPanics,
+    DohHandshakeFailures,
+    DohHandshakeTimeouts,
+    DohAlpnMismatches,
+}
+
+const DIAGNOSTICS: [(&str, &str); 4] = [
+    (
+        "query_task_panics",
+        "Plain DNS query and connection tasks that panicked.",
+    ),
+    ("doh_tls_handshake_failures", "Failed DoH TLS handshakes."),
+    (
+        "doh_tls_handshake_timeouts",
+        "DoH TLS handshakes that exceeded the I/O timeout.",
+    ),
+    (
+        "doh_alpn_mismatches",
+        "DoH TLS connections that did not select h2.",
+    ),
+];
+
 #[derive(Clone, Copy, Debug)]
 pub enum Timer {
     Request,
@@ -160,6 +186,7 @@ pub struct Metrics {
     upstream_attempts: [AtomicU64; 4],
     upstream_reasons: [AtomicU64; 9],
     counters: [AtomicU64; NAMES.len()],
+    diagnostics: [AtomicU64; DIAGNOSTICS.len()],
     inflight: [AtomicU64; 2],
     latency: [Histogram; 2],
 }
@@ -171,6 +198,7 @@ impl Default for Metrics {
             upstream_attempts: Default::default(),
             upstream_reasons: Default::default(),
             counters: std::array::from_fn(|_| AtomicU64::new(0)),
+            diagnostics: Default::default(),
             inflight: Default::default(),
             latency: Default::default(),
         }
@@ -271,6 +299,18 @@ impl Metrics {
     }
     pub fn inc(&self, counter: Counter) {
         self.counters[counter as usize].fetch_add(1, Relaxed);
+    }
+
+    pub fn record(&self, diagnostic: Diagnostic) {
+        self.diagnostics[diagnostic as usize].fetch_add(1, Relaxed);
+    }
+
+    /// Name, help text and value of each `/metrics`-only counter.
+    pub fn diagnostics(&self) -> impl Iterator<Item = (&'static str, &'static str, u64)> + '_ {
+        DIAGNOSTICS
+            .into_iter()
+            .zip(&self.diagnostics)
+            .map(|((name, help), value)| (name, help, value.load(Relaxed)))
     }
 
     pub fn track(&self, timer: Timer) -> Guard<'_> {

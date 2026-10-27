@@ -6,7 +6,10 @@ use futures_util::future::{BoxFuture, FutureExt, Shared, WeakShared};
 use hickory_proto::op::Message;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 /// Raw shared work result. Per-client stale fallback is intentionally not shared.
@@ -26,8 +29,55 @@ pub struct Answer {
     pub prefetch: bool,
 }
 type Work = BoxFuture<'static, Answer>;
-/// Shared work and the flag it sets once its query reached a source.
-type Group = (WeakShared<Work>, Arc<AtomicBool>);
+/// Shared work, the flag it sets once its query reached a source, and the
+/// number of its holds.
+type Group = (WeakShared<Work>, Arc<AtomicBool>, Arc<AtomicUsize>);
+
+/// One holder's share of work. Holds are counted explicitly, so of several
+/// holders that leave at once exactly one is the last.
+pub struct Hold {
+    work: Option<Shared<Work>>,
+    holds: Arc<AtomicUsize>,
+}
+
+impl Hold {
+    fn new(work: Shared<Work>, holds: Arc<AtomicUsize>) -> Self {
+        holds.fetch_add(1, Ordering::AcqRel);
+        Self {
+            work: Some(work),
+            holds,
+        }
+    }
+
+    pub async fn result(&mut self) -> Answer {
+        self.work.as_mut().expect("held work").await
+    }
+
+    /// Leaves the work, or returns this hold when it is the last. The last
+    /// hold stays counted, so whoever takes it over keeps the work alive.
+    pub fn leave(mut self) -> Option<Self> {
+        let last = self
+            .holds
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |holds| {
+                (holds > 1).then(|| holds - 1)
+            })
+            .is_err();
+        if !last {
+            // Already uncounted above.
+            self.work = None;
+        }
+        last.then_some(self)
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        if self.work.is_some() {
+            self.holds.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 pub enum Role {
     Bypass,
     Leader,
@@ -55,32 +105,37 @@ impl Flights {
         query: &Message,
         work: Work,
         sent: Arc<AtomicBool>,
-    ) -> Result<(Shared<Work>, Role, Arc<AtomicBool>), ()> {
+    ) -> Result<(Hold, Role, Arc<AtomicBool>), ()> {
         let Some(key) = self.config.enabled.then(|| key(query)).flatten() else {
-            return Ok((work.shared(), Role::Bypass, sent));
+            return Ok((Hold::new(work.shared(), Arc::default()), Role::Bypass, sent));
         };
         let mut groups = self.groups.lock().expect("flight lock poisoned");
         // Reap completed/dead weak entries before applying the group budget.
-        groups.retain(|_, (weak, _)| weak.upgrade().is_some_and(|f| f.peek().is_none()));
-        if let Some((shared, sent)) = groups
+        groups.retain(|_, (weak, ..)| weak.upgrade().is_some_and(|f| f.peek().is_none()));
+        if let Some((shared, sent, holds)) = groups
             .get(&key)
-            .and_then(|(weak, sent)| Some((weak.upgrade()?, sent.clone())))
+            .and_then(|(weak, sent, holds)| Some((weak.upgrade()?, sent.clone(), holds.clone())))
         {
-            // All new clones are made under this lock. Other callers can only drop.
-            if shared.strong_count().unwrap_or(0) > self.config.max_waiters {
+            // All new holds are made under this lock. Other holders can only leave.
+            if holds.load(Ordering::Acquire) >= self.config.max_waiters {
                 return Err(());
             }
-            return Ok((shared, Role::Joined, sent));
+            return Ok((Hold::new(shared, holds), Role::Joined, sent));
         }
         if groups.len() >= self.config.max_groups {
             return Err(());
         }
         let shared = work.shared();
+        let holds = Arc::default();
         groups.insert(
             key,
-            (shared.downgrade().expect("unpolled work"), sent.clone()),
+            (
+                shared.downgrade().expect("unpolled work"),
+                sent.clone(),
+                Arc::clone(&holds),
+            ),
         );
-        Ok((shared, Role::Leader, sent))
+        Ok((Hold::new(shared, holds), Role::Leader, sent))
     }
 }
 
@@ -95,6 +150,42 @@ mod tests {
         op::{MessageType, OpCode, Query},
         rr::{Name, RecordType, rdata::opt::EdnsOption},
     };
+
+    #[test]
+    fn of_holders_that_leave_at_once_exactly_one_is_the_last() {
+        let flights = Flights::new(CoalescingConfig::default());
+        let mut q = Message::new(1, MessageType::Query, OpCode::Query);
+        q.add_query(Query::query(
+            Name::from_ascii("example.test.").unwrap(),
+            RecordType::A,
+        ));
+        let work = || futures_util::future::pending::<Answer>().boxed();
+        let sent = Arc::new(AtomicBool::new(true));
+        for _ in 0..2000 {
+            let (first, ..) = flights.join(&q, work(), sent.clone()).unwrap();
+            let (second, ..) = flights.join(&q, work(), sent.clone()).unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let lasts: Vec<_> = std::thread::scope(|scope| {
+                [first, second]
+                    .map(|hold| {
+                        let barrier = &barrier;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            hold.leave()
+                        })
+                    })
+                    .map(|thread| thread.join().unwrap())
+            })
+            .into_iter()
+            .flatten()
+            .collect();
+            assert_eq!(lasts.len(), 1);
+            // The last hold stays counted: a later holder is not the last.
+            let (later, role, _) = flights.join(&q, work(), sent.clone()).unwrap();
+            assert!(matches!(role, Role::Joined));
+            assert!(later.leave().is_none());
+        }
+    }
 
     #[test]
     fn key_preserves_outbound_semantics_except_id_and_case() {

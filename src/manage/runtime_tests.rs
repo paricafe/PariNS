@@ -143,7 +143,14 @@ async fn subscriptions_missing_material_keep_console_and_disable_recovers_local_
         .unwrap();
     assert!(manager.resolver().is_none());
     assert!(manager.last_error.is_some());
-    assert!(manager.validate(subscription_config(true)).await.is_err());
+    assert!(
+        manager
+            .validation(&subscription_config(true))
+            .unwrap()
+            .run(subscription_config(true))
+            .await
+            .is_err()
+    );
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.toml = subscription_config(false);
@@ -576,7 +583,12 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     next.revision += 1;
     next.toml
         .push_str("\n[updates]\nauto_check=false\ncheck_interval_hours=168\n");
-    manager.validate(next.toml.clone()).await.unwrap();
+    manager
+        .validation(&next.toml)
+        .unwrap()
+        .run(next.toml.clone())
+        .await
+        .unwrap();
     assert_eq!(manager.hot_update(&next.toml), Some(false));
     assert!(!manager.apply(next).await.unwrap());
     assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
@@ -601,7 +613,12 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.toml = next.toml.replace("auto_check=false", "auto_check=true");
-    manager.validate(next.toml.clone()).await.unwrap();
+    manager
+        .validation(&next.toml)
+        .unwrap()
+        .run(next.toml.clone())
+        .await
+        .unwrap();
     assert_eq!(manager.hot_update(&next.toml), Some(false));
     assert!(!manager.apply(next).await.unwrap());
     assert!(manager.resolver().is_none());
@@ -777,5 +794,43 @@ async fn unreadable_local_rules_keep_dns_stopped_after_a_failed_apply_rolls_back
     manager.apply(next).await.unwrap();
     assert!(manager.resolver().is_some());
     assert!(manager.last_error.is_none());
+    manager.terminal_shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unreadable_rollback_copy_keeps_management_and_marks_rollback_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+            toml: config(),
+            previous: Some("unknown_key = true".into()),
+            revision: 2,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: vec![],
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active)
+        .await
+        .unwrap();
+    assert!(manager.resolver().is_some());
+    let reason = manager.status()["rollback_unavailable"].clone();
+    assert!(
+        reason
+            .as_str()
+            .is_some_and(|reason| reason.contains("rollback configuration")),
+        "{reason}"
+    );
+    // A new apply replaces the rollback copy with the running configuration.
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.previous = Some(next.toml.clone());
+    next.toml.push_str("\n# changed\n");
+    manager.apply(next).await.unwrap();
+    assert_eq!(manager.status()["rollback_unavailable"], Value::Null);
     manager.terminal_shutdown().await;
 }

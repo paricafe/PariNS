@@ -451,25 +451,94 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
             .expect(200)["setup_required"],
         true
     );
+    let document = server.request("GET", "/", None, None).await.body;
+    // The address the document gives `path`, with its content version.
+    let versioned = |path: &str| {
+        let start = document.find(&format!("\"{path}?v=")).unwrap() + 1;
+        document[start..start + document[start..].find('"').unwrap()].to_owned()
+    };
     for (path, content_type) in [
         ("/", "text/html"),
         ("/assets/app.js", "text/javascript"),
         ("/assets/app.css", "text/css"),
         ("/theme-init.js", "text/javascript"),
+        ("/favicon.svg", "image/svg+xml"),
     ] {
-        let response = server.request("GET", path, None, None).await;
+        let address = if path == "/" {
+            path.to_owned()
+        } else {
+            versioned(path)
+        };
+        let response = server.request("GET", &address, None, None).await;
         assert_eq!(response.status, 200);
         assert!(response.headers.contains(content_type));
-        assert!(response.headers.contains("cache-control: no-store"));
+        // The document is never stored, so it always names the current versions.
+        assert!(response.headers.contains(if path == "/" {
+            "cache-control: no-store"
+        } else {
+            "cache-control: public, max-age=31536000, immutable"
+        }));
+        assert!(!response.headers.contains("content-encoding"));
         assert!(response.headers.contains("script-src 'self'"));
         // Only a signed-out remote sign-in page with Turnstile allows Cloudflare.
         assert!(!response.headers.contains("challenges.cloudflare.com"));
         assert!(response.headers.contains("x-frame-options: deny"));
+        // HEAD sends the same headers without the body.
+        let head = server.request("HEAD", &address, None, None).await;
+        assert_eq!(head.status, 200);
+        let undated = |headers: &str| {
+            headers
+                .lines()
+                .filter(|line| !line.starts_with("date:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(undated(&head.headers), undated(&response.headers));
+        assert!(head.headers.contains("content-length: "));
+        assert!(head.body.is_empty());
+        // Another build's version, or none, is not stored.
+        if path != "/" {
+            for other in [path.to_owned(), format!("{path}?v=0")] {
+                let response = server.request("GET", &other, None, None).await;
+                assert_eq!(response.status, 200);
+                assert!(response.headers.contains("cache-control: no-store"));
+            }
+        }
     }
-    server
-        .request("GET", "/api/status", None, None)
-        .await
-        .expect(401);
+    let encoded = timeout(DEADLINE, async {
+        let mut stream = server.connect().await;
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n",
+            versioned("/assets/app.js"),
+            server.address
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        response
+    })
+    .await
+    .unwrap();
+    let split = encoded
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let headers = String::from_utf8_lossy(&encoded[..split]).to_ascii_lowercase();
+    assert!(headers.starts_with("http/1.1 200"));
+    assert!(headers.contains("content-encoding: br"));
+    assert!(headers.contains("vary: accept-encoding"));
+    assert!(headers.contains("cache-control: public, max-age=31536000, immutable"));
+    assert!(headers.contains("x-content-type-options: nosniff"));
+    assert_eq!(
+        &encoded[split + 4..],
+        include_bytes!("../web/dist/assets/app.js.br")
+    );
+    for (path, status) in [("/api/status", 401), ("/missing", 404)] {
+        let response = server.request("GET", path, None, None).await;
+        assert_eq!(response.status, status);
+        assert!(response.headers.contains("cache-control: no-store"));
+        assert!(response.headers.contains("x-frame-options: deny"));
+    }
     for extra in [
         "Origin: http://attacker.example\r\n",
         "Sec-Fetch-Site: cross-site\r\n",
@@ -1780,6 +1849,130 @@ async fn validation_is_read_only_and_revisioned_apply_and_rollback_keep_dns_live
     assert_eq!(server.config(&token).await["toml"], original);
     assert_dns(server.dns(&token).await).await;
     server.finish().await;
+}
+
+/// Rule file errors reach the console, so they carry only a position and a
+/// kind; PariNS's own state files are rejected as rule files outright.
+#[tokio::test]
+async fn rule_file_errors_never_return_file_content() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let token = server.setup(&directory, &configuration()).await;
+    std::fs::write(
+        directory.join("turnstile.json"),
+        r#"{"site_key":"0x4AAAAAAA-site","secret_key":"turnstile-secret-marker"}"#,
+    )
+    .unwrap();
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(directory.join("state.json")).unwrap()).unwrap();
+    let hash = state["password_hash"].as_str().unwrap().to_owned();
+    let rules = temporary.path().join("rules.toml");
+    std::fs::write(
+        &rules,
+        "block_exact = ['ok.test']\nrule-file-marker = = 1\n",
+    )
+    .unwrap();
+    let traversal = directory.join("certificates/../state.json");
+    for (file, secret) in [
+        (Path::new("turnstile.json"), "turnstile-secret-marker"),
+        (Path::new("state.json"), hash.as_str()),
+        (traversal.as_path(), hash.as_str()),
+        (rules.as_path(), "rule-file-marker"),
+    ] {
+        let toml = format!("filter_file = {}\n{}", json!(file), configuration());
+        for (method, path, body) in [
+            ("POST", "/api/config/validate", json!({"toml":toml})),
+            ("PUT", "/api/config", json!({"toml":toml,"revision":1})),
+        ] {
+            let response = server.request(method, path, Some(&token), Some(body)).await;
+            assert_eq!(response.status, 422, "{file:?}: {}", response.body);
+            assert!(!response.body.contains(secret), "{}", response.body);
+        }
+    }
+    let toml = format!("filter_file = {}\n{}", json!(rules), configuration());
+    let response = server
+        .request(
+            "POST",
+            "/api/config/validate",
+            Some(&token),
+            Some(json!({"toml":toml})),
+        )
+        .await;
+    assert!(
+        response
+            .body
+            .contains("TOML syntax error at line 2, column"),
+        "{}",
+        response.body
+    );
+    assert_eq!(server.config(&token).await["revision"], 1);
+    server.finish().await;
+}
+
+/// Validation reads certificates and compiles rules without the Manager lock:
+/// a rule file that blocks on open must not stall status or session reads.
+#[tokio::test]
+async fn validation_does_not_hold_the_manager_lock_while_reading_rules() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Arc::new(Management::start(&directory).await);
+    let fifo = temporary.path().join("rules.fifo");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let toml = format!("filter_file = {}\n{}", json!(fifo), configuration());
+    let setup = std::fs::read_to_string(directory.join("setup-token")).unwrap();
+    let preview = String::from_utf8(server.wire(
+        "POST",
+        "/api/setup/preview",
+        None,
+        Some(json!({"toml":toml})),
+    ))
+    .unwrap()
+    .replacen(
+        "\r\n\r\n",
+        &format!("\r\nX-PariNS-Setup: {setup}\r\n\r\n"),
+        1,
+    );
+    // Opening the FIFO blocks the rule reader until a writer opens it.
+    let blocked = |wire: Vec<u8>, probe: &'static str, token: Option<String>| {
+        let server = server.clone();
+        let fifo = fifo.clone();
+        async move {
+            let pending = {
+                let server = server.clone();
+                tokio::spawn(async move { server.raw(&wire).await })
+            };
+            sleep(Duration::from_millis(300)).await;
+            let probed = timeout(
+                Duration::from_secs(2),
+                server.request("GET", probe, token.as_deref(), None),
+            )
+            .await
+            .map(|response| response.status);
+            tokio::task::spawn_blocking(move || {
+                std::fs::OpenOptions::new().write(true).open(fifo).unwrap()
+            })
+            .await
+            .unwrap();
+            assert_eq!(pending.await.unwrap().status, 422);
+            assert_eq!(probed.ok(), Some(200), "{probe} waited for validation");
+        }
+    };
+    blocked(preview.into_bytes(), "/api/session", None).await;
+    let token = server.setup(&directory, &configuration()).await;
+    let validate = server.wire(
+        "POST",
+        "/api/config/validate",
+        Some(&token),
+        Some(json!({"toml":toml})),
+    );
+    blocked(validate, "/api/status", Some(token)).await;
 }
 
 #[tokio::test]

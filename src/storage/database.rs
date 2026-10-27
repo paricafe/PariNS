@@ -103,12 +103,9 @@ pub(super) fn run(
                 if let Some(join) = checking.take() {
                     database = finish_check(&shared, join);
                 }
+                // The terminal flush already cleaned up; closing commits only
+                // what arrived since.
                 let result = if let Some(db) = database.as_mut() {
-                    shared
-                        .stats
-                        .lock()
-                        .expect("statistics owner")
-                        .sample(&shared.metrics, true);
                     let result = db.drain(&shared, &logs);
                     db.report_error(&shared, &result);
                     db.update_status(&shared);
@@ -160,6 +157,10 @@ pub(super) fn run(
                 let result = db.cleanup();
                 db.report_error(&shared, &result);
                 db.last_cleanup = Instant::now();
+                // Publish the outcome at once: a stale capacity_pending would
+                // repeat the cleanup on every pass until the next refresh.
+                db.update_status(&shared);
+                last_status = Instant::now();
             }
             let reset_days = db.settings.statistics.reset_interval_days;
             if reset_days > 0 {
@@ -744,12 +745,11 @@ impl Database {
                 let _ = reply.send(result);
             }
             Command::Flush(reply) => {
-                shared
-                    .stats
-                    .lock()
-                    .expect("statistics owner")
-                    .sample(&shared.metrics, true);
-                let result = self.drain(shared, logs);
+                let result = self.drain(shared, logs).and_then(|()| {
+                    self.cleanup()?;
+                    self.last_cleanup = Instant::now();
+                    Ok(())
+                });
                 self.report_error(shared, &result);
                 self.update_status(shared);
                 let _ = reply.send(result);
@@ -757,9 +757,15 @@ impl Database {
             Command::Shutdown(_) => unreachable!("run handles shutdown"),
         }
     }
-    /// Explicit flush and shutdown leave every record committed and the
-    /// stored data within its bounds, including age retention.
+    /// Commits every queued record and a final statistics checkpoint. An
+    /// explicit flush then cleans up, leaving the stored data within its
+    /// bounds, including age retention.
     fn drain(&mut self, shared: &Shared, logs: &mpsc::Receiver<LogItem>) -> Result<()> {
+        shared
+            .stats
+            .lock()
+            .expect("statistics owner")
+            .sample(&shared.metrics, true);
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             self.flush_batch(shared, logs)?;
@@ -772,8 +778,6 @@ impl Database {
                 ));
             }
         }
-        self.cleanup()?;
-        self.last_cleanup = Instant::now();
         Ok(())
     }
     /// Every query-log read shares one deadline and the same filter semantics.
@@ -1021,41 +1025,39 @@ impl Database {
             s.error = Some(error.clone());
         }
     }
+    /// A write ends a degraded state, but pending cleanup stays visible.
     fn committed(&self, shared: &Shared) {
         let mut status = shared.status.lock().expect("storage status");
         status.last_commit_at_ms = Some(unix_ms());
-        status.health = "healthy".into();
+        status.health = if status.capacity_pending {
+            "cleaning"
+        } else {
+            "healthy"
+        }
+        .into();
         status.error = None;
     }
+    /// Reads the database and files first, then publishes under one short lock.
     fn update_status(&mut self, shared: &Shared) {
-        let mut status = shared.status.lock().expect("storage status");
-        if let Ok((size, pages, _)) = self.page_info() {
-            status.database_bytes = size * pages;
-            status.capacity_pending = pages > self.settings.storage.max_database_bytes / size;
-        }
-        if let Some(dir) = &self.directory {
-            status.database_bytes = std::fs::metadata(dir.join("observability.sqlite3"))
-                .map(|m| m.len())
-                .unwrap_or(status.database_bytes);
-            status.journal_bytes = std::fs::metadata(dir.join("observability.sqlite3-journal"))
-                .map(|m| m.len())
-                .unwrap_or(0);
-            status.cache_snapshot_bytes =
+        let pages = self.page_info().ok();
+        let files = self.directory.as_ref().map(|dir| {
+            (
+                std::fs::metadata(dir.join("observability.sqlite3"))
+                    .map(|m| m.len())
+                    .ok(),
+                std::fs::metadata(dir.join("observability.sqlite3-journal"))
+                    .map(|m| m.len())
+                    .unwrap_or(0),
                 std::fs::symlink_metadata(dir.join("dns-cache-clean.snapshot"))
                     .ok()
                     .filter(|m| m.is_file())
                     .map(|m| m.len())
-                    .unwrap_or(0);
-        }
-        if let Ok(count) = epoch(&self.conn, "log_count") {
-            status.query_log_entries = count;
-        }
-        if let Ok(bytes) = epoch(&self.conn, "log_bytes") {
-            status.query_log_bytes = bytes;
-        }
-        if let Ok(count) = epoch(&self.conn, "point_count") {
-            status.history_samples = count;
-        }
+                    .unwrap_or(0),
+            )
+        });
+        let log_count = epoch(&self.conn, "log_count").ok();
+        let log_bytes = epoch(&self.conn, "log_bytes").ok();
+        let point_count = epoch(&self.conn, "point_count").ok();
         let earliest = self
             .conn
             .query_row(
@@ -1072,21 +1074,16 @@ impl Database {
                 |r| r.get::<_, u64>(0),
             )
             .optional();
-        if let (Ok(earliest), Ok(latest)) = (earliest, latest) {
-            status.query_log_coverage = Coverage {
+        let coverage = match (earliest, latest) {
+            (Ok(earliest), Ok(latest)) => Some(Coverage {
                 earliest_time_ms: earliest,
                 latest_time_ms: latest,
                 span_ms: earliest.zip(latest).map(|(a, b)| b.saturating_sub(a)),
-            };
-        }
-        if let Ok(cleanup) = self.cleanup_status() {
-            status.cleanup = cleanup;
-        }
-        status.capacity_pending |= status.query_log_entries
-            > self.settings.query_log.max_entries as u64
-            || status.query_log_bytes > self.settings.query_log.max_bytes
-            || status.history_samples > self.settings.statistics.max_samples as u64;
-        if self.settings_pending {
+            }),
+            _ => None,
+        };
+        let cleanup = self.cleanup_status().ok();
+        let expired = self.settings_pending && {
             let now = self
                 .cleanup_wall
                 .saturating_add(
@@ -1112,15 +1109,48 @@ impl Database {
                     |r| r.get::<_, u64>(0),
                 )
                 .optional();
-            status.capacity_pending |= oldest_log.ok().flatten().is_some_and(|at| {
+            oldest_log.ok().flatten().is_some_and(|at| {
                 at <= now.saturating_sub(self.settings.query_log.retention_secs * 1000)
             }) || oldest_point.ok().flatten().is_some_and(|at| {
                 at <= now.saturating_sub(self.settings.statistics.retention_secs * 1000)
-            });
+            })
+        };
+        let mut status = shared.status.lock().expect("storage status");
+        if let Some((size, pages, _)) = pages {
+            status.database_bytes = size * pages;
+            status.capacity_pending = pages > self.settings.storage.max_database_bytes / size;
         }
+        if let Some((database, journal, snapshot)) = files {
+            status.database_bytes = database.unwrap_or(status.database_bytes);
+            status.journal_bytes = journal;
+            status.cache_snapshot_bytes = snapshot;
+        }
+        if let Some(count) = log_count {
+            status.query_log_entries = count;
+        }
+        if let Some(bytes) = log_bytes {
+            status.query_log_bytes = bytes;
+        }
+        if let Some(count) = point_count {
+            status.history_samples = count;
+        }
+        if let Some(coverage) = coverage {
+            status.query_log_coverage = coverage;
+        }
+        if let Some(cleanup) = cleanup {
+            status.cleanup = cleanup;
+        }
+        status.capacity_pending |= status.query_log_entries
+            > self.settings.query_log.max_entries as u64
+            || status.query_log_bytes > self.settings.query_log.max_bytes
+            || status.history_samples > self.settings.statistics.max_samples as u64
+            || expired;
         if !status.capacity_pending {
             status.applied_revision = self.revision;
             self.settings_pending = false;
+            if status.health == "cleaning" {
+                status.health = "healthy".into();
+            }
         } else if status.health == "healthy" {
             status.health = "cleaning".into();
         }

@@ -85,7 +85,18 @@ pub(super) fn import(
             count <= MAX_IMPORTS,
             "certificate import storage limit exceeded"
         );
-        if read_bounded(&entry.path(), MAX_IDENTITY)?.as_deref() == Some(combined.as_bytes()) {
+        // Only a file of this length can already hold this identity; others
+        // are not read, so they cannot block an unrelated import.
+        if entry.metadata()?.len() != combined.len() as u64 {
+            continue;
+        }
+        let existing = read_bounded(&entry.path(), MAX_IDENTITY).with_context(|| {
+            format!(
+                "check imported identity {}",
+                entry.file_name().to_string_lossy()
+            )
+        })?;
+        if existing.as_deref() == Some(combined.as_bytes()) {
             return Ok(imported(entry.path()));
         }
     }
@@ -264,6 +275,25 @@ mod tests {
                 .count(),
             MAX_IMPORTS
         );
+    }
+
+    #[test]
+    fn only_a_file_that_can_hold_the_identity_is_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state")).unwrap();
+        let (cert, key) = pair();
+        let existing = import(&store.dir, &cert, &key).unwrap();
+        let other = store.dir.join("certificates/other.pem");
+        fs::write(&other, "unrelated").unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o644)).unwrap();
+        let (next_cert, next_key) = pair();
+        import(&store.dir, &next_cert, &next_key).unwrap();
+        // A non-compliant file that could hold the identity is named.
+        fs::set_permissions(&existing.key_file, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = format!("{:#}", import(&store.dir, &cert, &key).err().unwrap());
+        let name = existing.key_file.file_name().unwrap().to_string_lossy();
+        assert!(error.contains(&*name), "{error}");
     }
 
     #[test]

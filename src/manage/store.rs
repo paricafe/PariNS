@@ -82,6 +82,54 @@ impl Store {
     }
 }
 
+/// What PariNS keeps in its state directory: this Store, Turnstile keys,
+/// certificate imports, runtime storage, subscriptions and update state. Hidden
+/// names are temporary files.
+const ENTRIES: [&str; 9] = [
+    STATE,
+    TOKEN,
+    "lock",
+    super::turnstile::FILE,
+    "certificates",
+    "runtime",
+    "filter-subscriptions",
+    "update-state.json",
+    crate::update::ipc::INBOX_NAME,
+];
+
+/// A managed rule file must not be PariNS's own state: rules and their errors
+/// are shown in the console. Checks the path as written and, when it exists,
+/// with links resolved.
+pub(super) fn check_rule_file(dir: &Path, config: &crate::config::Config) -> Result<()> {
+    let Some(file) = &config.filter_file else {
+        return Ok(());
+    };
+    let mut written = PathBuf::new();
+    for part in file.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                written.pop();
+            }
+            std::path::Component::CurDir => {}
+            part => written.push(part),
+        }
+    }
+    let state = |path: &Path| {
+        path.strip_prefix(dir)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .is_some_and(|entry| {
+                let name = entry.as_os_str().to_string_lossy();
+                name.starts_with('.') || ENTRIES.contains(&&*name)
+            })
+    };
+    ensure!(
+        !state(&written) && !fs::canonicalize(file).is_ok_and(|path| state(&path)),
+        "filter_file must not name PariNS state in the state directory"
+    );
+    Ok(())
+}
+
 /// Makes a rename or removal in `dir` durable. That change is the commit point,
 /// so a failed directory sync must not tell the caller to roll back what is
 /// already visible; it is logged because power-loss durability is uncertain.

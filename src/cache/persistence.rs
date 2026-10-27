@@ -321,8 +321,10 @@ impl Cache {
     /// Authenticates the complete bounded stream before admitting any record,
     /// then admits records in file order (most recently used first) until
     /// `deadline`; the rest are skipped with reason `deadline`. Running out of
-    /// time while authenticating admits nothing. No disk lookup layer, request
-    /// metrics, refresh work, or recency is restored.
+    /// time while authenticating admits nothing, and a record that does not
+    /// decode removes everything this restore admitted. Restored entries keep
+    /// their file order as use order, below any later use. No disk lookup
+    /// layer, request metrics or refresh work is restored.
     #[allow(clippy::too_many_arguments)]
     pub fn restore_clean_snapshot<R: Read + Seek>(
         &self,
@@ -383,16 +385,43 @@ impl Cache {
             "snapshot checksum mismatch"
         );
         reader.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
+        // Restored use stamps fall from the record count with file position,
+        // and every shard clock starts above it, so any later use ranks above
+        // all restored entries. Entries above a shard's floor are this restore's.
+        let records = header.records as u64;
+        let floors: Vec<u64> = self
+            .shards
+            .iter()
+            .map(|shard| {
+                let mut shard = shard.lock().expect("cache shard poisoned");
+                shard.clock = shard.clock.max(records);
+                shard.clock
+            })
+            .collect();
+        let mut position = 0;
         // The checksum binds every record to what this codec wrote, so a record
-        // that does not decode is a codec defect and ends the restore.
+        // that does not decode is a codec defect: the snapshot is damaged and
+        // nothing it loaded stays.
         let admitted = scan(reader, header.records, length, deadline, cancel, |line| {
+            let accessed = records - position;
+            position += 1;
             let record: Record = serde_json::from_slice(line).context("invalid snapshot record")?;
             let remaining = record.remaining_secs.saturating_sub(offline);
             let (query, mut response, scope) = record.decode()?;
             age_records(&mut response, offline);
             if remaining > 0
                 && self
-                    .admit(&query, &response, scope, now, self.epoch(), Some(remaining))
+                    .admit(
+                        &query,
+                        &response,
+                        scope,
+                        now,
+                        self.epoch(),
+                        Some(Restore {
+                            remaining,
+                            accessed,
+                        }),
+                    )
                     .admitted()
             {
                 report.restored += 1;
@@ -400,11 +429,32 @@ impl Cache {
                 report.skipped += 1;
             }
             Ok(())
-        })?;
+        })
+        .inspect_err(|_| self.unload(&floors))?;
         if let Some(processed) = admitted {
             stopped(processed, &mut report);
         }
         Ok(report)
+    }
+
+    /// Removes the entries admitted after each shard's clock reached `floors`.
+    fn unload(&self, floors: &[u64]) {
+        for (shard, &floor) in self.shards.iter().zip(floors) {
+            let mut shard = shard.lock().expect("cache shard poisoned");
+            let loaded: Vec<_> = shard
+                .partitions
+                .iter()
+                .enumerate()
+                .flat_map(|(part, p)| {
+                    p.lru
+                        .iter()
+                        .filter_map(move |(&id, _)| (id > floor).then_some((part, id)))
+                })
+                .collect();
+            for (part, id) in loaded {
+                shard.remove(part, id);
+            }
+        }
     }
 }
 

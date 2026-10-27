@@ -103,9 +103,18 @@ async fn start(
                 let result = async {
                     let candidate = filters.execute(work).await?;
                     let _permit = control.mutation.acquire().await?;
-                    let manager = control.manager.lock().await;
+                    // A software update commits its freeze under this permit.
+                    // Manager only reaches the flag; the commit (fsync and
+                    // rename) runs without its lock.
+                    let frozen = control
+                        .manager
+                        .lock()
+                        .await
+                        .updates
+                        .frozen
+                        .load(Ordering::Acquire);
                     anyhow::ensure!(
-                        !manager.updates.frozen.load(Ordering::Acquire),
+                        !frozen,
                         crate::filter_subscriptions::service::Failure {
                             code: "subscription_cancelled".into(),
                             line: None

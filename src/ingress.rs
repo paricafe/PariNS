@@ -1,14 +1,14 @@
 //! Shared admission and DNS handling for encrypted transport adapters.
 use crate::limits::{Denied, Limiter, Permit};
 use crate::{
-    metrics::Counter,
+    metrics::{Counter, Diagnostic},
     protocol,
     resolver::{Delivery, ForcedShutdown, Resolver},
 };
 use std::{net::IpAddr, sync::Arc, time::Duration};
 use tokio::{
     sync::{Semaphore, watch},
-    task::JoinSet,
+    task::{JoinError, JoinSet},
     time::timeout,
 };
 
@@ -25,6 +25,17 @@ pub struct Ingress {
 }
 
 impl Ingress {
+    /// Settles a finished connection or query task. A panic ends that task
+    /// alone: it is logged and counted, and the listener keeps serving.
+    pub fn settle<T>(&self, listener: &str, result: Result<T, JoinError>) {
+        if let Err(error) = result
+            && error.is_panic()
+        {
+            self.resolver.metrics().record(Diagnostic::QueryTaskPanics);
+            eprintln!("PariNS {listener} task panicked; listener keeps serving: {error}");
+        }
+    }
+
     pub fn admit_connection(&self, peer: IpAddr) -> Option<Permit> {
         self.source_limits
             .try_connection(peer)
@@ -164,6 +175,27 @@ mod tests {
             max_streams: 1,
         };
         (stop, ingress)
+    }
+
+    #[tokio::test]
+    async fn a_panicked_task_is_counted_and_a_cancelled_one_is_not() {
+        let (_stop, ingress) = ingress(false);
+        let panics = || {
+            ingress
+                .resolver
+                .metrics()
+                .diagnostics()
+                .find(|(name, ..)| *name == "query_task_panics")
+                .unwrap()
+                .2
+        };
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { panic!("test connection task panic") });
+        ingress.settle("test", tasks.join_next().await.unwrap());
+        assert_eq!(panics(), 1);
+        tasks.spawn(std::future::pending::<()>()).abort();
+        ingress.settle("test", tasks.join_next().await.unwrap());
+        assert_eq!(panics(), 1);
     }
 
     #[tokio::test]

@@ -5,6 +5,9 @@
 //! a stop. Streams still receiving a body are refused at once, like unfinished
 //! handshakes. Peer close notification (the two-phase GOAWAY) uses at most half
 //! the shutdown grace. An error exit outside a stop drains without forcing.
+//!
+//! Failed and timed-out TLS handshakes and connections without h2 are counted
+//! only on `/metrics`.
 use std::{net::IpAddr, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -14,7 +17,12 @@ use http::{Request, Response};
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::{TlsAcceptor, rustls};
 
-use crate::{ingress::Ingress, metrics::Counter, protocol::MAX_MESSAGE, resolver::ForcedShutdown};
+use crate::{
+    ingress::Ingress,
+    metrics::{Counter, Diagnostic},
+    protocol::MAX_MESSAGE,
+    resolver::ForcedShutdown,
+};
 
 pub const PATH: &str = "/dns-query";
 
@@ -88,9 +96,7 @@ pub async fn serve(
         }
         tokio::select! {
             _ = stop.changed() => break Ok(()),
-            joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = joined { break Err(error.into()); }
-            },
+            Some(result) = connections.join_next(), if !connections.is_empty() => ingress.settle("DoH", result),
             accepted = crate::transport::accept::accept(&listener) => {
                 let (socket, peer) = match accepted {
                     Ok(accepted) => accepted,
@@ -111,14 +117,18 @@ pub async fn serve(
                     let _permit = permit;
                     let _source = source;
                     let mut stop = ingress.stop.clone();
+                    let metrics = ingress.resolver.metrics();
                     let tls = tokio::select! {
                         _ = stop.changed() => return,
-                        result = timeout(ingress.io_timeout, acceptor.accept(socket)) => {
-                            let Ok(Ok(tls)) = result else { return };
-                            tls
+                        result = timeout(ingress.io_timeout, acceptor.accept(socket)) => match result {
+                            Ok(Ok(tls)) => tls,
+                            Ok(Err(error)) => return metrics.record(handshake_failure(&error)),
+                            Err(_) => return metrics.record(Diagnostic::DohHandshakeTimeouts),
                         }
                     };
-                    if tls.get_ref().1.alpn_protocol() != Some(b"h2") { return }
+                    if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
+                        return metrics.record(Diagnostic::DohAlpnMismatches);
+                    }
                     let _ = connection(tls, peer.ip(), ingress, h3_port).await;
                 });
             }
@@ -129,6 +139,18 @@ pub async fn serve(
         .drain(&mut connections, ForcedShutdown::DohDrain)
         .await;
     outcome
+}
+
+/// rustls ends the handshake of a client whose offered ALPN lacks h2; a client
+/// without ALPN completes it and is counted after the handshake.
+fn handshake_failure(error: &std::io::Error) -> Diagnostic {
+    match error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<rustls::Error>())
+    {
+        Some(rustls::Error::NoApplicationProtocol) => Diagnostic::DohAlpnMismatches,
+        _ => Diagnostic::DohHandshakeFailures,
+    }
 }
 
 async fn connection(
@@ -179,7 +201,7 @@ async fn connection(
                 close_by = Some(tokio::time::Instant::now() + close_window);
                 connection.graceful_shutdown();
             }
-            Some(_) = requests.join_next(), if !requests.is_empty() => {},
+            Some(result) = requests.join_next(), if !requests.is_empty() => ingress.settle("DoH", result),
             accepted = timeout(ingress.io_timeout, connection.accept()) => {
                 let Ok(Some(Ok((request, mut respond)))) = accepted else { break };
                 if stopping { respond.send_reset(Reason::REFUSED_STREAM); continue }

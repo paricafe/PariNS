@@ -9,10 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures_util::{
-    FutureExt,
-    future::{BoxFuture, Shared},
-};
+use futures_util::FutureExt;
 use hickory_proto::op::{Message, ResponseCode};
 
 use crate::{
@@ -20,7 +17,7 @@ use crate::{
     config::{CacheConfig, CoalescingConfig, Config, EcsConfig, ResolutionMode},
     ecs::{self, Context},
     filter_subscriptions::handle::PolicyHandle,
-    flight::{Answer, Flights, Role},
+    flight::{Answer, Flights, Hold, Role},
     metrics::{Counter, Metrics, Timer},
     policy::Policy,
     protocol::{self, Request},
@@ -517,7 +514,7 @@ impl Resolver {
                         });
                         async move {
                             match joined {
-                                Ok((future, _, _)) => future.await.admitted,
+                                Ok((mut hold, _, _)) => hold.result().await.admitted,
                                 Err(()) => false,
                             }
                         }
@@ -571,10 +568,10 @@ impl Resolver {
         let work = exchange.run(false).boxed();
         let flights = generation.flights(epoch, &self.coalescing);
         let result = match flights.join(&wire_query, work, sent) {
-            Ok((future, role, sent)) => {
+            Ok((hold, role, sent)) => {
                 self.metrics.inc(flight_counter(&role));
                 let mut waiting = Waiting {
-                    future: Some(future),
+                    hold: Some(hold),
                     sent,
                     fill: (cached.decision.outcome == LookupOutcome::Miss).then(|| Fill {
                         refresh: &generation.refresh,
@@ -640,13 +637,14 @@ impl Resolver {
             .then(|| cache.lookup_with_decision(&query, context.outgoing, Instant::now(), true));
         let response = match fallback {
             Some(crate::cache::LookupResult {
-                hit: Some(hit),
+                hit: Some(mut hit),
                 decision,
             }) => {
                 self.metrics.record_cache_lookup(decision);
                 trace.cache_lookup = Some(decision);
                 trace.cache_scope = Some(hit.scope.tag());
                 trace.cache = Some(if hit.stale { "stale" } else { "fresh" });
+                hit.message.metadata.authentic_data = hit.authentic;
                 Ok((hit.message, hit.scope.reply_scope(context.outgoing)))
             }
             _ => result.response,
@@ -657,7 +655,8 @@ impl Resolver {
                 None,
             )
         });
-        // A fresh source answer carries the source's AD bit; cached fallbacks do not.
+        // A source answer and a fresh cached answer carry their AD bit; stale
+        // answers never do.
         let mut authentic = self.authentic(&query, message.metadata.authentic_data);
         // Cache retains the original upstream response; policy applies equally
         // on misses and hits and never inserts its synthesized answer.
@@ -716,7 +715,7 @@ struct Exchange {
 /// owner, which lets it finish only to fill the cache. Unsent work, work over
 /// that budget and work of a stopped generation are cancelled with the caller.
 struct Waiting<'a> {
-    future: Option<Shared<BoxFuture<'static, Answer>>>,
+    hold: Option<Hold>,
     sent: Arc<AtomicBool>,
     fill: Option<Fill<'a>>,
 }
@@ -731,25 +730,26 @@ struct Fill<'a> {
 impl Waiting<'_> {
     async fn result(&mut self) -> Answer {
         let answer = self
-            .future
+            .hold
             .as_mut()
             .expect("unfinished upstream work")
+            .result()
             .await;
-        self.future = None;
+        self.hold = None;
         answer
     }
 }
 
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        // Other callers keep shared work running without a refresh slot.
-        if let (Some(future), Some(fill)) = (self.future.take(), self.fill.take())
+        // Other holders keep shared work running without a refresh slot.
+        if let (Some(hold), Some(fill)) = (self.hold.take(), self.fill.take())
             && self.sent.load(Ordering::Acquire)
-            && future.strong_count() == Some(1)
+            && let Some(mut hold) = hold.leave()
         {
             fill.refresh
                 .schedule(fill.query, fill.epoch, fill.config, || async move {
-                    future.await.admitted
+                    hold.result().await.admitted
                 });
         }
     }

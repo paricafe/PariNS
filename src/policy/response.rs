@@ -76,7 +76,10 @@ impl BlockResponse {
                     .into_iter()
                     .flatten()
                 {
-                    ensure!(unicast(address), "{address} is not a unicast address");
+                    ensure!(
+                        unicast(address),
+                        "block_ipv4 and block_ipv6 must be unicast addresses"
+                    );
                 }
                 Self::CustomIp { ipv4, ipv6 }
             }
@@ -97,11 +100,9 @@ impl BlockResponse {
         let (mut ipv4, mut ipv6) = (None, None);
         for token in tokens {
             let Ok(address) = token.parse::<IpAddr>() else {
-                bail!(
-                    "unknown method {token:?}: use nodata, null_ip, nxdomain, refused or IP addresses"
-                );
+                bail!("unknown method: use nodata, null_ip, nxdomain, refused or IP addresses");
             };
-            ensure!(unicast(address), "{address} is not a unicast address");
+            ensure!(unicast(address), "the address is not a unicast address");
             let duplicate = match address {
                 IpAddr::V4(v4) => ipv4.replace(v4).is_some(),
                 IpAddr::V6(v6) => ipv6.replace(v6).is_some(),

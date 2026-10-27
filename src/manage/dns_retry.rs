@@ -1,8 +1,9 @@
 //! Restarts a saved DNS configuration whose generation failed to start for a
 //! reason other than a listener bind (Server rebinds those listeners itself), such
-//! as unreadable certificate material. One task belongs to the management
-//! process; Manager decides when a retry is due (bounded backoff)
-//! and the task stops with management shutdown.
+//! as unreadable certificate material, or whose running generation ended without
+//! a stop request. One task belongs to the management process; Manager decides
+//! when a retry is due (bounded backoff) and the task stops with management
+//! shutdown.
 use super::Shared;
 use std::{sync::Arc, time::Duration};
 
@@ -17,14 +18,15 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
         if *stop.borrow() {
             return;
         }
-        let due = |manager: &super::runtime::Manager| {
+        let due = |manager: &mut super::runtime::Manager| {
+            manager.reap_exited();
             manager
                 .startup_retry_at()
                 .is_some_and(|at| at <= std::time::Instant::now())
         };
         // Take the mutation permit only when a retry is due, so idle polling
         // never makes an administrator's change see BUSY.
-        if !due(&*shared.manager.lock().await) {
+        if !due(&mut *shared.manager.lock().await) {
             continue;
         }
         // A configuration change in progress owns DNS startup itself; try again
@@ -35,7 +37,7 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
             continue;
         };
         let mut manager = shared.manager.lock().await;
-        if due(&manager) {
+        if due(&mut manager) {
             manager.retry_startup().await;
         }
     }
@@ -98,6 +100,20 @@ mod tests {
         })
         .await;
         assert!(started.is_ok(), "DNS restarted once the permit was free");
+        // A generation that ends without a stop request is restarted too.
+        let generation = shared.manager.lock().await.status()["generation"].clone();
+        shared.manager.lock().await.simulate_exit();
+        let restarted = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let manager = shared.manager.lock().await;
+                if manager.resolver().is_some() && manager.status()["generation"] != generation {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(restarted.is_ok(), "DNS restarted after its task ended");
         stop.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await

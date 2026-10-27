@@ -791,6 +791,40 @@ async fn local_source_waits_for_worker_before_opening_file() {
 }
 
 #[tokio::test]
+async fn a_check_waits_for_the_worker_instead_of_answering_busy() {
+    let (dir, service) = fixture(vec![]).await;
+    let path = dir.path().join("local.toml");
+    std::fs::write(&path, "enabled = true\nblock_exact = ['ads.test']\n").unwrap();
+    let settings = service.state.lock().unwrap().settings.clone();
+    let source = || crate::policy::LocalPolicySource::File(path.clone());
+    let wait = std::time::Duration::from_secs(5);
+    let lease = service.acquire().unwrap();
+    let check = tokio::spawn({
+        let (service, settings, source) = (service.clone(), settings.clone(), source());
+        async move {
+            service
+                .check_config_from_source(settings, source, 1, wait)
+                .await
+                .map(drop)
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!check.is_finished(), "the check waits for the worker");
+    drop(lease);
+    check.await.unwrap().unwrap();
+
+    let lease = service.acquire().unwrap();
+    let error = service
+        .check_config_from_source(settings, source(), 1, std::time::Duration::from_millis(50))
+        .await
+        .map(drop)
+        .unwrap_err();
+    assert_eq!(error_code(&error), "busy");
+    drop(lease);
+    assert!(service.acquire().is_ok());
+}
+
+#[tokio::test]
 async fn local_source_budget_counts_old_policy_and_preserves_generation() {
     let dir = tempfile::tempdir().unwrap();
     let rules = (0..256)

@@ -27,6 +27,41 @@ pub fn strip_padding(message: &mut Message) {
     }
 }
 
+/// Whether `message` has no OPT record, or EDNS version 0 with only `allowed`
+/// options.
+pub fn edns_within(message: &Message, allowed: &[EdnsCode]) -> bool {
+    message.edns.as_ref().is_none_or(|edns| {
+        edns.version() == 0
+            && edns
+                .options()
+                .options
+                .iter()
+                .all(|(code, _)| allowed.contains(code))
+    })
+}
+
+/// The OPT record of a reply to `query`: this server's UDP payload size and
+/// the client's DO bit, or none when the query has no EDNS.
+pub fn reply_edns(query: &Message) -> Option<Edns> {
+    query.edns.as_ref().map(|client| {
+        let mut edns = Edns::new();
+        edns.set_max_payload(MAX_UDP_PAYLOAD)
+            .set_dnssec_ok(client.flags().dnssec_ok);
+        edns
+    })
+}
+
+/// The Extended DNS Error options (RFC 8914) of `message`.
+pub fn extended_errors(message: &Message) -> Vec<EdnsOption> {
+    message
+        .edns
+        .iter()
+        .flat_map(|edns| &edns.options().options)
+        .filter(|(code, _)| *code == EdnsCode::Unknown(15))
+        .map(|(_, option)| option.clone())
+        .collect()
+}
+
 /// EDNS TCP keepalive (RFC 7828) describes one TCP connection. PariNS never
 /// negotiates it: client queries lose it at ingress and upstream answers at the
 /// upstream pool, so it is never forwarded, cached or answered.
@@ -95,12 +130,7 @@ pub fn canonical_work_key(query: &Message) -> Option<Vec<u8>> {
     if query.queries.len() != 1
         || query.queries[0].query_class() != DNSClass::IN
         || query.signature.is_some()
-        || query.edns.as_ref().is_some_and(|e| {
-            e.options()
-                .options
-                .iter()
-                .any(|(code, _)| !matches!(u16::from(*code), 8 | 12))
-        })
+        || !edns_within(query, &[EdnsCode::Subnet, EdnsCode::Padding])
     {
         return None;
     }
@@ -206,13 +236,7 @@ pub fn error_response(query: &Message, code: ResponseCode) -> Message {
     response.metadata.recursion_desired = query.recursion_desired;
     response.metadata.checking_disabled = query.checking_disabled;
     response.metadata.recursion_available = true;
-    if let Some(edns) = &query.edns {
-        let mut reply_edns = Edns::new();
-        reply_edns
-            .set_max_payload(MAX_UDP_PAYLOAD)
-            .set_dnssec_ok(edns.flags().dnssec_ok);
-        response.edns = Some(reply_edns);
-    }
+    response.edns = reply_edns(query);
     response
 }
 
@@ -241,7 +265,19 @@ pub fn encode_udp(response: &Message, limit: usize) -> Result<Vec<u8>> {
     let mut truncated = error_response(response, response.response_code);
     crate::ecs::set_subnet(&mut truncated, crate::ecs::subnet(response));
     truncated.metadata.truncation = true;
-    let bytes = truncated.to_vec()?;
+    // The answer's Extended DNS Errors stay when they fit.
+    if let Some(edns) = &mut truncated.edns {
+        for option in extended_errors(response) {
+            edns.options_mut().insert(option);
+        }
+    }
+    let mut bytes = truncated.to_vec()?;
+    if bytes.len() > limit
+        && let Some(edns) = &mut truncated.edns
+    {
+        edns.options_mut().remove(EdnsCode::Unknown(15));
+        bytes = truncated.to_vec()?;
+    }
     ensure!(
         bytes.len() <= limit,
         "truncated response exceeds UDP budget"
@@ -447,5 +483,44 @@ mod tests {
         assert_eq!(truncated.queries, q.queries);
         assert!(truncated.checking_disabled);
         assert!(truncated.edns.unwrap().flags().dnssec_ok);
+    }
+
+    #[test]
+    fn a_truncated_reply_keeps_extended_errors_that_fit() {
+        use hickory_proto::rr::{RData, Record, rdata::A};
+        let mut q = query();
+        q.edns = Some(Edns::new());
+        let mut response = error_response(&q, ResponseCode::NoError);
+        for _ in 0..100 {
+            response.add_answer(Record::from_rdata(
+                q.queries[0].name().clone(),
+                60,
+                RData::A(A::new(192, 0, 2, 1)),
+            ));
+        }
+        let blocked = EdnsOption::Unknown(15, vec![0, 15]);
+        let mut detailed = response.clone();
+        detailed
+            .edns
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .insert(blocked.clone());
+        let truncated = decode(&encode_udp(&detailed, 512).unwrap()).unwrap();
+        assert!(truncated.truncation);
+        assert_eq!(extended_errors(&truncated), vec![blocked]);
+        // An error whose text exceeds the budget is dropped, never the reply.
+        let mut long = response;
+        long.edns
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .insert(EdnsOption::Unknown(
+                15,
+                [&[0, 15][..], &[b'x'; 600]].concat(),
+            ));
+        let truncated = decode(&encode_udp(&long, 512).unwrap()).unwrap();
+        assert!(truncated.truncation);
+        assert!(extended_errors(&truncated).is_empty());
     }
 }

@@ -18,7 +18,7 @@ use hickory_proto::{
     op::{Edns, Message, Query, ResponseCode},
     rr::{
         DNSClass, Name, RData, RecordType,
-        rdata::opt::{ClientSubnet, EdnsCode, EdnsOption},
+        rdata::opt::{ClientSubnet, EdnsCode},
     },
 };
 use lru::LruCache;
@@ -71,14 +71,7 @@ impl Key {
 }
 
 fn plain_edns(message: &Message) -> bool {
-    message.edns.as_ref().is_none_or(|edns| {
-        edns.version() == 0
-            && edns
-                .options()
-                .options
-                .iter()
-                .all(|(code, _)| matches!(code, EdnsCode::Subnet | EdnsCode::Padding))
-    })
+    protocol::edns_within(message, &[EdnsCode::Subnet, EdnsCode::Padding])
 }
 
 fn query_rejection(query: &Message) -> DecisionReason {
@@ -89,19 +82,14 @@ fn query_rejection(query: &Message) -> DecisionReason {
     }
 }
 
+/// EDE (RFC 8914) is diagnostic information, not a transaction-specific
+/// option. It can supersede old knowledge without being admitted for later
+/// replay by plain_edns / prepare_response.
 fn superseding_edns(message: &Message) -> bool {
-    message.edns.as_ref().is_none_or(|edns| {
-        edns.version() == 0
-            && edns.options().options.iter().all(|(code, _)| {
-                // EDE (RFC 8914) is diagnostic information, not a transaction-
-                // specific option. It can supersede old knowledge without being
-                // admitted for later replay by plain_edns / prepare_response.
-                matches!(
-                    code,
-                    EdnsCode::Subnet | EdnsCode::Padding | EdnsCode::Unknown(15)
-                )
-            })
-    })
+    protocol::edns_within(
+        message,
+        &[EdnsCode::Subnet, EdnsCode::Padding, EdnsCode::Unknown(15)],
+    )
 }
 
 struct Entry {
@@ -263,8 +251,9 @@ pub struct Hit {
     pub scope: Scope,
     pub stale: bool,
     pub refresh: bool,
-    /// The source's AD bit when the answer was stored; never replayed in
-    /// `message`. Only a validating source makes it meaningful.
+    /// The source's AD bit when the answer was stored, and false for stale
+    /// data; never replayed in `message`. Only a validating source makes it
+    /// meaningful.
     pub authentic: bool,
     /// A cached upstream SERVFAIL.
     pub failure: Option<Failure>,
@@ -549,16 +538,13 @@ impl Cache {
             };
         }
         message.metadata.id = query.id;
-        let authentic = std::mem::take(&mut message.metadata.authentic_data);
+        // Stale data is past the lifetime its validation covered.
+        let authentic = std::mem::take(&mut message.metadata.authentic_data) && !stale;
         message.queries = query.queries.clone();
-        if let Some(edns) = &query.edns {
-            let mut response_edns = Edns::new();
-            response_edns
-                .set_max_payload(MAX_UDP_PAYLOAD)
-                .set_dnssec_ok(edns.flags().dnssec_ok);
+        if let Some(mut response_edns) = protocol::reply_edns(query) {
             // A cached failure replays the source's Extended DNS Errors.
             if entry.failure.is_some() {
-                for option in extended_errors(&message) {
+                for option in protocol::extended_errors(&message) {
                     response_edns.options_mut().insert(option);
                 }
             }
@@ -617,9 +603,9 @@ impl Cache {
         scope: Scope,
         now: Instant,
         epoch: u64,
-        restore_remaining: Option<u32>,
+        restore: Option<Restore>,
     ) -> StoreDecision {
-        let restoring = restore_remaining.is_some();
+        let restoring = restore.is_some();
         let Some(key) = Key::of(query) else {
             return StoreDecision::skipped(query_rejection(query));
         };
@@ -645,8 +631,7 @@ impl Cache {
         // failure is distinct from supersession: TTL=0 is still newer knowledge.
         let prepared =
             prepare_response(query, response, &policy).and_then(|(stored, lifetime, negative)| {
-                let lifetime =
-                    restore_remaining.map_or(lifetime, |remaining| lifetime.min(remaining));
+                let lifetime = restore.map_or(lifetime, |restore| lifetime.min(restore.remaining));
                 if lifetime == 0 {
                     return Err(DecisionReason::TtlZero);
                 }
@@ -689,7 +674,8 @@ impl Cache {
         };
         // Snapshot records arrive most recently used first (see
         // `write_clean_snapshot`). A restore cannot evict an already admitted
-        // record, supersede live knowledge, or change counters.
+        // record, supersede live knowledge, or change counters; each restored
+        // entry goes to the least recently used end.
         if restoring {
             let Ok((wire, _, negative)) = &prepared else {
                 return StoreDecision::skipped(*prepared.as_ref().unwrap_err());
@@ -744,6 +730,7 @@ impl Cache {
                 negative,
                 failure: None,
                 prefetch: policy.prefetch,
+                accessed: restore.map(|restore| restore.accessed),
             },
             now,
             superseded,
@@ -797,7 +784,7 @@ impl Cache {
             return StoreDecision::skipped(DecisionReason::UncacheableResponse);
         }
         let mut stored = protocol::error_response(query, ResponseCode::ServFail);
-        let errors = extended_errors(response);
+        let errors = protocol::extended_errors(response);
         if !errors.is_empty() {
             let edns = stored.edns.get_or_insert_with(|| {
                 let mut edns = Edns::new();
@@ -852,6 +839,7 @@ impl Cache {
                 negative: true,
                 failure: Some(failure),
                 prefetch: false,
+                accessed: None,
             },
             now,
             superseded,
@@ -876,6 +864,7 @@ impl Cache {
             negative,
             failure,
             prefetch,
+            accessed,
         } = stored;
         let charge = charge(&wire, &key);
         let part = usize::from(negative);
@@ -932,7 +921,7 @@ impl Cache {
             failure,
             prefetch,
             hits: AtomicU64::new(0),
-            accessed: AtomicU64::new(id),
+            accessed: AtomicU64::new(accessed.unwrap_or(id)),
             charge,
             charged,
         });
@@ -941,7 +930,11 @@ impl Cache {
             .entry(key)
             .or_default()
             .push(Arc::clone(&entry));
-        shard.partitions[part].lru.put(id, entry);
+        let lru = &mut shard.partitions[part].lru;
+        lru.put(id, entry);
+        if accessed.is_some() {
+            lru.demote(&id);
+        }
         StoreDecision {
             outcome: if superseded {
                 StoreOutcome::Replaced
@@ -1132,17 +1125,16 @@ struct Stored {
     negative: bool,
     failure: Option<Failure>,
     prefetch: bool,
+    /// A restored entry's use stamp; the entry starts least recently used.
+    accessed: Option<u64>,
 }
 
-/// The Extended DNS Error options (RFC 8914) of `message`.
-fn extended_errors(message: &Message) -> Vec<EdnsOption> {
-    message
-        .edns
-        .iter()
-        .flat_map(|edns| &edns.options().options)
-        .filter(|(code, _)| *code == EdnsCode::Unknown(15))
-        .map(|(_, option)| option.clone())
-        .collect()
+/// A snapshot record's admission: its remaining fresh lifetime in seconds and
+/// its use stamp, which falls with its position in the file.
+#[derive(Clone, Copy)]
+struct Restore {
+    remaining: u32,
+    accessed: u64,
 }
 
 /// The single positive/negative classification used by admission and sharing.

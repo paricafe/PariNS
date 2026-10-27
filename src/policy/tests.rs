@@ -292,6 +292,42 @@ fn local_source_is_raw_until_budgeted_compilation_and_can_reuse_owned_policy() {
 }
 
 #[test]
+fn rule_file_errors_give_the_position_and_reason_without_rule_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rules.toml");
+    for (rules, expected) in [
+        (
+            "allow_exact = ['marker-one.test nxdomain']",
+            "filter file allow_exact[0]: allow rules take no block method",
+        ),
+        (
+            "block_exact = ['ok.test', 'marker-two.test marker-three']",
+            "filter file block_exact[1]: unknown method: use nodata, null_ip, nxdomain, refused or IP addresses",
+        ),
+        (
+            "block_suffix = ['marker-four.test 224.0.0.9']",
+            "filter file block_suffix[0]: the address is not a unicast address",
+        ),
+        (
+            "block_response = 'custom_ip'\nblock_ipv4 = '224.0.0.10'",
+            "invalid filter block_response: block_ipv4 and block_ipv6 must be unicast addresses",
+        ),
+    ] {
+        std::fs::write(&path, format!("enabled = true\n{rules}\n")).unwrap();
+        let error = format!(
+            "{:#}",
+            LocalPolicySource::File(path.clone())
+                .compile(Limits::default(), || Ok(()))
+                .unwrap_err()
+        );
+        assert!(error.contains(expected), "{error}");
+        for content in ["marker", "224.0.0"] {
+            assert!(!error.contains(content), "{error}");
+        }
+    }
+}
+
+#[test]
 fn local_file_buffer_is_charged_before_reading_or_compiling_it() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rules.toml");
@@ -485,10 +521,8 @@ fn a_blocked_chain_target_answers_with_its_rule_method() {
     );
     assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
     assert!(reply.answers.is_empty());
-    assert_eq!(
-        reply.authorities[0].name,
-        Name::from_ascii("ads.test.").unwrap()
-    );
+    // The SOA owner is the question name, never the target's rule.
+    assert_eq!(&reply.authorities[0].name, q.queries[0].name());
 }
 
 #[test]
@@ -527,7 +561,7 @@ fn rule_lines_and_block_settings_are_validated_with_their_position() {
         ("block_ipv4 = '192.0.2.1'", "only with block_response"),
         (
             "block_response = 'custom_ip'\nblock_ipv6 = 'ff02::1'",
-            "not a unicast",
+            "must be unicast addresses",
         ),
         ("block_response = 'drop'", "unknown variant"),
         ("blocked_ttl_secs = 0", "blocked_ttl_secs"),

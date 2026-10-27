@@ -1,6 +1,7 @@
 //! Private runtime storage. One SQLite owner; DNS producers never wait for IO.
 //! Retention cleanup runs every `storage.cleanup_interval_secs`, right after a
-//! write that leaves a capacity bound exceeded, and on explicit flush/shutdown.
+//! write that leaves a capacity bound exceeded, and on explicit flush. Shutdown
+//! follows the terminal flush and commits only what arrived since.
 mod database;
 pub(crate) use database::DATABASE_FORMAT;
 mod observation;

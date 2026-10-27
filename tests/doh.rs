@@ -277,6 +277,85 @@ async fn alt_svc_follows_the_http3_listener_state() {
 }
 
 #[tokio::test]
+async fn tls_handshake_failures_timeouts_and_alpn_mismatches_are_counted() {
+    use tokio::io::AsyncWriteExt;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = watch::channel(false);
+    let resolver = Arc::new(common::resolver(
+        "127.0.0.1:9".parse().unwrap(),
+        Duration::from_millis(100),
+    ));
+    let ingress = Ingress {
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default())),
+        resolver: resolver.clone(),
+        queries: Arc::new(Semaphore::new(4)),
+        connections: Arc::new(Semaphore::new(8)),
+        stop: stopped,
+        io_timeout: Duration::from_millis(200),
+        shutdown_grace: Duration::from_millis(200),
+        max_streams: 4,
+    };
+    let (server_tls, client_tls) = certificates();
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
+    // Plain HTTP is not a TLS handshake.
+    let mut plain = TcpStream::connect(address).await.unwrap();
+    plain
+        .write_all(b"GET /dns-query HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    // A silent peer exceeds the I/O timeout.
+    let _silent = TcpStream::connect(address).await.unwrap();
+    // Without ALPN the handshake completes but selects no h2.
+    let mut without = (*client_tls).clone();
+    without.alpn_protocols.clear();
+    let _without = TlsConnector::from(Arc::new(without))
+        .connect(
+            "localhost".try_into().unwrap(),
+            TcpStream::connect(address).await.unwrap(),
+        )
+        .await;
+    // An offer without h2 ends the handshake.
+    let mut other = (*client_tls).clone();
+    other.alpn_protocols = vec![b"http/1.1".to_vec()];
+    assert!(
+        TlsConnector::from(Arc::new(other))
+            .connect(
+                "localhost".try_into().unwrap(),
+                TcpStream::connect(address).await.unwrap(),
+            )
+            .await
+            .is_err()
+    );
+    let expected = [
+        "parins_doh_tls_handshake_failures_total 1\n",
+        "parins_doh_tls_handshake_timeouts_total 1\n",
+        "parins_doh_alpn_mismatches_total 2\n",
+    ];
+    let counted = timeout(Duration::from_secs(2), async {
+        loop {
+            let text = parins::admin::render(resolver.metrics());
+            if expected.iter().all(|line| text.contains(line)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        counted.is_ok(),
+        "{}",
+        parins::admin::render(resolver.metrics())
+    );
+    stop.send(true).unwrap();
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn incomplete_body_expires_and_shutdown_releases_admission() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

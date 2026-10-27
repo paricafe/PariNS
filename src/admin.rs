@@ -56,10 +56,15 @@ pub fn render(metrics: &Metrics) -> String {
             histogram.sum_micros as f64 / 1_000_000.0
         );
     }
-    output
+    let diagnostics: Vec<_> = metrics
+        .diagnostics()
+        .map(|(name, help, value)| (name, help, value, false))
+        .collect();
+    output + &render_extra(&diagnostics)
 }
 
-/// Generation-scoped counters of the active resolution source (recursive mode only).
+/// Counters and gauges outside the persisted snapshot: listener diagnostics and
+/// the generation-scoped counters of the recursive resolution source.
 fn render_extra(metrics: &[(&str, &str, u64, bool)]) -> String {
     let mut output = String::new();
     for (name, help, value, gauge) in metrics {
@@ -95,9 +100,7 @@ pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
         }
         tokio::select! {
             _ = stop.changed() => break Ok(()),
-            joined = tasks.join_next(), if !tasks.is_empty() => {
-                if let Some(Err(error)) = joined { break Err(error.into()); }
-            },
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => ingress.settle("admin", result),
             accepted = crate::transport::accept::accept(&listener) => {
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,

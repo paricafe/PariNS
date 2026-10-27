@@ -35,9 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
-    ApiError, Shared, Snapshot,
-    account::Credentials,
-    decode, error, internal, invalid,
+    ApiError, Shared, Snapshot, account, decode, error, internal, invalid,
     store::{self, Store},
 };
 
@@ -193,9 +191,12 @@ impl Admission {
         let outcome = tokio::time::timeout(DEADLINE, self.siteverify(&keys.secret_key, token))
             .await
             .map_err(|_| unavailable())??;
-        let testing = outcome
-            .metadata
-            .is_some_and(|metadata| metadata.result_with_testing_key);
+        // Test secrets answer for any token, host and action; a real secret
+        // never relaxes the checks, whatever the answer claims.
+        let testing = test_secret(&keys.secret_key).is_some()
+            && outcome
+                .metadata
+                .is_some_and(|metadata| metadata.result_with_testing_key);
         let hostname = expected_hostname(transport, host);
         let matches = outcome
             .hostname
@@ -239,8 +240,12 @@ impl Admission {
             // Tests never reach Cloudflare.
             None => Err(crate::https_reader::ReaderError::new("network_error")),
         };
+        // One reader keeps one root certificate store for every sign-in.
         #[cfg(not(test))]
-        let response = crate::https_reader::HttpsReader::new()
+        static READER: std::sync::LazyLock<crate::https_reader::HttpsReader> =
+            std::sync::LazyLock::new(crate::https_reader::HttpsReader::new);
+        #[cfg(not(test))]
+        let response = READER
             .send(Method::POST, Uri::from_static(SITEVERIFY), headers, body)
             .await;
         let response = response.map_err(|_| unavailable())?;
@@ -384,11 +389,6 @@ pub(super) async fn change(
     body: &[u8],
 ) -> Result<Value, ApiError> {
     let input: Change = decode(body)?;
-    if input.current_password.len() > 256 {
-        return Err(invalid(anyhow::anyhow!(
-            "Current password must contain at most 256 bytes"
-        )));
-    }
     if let Some(setting) = &input.turnstile
         && !(valid_key(&setting.site_key) && setting.secret_key.as_deref().is_none_or(valid_key))
     {
@@ -396,81 +396,52 @@ pub(super) async fn change(
             "Turnstile keys must be 1 to 256 visible ASCII characters"
         )));
     }
-    shared.auth.attempt(peer.ip())?;
-    let verified = shared
-        .manager
-        .lock()
-        .await
-        .saved
-        .as_ref()
-        .map(Credentials::from)
-        .ok_or_else(internal)?;
-    let password_hash = verified.password_hash.clone();
-    let current_password = input.current_password;
-    // CPU work owns the existing hash permit, and never holds Manager.
-    let correct = shared
-        .auth
-        .password_work(move || store::verify_password(&password_hash, &current_password))
-        .await?;
-    if !correct {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "CURRENT_PASSWORD_INCORRECT",
-            "Current password is incorrect",
-        ));
-    }
-    let permit = shared
-        .protected_mutation_permit(headers, &transport)
-        .await?;
-    let headers = headers.clone();
     let setting = input.turnstile;
-    // Once admitted, persistence and revocation outlive the HTTP request.
-    tokio::spawn(async move {
-        let _permit = permit;
-        let mut manager = shared.manager.clone().lock_owned().await;
-        shared.authorized(&headers, &transport)?;
-        if !verified.matches(manager.saved.as_ref()) {
-            return Err(error(
-                StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
-                "Sign in required",
-            ));
-        }
-        let next = match setting {
-            None => None,
-            Some(Setting {
-                site_key,
-                secret_key,
-            }) => {
-                let secret_key = secret_key
-                    .or_else(|| {
-                        manager
-                            .turnstile
-                            .keys
-                            .as_ref()
-                            .map(|keys| keys.secret_key.clone())
-                    })
-                    .ok_or_else(|| invalid(anyhow::anyhow!("Enter the Turnstile secret key")))?;
-                let keys = Keys {
+    account::change(
+        shared,
+        transport,
+        peer,
+        headers,
+        input.current_password,
+        || Ok(()),
+        |shared, mut manager, ()| async move {
+            let next = match setting {
+                None => None,
+                Some(Setting {
                     site_key,
                     secret_key,
-                };
-                // A test secret passes (or fails) every token whatever the
-                // widget, so it is accepted only with a test site key.
-                if !valid(&keys) {
-                    return Err(test_keys_unpaired());
+                }) => {
+                    let secret_key = secret_key
+                        .or_else(|| {
+                            manager
+                                .turnstile
+                                .keys
+                                .as_ref()
+                                .map(|keys| keys.secret_key.clone())
+                        })
+                        .ok_or_else(|| {
+                            invalid(anyhow::anyhow!("Enter the Turnstile secret key"))
+                        })?;
+                    let keys = Keys {
+                        site_key,
+                        secret_key,
+                    };
+                    // A test secret passes (or fails) every token whatever the
+                    // widget, so it is accepted only with a test site key.
+                    if !valid(&keys) {
+                        return Err(test_keys_unpaired());
+                    }
+                    Some(keys)
                 }
-                Some(keys)
-            }
-        };
-        persist(manager.store.clone(), next.clone()).await?;
-        // The Store commit is done. No await separates publication from
-        // revocation; retain the Manager -> Active lock order.
-        manager.turnstile.keys = next;
-        manager.turnstile.generation += 1;
-        shared.active.lock().unwrap().sessions.clear();
-        Ok(json!({"reauthentication_required": true}))
-    })
+            };
+            persist(manager.store.clone(), next.clone()).await?;
+            // The Store commit is done. No await separates publication from
+            // revocation; retain the Manager -> Active lock order.
+            manager.turnstile.keys = next;
+            manager.turnstile.generation += 1;
+            shared.active.lock().unwrap().sessions.clear();
+            Ok(json!({"reauthentication_required": true}))
+        },
+    )
     .await
-    .map_err(|_| internal())?
 }

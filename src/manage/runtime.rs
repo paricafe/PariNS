@@ -22,6 +22,7 @@ use futures_util::FutureExt;
 use serde_json::Value;
 use std::{
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -171,6 +172,8 @@ pub(super) struct Manager {
     /// service holds an empty placeholder. No start, retry or rollback restore
     /// may serve it; only applying a configuration whose rules compile clears it.
     local_error: Option<String>,
+    /// Why the saved rollback copy cannot be used. Any apply replaces that copy.
+    pub rollback_error: Option<String>,
 }
 
 /// Subscription fingerprints of the saved rollback copy. Startup needs them,
@@ -182,6 +185,51 @@ pub(super) fn previous_fingerprints(saved: &Stored, dir: &std::path::Path) -> Re
     Config::parse_in(text, dir)
         .and_then(|config| config.filter_subscriptions.fingerprints())
         .context("saved rollback configuration (previous revision) is invalid")
+}
+
+/// How long a validation waits for the subscription worker, within the
+/// management connection's 90 s limit.
+const VALIDATION_WORKER_WAIT: Duration = Duration::from_secs(60);
+
+/// A candidate's checks that run without the Manager lock.
+pub(super) struct Validation {
+    dir: PathBuf,
+    address: SocketAddr,
+    filters: Arc<crate::filter_subscriptions::service::Service>,
+    revision: u64,
+    updates_only: bool,
+}
+
+impl Validation {
+    pub async fn run(self, toml: String) -> Result<Config> {
+        if self.updates_only {
+            return Config::parse_in(&toml, &self.dir);
+        }
+        let config = prepare(self.dir, self.address, toml).await?.0;
+        let local = config.local_policy_source();
+        let _candidate = self
+            .filters
+            .check_config_from_source(
+                config.filter_subscriptions.clone(),
+                local,
+                self.revision,
+                VALIDATION_WORKER_WAIT,
+            )
+            .await?;
+        Ok(config)
+    }
+}
+
+async fn prepare(dir: PathBuf, address: SocketAddr, toml: String) -> Result<(Config, Snapshot)> {
+    ensure!(toml.len() <= MAX_CONFIG, "configuration exceeds 256 KiB");
+    tokio::task::spawn_blocking(move || {
+        let config = Config::parse_in(&toml, &dir)?;
+        super::store::check_rule_file(&dir, &config)?;
+        let snapshot = Snapshot::prepare(&config, address)?;
+        config.check_non_identity_files()?;
+        Ok((config, snapshot))
+    })
+    .await?
 }
 
 /// The saved configuration failed to start (for example a port held by another
@@ -225,9 +273,18 @@ impl Manager {
             .unwrap_or_default();
         let local = config.as_ref().map(Config::load_policy).transpose();
         let local_error = local.as_ref().err().map(ToString::to_string);
-        let previous = match &saved {
-            Some(saved) => previous_fingerprints(saved, &store.dir)?,
-            None => Vec::new(),
+        // An unreadable rollback copy (for example after a downgrade) leaves
+        // management and the saved revision available; only rollback is not.
+        let (previous, rollback_error) = match saved
+            .as_ref()
+            .map(|saved| previous_fingerprints(saved, &store.dir))
+            .transpose()
+        {
+            Ok(previous) => (previous.unwrap_or_default(), None),
+            Err(error) => {
+                eprintln!("PariNS rollback unavailable: {error:#}");
+                (Vec::new(), Some(format!("{error:#}")))
+            }
         };
         // A broken local file must keep management available; Manager keeps
         // local_error so no start path ever serves this placeholder policy.
@@ -295,6 +352,7 @@ impl Manager {
             reload_attempt: 0,
             startup: None,
             local_error,
+            rollback_error,
         };
         if let Some(saved) = this.saved.clone() {
             this.restore(&saved.toml, if skip_restore { None } else { consumed.ok() })
@@ -312,9 +370,10 @@ impl Manager {
         serde_json::json!({
             "running": running.is_some(),
             "last_error": if self.running.is_some() && running.is_none() {
-                Some("DNS task exited; reapply configuration to restart".to_string())
+                Some("DNS task exited; restarting automatically".to_string())
             } else { self.last_error.clone() },
             "revision": self.saved.as_ref().map_or(0, |s| s.revision),
+            "rollback_unavailable": self.rollback_error,
             "resolution_mode": running.map(|r| r.resolver.resolution_mode()),
             "metrics": self.services.metrics.snapshot(),
             "metrics_scope": "process",
@@ -476,35 +535,17 @@ impl Manager {
         }
     }
 
-    pub async fn validate(&self, toml: String) -> Result<Config> {
+    /// Copies what validating `toml` needs, so the caller can release the
+    /// Manager lock before certificates are read and rules compiled.
+    pub fn validation(&self, toml: &str) -> Result<Validation> {
         ensure!(toml.len() <= MAX_CONFIG, "configuration exceeds 256 KiB");
-        if self.updates_only(&toml)? {
-            return Config::parse_in(&toml, &self.store.dir);
-        }
-        let config = self.prepare(toml).await?.0;
-        let local = config.local_policy_source();
-        let _candidate = self
-            .filters
-            .prepare_config_from_source(
-                config.filter_subscriptions.clone(),
-                local,
-                self.saved.as_ref().map_or(0, |s| s.revision),
-            )
-            .await?;
-        Ok(config)
-    }
-
-    pub async fn prepare(&self, toml: String) -> Result<(Config, Snapshot)> {
-        ensure!(toml.len() <= MAX_CONFIG, "configuration exceeds 256 KiB");
-        let dir = self.store.dir.clone();
-        let address = self.address;
-        tokio::task::spawn_blocking(move || {
-            let config = Config::parse_in(&toml, &dir)?;
-            let snapshot = Snapshot::prepare(&config, address)?;
-            config.check_non_identity_files()?;
-            Ok((config, snapshot))
+        Ok(Validation {
+            dir: self.store.dir.clone(),
+            address: self.address,
+            filters: self.filters.clone(),
+            revision: self.saved.as_ref().map_or(0, |s| s.revision),
+            updates_only: self.updates_only(toml)?,
         })
-        .await?
     }
 
     async fn restore(&mut self, toml: &str, snapshot: Option<ConsumedSnapshot>) {
@@ -584,8 +625,24 @@ impl Manager {
         failure.attempts = failure.attempts.saturating_add(1);
         failure.failed_at = now;
         if failure.log.due(&error) {
-            eprintln!("PariNS DNS failed to start: {error}; retrying automatically");
+            eprintln!("PariNS DNS unavailable: {error}; retrying automatically");
         }
+    }
+
+    /// A running generation that ended without a stop request (a panic, or a
+    /// listener failure the Server could not ride out) is handed to `dns_retry`,
+    /// which restarts the saved revision as after a failed start.
+    pub fn reap_exited(&mut self) {
+        let Some(running) = self.running.take_if(|running| running.task.is_finished()) else {
+            return;
+        };
+        let reason = match running.task.now_or_never() {
+            Some(Ok(Err(error))) => format!("DNS task exited: {error:#}"),
+            Some(Ok(Ok(()))) => "DNS task exited without a stop request".into(),
+            Some(Err(_)) | None => "DNS task aborted".into(),
+        };
+        self.last_error = Some(format!("DNS unavailable: {reason}"));
+        self.startup_failed(reason);
     }
 
     fn startup_recovered(&mut self) {
@@ -605,6 +662,12 @@ impl Manager {
             return None;
         }
         Some(failure.failed_at + crate::server::backoff(failure.attempts))
+    }
+
+    /// Ends the running generation's task without a stop request.
+    #[cfg(test)]
+    pub(super) fn simulate_exit(&self) {
+        self.running.as_ref().expect("running DNS").task.abort();
     }
 
     /// Stops DNS and records a startup failure, as a non-bind start error would.
@@ -641,13 +704,15 @@ impl Manager {
             }
             self.filters.set_revision(next.revision);
             self.saved = Some(next);
+            self.rollback_error = None;
             return Ok(false);
         }
         ensure!(
             self.cache_ready,
             "cannot start DNS before clean snapshot is durably consumed; restart after resolving the storage error"
         );
-        let (config, candidate) = self.prepare(next.toml.clone()).await?;
+        let (config, candidate) =
+            prepare(self.store.dir.clone(), self.address, next.toml.clone()).await?;
         let local = config.local_policy_source();
         let filter_candidate = self
             .filters
@@ -676,6 +741,7 @@ impl Manager {
                 .expect("running hot-update target")
                 .config = config;
             self.saved = Some(next);
+            self.rollback_error = None;
             self.last_error = None;
             return Ok(false);
         }
@@ -719,6 +785,7 @@ impl Manager {
                 self.publish(candidate);
                 self.running = Some(running);
                 self.saved = Some(next);
+                self.rollback_error = None;
                 self.last_error = None;
                 self.local_error = None;
                 self.startup_recovered();

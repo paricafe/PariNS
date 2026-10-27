@@ -727,6 +727,85 @@ async fn smaller_limits_remain_pending_until_background_cleanup_finishes() {
 }
 
 #[tokio::test]
+async fn capacity_pending_clears_with_the_cleanup_that_resolves_it() {
+    let runtime = RuntimeServices::ephemeral(settings());
+    for _ in 0..600 {
+        runtime.storage.record_log(0, entry("fresh"));
+    }
+    runtime.storage.flush().await.unwrap();
+    // Applying the limit removes 256 entries; one background cleanup removes
+    // the rest.
+    let mut updated = settings();
+    updated.query_log.max_entries = 100;
+    runtime.storage.publish_settings(updated, 2);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let shared = runtime.storage.0.shared.clone();
+        let (send, receive) = oneshot::channel();
+        inspect(&runtime.storage, move |conn| {
+            let count: u64 = conn.query_row(
+                "SELECT value FROM metadata WHERE key='log_count'",
+                [],
+                |r| r.get(0),
+            )?;
+            let pending = shared.status.lock().unwrap().capacity_pending;
+            let _ = send.send((count, pending));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (count, pending) = receive.await.unwrap();
+        if count <= 100 {
+            // Seen from the worker's next pass, before any periodic refresh.
+            assert!(!pending, "capacity_pending outlived the cleanup");
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    runtime.storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn writes_during_pending_cleanup_keep_health_cleaning() {
+    let dir = private_dir();
+    let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
+    for _ in 0..3000 {
+        runtime.storage.record_log(0, entry("fresh"));
+    }
+    runtime.storage.flush().await.unwrap();
+    let mut updated = settings();
+    updated.query_log.max_entries = 3;
+    runtime.storage.publish_settings(updated, 2);
+    let shared = runtime.storage.0.shared.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let watching = done.clone();
+    let watcher = thread::spawn(move || {
+        let mut flapped = false;
+        while !watching.load(Ordering::Acquire) {
+            let status = shared.status.lock().unwrap();
+            flapped |= status.capacity_pending && status.health == "healthy";
+            drop(status);
+            thread::sleep(Duration::from_micros(100));
+        }
+        flapped
+    });
+    // Each batch fills the queue past 256, so the worker writes on every pass.
+    for _ in 0..20 {
+        for _ in 0..300 {
+            runtime.storage.record_log(0, entry("fresh"));
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    done.store(true, Ordering::Release);
+    assert!(
+        !watcher.join().unwrap(),
+        "a write reported healthy while cleanup was pending"
+    );
+    runtime.storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn delayed_checkpoint_cannot_replace_newer_totals_or_duplicate_minute_points() {
     let mut config = settings();
     config.storage.flush_interval_ms = 100;

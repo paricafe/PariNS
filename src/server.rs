@@ -11,6 +11,8 @@
 //! once, repeats within one outage at most every ten minutes. Stopping the
 //! generation cancels pending retries and releases every socket, including Quinn
 //! drivers; one listener's error during that drain does not cut the others short.
+//! A panic in one plain DNS query or connection task ends that task alone: it is
+//! logged and counted on `/metrics`, and the listener keeps serving.
 
 use std::{
     future::Future,
@@ -862,9 +864,7 @@ async fn serve_plain(
         }
         tokio::select! {
             _ = ingress.stop.changed() => break Ok(()),
-            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
-                if let Err(error) = result { break Err(error.into()); }
-            }
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => ingress.settle("plain DNS", result),
             accepted = crate::transport::accept::accept(&tcp) => {
                 let (stream, peer) = match accepted { Ok(value) => value, Err(error) => break Err(error.into()) };
                 let Ok(permit) = ingress.connections.clone().try_acquire_owned() else {
@@ -906,6 +906,10 @@ async fn serve_plain(
                 tasks.spawn(async move {
                     let _permit = permit;
                     let _source = source;
+                    #[cfg(test)]
+                    if bytes == tests::PANIC_DATAGRAM {
+                        panic!("test query task panic");
+                    }
                     if let Some(reply) = resolver.resolve_with_transport(&bytes, peer.ip(), "udp").await
                         && let Ok(bytes) = protocol::encode_udp(&reply.message, reply.udp_limit)
                     {
@@ -981,6 +985,69 @@ async fn serve_tcp(
 mod tests {
     use super::*;
     use crate::runtime_health::State;
+
+    /// A UDP payload that makes its query task panic.
+    pub(super) const PANIC_DATAGRAM: &[u8] = b"parins-panic";
+
+    #[tokio::test]
+    async fn a_panicking_query_task_leaves_the_plain_listener_serving() {
+        use hickory_proto::{
+            op::{Message, MessageType, OpCode, Query},
+            rr::{Name, RecordType},
+        };
+        let config = Config::parse(
+            "listen='127.0.0.1:0'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=200\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n",
+        )
+        .unwrap();
+        let services = crate::runtime_services::RuntimeServices::ephemeral(
+            crate::storage::RuntimeSettings::from_config(&config),
+        );
+        let server = Server::bind_with_services(config, None, services)
+            .await
+            .unwrap();
+        let address = server.local_addr();
+        let metrics = server.metrics().clone();
+        let listeners = server.listeners();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(server.run(async {
+            let _ = stopped.await;
+        }));
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(PANIC_DATAGRAM, address).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The unreachable upstream makes the answer a SERVFAIL; any answer shows
+        // the listener still serves.
+        let mut query = Message::new(7, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_ascii("panic.test.").unwrap(),
+            RecordType::A,
+        ));
+        client
+            .send_to(&query.to_vec().unwrap(), address)
+            .await
+            .unwrap();
+        let mut buffer = [0; 512];
+        let (length, _) = timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+            .await
+            .expect("plain listener answers after a task panic")
+            .unwrap();
+        assert_eq!(Message::from_vec(&buffer[..length]).unwrap().metadata.id, 7);
+        let panics = metrics
+            .diagnostics()
+            .find(|(name, _, _)| *name == "query_task_panics")
+            .unwrap()
+            .2;
+        assert_eq!(panics, 1);
+        let dns = listeners
+            .snapshot()
+            .into_iter()
+            .find(|l| l.kind == ListenerKind::Dns)
+            .unwrap();
+        assert_eq!(dns.state, ListenerState::Running);
+        assert_eq!(dns.failures, 0);
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
 
     #[test]
     fn a_new_outage_logs_again_while_repeats_within_one_outage_are_limited() {

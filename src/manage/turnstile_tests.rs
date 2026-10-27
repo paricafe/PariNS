@@ -474,3 +474,34 @@ async fn cloudflare_test_keys_are_accepted_only_as_a_pair() {
     }
     shared.manager.lock().await.terminal_shutdown().await;
 }
+
+#[tokio::test]
+async fn only_a_configured_test_secret_relaxes_the_host_and_action_checks() {
+    let (_temp, shared) = fixture().await;
+    let reply = Arc::new(StdMutex::new(Reply::Json(
+        r#"{"success":true,"hostname":"example.com","action":"","metadata":{"result_with_testing_key":true}}"#,
+    )));
+    let (address, _) = siteverify(reply).await;
+    shared.manager.lock().await.turnstile.siteverify = Some(address);
+    set(
+        &shared,
+        json!({"site_key": "0x4AAAAAAA-site", "secret_key": "0x4AAAAAAA-secret"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        login(&shared, ANY, Some("token")).await.unwrap_err().1,
+        "TURNSTILE_FAILED"
+    );
+    set(
+        &shared,
+        json!({"site_key": "1x00000000000000000000AA", "secret_key": "1x0000000000000000000000000000000AA"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        login(&shared, ANY, Some("token")).await.unwrap()["authenticated"],
+        true
+    );
+    shared.manager.lock().await.terminal_shutdown().await;
+}

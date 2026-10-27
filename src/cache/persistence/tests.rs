@@ -739,6 +739,44 @@ fn restore_rejects_malformed_scope_and_question_even_with_recomputed_checksum() 
 }
 
 #[test]
+fn a_record_that_does_not_decode_unloads_what_the_restore_admitted() {
+    let config = CacheConfig {
+        shards: 1,
+        ..CacheConfig::default()
+    };
+    let cache = Cache::new(config.clone());
+    let now = Instant::now();
+    for name in ["first.test.", "second.test."] {
+        let q = query(name);
+        insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
+    }
+    let original = encode(&cache, now);
+    let mut header: Header = serde_json::from_slice(&original[..HEADER_BYTES]).unwrap();
+    let mut lines: Vec<Vec<u8>> = original[HEADER_BYTES..]
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(<[u8]>::to_vec)
+        .collect();
+    // The second record names a scope this codec never writes.
+    let mut record: Record = serde_json::from_slice(&lines[1]).unwrap();
+    record.scope = SavedScope::Network("192.0.2.1/24".into());
+    lines[1] = serde_json::to_vec(&record).unwrap();
+    lines[1].push(b'\n');
+    let mut hash = Sha256::new();
+    for line in &lines {
+        hash.update(line);
+    }
+    header.checksum = digest(hash, &header);
+    let encoded = serde_json::to_vec(&header).unwrap();
+    let mut bytes = vec![b' '; HEADER_BYTES];
+    bytes[..encoded.len()].copy_from_slice(&encoded);
+    bytes.extend(lines.concat());
+    let restored = Cache::new(config);
+    assert!(restore(&restored, bytes, 0, now).is_err());
+    assert_eq!(restored.snapshot()["entries"], 0);
+    assert_eq!(restored.snapshot()["bytes"], 0);
+}
+
+#[test]
 fn current_variants_negative_partition_and_admission_remain_authoritative() {
     let config = CacheConfig {
         shards: 1,
@@ -881,7 +919,17 @@ fn learned_entries_round_trip_without_restoring_classification() {
     }
     let v6 = Scope::Learned { ipv4: false };
     let q6 = query("learned6.test.");
-    cache.admit(&q6, &answer(&q6, 60), v6, now, cache.epoch(), Some(60));
+    cache.admit(
+        &q6,
+        &answer(&q6, 60),
+        v6,
+        now,
+        cache.epoch(),
+        Some(Restore {
+            remaining: 60,
+            accessed: 1,
+        }),
+    );
     assert_eq!(cache.snapshot()["ecs_shared_entries"], 2);
     let bytes = encode(&cache, now);
     let text = String::from_utf8_lossy(&bytes);
@@ -1009,6 +1057,32 @@ fn twenty(now: Instant) -> (Cache, Vec<Message>) {
         insert(&cache, q, &answer(q, 60), Scope::NoEcs, now);
     }
     (cache, queries)
+}
+
+#[test]
+fn restored_entries_keep_their_use_order_for_eviction_and_the_next_save() {
+    let now = Instant::now();
+    let (cache, queries) = twenty(now);
+    let bytes = encode(&cache, now);
+    let restored = Cache::new(CacheConfig {
+        shards: 1,
+        max_entries: 20,
+        negative_percent: 0,
+        ..CacheConfig::default()
+    });
+    assert_eq!(
+        restore(&restored, bytes.clone(), 0, now).unwrap().restored,
+        20
+    );
+    // The next save lists the restored entries in the order they were saved.
+    assert!(encode(&restored, now)[HEADER_BYTES..] == bytes[HEADER_BYTES..]);
+    // New answers evict the least recently used restored entries first.
+    for i in 0..19 {
+        let q = query(&format!("new{i}.test."));
+        insert(&restored, &q, &answer(&q, 60), Scope::NoEcs, now);
+    }
+    assert!(restored.peek(&queries[19], None, now, false).is_some());
+    assert!(restored.peek(&queries[18], None, now, false).is_none());
 }
 
 #[test]

@@ -1,6 +1,6 @@
 mod common;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hickory_proto::{
     op::{Edns, Message, ResponseCode},
@@ -10,6 +10,7 @@ use hickory_proto::{
     },
 };
 use parins::{
+    cache::Failure,
     config::{Config, ResolutionMode},
     ecs::Scope,
     protocol,
@@ -117,6 +118,68 @@ async fn filtered_answers_lose_ad() {
             .all(|record| record.record_type() != RecordType::A),
         "{reply:?}"
     );
+    assert!(!reply.authentic_data);
+}
+
+/// A recursive resolver holding a validated answer that went stale a second
+/// ago.
+fn stale_validated(query: &Message) -> Resolver {
+    let mut config = config(ResolutionMode::Recursive);
+    config.cache.stale.enabled = true;
+    let resolver = Resolver::try_from_config(&config).unwrap();
+    let cache = resolver.cache();
+    assert!(
+        cache
+            .insert_decision_if_epoch(
+                query,
+                &validated(query, None),
+                Scope::NoEcs,
+                Instant::now() - Duration::from_secs(61),
+                cache.epoch(),
+            )
+            .admitted()
+    );
+    resolver
+}
+
+async fn reply(resolver: &Resolver, query: &Message) -> Message {
+    resolver
+        .resolve(&query.to_vec().unwrap(), "192.0.2.10".parse().unwrap())
+        .await
+        .unwrap()
+        .message
+}
+
+#[tokio::test]
+async fn a_stale_answer_behind_a_cached_failure_never_carries_ad() {
+    let query = query("stale.test.", Some(true), false);
+    let resolver = stale_validated(&query);
+    let cache = resolver.cache();
+    assert!(
+        cache
+            .insert_failure_if_epoch(
+                &query,
+                &protocol::error_response(&query, ResponseCode::ServFail),
+                Scope::NoEcs,
+                Instant::now(),
+                cache.epoch(),
+                Failure::StaleFallback,
+            )
+            .admitted()
+    );
+    let reply = reply(&resolver, &query).await;
+    assert_eq!(reply.answers.len(), 1, "{reply:?}");
+    assert!(!reply.authentic_data);
+}
+
+#[tokio::test]
+async fn a_stale_answer_after_a_failed_resolution_never_carries_ad() {
+    let query = query("stale.test.", Some(true), false);
+    let resolver = stale_validated(&query);
+    // A shut down recursion fails every resolution before sending a query.
+    resolver.shutdown_refresh().await;
+    let reply = reply(&resolver, &query).await;
+    assert_eq!(reply.answers.len(), 1, "{reply:?}");
     assert!(!reply.authentic_data);
 }
 

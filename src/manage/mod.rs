@@ -3,6 +3,7 @@
 //! outlives its request, under that module's own limits and shutdown drain. The
 //! listener rides out per-connection accept errors like the DNS listeners.
 mod account;
+mod assets;
 mod auth_budget;
 mod cache;
 mod certificates;
@@ -339,7 +340,7 @@ impl Shared {
         Ok(active
             .sessions
             .iter()
-            .find(|s| s.token == supplied)
+            .find(|s| secret_matches(supplied, &s.token))
             .cloned())
     }
 
@@ -370,10 +371,12 @@ impl Shared {
         if let Some(session) = active
             .sessions
             .iter()
-            .find(|session| session.token == token)
+            .find(|session| secret_matches(token, &session.token))
         {
             verify_binding(headers, session)?;
-            active.sessions.retain(|session| session.token != token);
+            active
+                .sessions
+                .retain(|session| !secret_matches(token, &session.token));
         }
         Ok(())
     }
@@ -391,8 +394,9 @@ fn current_realm(active: &Active, transport: &Snapshot) -> std::result::Result<(
     Ok(())
 }
 
-/// Setup tokens are compared in constant time; both have a fixed length.
-fn setup_token_matches(supplied: &str, expected: &str) -> bool {
+/// Compares a supplied secret (a setup or session token, a session binding or
+/// a username) in constant time. Only a length difference returns early.
+fn secret_matches(supplied: &str, expected: &str) -> bool {
     supplied.len() == expected.len()
         && supplied
             .bytes()
@@ -415,10 +419,10 @@ fn already_setup() -> ApiError {
 
 fn verify_binding(headers: &HeaderMap, session: &Session) -> std::result::Result<(), ApiError> {
     if headers.get_all("x-parins-session").iter().count() != 1
-        || headers
+        || !headers
             .get("x-parins-session")
             .and_then(|h| h.to_str().ok())
-            != Some(session.binding.as_str())
+            .is_some_and(|binding| secret_matches(binding, &session.binding))
     {
         return Err(error(
             StatusCode::CONFLICT,
@@ -594,17 +598,20 @@ async fn api(
                     internal()
                 });
             };
-            if !setup_token_matches(supplied, &expected) {
+            if !secret_matches(supplied, &expected) {
                 return Err(invalid_setup_token());
             }
-            let manager = shared.manager.lock().await;
-            if manager.saved.is_some() {
-                return Err(already_setup());
-            }
-            let change = manager
-                .transport_change(&document.toml, host)
-                .map_err(invalid)?;
-            manager.validate(document.toml).await.map_err(invalid)?;
+            let (change, validation) = {
+                let manager = shared.manager.lock().await;
+                if manager.saved.is_some() {
+                    return Err(already_setup());
+                }
+                let change = manager
+                    .transport_change(&document.toml, host)
+                    .map_err(invalid)?;
+                (change, manager.validation(&document.toml).map_err(invalid)?)
+            };
+            validation.run(document.toml).await.map_err(invalid)?;
             return Ok(json!({"valid":true,"transport_change":change}));
         }
         ("GET", "/api/login/options") => {
@@ -650,7 +657,7 @@ async fn api(
                 .password_work(move || {
                     let valid_password =
                         store::verify_password(&saved.password_hash, &credentials.password);
-                    valid_password && saved.username == credentials.username
+                    valid_password && secret_matches(&credentials.username, &saved.username)
                 })
                 .await?;
             if !valid {
@@ -699,7 +706,7 @@ async fn api(
                     return Err(already_setup());
                 }
                 let expected = manager.store.setup_token().map_err(|_| internal())?;
-                if !setup_token_matches(&supplied, &expected) {
+                if !secret_matches(&supplied, &expected) {
                     return Err(invalid_setup_token());
                 }
                 store::validate_username(&setup.username).map_err(invalid)?;
@@ -946,9 +953,8 @@ async fn api(
         ("GET", "/api/config") => {
             let manager = shared.manager.lock().await;
             let saved = manager.saved.as_ref().ok_or_else(internal)?;
-            Ok(
-                json!({"toml":saved.toml,"revision":saved.revision,"has_backup":saved.previous.is_some()}),
-            )
+            let has_backup = saved.previous.is_some() && manager.rollback_error.is_none();
+            Ok(json!({"toml":saved.toml,"revision":saved.revision,"has_backup":has_backup}))
         }
         ("POST", "/api/config/parse") => {
             let document: Document = decode(body)?;
@@ -971,12 +977,19 @@ async fn api(
         }
         ("POST", "/api/config/validate") => {
             let document: Document = decode(body)?;
-            let manager = shared.manager.lock().await;
-            let restart_required = manager.hot_update(&document.toml).is_none();
-            let change = manager
-                .transport_change(&document.toml, host)
-                .map_err(invalid)?;
-            manager.validate(document.toml).await.map_err(invalid)?;
+            let (restart_required, change, validation) = {
+                let manager = shared.manager.lock().await;
+                let change = manager
+                    .transport_change(&document.toml, host)
+                    .map_err(invalid)?;
+                (
+                    manager.hot_update(&document.toml).is_none(),
+                    change,
+                    manager.validation(&document.toml).map_err(invalid)?,
+                )
+            };
+            // Certificates and rules are read without the Manager lock.
+            validation.run(document.toml).await.map_err(invalid)?;
             Ok(json!({"valid":true,"restart_required":restart_required,"transport_change":change}))
         }
         ("POST", "/api/config/rollback/preview") => {
@@ -1088,8 +1101,11 @@ async fn handle(
         CSP
     };
     let headers = response.headers_mut();
+    // Versioned console files set their own long-lived Cache-Control.
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     for (name, value) in [
-        ("cache-control", "no-store"),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
         ("referrer-policy", "no-referrer"),
@@ -1135,35 +1151,16 @@ async fn handle_inner(
     }
     let path = parts.uri.path().to_owned();
     let path = path.as_str();
-    if parts.method == "GET" {
-        let asset = match path {
-            "/" => Some((
-                "text/html; charset=utf-8",
-                include_str!("../../web/dist/index.html"),
-            )),
-            "/assets/app.css" => Some((
-                "text/css; charset=utf-8",
-                include_str!("../../web/dist/assets/app.css"),
-            )),
-            "/assets/app.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/dist/assets/app.js"),
-            )),
-            "/theme-init.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_str!("../../web/dist/theme-init.js"),
-            )),
-            _ => None,
-        };
-        if let Some((kind, text)) = asset {
-            let mut response = ([("content-type", kind)], text).into_response();
-            if path == "/"
-                && turnstile::document_needs_widget(&shared, &transport, peer, &parts.headers).await
-            {
-                response.extensions_mut().insert(TurnstileDocument);
-            }
-            return Ok(response);
+    if (parts.method == "GET" || parts.method == "HEAD")
+        && let Some(asset) = assets::find(path)
+    {
+        let mut response = asset.response(&parts);
+        if path == "/"
+            && turnstile::document_needs_widget(&shared, &transport, peer, &parts.headers).await
+        {
+            response.extensions_mut().insert(TurnstileDocument);
         }
+        return Ok(response);
     }
     if !path.starts_with("/api/") {
         return Err(error(StatusCode::NOT_FOUND, "NOT_FOUND", "Not found"));
@@ -1783,12 +1780,12 @@ mod tests {
             };
             assert_eq!(error.1, expected);
         }
-        assert!(setup_token_matches(&token, &token));
-        assert!(!setup_token_matches(
+        assert!(secret_matches(&token, &token));
+        assert!(!secret_matches(
             std::str::from_utf8(&guess).unwrap(),
             &token
         ));
-        assert!(!setup_token_matches(&token[..63], &token));
+        assert!(!secret_matches(&token[..63], &token));
         let _shutdown = shared.mutation.acquire().await.unwrap();
         manager.lock().await.terminal_shutdown().await;
     }

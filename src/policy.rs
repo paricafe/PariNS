@@ -103,6 +103,14 @@ impl Default for LocalRules {
 impl TryFrom<Rules> for LocalRules {
     type Error = anyhow::Error;
     fn try_from(rules: Rules) -> Result<Self> {
+        Self::new(rules, true)
+    }
+}
+impl LocalRules {
+    /// `quote` names offending rule text in errors. A rule file can be any
+    /// local file, so its errors name only the rule's position. Reasons are
+    /// fixed program text and never repeat rule content.
+    fn new(rules: Rules, quote: bool) -> Result<Self> {
         ensure!(
             rules
                 .groups()
@@ -127,12 +135,16 @@ impl TryFrom<Rules> for LocalRules {
         let mut variants = Vec::new();
         for (group, kind, list) in rules.groups() {
             for (position, rule) in group.iter().enumerate() {
-                let entry = || format!("filter.{list}[{position}] {rule:?}");
-                let (domain, method) = split_rule(rule, kind)
-                    .map_err(|error| anyhow::anyhow!("{}: {error}", entry()))?;
-                canonical::Key::rule(domain).with_context(|| {
-                    format!("{}: expected ASCII DNS labels, not rule syntax", entry())
-                })?;
+                let invalid = |reason: &dyn std::fmt::Display| {
+                    if quote {
+                        anyhow::anyhow!("filter.{list}[{position}] {rule:?}: {reason}")
+                    } else {
+                        anyhow::anyhow!("filter file {list}[{position}]: {reason}")
+                    }
+                };
+                let (domain, method) = split_rule(rule, kind).map_err(|error| invalid(&error))?;
+                canonical::Key::rule(domain)
+                    .map_err(|_| invalid(&"expected ASCII DNS labels, not rule syntax"))?;
                 if let Some(method) = method
                     && !variants.contains(&method)
                 {
@@ -164,8 +176,6 @@ impl TryFrom<Rules> for LocalRules {
             digest: hash.finalize().into(),
         })
     }
-}
-impl LocalRules {
     fn owned_bytes(&self) -> usize {
         self.rules.owned_bytes()
             + std::mem::size_of::<Rules>()
@@ -279,8 +289,8 @@ impl LocalPolicySource {
                 );
                 check()?;
                 let text = std::str::from_utf8(&bytes).context("filter file must be UTF-8")?;
-                let rules: LocalRules = toml::from_str(text).context("invalid filter file")?;
-                rules.compile(
+                let rules = toml::from_str(text).map_err(|error| file_error(text, &error))?;
+                LocalRules::new(rules, false)?.compile(
                     Limits {
                         retained_bytes: budget.live,
                         ..limits
@@ -290,6 +300,27 @@ impl LocalPolicySource {
             }
         }
     }
+}
+
+/// A rule file's TOML error, reduced to its position and a fixed kind: the
+/// parser's own message can quote the file, which may be any local file.
+fn file_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
+    let kind = match toml::from_str::<toml::Table>(text) {
+        Err(_) => "TOML syntax error",
+        Ok(_) => "unknown key or invalid value",
+    };
+    let Some(before) = error.span().and_then(|span| text.get(..span.start)) else {
+        return anyhow::anyhow!("invalid filter file: {kind}");
+    };
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count()
+        + 1;
+    anyhow::anyhow!("invalid filter file: {kind} at line {line}, column {column}")
 }
 
 impl Rules {
@@ -556,7 +587,14 @@ impl Policy {
         let found = self.data.index.block_match(name, responses.local_slots)?;
         let response = responses.get(found.source_slot);
         let rule = self.data.index.rule(name, found);
-        let owner = Name::from_ascii(format!("{rule}.")).expect("matched rules are DNS names");
+        // The SOA owner is the question name or an ancestor: the rule's name
+        // when it matched the question, else the question name itself.
+        let qname = query.queries[0].name();
+        let owner = if name == qname {
+            Name::from_ascii(format!("{rule}.")).expect("matched rules are DNS names")
+        } else {
+            qname.clone()
+        };
         let id = &self.data.source_ids[usize::from(found.source_slot)];
         Some((
             response.answer(query, &owner, responses.ttl),

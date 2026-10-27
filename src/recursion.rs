@@ -31,7 +31,7 @@ use std::{
 use anyhow::{Result, anyhow, ensure};
 use hickory_proto::{
     dnssec::{Proof, rdata::DNSSECRData},
-    op::{Edns, Message, OpCode, ResponseCode},
+    op::{Edns, Message, ResponseCode},
     rr::{
         RData, Record, RecordType,
         rdata::opt::{ClientSubnet, EdnsCode, EdnsOption},
@@ -46,7 +46,7 @@ use hickory_resolver::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{ecs, protocol::MAX_UDP_PAYLOAD};
+use crate::{ecs, protocol};
 
 mod outbound;
 
@@ -504,7 +504,7 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
             // briefly (RFC 9520). Timeouts and other errors are not cached.
             Failure::Other(_, kind @ (FailKind::Referral | FailKind::Budget)) => {
                 return Outcome {
-                    response: Ok(header(query, ResponseCode::ServFail)),
+                    response: Ok(protocol::error_response(query, ResponseCode::ServFail)),
                     kind: Kind::Failed(kind),
                     proof: None,
                     scope: None,
@@ -545,7 +545,7 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
     if proof == Some(Validation::Bogus) {
         return bogus(query, scope);
     }
-    let mut response = header(query, code);
+    let mut response = protocol::error_response(query, code);
     response.answers = answers;
     response.authorities = authorities;
     response.metadata.authentic_data = proof == Some(Validation::Secure);
@@ -662,7 +662,7 @@ pub fn is_bogus(response: &Message) -> bool {
 }
 
 fn bogus(query: &Message, scope: EcsScope) -> Outcome {
-    let mut response = header(query, ResponseCode::ServFail);
+    let mut response = protocol::error_response(query, ResponseCode::ServFail);
     response
         .edns
         .get_or_insert_with(Edns::new)
@@ -677,22 +677,6 @@ fn bogus(query: &Message, scope: EcsScope) -> Outcome {
         proof: Some(Validation::Bogus),
         scope: Some(scope),
     }
-}
-
-fn header(query: &Message, code: ResponseCode) -> Message {
-    let mut response = Message::response(query.id, OpCode::Query);
-    response.metadata.recursion_desired = query.recursion_desired;
-    response.metadata.recursion_available = true;
-    response.metadata.checking_disabled = query.checking_disabled;
-    response.metadata.response_code = code;
-    response.queries = query.queries.clone();
-    if let Some(client) = &query.edns {
-        let mut edns = Edns::new();
-        edns.set_max_payload(MAX_UDP_PAYLOAD)
-            .set_dnssec_ok(client.flags().dnssec_ok);
-        response.edns = Some(edns);
-    }
-    response
 }
 
 #[cfg(test)]
@@ -894,7 +878,10 @@ mod tests {
         assert!(response.answers.is_empty() && !response.authentic_data);
         assert_eq!(ede(&response), Some(vec![0, 6]));
         assert!(is_bogus(&response));
-        assert!(!is_bogus(&header(&q, ResponseCode::ServFail)));
+        assert!(!is_bogus(&protocol::error_response(
+            &q,
+            ResponseCode::ServFail
+        )));
     }
 
     #[test]

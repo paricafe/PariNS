@@ -113,10 +113,14 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
     let local_port = endpoint.local_addr()?.port();
     let mut stop = ingress.stop.clone();
     let mut connections = JoinSet::new();
+    let listener = match protocol {
+        Protocol::Doq => "DoQ",
+        Protocol::H3 => "DoH3",
+    };
     while !*stop.borrow() {
         tokio::select! {
             _ = stop.changed() => break,
-            _ = connections.join_next(), if !connections.is_empty() => {},
+            Some(result) = connections.join_next(), if !connections.is_empty() => ingress.settle(listener, result),
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
                 if !incoming.remote_address_validated() {
@@ -187,7 +191,7 @@ async fn doq_connection(connection: Connection, ingress: Ingress) {
     while !*stop.borrow() {
         tokio::select! {
             _ = stop.changed() => break,
-            _ = streams.join_next(), if !streams.is_empty() => {},
+            Some(result) = streams.join_next(), if !streams.is_empty() => ingress.settle("DoQ", result),
             stream = connection.accept_bi(), if streams.len() < ingress.max_streams => {
                 let Ok((send, recv)) = stream else { break };
                 let context = ingress.clone();
@@ -209,8 +213,19 @@ async fn doq_connection(connection: Connection, ingress: Ingress) {
             }
         }
     }
-    ingress.drain(&mut streams, ForcedShutdown::QuicDrain).await;
+    drain_streams(&ingress, &mut streams).await;
     connection.close(VarInt::from_u32(0), b"closed");
+}
+
+/// During a stop only the listener drain counts the grace: it forces the stop
+/// and aborts this connection on expiry. A connection that ends outside a stop
+/// drains its streams within the grace without forcing.
+async fn drain_streams(ingress: &Ingress, streams: &mut JoinSet<()>) {
+    if *ingress.stop.borrow() {
+        while streams.join_next().await.is_some() {}
+    } else {
+        ingress.drain(streams, ForcedShutdown::QuicDrain).await;
+    }
 }
 
 async fn doq_request(
@@ -308,7 +323,7 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
     while !*stop.borrow() {
         tokio::select! {
             _ = stop.changed() => break,
-            _ = streams.join_next(), if !streams.is_empty() => {},
+            Some(result) = streams.join_next(), if !streams.is_empty() => ingress.settle("DoH3", result),
             request = h3.accept(), if streams.len() < ingress.max_streams => {
                 let Ok(Some(request)) = request else { break };
                 let context = ingress.clone();
@@ -330,7 +345,7 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
             }
         }
     }
-    ingress.drain(&mut streams, ForcedShutdown::QuicDrain).await;
+    drain_streams(&ingress, &mut streams).await;
     connection.close(VarInt::from_u32(0x100), b"closed");
 }
 

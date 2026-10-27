@@ -396,9 +396,7 @@ pub async fn serve(
         }
         tokio::select! {
             _ = ingress.stop.changed() => break Ok(()),
-            joined = tasks.join_next(), if !tasks.is_empty() => {
-                if let Some(Err(error)) = joined { break Err(error.into()); }
-            }
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => ingress.settle("DoT", result),
             accepted = crate::transport::accept::accept(&listener) => {
                 let (stream, peer) = match accepted {
                     Ok(value) => value,

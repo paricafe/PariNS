@@ -409,10 +409,8 @@ async fn cname_negative_reuses_upstream_and_preserves_filtering(code: ResponseCo
         assert_eq!(blocked.response_code, ResponseCode::NoError);
         assert!(blocked.answers.is_empty());
         assert_eq!(blocked.authorities.len(), 1);
-        assert_eq!(
-            blocked.authorities[0].name,
-            Name::from_ascii("missing.other.test.").unwrap()
-        );
+        // The chain target's block names the question in its SOA.
+        assert_eq!(&blocked.authorities[0].name, blocked.queries[0].name());
         assert!(blocked.additionals.is_empty());
         let echoed = ecs::subnet(&blocked).unwrap();
         assert_eq!(echoed.addr(), peer.parse::<IpAddr>().unwrap());

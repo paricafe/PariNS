@@ -451,6 +451,18 @@ mv -f "$temporary" "$helper_target"
 temporary=$(mktemp "$updater_private/.install-build-info.XXXXXX")
 install -m 0600 "$build_info" "$temporary"
 mv -f "$temporary" "$updater_private/install-build-info.json"
+# Remove leftovers while the installer lock is held and the update request
+# path is stopped, so no online update runs at the same time. A rollback
+# needs only this run's backup, which is never listed.
+leftovers 2 | while IFS= read -r path; do
+    if [ -n "$root" ]; then
+        printf 'Would remove old installer data: %s\n' "$path"
+    elif rm -rf -- "$path"; then
+        printf 'Removed old installer data: %s\n' "$path"
+    else
+        printf 'Could not remove old installer data: %s\n' "$path" >&2
+    fi
+done
 if [ -z "$root" ]; then
     systemctl daemon-reload 9>&-
     installation_nonce=$("$helper_target" register <&9 9<&-)
@@ -497,15 +509,6 @@ fresh_guidance() {
         'DNS starts after setup: point your clients at this server and open the DNS ports you enable (53 for plain DNS) in your firewall.'
 }
 committed=true
-leftovers 2 | while IFS= read -r path; do
-    if [ -n "$root" ]; then
-        printf 'Would remove old installer data: %s\n' "$path"
-    elif rm -rf -- "$path"; then
-        printf 'Removed old installer data: %s\n' "$path"
-    else
-        printf 'Could not remove old installer data: %s\n' "$path" >&2
-    fi
-done
 printf 'Installed. Backup: %s\n' "$backup"
 if [ -n "$root" ]; then
     printf 'Staged for inspection under %s.\n' "$root"

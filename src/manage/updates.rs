@@ -259,8 +259,15 @@ impl Coordinator {
                     "reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
         }).or_else(||root.as_ref().and_then(|r|r.active_operation.as_ref()).map(|o|json!(o)));
         let last = state.operation.as_ref().filter(|o| o.finished).map(|op| {
+            // Root records a generic reason for an Abort and no version for an
+            // operation it never began; the application keeps both.
             root.as_ref().and_then(|r| r.terminal_for(&op.operation_id, &op.phase_nonce))
-                .map(|r| json!(r))
+                .map(|r| {
+                    let mut view = json!(r);
+                    view["version"] = json!(op.expected_version);
+                    view["reason"] = json!(op.reason);
+                    view
+                })
                 .unwrap_or_else(|| json!({"operation_id":op.operation_id,"phase":op.phase,"version":op.expected_version,"reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
         }).or_else(|| root.as_ref().and_then(|r|r.last_operation.as_ref()).map(|o|json!(o)));
         json!({"current":BuildInfo::current(),"capability":{"available":reason.is_none(),"reason":reason},

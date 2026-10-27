@@ -158,6 +158,7 @@ jobs:
           name: update-manifest
           path: target/release-assets
       - name: Publish only the fully verified tag
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -165,13 +166,27 @@ jobs:
           version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
           test "$GITHUB_REF_NAME" = "$version"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # Publish only a tag whose commit is on main.
+          relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq '.status')
+          case "$relation" in
+            identical|ahead) ;;
+            *) echo "Tagged commit $GITHUB_SHA is not on main ($relation); refusing to publish" >&2; exit 1 ;;
+          esac
           node scripts/release-notes.mjs "$version" > "$RUNNER_TEMP/parins-release-notes.md"
           # API errors fail closed; an existing draft or release must never be overwritten.
-          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')
-          if printf '%s\n' "$existing" | grep -Fxq "$version"; then
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | "\(.tag_name) \(.draft or .prerelease)"')
+          if printf '%s\n' "$releases" | cut -d ' ' -f 1 | grep -Fxq "$version"; then
             echo "Release $version already exists; refusing to overwrite it" >&2
             exit 1
           fi
+          # Only the highest published version becomes latest. A patch to an
+          # older line must not move the latest download (bootstrap.sh) back.
+          highest=$(printf '%s\n' "$releases" |
+            awk -v version="$version" '$2 == "false" && $1 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 } END { print version }' |
+            sort -V | tail -n 1)
+          latest=false
+          if [ "$highest" = "$version" ]; then latest=true; fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
           cd target/release-assets
           for arch in x86_64 aarch64; do
             sha256sum --check "parins-$version-linux-$arch.tar.gz.sha256"
@@ -183,15 +198,19 @@ jobs:
             "parins-$version-linux-x86_64.tar.gz" "parins-$version-linux-x86_64.tar.gz.sha256" \
             "parins-$version-linux-aarch64.tar.gz" "parins-$version-linux-aarch64.tar.gz.sha256" \
             "parins-$version-linux-x86_64.bin" "parins-$version-linux-aarch64.bin" parins-update.json bootstrap.sh
-          gh release edit "$version" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release edit "$version" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
       - name: Verify the public quick-start download chain
+        env:
+          LATEST: ${{ steps.publish.outputs.latest }}
         run: |
           set -euo pipefail
           stage=$(mktemp -d)
           script=$(mktemp)
+          release=latest/download
+          if [ "$LATEST" != true ]; then release="download/$GITHUB_REF_NAME"; fi
           curl --proto '=https' --proto-redir '=https' --fail --location \
             --retry 3 --connect-timeout 15 --max-time 120 \
-            "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/bootstrap.sh" -o "$script"
+            "https://github.com/$GITHUB_REPOSITORY/releases/$release/bootstrap.sh" -o "$script"
           sh "$script" --root "$stage"
           test -x "$stage/opt/parins-managed/parins"
           test "$("$stage/opt/parins-managed/parins" --version)" = "parins ${GITHUB_REF_NAME#v}"

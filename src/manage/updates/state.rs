@@ -91,7 +91,7 @@ pub(super) fn write(dir: &Path, state: &AppState) -> Result<()> {
     validate(state)?;
     let bytes = serde_json::to_vec(state)?;
     ensure!(bytes.len() <= 256 * 1024, "update state too large");
-    atomic(dir, "update-state.json", &bytes)
+    atomic(dir, "update-state.json", ".update-state.json.tmp", &bytes)
 }
 fn validate(state: &AppState) -> Result<()> {
     ensure!(state.schema == 1, "unknown update state");
@@ -128,12 +128,12 @@ fn validate(state: &AppState) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+/// Each temporary name has one process-owned writer. The writer reuses it, so
+/// crashes cannot accumulate files.
+pub(super) fn atomic(dir: &Path, name: &str, temp: &str, bytes: &[u8]) -> Result<()> {
     let target = dir.join(name);
     crate::private_files::checked_open(&target, false)?;
-    // Each caller has one process-owned writer for its fixed destination.
-    // Reuse that reserved temporary name so crashes cannot accumulate files.
-    let temp = dir.join(format!(".{name}.tmp"));
+    let temp = dir.join(temp);
     if crate::private_files::checked_open(&temp, false)?.is_some() {
         std::fs::remove_file(&temp)?;
     }
@@ -191,7 +191,13 @@ mod tests {
             ..AppState::default()
         };
         let bytes = serde_json::to_vec(&state).unwrap();
-        atomic(dir.path(), "update-state.json", &bytes).unwrap();
+        atomic(
+            dir.path(),
+            "update-state.json",
+            ".update-state.json.tmp",
+            &bytes,
+        )
+        .unwrap();
         assert!(read(dir.path()).is_err());
         assert_eq!(
             std::fs::read(dir.path().join("update-state.json")).unwrap(),

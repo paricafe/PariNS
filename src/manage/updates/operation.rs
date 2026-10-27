@@ -120,7 +120,10 @@ impl Coordinator {
         };
         let bytes = serde_json::to_vec(&request)?;
         let dir = self.dir.clone();
-        tokio::task::spawn_blocking(move || state::atomic(&dir, ipc::INBOX_NAME, &bytes)).await??;
+        tokio::task::spawn_blocking(move || {
+            state::atomic(&dir, ipc::INBOX_NAME, ".update-request.json.tmp", &bytes)
+        })
+        .await??;
         Ok(())
     }
 
@@ -419,6 +422,7 @@ async fn heartbeat(
         state::atomic(
             std::path::Path::new("/run/parins-managed"),
             "update-health.json",
+            ".update-health.json.tmp",
             &bytes,
         )
     })
@@ -437,7 +441,13 @@ async fn heartbeat(
         // Do not overwrite a request already awaiting root consumption.
         tokio::task::spawn_blocking(move || {
             if crate::private_files::checked_open(&dir.join(ipc::INBOX_NAME), false)?.is_none() {
-                state::atomic(&dir, ipc::INBOX_NAME, &bytes)?;
+                // The operation's own requests use the other temporary name.
+                state::atomic(
+                    &dir,
+                    ipc::INBOX_NAME,
+                    ".update-request.json.recovery.tmp",
+                    &bytes,
+                )?;
             }
             Ok::<_, anyhow::Error>(())
         })
@@ -1382,6 +1392,43 @@ mod tests {
                 assert_eq!(operation.reason.as_deref(), Some("interrupted"));
             }
         }
+    }
+
+    /// Root never saw the Stage (or failed it without a record), so it has no
+    /// operation that matches the Abort. Its fence still ends the operation.
+    #[tokio::test]
+    async fn unmatched_abort_ends_the_operation_with_its_own_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = tempfile::tempdir().unwrap();
+        let (coordinator, mut op, mut root) = fixture(dir.path());
+        op.invocation_id = coordinator.invocation.clone().unwrap();
+        op.phase = "downloading".into();
+        coordinator
+            .change(|state| {
+                state.operation = Some(op.clone());
+                state.commit_intent = None;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        coordinator.frozen.store(false, Ordering::Release);
+        root.last_operation = None;
+        coordinator
+            .abort_before_commit(&op, "helper_unavailable")
+            .await;
+        let inbox = std::fs::read(dir.path().join(ipc::INBOX_NAME)).unwrap();
+        let fence =
+            crate::update::executor::consume_abort_fixture(root_dir.path(), &root, &inbox).unwrap();
+        reconcile(&coordinator, Some(&fence)).await.unwrap();
+        *coordinator.root.lock().unwrap() = Some(fence);
+        let done = state::read(dir.path()).unwrap().unwrap().operation.unwrap();
+        assert!(done.finished);
+        assert_eq!(done.phase, "aborted");
+        assert_eq!(done.reason.as_deref(), Some("helper_unavailable"));
+        let view = coordinator.view();
+        assert_eq!(view["last_operation"]["reason"], "helper_unavailable");
+        assert_eq!(view["last_operation"]["version"], op.expected_version);
+        assert!(view["active_operation"].is_null());
     }
 
     #[tokio::test]

@@ -1,0 +1,160 @@
+tests/cache_integration.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 412-413
+src/filter_subscriptions/service.rs
+  s_cffe143f0c5c88::t_fd0dfcf7a560cc 480-510
+src/quic.rs
+  s_cffe143f0c5c88::t_039770a834eb1d 116-119,123,194
+  s_cffe143f0c5c88::t_6f4076282fb0be 216,220-228
+  s_e9dff4e9f414a4::t_647c593030d82a 229-230,326,348
+web/package.json
+  s_cffe143f0c5c88::t_a4327bf01cadac 8
+  s_cffe143f0c5c88::t_54ca52bc305905 30
+src/cache.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 85-87,89-91
+  s_2f44ee9bd5d8c7::t_968c6761c7b300 21,74,92,254-256,541-542,544,547,606,608,634,677-678,733,787,842,867,924,933-937,1128-1129,1132-1137
+src/flight.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 9-12,32-80,108,110,114-115,117,119-120,123,129,132-136,138,154-188
+  s_cffe143f0c5c88::t_25774c64a8cc8b 189
+web/index.html
+  s_cffe143f0c5c88::t_e3273f3b1dd7eb 8
+src/protocol.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 30-64,133,239,268-280,487-523
+  s_e9dff4e9f414a4::t_275b0a624c71a3 524-525
+src/admin.rs
+  s_cffe143f0c5c88::t_0175b7da7edfc5 103
+  s_cffe143f0c5c88::t_6f4076282fb0be 59-63
+  s_e9dff4e9f414a4::t_028053fa042b48 66-67
+src/storage/database.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 106-107,160-162,1028,1032-1037,1040
+  s_2f44ee9bd5d8c7::t_3efddc3402fdc0 748-752,760
+  s_2f44ee9bd5d8c7::t_3a615ee13f30b7 163,761-762,764-768,1042-1050,1055-1060,1077-1078,1082-1086,1112,1116-1126,1128-1147,1151-1153
+src/manage/mod.rs
+  s_cffe143f0c5c88::t_8b2fb9bf87c991 6,343,374,377-379,397-399,422,425,601,604-614,660,709,956-957,980-992,1104-1107,1154-1161,1163
+  s_cffe143f0c5c88::t_c444db9c264814 1783-1784,1788
+src/cache/persistence.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 324-327,388-401,403-404,406-407,414-419,421-424,432-433,439-454,456-457
+  s_e9dff4e9f414a4::t_028053fa042b48 420,455
+  s_2f44ee9bd5d8c7::t_28201fb63bc9ce 458
+src/storage/tests.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 729-807
+web/scripts/check-dist.mjs
+  s_cffe143f0c5c88::t_a4327bf01cadac 1,4,6-8,10,18-25,28-31
+  s_cffe143f0c5c88::t_e3273f3b1dd7eb 9,27
+src/policy/response.rs
+  s_cffe143f0c5c88::t_039770a834eb1d 79-82
+  s_cffe143f0c5c88::t_24d9061a1cbb90 103,105
+tests/recursion.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 3,13,124-184
+  s_cffe143f0c5c88::t_9d4ca578e9b67a 185
+src/manage/runtime.rs
+  s_cffe143f0c5c88::t_ce4d7d879b63af 284-287
+  s_cffe143f0c5c88::t_fd0dfcf7a560cc 190-217
+  s_cffe143f0c5c88::t_cebec0d10c18db 25,175-176,218-234,276-283,355,373,376,538-540,542-547,628,632-647,667-672,707,714-715,744,788
+tests/manage.rs
+  s_cffe143f0c5c88::t_833a64fe734d92 469,475-481,486-521,526-539,1866,1875,1903,1908,1927,1941,1974
+  s_cffe143f0c5c88::t_5a4acb3671dd16 465,522-525
+  s_cffe143f0c5c88::t_abb32f5d8c6022 454-459,467-468,470-472,540,1854-1865,1867-1874,1876-1902,1904-1907,1909-1926,1928-1940,1942-1973,1975-1977
+src/cache/persistence/tests.rs
+  s_e9dff4e9f414a4::t_028053fa042b48 928
+  s_cffe143f0c5c88::t_6f4076282fb0be 741-778,922-927,929-932,1062-1086
+  s_2f44ee9bd5d8c7::t_3a3e95abcd837b 1087
+src/server.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 14-15,867,909-912,989-1039
+  s_2f44ee9bd5d8c7::t_d986800931a169 1040-1051
+src/policy.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 590-597
+  s_cffe143f0c5c88::t_24d9061a1cbb90 111-113,138-142
+  s_cffe143f0c5c88::t_145450f34619aa 106-110,143-147,292-293,305-325
+tests/doh.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 280-355
+  s_e9dff4e9f414a4::t_58bd780c6fdfb7 279,356-357
+src/metrics.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 121-146,189,201,304-314
+  s_cffe143f0c5c88::t_e38dcdfdeb2c79 315
+web/scripts/prepare-dist.mjs
+  s_cffe143f0c5c88::t_e3273f3b1dd7eb 9
+  s_cffe143f0c5c88::t_a4327bf01cadac 1-8,10-29
+src/policy/tests.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 524-525
+  s_cffe143f0c5c88::t_63ab7a23c898a6 564
+  s_cffe143f0c5c88::t_ebf4bb72745550 295-329
+  s_cffe143f0c5c88::t_c037f035d1053d 294
+src/filter_subscriptions/service/tests.rs
+  s_cffe143f0c5c88::t_fd0dfcf7a560cc 794-824
+  s_cffe143f0c5c88::t_06f0198a1b1737 791-793
+src/recursion.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 34,49,507,548,665,881-884
+web/public/favicon.svg
+  s_cffe143f0c5c88::t_e3273f3b1dd7eb 1
+src/manage/assets.rs
+  s_cffe143f0c5c88::t_062f8aa6a73694 1-58,65-66,68-140,144-246,274-277
+  s_cffe143f0c5c88::t_5a4acb3671dd16 59-64,67,141-143,250-273
+  s_cffe143f0c5c88::t_39316fa85a72fe 247-249
+src/resolver.rs
+  s_cffe143f0c5c88::t_6f4076282fb0be 12,20
+  s_2f44ee9bd5d8c7::t_71182310084e6a 517,571,574,640,647,658-659,718,733,736,738,745-746,748,752
+src/doh.rs
+  s_cffe143f0c5c88::t_0175b7da7edfc5 99,204
+  s_cffe143f0c5c88::t_6f4076282fb0be 8-10,20-25,120,123-126,129-131,144-153
+  s_e9dff4e9f414a4::t_f1c394bcfb652f 154-155
+src/ingress.rs
+  s_cffe143f0c5c88::t_0175b7da7edfc5 4,11,28-38
+  s_cffe143f0c5c88::t_8e555638ee9a95 180-190
+  s_e9dff4e9f414a4::t_ae0c907b3672c1 191-200
+src/tls.rs
+  s_cffe143f0c5c88::t_0175b7da7edfc5 399
+src/manage/account.rs
+  s_cffe143f0c5c88::t_80d49ef1b52cb1 14,18-19,66-113,128,131,138,147,156
+src/manage/certificates.rs
+  s_cffe143f0c5c88::t_79f4af37f80ee4 88-99,280-298
+src/manage/dns_retry.rs
+  s_cffe143f0c5c88::t_7df4f6e090fb81 3-6,21-22,29,40,103-116
+src/manage/filters.rs
+  s_cffe143f0c5c88::t_54825506e015b8 106-115,117
+src/manage/live.rs
+  s_2f44ee9bd5d8c7::t_30f3d3cefb683d 25,355
+src/manage/runtime_tests.rs
+  s_cffe143f0c5c88::t_cd55f155e966c4 146-153,586-591,616-621,799-836
+src/manage/store.rs
+  s_cffe143f0c5c88::t_a2151afaec2170 85-132
+src/manage/turnstile.rs
+  s_cffe143f0c5c88::t_c1068397a12aa3 38,194-199,243,245-248,400-410,413-434,436-445
+src/manage/turnstile_tests.rs
+  s_cffe143f0c5c88::t_6c9801c3b43a63 477-507
+src/storage/mod.rs
+  s_2f44ee9bd5d8c7::t_aa884997c7fd28 3-4
+web/package-lock.json
+  s_cffe143f0c5c88::t_eda2a02b48932d 27,250-251,260-261,267-268,631-632,689-691,696,698,704,717-719,773-775,888-889,1037-1046,1103-1105,1323-1325,1330-1332,1340-1342,1781-1783,1788-1789,1792-1793,1795-1797,1799,1814-1815,1817-1819,1904-1906,1913
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1380627829fbe326984599c5777a34af7439b94f",
+  "prompts": {},
+  "sessions": {
+    "s_2f44ee9bd5d8c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a15955-0f7e-7513-97db-a2e5db926352",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_cffe143f0c5c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a4723be-a3e0-4ba6-94db-903d02987373",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_e9dff4e9f414a4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15955-0f7e-7513-97db-a2e5db926352",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

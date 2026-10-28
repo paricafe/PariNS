@@ -1,0 +1,154 @@
+src/upstreams/transport.rs
+  s_aa37914330e67a::t_5bf0f6e5f7f02e 22-23
+  s_aa37914330e67a::t_cdfb79edff81d3 141-142,155-156,158-159,165-167,171-173,651-652,655-660
+  s_aa37914330e67a::t_5fc226625eadfc 143-146,160-164,168-170
+web/index.html
+  s_aa37914330e67a::t_93517cc0fa3b18 7
+CHANGELOG.md
+  s_aa37914330e67a::t_d8606d6521c789 7-29
+  s_aa37914330e67a::t_2f43707592b844 5-6
+src/filter_subscriptions/service/tests.rs
+  s_aa37914330e67a::t_acfb16fe5bf432 721-733,743-820
+  s_aa37914330e67a::t_7aea1b2cdee314 4
+  s_aa37914330e67a::t_1c4fe23153cccf 734-742
+  s_aa37914330e67a::t_f2721188baa74f 720
+Cargo.toml
+  s_aa37914330e67a::t_c0077cf5838aa9 25,63
+  s_aa37914330e67a::t_2f43707592b844 3
+web/src/i18n/views.ts
+  s_aa37914330e67a::t_9b3e7748dcf649 61,67-69
+tests/upstreams.rs
+  s_aa37914330e67a::t_98361e29a59847 672-677,682-689,693-704,718-726,731-744,747,759-773,778-780
+  s_aa37914330e67a::t_5fc226625eadfc 678-681,690-692,705-717,727-730,745-746,748-758,774-777
+web/src/session/context.tsx
+  s_aa37914330e67a::t_93517cc0fa3b18 19-20,41,204
+AGENTS.md
+  s_aa37914330e67a::t_d8606d6521c789 225,235-237,270-271
+  s_aa37914330e67a::t_1ea59474b312b9 227-228
+  s_aa37914330e67a::t_5bf0f6e5f7f02e 226
+tests/manage.rs
+  s_aa37914330e67a::t_7a98a64560b9f8 1552-1610,1617-1620
+  s_aa37914330e67a::t_5fc226625eadfc 1611-1616
+  s_aa37914330e67a::t_99b69e577423ab 1551
+src/storage/database.rs
+  s_aa37914330e67a::t_edb0e7372d2e71 35,111-113,156,163,454,704-708,710,922-934,950-955,1351
+src/recursion.rs
+  s_aa37914330e67a::t_5fc226625eadfc 541-542,557-558,561-564,639-640,842-844,883-887,911-918,921-926,937-944,947-950,963-967,970-973
+  s_aa37914330e67a::t_edca3583ea3ea3 539-540,543-544,559,565,637-638
+  s_aa37914330e67a::t_a093a84a4078c6 17-19
+  s_aa37914330e67a::t_fa78cc5b7c93da 560,854-861,864-882,888-910,919-920,927-936,945-946,951-962,968-969,975-976
+web/src/pages/observability/live.ts
+  s_aa37914330e67a::t_93517cc0fa3b18 32,74,132,135-141
+web/src/features/account/turnstile.test.tsx
+  s_aa37914330e67a::t_5495254446c8e4 39-46,58-59,77,125,155-164
+  s_aa37914330e67a::t_9f3bc66ffed160 165
+src/update/executor/mod.rs
+  s_aa37914330e67a::t_5bf0f6e5f7f02e 20-22
+  s_aa37914330e67a::t_1f851371916560 1951-1957,1977,1981-1994,1998-2000,2002-2010,2017,2022-2028
+  s_6a7603c1686e08::t_524e0f6bf97a96 940-947,2011-2013
+  s_aa37914330e67a::t_99f0cb39c5bacb 770-771,773,823,949,1021
+  s_aa37914330e67a::t_5fc226625eadfc 795-798,1958-1976,1978-1980,1995-1997,2014-2016,2018-2021
+  s_aa37914330e67a::t_fecd22cf954dba 430-432,456-477,793-794,799-813
+  s_6a7603c1686e08::t_c1b269f3821dde 1950,2001
+src/manage/mod.rs
+  s_aa37914330e67a::t_7a4bcc2bd380c2 1157-1164
+src/manage/runtime.rs
+  s_aa37914330e67a::t_525bfc09cfdb12 2-4
+  s_aa37914330e67a::t_93517cc0fa3b18 334-337,345-348,583-595,615-623,628-631
+  s_aa37914330e67a::t_cf0e65e59f13fe 338-344
+  s_aa37914330e67a::t_5fc226625eadfc 596
+web/src/pages/observability/__tests__/live.test.tsx
+  s_aa37914330e67a::t_5495254446c8e4 25,31,106,108-110,113-132
+src/filter_subscriptions/service.rs
+  s_aa37914330e67a::t_911aa6ddffd5b5 667
+  s_aa37914330e67a::t_59c055534200d3 669-673
+web/src/pages/config/CacheInspect.test.tsx
+  s_aa37914330e67a::t_1f851371916560 14-23
+src/recursion/outbound.rs
+  s_aa37914330e67a::t_edca3583ea3ea3 11,22-23,128,138-139
+  s_aa37914330e67a::t_549574d1e811f2 190-193
+  s_aa37914330e67a::t_a093a84a4078c6 6
+  s_aa37914330e67a::t_5fc226625eadfc 129-137,171-179,199-208,210-213,218-226
+  s_aa37914330e67a::t_147b7323f9eb83 170,180,183-189,194-198,209,214-217,227-233
+  s_6a7603c1686e08::t_922cf9575d60ca 234
+src/policy/tests.rs
+  s_aa37914330e67a::t_1f851371916560 601-609
+src/cache/tests/servfail.rs
+  s_aa37914330e67a::t_98361e29a59847 34,53
+  s_aa37914330e67a::t_5fc226625eadfc 37-52
+  s_aa37914330e67a::t_1f851371916560 21-33,35-36,54-59
+  s_aa37914330e67a::t_9a3f222071df7b 20
+src/update/contract.rs
+  s_aa37914330e67a::t_fecd22cf954dba 12
+tests/manage/live.rs
+  s_aa37914330e67a::t_7a98a64560b9f8 217,225-229
+  s_aa37914330e67a::t_5fc226625eadfc 218-224
+  s_aa37914330e67a::t_5495254446c8e4 203,216,355
+guide/operations.md
+  s_aa37914330e67a::t_2f43707592b844 140
+scripts/bootstrap.sh
+  s_aa37914330e67a::t_2f43707592b844 11-12,41
+src/storage/mod.rs
+  s_aa37914330e67a::t_59c055534200d3 6-7
+src/cache.rs
+  s_aa37914330e67a::t_cdfb79edff81d3 1144,1164-1169
+  s_aa37914330e67a::t_5fc226625eadfc 1145-1146,1148-1150,1153-1154,1159
+  s_aa37914330e67a::t_9b3e7748dcf649 1147,1151-1152
+src/upstreams/h3.rs
+  s_aa37914330e67a::t_5fc226625eadfc 345-350
+  s_aa37914330e67a::t_cdfb79edff81d3 341-342,344,352-354
+web/src/AuthPages.tsx
+  s_aa37914330e67a::t_93517cc0fa3b18 41
+src/manage/live.rs
+  s_aa37914330e67a::t_525bfc09cfdb12 25-28
+  s_aa37914330e67a::t_93517cc0fa3b18 412-419
+src/policy.rs
+  s_aa37914330e67a::t_5fc226625eadfc 551-553,559-560,562,564-575,577
+  s_aa37914330e67a::t_cdfb79edff81d3 549-550,554,556-558,576
+src/storage/tests.rs
+  s_aa37914330e67a::t_c5c1616367f045 1023
+  s_aa37914330e67a::t_911aa6ddffd5b5 991-994
+  s_aa37914330e67a::t_a3dc8e6c2b0964 985-990,995-1022,1024-1077
+src/manage/assets.rs
+  s_aa37914330e67a::t_5fc226625eadfc 309
+  s_aa37914330e67a::t_525bfc09cfdb12 10-11
+  s_aa37914330e67a::t_7a4bcc2bd380c2 77-98,301-308,310-315
+src/filter_subscriptions/service/operations.rs
+  s_aa37914330e67a::t_59c055534200d3 292,296,299-300,700-704,853-872
+web/src/pages/config/SettingsPage.tsx
+  s_aa37914330e67a::t_fecd22cf954dba 181
+Cargo.lock
+  s_9e3b28a29e4d21::t_ac6229e29ff3fa 668,697,719,1236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c91a0dd9d45b8d57da428c0a6c9b9a8669071fc1",
+  "prompts": {},
+  "sessions": {
+    "s_6a7603c1686e08": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_9e3b28a29e4d21": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd59-f9e9-7cc3-816d-e1a2d857965a",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -38,7 +38,7 @@ export function LoginPage({ language }: { language: Language }) {
   const turnstile = options?.turnstile ?? null;
   // Only a document served signed out while Turnstile was on may load the widget (its script
   // policy is relaxed for it); any other document reloads once to get that policy.
-  const widgetAllowed = options !== null && turnstileAllowed(Boolean(turnstile));
+  const widgetAllowed = options !== null && turnstileAllowed();
   useEffect(() => { if (turnstile && !widgetAllowed) reloadConsole(); }, [turnstile, widgetAllowed]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError(null);

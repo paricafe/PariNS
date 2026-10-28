@@ -137,7 +137,7 @@ the installer**; run the [install command](deployment.md#install) again. Automat
 rollback restores the program, not data: it never restores an old database or
 removes new history.
 
-Version 0.1.28 requires updater protocol 3 for its recovery fixes. Upgrade older
+Version 0.1.30 requires updater protocol 4 for its recovery fixes. Upgrade older
 helpers with the complete installer; it replaces both the program and the helper.
 
 If PariNS cancels an update before the program was replaced, the console shows its

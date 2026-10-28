@@ -32,6 +32,7 @@ struct Database {
     last_cleanup: Instant,
     run_id: String,
     settings_pending: bool,
+    age_pending: bool,
     reset_clock_ms: u64,
     /// Records queued before the asynchronous open learned the stored epoch
     /// belong to it until the first clear after open.
@@ -107,7 +108,9 @@ pub(super) fn run(
                 // The terminal flush already cleaned up; closing commits only
                 // what arrived since.
                 let result = if let Some(db) = database.as_mut() {
-                    let result = db.drain(&shared, &logs).and_then(|()| db.checkpoint(true));
+                    let result = db
+                        .drain(&shared, &logs, Instant::now() + Duration::from_secs(8))
+                        .and_then(|()| db.checkpoint(true));
                     db.report_error(&shared, &result);
                     db.update_status(&shared);
                     result
@@ -150,13 +153,14 @@ pub(super) fn run(
             let cleanup_due = db.last_cleanup.elapsed()
                 >= Duration::from_secs(db.settings.storage.cleanup_interval_secs);
             if cleanup_due
+                || db.age_pending
                 || shared
                     .status
                     .lock()
                     .expect("storage status")
                     .capacity_pending
             {
-                let result = if cleanup_due || db.settings_pending {
+                let result = if cleanup_due || db.settings_pending || db.age_pending {
                     db.cleanup()
                 } else {
                     db.trim_capacity()
@@ -447,6 +451,7 @@ impl Database {
             last_cleanup: Instant::now(),
             run_id: String::new(),
             settings_pending: true,
+            age_pending: false,
             reset_clock_ms: 0,
             opened_log_epoch: log_epoch,
             coverage: Coverage::default(),
@@ -696,7 +701,13 @@ impl Database {
         }
         tx.prepare_cached("UPDATE metadata SET value=? WHERE key='clock_lower_ms'")?
             .execute([now])?;
+        let age_pending = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM query_log WHERE retention_ms <= ?1) OR EXISTS(SELECT 1 FROM statistics_points WHERE retention_ms <= ?2)",
+            params![cutoff, point_cutoff],
+            |row| row.get(0),
+        )?;
         tx.commit()?;
+        self.age_pending = age_pending;
         self.conn.execute_batch("PRAGMA incremental_vacuum(256)")?;
         let (size, pages, free) = self.page_info()?;
         let desired = self.settings.storage.max_database_bytes / size;
@@ -908,8 +919,19 @@ impl Database {
                 let _ = reply.send(result);
             }
             Command::Flush(reply) => {
-                let result = self.drain(shared, logs).and_then(|()| {
-                    self.cleanup()?;
+                let deadline = Instant::now() + Duration::from_secs(8);
+                let result = self.drain(shared, logs, deadline).and_then(|()| {
+                    loop {
+                        self.cleanup()?;
+                        if !self.age_pending {
+                            break;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(Error::StorageUnavailable(
+                                "flush deadline exceeded; expired records remain".into(),
+                            ));
+                        }
+                    }
                     self.last_cleanup = Instant::now();
                     Ok(())
                 });
@@ -925,13 +947,17 @@ impl Database {
     /// Commits every queued record and a final statistics checkpoint. An
     /// explicit flush then cleans up, leaving the stored data within its
     /// bounds, including age retention.
-    fn drain(&mut self, shared: &Shared, logs: &mpsc::Receiver<LogItem>) -> Result<()> {
+    fn drain(
+        &mut self,
+        shared: &Shared,
+        logs: &mpsc::Receiver<LogItem>,
+        deadline: Instant,
+    ) -> Result<()> {
         shared
             .stats
             .lock()
             .expect("statistics owner")
             .sample(&shared.metrics, true);
-        let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             self.flush_batch(shared, logs)?;
             if shared.queue_entries.load(Ordering::Acquire) == 0 {
@@ -1293,38 +1319,6 @@ impl Database {
         let point_count = epoch(&self.conn, "point_count").ok();
         let coverage = self.coverage.clone();
         let cleanup = self.cleanup_status().ok();
-        let expired = self.settings_pending && {
-            let now = self
-                .cleanup_wall
-                .saturating_add(
-                    self.cleanup_anchor
-                        .elapsed()
-                        .as_millis()
-                        .min(u64::MAX as u128) as u64,
-                )
-                .max(unix_ms());
-            let oldest_log = self
-                .conn
-                .query_row(
-                    "SELECT retention_ms FROM query_log ORDER BY retention_ms LIMIT 1",
-                    [],
-                    |r| r.get::<_, u64>(0),
-                )
-                .optional();
-            let oldest_point = self
-                .conn
-                .query_row(
-                    "SELECT retention_ms FROM statistics_points ORDER BY retention_ms LIMIT 1",
-                    [],
-                    |r| r.get::<_, u64>(0),
-                )
-                .optional();
-            oldest_log.ok().flatten().is_some_and(|at| {
-                at <= now.saturating_sub(self.settings.query_log.retention_secs * 1000)
-            }) || oldest_point.ok().flatten().is_some_and(|at| {
-                at <= now.saturating_sub(self.settings.statistics.retention_secs * 1000)
-            })
-        };
         let mut status = shared.status.lock().expect("storage status");
         if let Some((size, pages, _)) = pages {
             status.database_bytes = size * pages;
@@ -1354,7 +1348,7 @@ impl Database {
             > self.settings.query_log.max_entries as u64
             || status.query_log_bytes > self.settings.query_log.max_bytes
             || status.history_samples > self.settings.statistics.max_samples as u64
-            || expired;
+            || self.age_pending;
         if !status.capacity_pending {
             status.applied_revision = self.revision;
             self.settings_pending = false;

@@ -22,6 +22,10 @@
 //!   requests, leaving its bounded control queue to other operations. State
 //!   comes from the cached storage status. Manager is locked only to clone
 //!   RuntimeServices before the upgrade, never across socket IO.
+//! - Each accepted subscription receives one `subscribed` acknowledgement
+//!   before its entries. Independent `state` updates never acknowledge a
+//!   subscription; clients discard prior batches until every queued change is
+//!   acknowledged in WebSocket order.
 use super::{ApiError, SESSION_LIFETIME, Shared, Snapshot, error, secret_matches};
 use crate::{query_log::ListOptions, runtime_services::RuntimeServices};
 use axum::{
@@ -405,15 +409,18 @@ impl Live {
                             else {
                                 return Some(4400);
                             };
-                            sent = None;
+                            let state = State::current(&self.services);
+                            if let Err(end) = send(
+                                socket,
+                                serde_json::json!({"type":"subscribed","log":state.log,"log_epoch":state.log_epoch}).to_string(),
+                            ).await {
+                                return end;
+                            }
+                            sent = Some(state);
                             if next_subscription.interval.is_none() {
                                 // Manual mode reports state now and entries only on refresh.
                                 next = None;
                                 subscription = Some(next_subscription);
-                                let state = State::current(&self.services);
-                                if let Err(end) = self.send_state(socket, state, &mut sent).await {
-                                    return end;
-                                }
                                 continue;
                             }
                             subscription = Some(next_subscription);

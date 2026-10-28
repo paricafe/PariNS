@@ -178,7 +178,7 @@ export function CacheRules({ language }: { language: Language }) {
   </section>;
 }
 
-interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
+interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'failure' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
 /** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
 export function restoreSummary(report: SnapshotReport, language: Language): string {

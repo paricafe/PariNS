@@ -1549,6 +1549,76 @@ async fn saved_https_with_missing_identity_fails_startup_closed() {
 }
 
 #[tokio::test]
+async fn saved_http_keeps_management_available_and_retries_missing_dns_identities() {
+    for role in ["dot", "doq"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("state");
+        let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+        let cert_path = temporary.path().join("cert.pem");
+        let key_path = temporary.path().join("key.pem");
+        let restore = || {
+            std::fs::write(&cert_path, identity.cert.pem()).unwrap();
+            std::fs::write(&key_path, identity.signing_key.serialize_pem()).unwrap();
+        };
+        restore();
+        let candidate = format!(
+            "{}\n[{role}]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+            configuration(),
+            json!(cert_path),
+            json!(key_path)
+        );
+        let server = Management::start(&directory).await;
+        server.setup(&directory, &candidate).await;
+        server.finish().await;
+        std::fs::remove_file(&cert_path).unwrap();
+        let server = Management::start(&directory).await;
+        let session = server
+            .request("GET", "/api/session", None, None)
+            .await
+            .expect(200);
+        assert_eq!(session["transport"]["scheme"], "http");
+        let auth = server
+            .request(
+                "POST",
+                "/api/login",
+                None,
+                Some(json!({"username":"admin","password":PASSWORD})),
+            )
+            .await
+            .auth();
+        let status = server
+            .request("GET", "/api/status", Some(&auth), None)
+            .await
+            .expect(200);
+        assert_eq!(status["running"], false, "{role}: {status}");
+        assert_eq!(status["dns_health"]["code"], "startup_failed");
+        restore();
+        let status = timeout(DEADLINE, async {
+            loop {
+                let status = server
+                    .request("GET", "/api/status", Some(&auth), None)
+                    .await
+                    .expect(200);
+                if status["running"] == true {
+                    break status;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("DNS retries after its identity is restored");
+        assert_eq!(status["certificates"]["roles"].as_array().unwrap().len(), 1);
+        assert!(
+            status["certificates"]["certificate_generation"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        server.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn same_origin_certificate_reapply_changes_identity_without_revoking_session() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");

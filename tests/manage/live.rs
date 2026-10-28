@@ -200,7 +200,7 @@ async fn live_interval_and_manual_modes_push_filtered_entries_after_the_cursor()
     .await;
     assert_eq!(
         next(&mut auto, DEADLINE).await,
-        json!({"type":"state","log":"ok","log_epoch":0})
+        json!({"type":"subscribed","log":"ok","log_epoch":0})
     );
     let first = next(&mut auto, DEADLINE).await;
     assert_eq!(first["type"], "entries");
@@ -213,7 +213,20 @@ async fn live_interval_and_manual_modes_push_filtered_entries_after_the_cursor()
 
     let mut manual = authenticated(&server, &token).await;
     subscribe(&mut manual, Value::Null, json!(newest), json!({})).await;
-    assert_eq!(next(&mut manual, DEADLINE).await["type"], "state");
+    assert_eq!(next(&mut manual, DEADLINE).await["type"], "subscribed");
+    // Even unchanged global state acknowledges each queued subscription once.
+    subscribe(
+        &mut manual,
+        Value::Null,
+        json!(newest),
+        json!({"search":"a"}),
+    )
+    .await;
+    subscribe(&mut manual, Value::Null, json!(newest), json!({})).await;
+    for _ in 0..2 {
+        assert_eq!(next(&mut manual, DEADLINE).await["type"], "subscribed");
+    }
+    pong(&mut manual).await;
 
     // The upstream failure does not match the blocked filter.
     resolve(dns, "other.test.").await;
@@ -339,7 +352,7 @@ async fn live_socket_without_client_messages_closes_after_idle_timeout() {
     let token = server.setup(&directory, &live_config()).await;
     let mut idle = authenticated(&server, &token).await;
     subscribe(&mut idle, Value::Null, Value::Null, json!({})).await;
-    assert_eq!(next(&mut idle, DEADLINE).await["type"], "state");
+    assert_eq!(next(&mut idle, DEADLINE).await["type"], "subscribed");
     let mut active = authenticated(&server, &token).await;
     let started = std::time::Instant::now();
     let pinging = async {

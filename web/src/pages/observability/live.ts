@@ -29,7 +29,7 @@ export interface LiveHandlers {
 /** Server messages; anything else is a protocol error. */
 type LiveMessage =
   | { type: 'entries'; entries: LogEntry[]; cursor: number | null; more: boolean }
-  | ({ type: 'state' } & LiveLogState)
+  | ({ type: 'state' | 'subscribed' } & LiveLogState)
   | { type: 'pong' };
 
 export const PING_MS = 10_000;
@@ -71,7 +71,7 @@ export class LiveLogClient {
   }
 
   /**
-   * The server answers every subscribe with a state message before any entries for it.
+   * The server acknowledges every subscribe before any entries for it.
    * Entries arriving before that answer belong to the previous filter or cursor, and
    * would insert unmatched rows or skip matching ones: they are dropped.
    */
@@ -129,9 +129,16 @@ export class LiveLogClient {
         if (message.cursor !== null) this.advance(Math.max(message.cursor, this.subscription.cursor ?? 0));
         this.handlers.entries(message.entries, message.more);
         return;
-      case 'state':
+      case 'subscribed':
         this.failures = 0;
         if (this.unanswered > 0) this.unanswered -= 1;
+        if (this.unanswered > 0) return;
+        this.handlers.state({ log: message.log, log_epoch: message.log_epoch });
+        this.handlers.status('open');
+        return;
+      case 'state':
+        this.failures = 0;
+        if (this.unanswered > 0) return;
         this.handlers.state({ log: message.log, log_epoch: message.log_epoch });
         this.handlers.status('open');
         return;

@@ -11,6 +11,16 @@ afterEach(() => { cleanup(); mocks.request.mockReset(); });
 const variant = (scope: string, state: string) => ({ name: 'example.test.', qtype: 'A', scope, state, dnssec_ok: false, edns: true, hits: 3 });
 
 describe('cache inspection', () => {
+  it('explains a cached DNSSEC failure without suggesting another upstream request', async () => {
+    mocks.request.mockResolvedValue({ epoch: 1,
+      explanation: { state: 'failure', reason: 'cached_dnssec_failure', scope: 'no_ecs' },
+      inspection: { variants: [], truncated: false } });
+    render(<CacheInspect language="en" dirty={false} />);
+    fireEvent.change(screen.getByLabelText('Domain'), { target: { value: 'bogus.test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
+    expect(await screen.findByText('Cached failure: returns SERVFAIL without asking an upstream.')).toBeTruthy();
+    expect(screen.getByText(/A cached DNSSEC validation failure prevents stale fallback/)).toBeTruthy();
+  });
   it('lists entries in plain language and clears one with its own scope', async () => {
     let epoch = 4;
     mocks.request.mockImplementation(async (path: string) => {

@@ -19,6 +19,8 @@
 //! the upstream connection and is removed here (DoQ rejects it, RFC 9250). DoQ
 //! in-flight requests retain their endpoint owner independently of the current
 //! bootstrap-address cache entry.
+//! DoH uses GET while its encoded URI fits, otherwise POST, choosing the method
+//! before the request is handed to H2 or H3.
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -136,11 +138,12 @@ pub(super) fn doh_answer(
     Ok(response)
 }
 
-/// RFC 8484 GET, the method every DoH server must support: the query (ID 0)
-/// travels base64url-encoded without padding in the `dns` parameter. Production
-/// servers answered some POSTs with 405. Returns the request and the message
-/// that answers are validated against.
-pub(super) fn doh_get(spec: &Endpoint, query: &Message) -> Result<(http::Request<()>, Message)> {
+/// Use GET for queries that fit in an HTTP URI, and POST for larger DNS messages.
+/// Both methods carry ID 0 and are selected before anything is sent.
+pub(super) fn doh_request(
+    spec: &Endpoint,
+    query: &Message,
+) -> Result<(http::Request<Bytes>, Message)> {
     use base64::Engine;
     let mut outbound = query.clone();
     outbound.metadata.id = 0;
@@ -149,18 +152,25 @@ pub(super) fn doh_get(spec: &Endpoint, query: &Message) -> Result<(http::Request
     } else {
         spec.host.clone()
     };
+    let endpoint: http::Uri = format!("https://{host}:{}{}", spec.port, spec.path).parse()?;
+    let wire = protocol::encode_upstream(&outbound, true)?;
     let separator = if spec.path.contains('?') { '&' } else { '?' };
-    let request = http::Request::builder()
-        .method("GET")
-        .uri(format!(
-            "https://{host}:{}{}{separator}dns={}",
-            spec.port,
-            spec.path,
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(protocol::encode_upstream(&outbound, true)?)
-        ))
-        .header("accept", "application/dns-message")
-        .body(())?;
+    // The endpoint was validated above and base64url adds no invalid URI bytes.
+    // A larger encoded URI may exceed the HTTP library's representable length.
+    let get = format!(
+        "{endpoint}{separator}dns={}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&wire)
+    )
+    .parse::<http::Uri>();
+    let builder = http::Request::builder().header("accept", "application/dns-message");
+    let request = match get {
+        Ok(uri) => builder.method("GET").uri(uri).body(Bytes::new())?,
+        Err(_) => builder
+            .method("POST")
+            .uri(endpoint)
+            .header("content-type", "application/dns-message")
+            .body(Bytes::from(wire))?,
+    };
     Ok((request, outbound))
 }
 
@@ -638,10 +648,16 @@ impl Client {
         let _permit = connection.streams.acquire().await?;
         let _stream = InFlight::new(&connection.usage);
         let mut sender = connection.sender.clone().ready().await.map_err(not_sent)?;
-        let (request, outbound) = doh_get(&self.spec, query)?;
+        let (request, outbound) = doh_request(&self.spec, query)?;
+        let (parts, body) = request.into_parts();
         attempt.stage(Stage::RequestWrite);
         // Dropping this on cancellation resets only this stream (RST_STREAM).
-        let (response, _) = sender.send_request(request, true).map_err(not_sent)?;
+        let (response, mut stream) = sender
+            .send_request(http::Request::from_parts(parts, ()), body.is_empty())
+            .map_err(not_sent)?;
+        if !body.is_empty() {
+            stream.send_data(body, true)?;
+        }
         attempt.stage(Stage::ResponseHeaders);
         let response = response.await?;
         let age = doh_head(response.status(), response.headers(), attempt)?;

@@ -3,6 +3,8 @@
 //! shares the insert transaction. Capacity trims do not vacuum; periodic cleanup,
 //! reduced limits and explicit flush reclaim pages. Shutdown follows the terminal
 //! flush, commits what arrived since and checkpoints the WAL before releasing its lock.
+//! Age cleanup continues in bounded batches between controls and writes; an explicit
+//! flush completes pending age batches within its flush deadline.
 mod database;
 pub(crate) use database::DATABASE_FORMAT;
 mod observation;

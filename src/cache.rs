@@ -1141,18 +1141,32 @@ impl Cache {
         let shard = self.shards[self.shard(&key)]
             .lock()
             .expect("cache shard poisoned");
-        let selected = shard.select(&key, outgoing, now, true).map(|(part, id)| {
+        let fresh = shard.select(&key, outgoing, now, false);
+        let failure =
+            fresh.and_then(|(part, id)| shard.partitions[part].lru.peek(&id).unwrap().failure);
+        let selected = match (fresh, failure) {
+            (Some(entry), Some(Failure::StaleFallback)) => {
+                shard.select(&key, outgoing, now, true).or(Some(entry))
+            }
+            (Some(entry), _) => Some(entry),
+            (None, _) => shard.select(&key, outgoing, now, true),
+        }
+        .map(|(part, id)| {
             let e = shard.partitions[part].lru.peek(&id).unwrap();
             (
                 now.saturating_duration_since(e.inserted) < e.lifetime,
                 e.scope,
+                e.failure,
             )
         });
         drop(shard);
         json!({"eligible":true,"reason":match selected {
-            Some((true,_))=>"matching_fresh_scope",Some((false,_))=>"failure_only_stale",None=>"no_matching_retained_entry"},
-            "policy":policy,"state":match selected {Some((true,_))=>"fresh",Some((false,_))=>"stale",None=>"miss"},
-            "scope":selected.map(|(_,scope)|scope.tag())})
+            Some((_,_,Some(Failure::Final)))=>"cached_dnssec_failure",
+            Some((_,_,Some(Failure::StaleFallback)))=>"cached_upstream_failure",
+            Some((false,_,None)) if failure.is_some()=>"cached_failure_stale_fallback",
+            Some((true,_,None))=>"matching_fresh_scope",Some((false,_,None))=>"failure_only_stale",None=>"no_matching_retained_entry"},
+            "policy":policy,"state":match selected {Some((_,_,Some(_)))=>"failure",Some((true,_,None))=>"fresh",Some((false,_,None))=>"stale",None=>"miss"},
+            "scope":selected.map(|(_,scope,_)|scope.tag())})
     }
 }
 

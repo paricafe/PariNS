@@ -16,8 +16,8 @@ interface SessionContextValue {
   rotateCredentials(currentPassword: string, username: string, newPassword: string): Promise<void>;
   /** Sets or clears the Turnstile keys; every session ends. */
   changeTurnstile(body: unknown): Promise<void>;
-  /** Records the first login options this document saw; returns whether it may show the Turnstile widget. */
-  turnstileAllowed(optionsHaveTurnstile: boolean): boolean;
+  /** Whether this document's server-selected script policy permits Turnstile. */
+  turnstileAllowed(): boolean;
   setup(username: string, password: string, toml: string, token: string): Promise<void>;
   logout(): Promise<void>;
   retryLogout(): Promise<void>;
@@ -38,7 +38,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const mounted = useRef(true);
   const bootId = useRef(0);
   const logoutBinding = useRef<string | null>(null);
-  const firstView = useRef<boolean | null>(null);
+  const documentTurnstile = useRef(document.querySelector('meta[name="parins-turnstile"]')?.getAttribute('content') === 'enabled');
   const logoutIntent = useRef(false);
   const authInFlight = useRef(false);
   const updateRestart = useRef(false);
@@ -51,7 +51,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const applySession = useCallback((view: SessionView) => {
     if (!mounted.current) return;
-    if (firstView.current === null) firstView.current = view.authenticated;
     if (!view.authenticated && updateRestart.current && !logoutIntent.current) {
       updateRestart.current = false;
       api.replaceBinding(null);
@@ -202,13 +201,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const changeTurnstile = useCallback((body: unknown) => credentialChange('account/turnstile', body,
     { changed: 'turnstileChanged', unknown: 'turnstileUnknown' }), [credentialChange]);
-  // The server relaxes this document's script policy for the widget only if it was served
-  // signed out while Turnstile was on; the first login options of a signed-out document tell.
-  const documentTurnstile = useRef<boolean | null>(null);
-  const turnstileAllowed = useCallback((optionsHaveTurnstile: boolean) => {
-    if (documentTurnstile.current === null) documentTurnstile.current = firstView.current === false && optionsHaveTurnstile;
-    return documentTurnstile.current;
-  }, []);
+  const turnstileAllowed = useCallback(() => documentTurnstile.current, []);
 
   const setup = useCallback(async (username: string, password: string, toml: string, token: string) => {
     let sent = false;

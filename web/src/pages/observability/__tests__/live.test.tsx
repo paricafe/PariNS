@@ -22,13 +22,13 @@ class FakeSocket {
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   constructor(readonly url: string) { FakeSocket.instances.push(this); }
-  /** Like the server, every subscribe is answered with the current state first. */
+  /** Like the server, every subscribe has a distinct acknowledgement. */
   state: Record<string, unknown> = { type: 'state', log: 'ok', log_epoch: 3 };
   answerSubscribes = true;
   send(data: string) {
     const message = JSON.parse(data);
     this.sent.push(message);
-    if (message.type === 'subscribe' && this.answerSubscribes) this.push(this.state);
+    if (message.type === 'subscribe' && this.answerSubscribes) this.push({ ...this.state, type: 'subscribed' });
   }
   close(code = 1000) { this.readyState = 3; this.closedBy = code; }
   open() { this.readyState = 1; this.onopen?.(); }
@@ -103,9 +103,33 @@ describe('LiveLogClient', () => {
     // Still the old filter's batch: it must not be inserted under the new filter.
     socket.push({ type: 'entries', entries: [row(43, 'a.test')], cursor: 43, more: false });
     expect(received).toEqual([]);
+    // A spontaneous state from the old poll is not a subscription acknowledgement.
     socket.push({ type: 'state', log: 'ok', log_epoch: 3 });
+    socket.push({ type: 'entries', entries: [row(60, 'a.test')], cursor: 60, more: false });
+    expect(received).toEqual([]);
+    socket.push({ type: 'subscribed', log: 'ok', log_epoch: 3 });
     socket.push({ type: 'entries', entries: [row(44, 'b.test')], cursor: 44, more: false });
     expect(received).toEqual([44]);
+    socket.serverClose(1001);
+    client.stop();
+  });
+
+  it('waits for every queued subscription acknowledgement before accepting entries', () => {
+    const events = handlers();
+    const subscription = { interval: 3 as const, cursor: 40, filter: { search: null, status: null, cache: null } };
+    const client = new LiveLogClient(() => BINDING, events, subscription);
+    client.start(subscription);
+    const socket = latest();
+    socket.open();
+    socket.answerSubscribes = false;
+    client.update({ ...subscription, filter: { ...subscription.filter, search: 'b.test' } });
+    client.update({ ...subscription, filter: { ...subscription.filter, search: 'c.test' } });
+    socket.push({ type: 'subscribed', log: 'ok', log_epoch: 3 });
+    socket.push({ type: 'entries', entries: [row(60, 'b.test')], cursor: 60, more: false });
+    expect(events.entries).not.toHaveBeenCalled();
+    socket.push({ type: 'subscribed', log: 'ok', log_epoch: 3 });
+    socket.push({ type: 'entries', entries: [row(50, 'c.test')], cursor: 50, more: false });
+    expect(events.entries).toHaveBeenCalledWith([row(50, 'c.test')], false);
     client.stop();
   });
 

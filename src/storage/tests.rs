@@ -982,6 +982,99 @@ async fn byte_age_cleanup_and_io_drops_have_distinct_reasons() {
     runtime.storage.shutdown().await.unwrap();
 }
 
+async fn expire_log_and_history_batches(handle: &Handle) {
+    for _ in 0..800 {
+        handle.record_log(0, entry("fresh"));
+    }
+    handle.flush().await.unwrap();
+    inspect(handle, |conn| {
+        let bytes: Vec<u8> =
+            conn.query_row("SELECT payload FROM statistics_points LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+        let mut point: Point = serde_json::from_slice(&bytes)?;
+        point.run_id = "expired-fixture".into();
+        point.start_ms = 1;
+        point.timestamp_ms = 1;
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE query_log SET retention_ms=1", [])?;
+        tx.execute("DELETE FROM statistics_points", [])?;
+        for seq in 1..=800 {
+            point.seq = seq;
+            tx.execute(
+                "INSERT INTO statistics_points VALUES(?1,?2,?3,1,1,?4)",
+                rusqlite::params![
+                    point.history_epoch,
+                    point.run_id,
+                    point.seq,
+                    serde_json::to_vec(&point)?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+async fn expired_counts(handle: &Handle) -> (u64, u64) {
+    let (send, receive) = oneshot::channel();
+    inspect(handle, move |conn| {
+        let count = conn.query_row(
+            "SELECT (SELECT count(*) FROM query_log WHERE retention_ms=1), (SELECT count(*) FROM statistics_points WHERE retention_ms=1)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let _ = send.send(count);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    receive.await.unwrap()
+}
+
+#[tokio::test]
+async fn periodic_age_cleanup_finishes_batches_before_the_next_interval() {
+    let mut config = settings();
+    config.storage.cleanup_interval_secs = 1;
+    let runtime = RuntimeServices::ephemeral(config);
+    expire_log_and_history_batches(&runtime.storage).await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let counts = expired_counts(&runtime.storage).await;
+        if counts != (800, 800) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "periodic cleanup did not start");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        if expired_counts(&runtime.storage).await == (0, 0) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "remaining age batches waited for the next cleanup interval"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(runtime.storage.status().query_log_entries, 0);
+    assert!(!runtime.storage.status().capacity_pending);
+    runtime.storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_flush_finishes_every_expired_batch() {
+    let runtime = RuntimeServices::ephemeral(settings());
+    expire_log_and_history_batches(&runtime.storage).await;
+    runtime.storage.flush().await.unwrap();
+    assert_eq!(expired_counts(&runtime.storage).await, (0, 0));
+    assert!(!runtime.storage.status().capacity_pending);
+    runtime.storage.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn filesystem_sample_is_cached_and_snapshot_path_does_not_block_diagnostics() {
     let dir = private_dir();

@@ -14,7 +14,9 @@
 //!   only when every answer record, and for a negative answer every authority
 //!   record, is Secure. A positive answer keeps in its authority section only the
 //!   NSEC/NSEC3 records and their signatures, and only for DO clients, so a
-//!   downstream validator can check a wildcard expansion.
+//!   downstream validator can check a wildcard expansion. CD clients receive
+//!   the unvalidated denial records with AD clear. Proof is evaluated before
+//!   DNSSEC records that a non-DO client did not query are stripped.
 //! - Infrastructure caches (delegations, name servers, DNSSEC keys) belong to
 //!   the recursor and are bounded by entry counts; answers are never read from
 //!   or stored in the recursor's answer cache.
@@ -534,8 +536,12 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
         let dnssec_ok = query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
         let denials = authorities
             .into_iter()
-            // Only validated proof travels under an AD answer.
-            .filter(|record| dnssec_ok && is_denial(record) && record.proof == Proof::Secure)
+            // CD clients need the received proof to perform validation themselves.
+            .filter(|record| {
+                dnssec_ok
+                    && is_denial(record)
+                    && (query.checking_disabled || record.proof == Proof::Secure)
+            })
             .collect();
         (denials, validation(answers.iter()))
     } else {
@@ -548,7 +554,15 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
     let mut response = protocol::error_response(query, code);
     response.answers = answers;
     response.authorities = authorities;
-    response.metadata.authentic_data = proof == Some(Validation::Secure);
+    response.metadata.authentic_data =
+        !query.checking_disabled && proof == Some(Validation::Secure);
+    // Evaluate the proof before removing records the client did not request.
+    let mut response = response.maybe_strip_dnssec_records(
+        query
+            .edns
+            .as_ref()
+            .is_some_and(|edns| edns.flags().dnssec_ok),
+    );
     echo_scope(query, &mut response, scope);
     Outcome {
         response: Ok(response),
@@ -620,7 +634,10 @@ fn classify(error: RecursorError) -> Failure {
     let no_records = match error {
         RecursorError::Negative(data) => NoRecords::from(data),
         RecursorError::Net(NetError::Dns(DnsError::NoRecordsFound(no_records)))
-            if no_records.ns.is_none() =>
+            if no_records.ns.is_none()
+                || no_records.response_code == ResponseCode::NXDomain
+                || (no_records.response_code == ResponseCode::NoError
+                    && no_records.soa.is_some()) =>
         {
             no_records
         }
@@ -822,7 +839,9 @@ mod tests {
         let mut unproven = nsec.clone();
         unproven.name = Name::from_ascii("other.example.").unwrap();
         unproven.proof = Proof::Indeterminate;
-        for dnssec_ok in [true, false] {
+        for (dnssec_ok, checking_disabled) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
             let mut message = Message::query();
             message.answers = vec![a(Proof::Secure), signature(RecordType::A)];
             message.authorities = vec![
@@ -832,14 +851,129 @@ mod tests {
                 signature(RecordType::NS),
                 unproven.clone(),
             ];
-            let outcome = respond(&query(None, dnssec_ok), Ok(message), EcsScope::NotSent);
+            if checking_disabled {
+                for record in message.answers.iter_mut().chain(&mut message.authorities) {
+                    record.proof = Proof::Indeterminate;
+                }
+            }
+            let mut query = query(None, dnssec_ok);
+            query.metadata.checking_disabled = checking_disabled;
+            let outcome = respond(&query, Ok(message), EcsScope::NotSent);
             let response = outcome.response.unwrap();
             assert_eq!(outcome.kind, Kind::Answered);
-            assert!(response.authentic_data);
-            assert_eq!(
-                response.authorities,
-                if dnssec_ok { denial.clone() } else { vec![] }
+            assert_eq!(response.authentic_data, !checking_disabled);
+            let mut expected = if dnssec_ok { denial.clone() } else { vec![] };
+            if checking_disabled && dnssec_ok {
+                expected.push(unproven.clone());
+                for record in &mut expected {
+                    record.proof = Proof::Indeterminate;
+                }
+            }
+            assert_eq!(response.authorities, expected);
+            assert_eq!(response.answers.len(), if dnssec_ok { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn negative_answers_strip_dnssec_after_evaluating_proof() {
+        use hickory_proto::dnssec::rdata::NSEC;
+        for nx in [true, false] {
+            for dnssec_ok in [true, false] {
+                for checking_disabled in [true, false] {
+                    let proof = if checking_disabled {
+                        Proof::Indeterminate
+                    } else {
+                        Proof::Secure
+                    };
+                    let mut soa = soa();
+                    soa.proof = proof;
+                    let mut denial = Record::from_rdata(
+                        Name::from_ascii("example.").unwrap(),
+                        60,
+                        RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                            Name::from_ascii("z.example.").unwrap(),
+                            [RecordType::SOA, RecordType::NS],
+                        ))),
+                    );
+                    denial.proof = proof;
+                    let mut query = query(None, dnssec_ok);
+                    query.metadata.checking_disabled = checking_disabled;
+                    let error = RecursorError::Negative(AuthorityData::new(
+                        Box::new(query.queries[0].clone()),
+                        Some(Box::new(soa)),
+                        true,
+                        nx,
+                        Some(Arc::from(vec![denial])),
+                    ));
+                    let outcome = respond(&query, Err(error), EcsScope::NotSent);
+                    let response = outcome.response.unwrap();
+                    assert_eq!(outcome.kind, Kind::Negative);
+                    assert_eq!(
+                        outcome.proof,
+                        Some(if checking_disabled {
+                            Validation::Indeterminate
+                        } else {
+                            Validation::Secure
+                        })
+                    );
+                    assert_eq!(response.authentic_data, !checking_disabled);
+                    assert_eq!(response.authorities.len(), if dnssec_ok { 2 } else { 1 });
+                    assert!(
+                        response
+                            .authorities
+                            .iter()
+                            .any(|record| record.record_type() == RecordType::SOA)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_dnssec_query_keeps_the_queried_record_without_do() {
+        use hickory_proto::dnssec::rdata::NSEC;
+        let mut query = query(None, false);
+        query.queries[0].set_query_type(RecordType::NSEC);
+        let mut nsec = Record::from_rdata(
+            query.queries[0].name().clone(),
+            60,
+            RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                Name::from_ascii("z.example.").unwrap(),
+                [RecordType::A],
+            ))),
+        );
+        nsec.proof = Proof::Secure;
+        let outcome = respond(&query, answer(vec![nsec]), EcsScope::NotSent);
+        assert_eq!(
+            outcome.response.unwrap().answers[0].record_type(),
+            RecordType::NSEC
+        );
+    }
+
+    #[test]
+    fn negative_answer_with_nameservers_is_not_a_resolution_failure() {
+        use hickory_proto::rr::rdata::NS;
+        use hickory_resolver::net::ForwardNSData;
+        for code in [ResponseCode::NXDomain, ResponseCode::NoError] {
+            let mut query = query(None, false);
+            query.queries[0].set_query_type(RecordType::SOA);
+            let mut negative = NoRecords::new(query.queries[0].clone(), code);
+            negative.soa = Some(Box::new(soa()));
+            negative.ns = Some(Arc::from(vec![ForwardNSData {
+                ns: Record::from_rdata(
+                    Name::from_ascii("example.").unwrap(),
+                    60,
+                    RData::NS(NS(Name::from_ascii("ns.example.").unwrap())),
+                ),
+                glue: Arc::from(Vec::<Record>::new()),
+            }]));
+            let outcome = respond(
+                &query,
+                Err(RecursorError::Net(NetError::from(negative))),
+                EcsScope::NotSent,
             );
+            assert_eq!(outcome.kind, Kind::Negative);
+            assert_eq!(outcome.response.unwrap().response_code, code);
         }
     }
 

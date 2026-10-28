@@ -36,6 +36,14 @@ function Harness() {
   return <ConfirmProvider language="en">{state.phase === 'login' ? <LoginPage language="en" /> : state.phase === 'ready' ? <><p>READY</p><AccountControls language="en" /></> : null}</ConfirmProvider>;
 }
 
+function documentPolicy(enabled: boolean) {
+  document.querySelector('meta[name="parins-turnstile"]')?.remove();
+  const marker = document.createElement('meta');
+  marker.name = 'parins-turnstile';
+  marker.content = enabled ? 'enabled' : 'disabled';
+  document.head.append(marker);
+}
+
 async function password() {
   fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'admin' } });
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'long-admin-password' } });
@@ -47,8 +55,8 @@ beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
   HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
 });
-beforeEach(() => { config.dirty = false; config.discard.mockReset(); reload.mockReset(); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); delete window.turnstile; });
+beforeEach(() => { config.dirty = false; config.discard.mockReset(); reload.mockReset(); documentPolicy(false); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); delete window.turnstile; document.querySelector('meta[name="parins-turnstile"]')?.remove(); });
 
 describe('sign-in with Turnstile', () => {
   it('signs in with only the username and password while Turnstile is off', async () => {
@@ -66,6 +74,7 @@ describe('sign-in with Turnstile', () => {
   });
 
   it('sends the Turnstile token with the password and reloads after signing in', async () => {
+    documentPolicy(true);
     const turnstile = { render: vi.fn((_: HTMLElement, options: Record<string, unknown>) => { (options.callback as (token: string) => void)('token-1'); return 'widget'; }), reset: vi.fn(), remove: vi.fn() };
     window.turnstile = turnstile;
     let authenticated = false;
@@ -113,6 +122,7 @@ describe('sign-in with Turnstile', () => {
   });
 
   it('does not send a password without a Turnstile token, and explains the loopback exception', async () => {
+    documentPolicy(true);
     window.turnstile = { render: vi.fn(() => 'widget'), reset: vi.fn(), remove: vi.fn() };
     const sent = serve({
       '/api/session': () => json(signedOut),
@@ -141,6 +151,17 @@ describe('sign-in with Turnstile', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('reloads when Turnstile was enabled between serving the document and the first login options', async () => {
+    window.turnstile = { render: vi.fn(() => 'widget'), reset: vi.fn(), remove: vi.fn() };
+    serve({
+      '/api/session': () => json(signedOut),
+      '/api/login/options': () => json({ ...noOptions, turnstile: { site_key: 'site-key', action: 'login' } }),
+    });
+    render(<SessionProvider><Harness /></SessionProvider>);
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    expect(window.turnstile.render).not.toHaveBeenCalled();
   });
 });
 

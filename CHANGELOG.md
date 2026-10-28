@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## v0.1.30 — 2026-10-28
+
+### Upgrade
+
+- The updater recovery fixes require helper protocol 4. Run the complete installer
+  to replace the root updater before using online updates with this version.
+
+### Fixed
+
+- Recursive DNS preserves wildcard denial proofs across CNAME chains, returns
+  NXDOMAIN and NODATA with authority NS records correctly, and applies DO/CD flags
+  consistently. Each outbound UDP send now takes one rate and concurrency admission.
+- Consumed Commit requests record pre-installation failures durably, allowing the
+  application to end its update freeze. Boot rollback publishes the readiness phase
+  that the application verifies.
+- Retention cleanup continues in bounded batches until expired query logs and
+  statistics are removed. Subscription Retry-After deadlines are bounded by their
+  configured update interval, including saved schedules after restart or edits.
+- HTTP management remains available while missing DoT or DoQ identities are retried.
+  Login reads the Turnstile policy of its actual HTML document, and live query-log
+  filter changes wait for an explicit subscription acknowledgement.
+- Large DoH queries use POST when their encoded GET URI cannot be represented.
+  Cache inspection explains cached SERVFAIL and stale fallback, and filtering
+  explanations identify the same rule that selects the actual response.
+
 ## v0.1.29 — 2026-10-27
 
 ### Upgrade

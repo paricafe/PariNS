@@ -669,6 +669,115 @@ fn doh_get_query(uri: &http::Uri) -> Message {
     .unwrap()
 }
 
+#[tokio::test]
+async fn large_doh_queries_use_post_and_preserve_unknown_edns_on_h2_and_h3() {
+    use bytes::{Buf, Bytes};
+    for h3 in [false, true] {
+        let (_dir, ca, tls) = identity(if h3 { b"h3" } else { b"h2" });
+        let mut q = query();
+        q.edns
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .insert(EdnsOption::Unknown(65001, vec![7; 50_000]));
+        let expected = q.clone();
+        let (address, server) = if h3 {
+            let endpoint = h3_endpoint(&tls);
+            let address = endpoint.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let connection = endpoint.accept().await.unwrap().await.unwrap();
+                let mut server = h3::server::builder()
+                    .build::<_, Bytes>(h3_quinn::Connection::new(connection.clone()))
+                    .await
+                    .unwrap();
+                let request = server.accept().await.unwrap().unwrap();
+                let (request, mut stream) = request.resolve_request().await.unwrap();
+                assert_eq!(request.method(), "POST");
+                assert_eq!(request.uri().path(), "/dns-query");
+                assert!(request.uri().query().is_none());
+                assert_eq!(request.headers()["content-type"], "application/dns-message");
+                let mut wire = Vec::new();
+                while let Some(mut data) = stream.recv_data().await.unwrap() {
+                    wire.extend_from_slice(&data.copy_to_bytes(data.remaining()));
+                }
+                let mut response = verify_forwarded(Message::from_vec(&wire).unwrap(), &expected);
+                response.edns = None;
+                stream
+                    .send_response(
+                        http::Response::builder()
+                            .header("content-type", "application/dns-message")
+                            .body(())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                stream
+                    .send_data(Bytes::from(response.to_vec().unwrap()))
+                    .await
+                    .unwrap();
+                stream.finish().await.unwrap();
+                connection.closed().await;
+            });
+            (address, server)
+        } else {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let socket = tokio_rustls::TlsAcceptor::from(tls)
+                    .accept(socket)
+                    .await
+                    .unwrap();
+                let mut connection = h2::server::handshake(socket).await.unwrap();
+                let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+                let handler = async move {
+                    assert_eq!(request.method(), "POST");
+                    assert_eq!(request.uri().path(), "/dns-query");
+                    assert!(request.uri().query().is_none());
+                    assert_eq!(request.headers()["content-type"], "application/dns-message");
+                    let mut body = request.into_body();
+                    let mut wire = Vec::new();
+                    while let Some(data) = body.data().await {
+                        let data = data.unwrap();
+                        wire.extend_from_slice(&data);
+                        body.flow_control().release_capacity(data.len()).unwrap();
+                    }
+                    let mut response =
+                        verify_forwarded(Message::from_vec(&wire).unwrap(), &expected);
+                    response.edns = None;
+                    respond
+                        .send_response(
+                            http::Response::builder()
+                                .header("content-type", "application/dns-message")
+                                .body(())
+                                .unwrap(),
+                            false,
+                        )
+                        .unwrap()
+                        .send_data(Bytes::from(response.to_vec().unwrap()), true)
+                        .unwrap();
+                };
+                tokio::pin!(handler);
+                tokio::select! { _ = &mut handler => {}, _ = connection.accept() => panic!("closed early") }
+                while connection.accept().await.is_some() {}
+            });
+            (address, server)
+        };
+        let mut settings = config(vec![format!("https://{address}/dns-query")], Mode::Weighted);
+        settings.upstreams.ca_file = Some(ca);
+        settings.upstreams.prefer_h3 = h3;
+        let pool = client(&settings).unwrap();
+        let response = exchange(&pool, &q).await.unwrap();
+        assert_eq!(response.message.id, q.id);
+        assert_eq!(response.message.queries, q.queries);
+        drop(pool);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
 fn h3_endpoint(tls: &rustls::ServerConfig) -> quinn::Endpoint {
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls.clone()).unwrap();
     quinn::Endpoint::server(

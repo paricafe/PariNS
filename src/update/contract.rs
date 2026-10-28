@@ -9,7 +9,7 @@ use super::build_info::BuildInfo;
 
 pub const REPOSITORY: &str = "paricafe/PariNS";
 pub const UPDATE_PROTOCOL: u32 = 1;
-pub const HELPER_PROTOCOL: u32 = 3;
+pub const HELPER_PROTOCOL: u32 = 4;
 pub const INSTALL_CONTRACT: &str = "linux-managed-updater-v1";
 // The complete bidirectional state/TOML/database/payload contract, not merely
 // a database schema version.

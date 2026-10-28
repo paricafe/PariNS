@@ -1154,10 +1154,14 @@ async fn handle_inner(
     if (parts.method == "GET" || parts.method == "HEAD")
         && let Some(asset) = assets::find(path)
     {
-        let mut response = asset.response(&parts);
-        if path == "/"
-            && turnstile::document_needs_widget(&shared, &transport, peer, &parts.headers).await
-        {
+        let widget = path == "/"
+            && turnstile::document_needs_widget(&shared, &transport, peer, &parts.headers).await;
+        let mut response = if path == "/" {
+            assets::document(&parts, widget)
+        } else {
+            asset.response(&parts)
+        };
+        if widget {
             response.extensions_mut().insert(TurnstileDocument);
         }
         return Ok(response);

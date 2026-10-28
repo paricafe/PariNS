@@ -222,16 +222,19 @@ until preview/validation.
   /64); failure refuses. Only a loopback socket peer skips it (a same-host proxy or
   tunnel makes everyone loopback; documented and warned in the console). Cloudflare
   test keys only as a pair. The relaxed CSP for its script and frame applies only to
-  a signed-out console document that shows it. Setting or clearing the keys needs
-  the current password, revokes all sessions and voids sign-ins admitted under the
-  old setting. Details: `src/manage/turnstile.rs`.
+  a signed-out console document that shows it; an immutable document marker tells
+  the console whether that exact policy permits the widget. Setting or clearing
+  the keys needs the current password, revokes all sessions and voids sign-ins
+  admitted under the old setting. Details: `src/manage/turnstile.rs`.
 - The live query log WebSocket (`/api/query-log/live`) belongs to the management
   process: Host/Origin (Origin required) and session Cookie are checked before the
   upgrade; the binding arrives only as the first message. Sockets leave the HTTP
   connection lifetime but stay bounded per session and in total, with a small
   inbound message limit and an idle timeout. Removing the session from memory
   closes them (4403), and shutdown closes them (1001) within its drain. Polls run
-  on the storage worker; Manager is never held across socket IO. Details:
+  on the storage worker; Manager is never held across socket IO. A `subscribed`
+  acknowledgement fences each filter change; spontaneous state updates never
+  acknowledge a subscription. Details:
   `src/manage/live.rs`.
 - Validate and persist before publishing replacement state. Cache-only, storage-only
   and updates-only changes preserve listeners; updates-only changes also keep caches,
@@ -264,6 +267,8 @@ until preview/validation.
   and actual port over UDP. Management and DNS keep separate ports, ALPN and routes.
   A failed candidate or TLS fault never downgrades HTTPS to HTTP; disabling DoH needs
   downgrade confirmation. Rust owns `[web].public_host`, origin and protocol state.
+  Missing DoT/DoQ identities leave HTTP management available while DNS startup retries;
+  a successful start publishes the CertificateSet used by its listeners.
 - Manager/Active owns the atomic CertificateSet, reloaded by API or SIGHUP without
   changing revision, DNS/cache ownership or sessions. Pasted identities are validated
   before private persistence; only file references are returned, never private keys.

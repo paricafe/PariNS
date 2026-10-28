@@ -665,7 +665,7 @@ dependencies = [
 [[package]]
 name = "hickory-net"
 version = "0.26.3"
-source = "git+https://github.com/Natsuki-Kaede/hickory-dns?rev=b3f813236f2982ce0f0a2b42383f64d8f7281a67#b3f813236f2982ce0f0a2b42383f64d8f7281a67"
+source = "git+https://github.com/Natsuki-Kaede/hickory-dns?rev=c5597630ba8c07dd3f3f165b660a5c3c05a4e3ca#c5597630ba8c07dd3f3f165b660a5c3c05a4e3ca"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -694,7 +694,7 @@ dependencies = [
 [[package]]
 name = "hickory-proto"
 version = "0.26.3"
-source = "git+https://github.com/Natsuki-Kaede/hickory-dns?rev=b3f813236f2982ce0f0a2b42383f64d8f7281a67#b3f813236f2982ce0f0a2b42383f64d8f7281a67"
+source = "git+https://github.com/Natsuki-Kaede/hickory-dns?rev=c5597630ba8c07dd3f3f165b660a5c3c05a4e3ca#c5597630ba8c07dd3f3f165b660a5c3c05a4e3ca"
 dependencies = [
  "bitflags",
  "data-encoding",
@@ -716,7 +716,7 @@ dependencies = [
 [[package]]
 name = "hickory-resolver"
 version = "0.26.3"
-source = "git+https://github.com/Natsuki-Kaede/hickory-dns?rev=b3f813236f2982ce0f0a2b42383f64d8f7281a67#b3f813236f2982ce0f0a2b42383f64d8f7281a67"
+source = "git+https://github.com/Natsuki-Kaede/hickory-dns?rev=c5597630ba8c07dd3f3f165b660a5c3c05a4e3ca#c5597630ba8c07dd3f3f165b660a5c3c05a4e3ca"
 dependencies = [
  "async-recursion",
  "cfg-if",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "parins"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "anyhow",
  "argon2",

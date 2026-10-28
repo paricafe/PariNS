@@ -664,16 +664,13 @@ impl Service {
                             || !old.auto_update
                             || old.update_interval_hours != source.update_interval_hours
                     });
-            if changed
-                && let Some(record) = state.records.iter_mut().find(|r| r.fingerprint == fp)
-                && record.status.failures == 0
+            if changed && let Some(record) = state.records.iter_mut().find(|r| r.fingerprint == fp)
             {
-                let due = operations::periodic(record.prepared_at, source.update_interval_hours);
-                record.status.next_update = Some(if due <= unix_secs() {
-                    unix_secs() + rand::random_range(60..=300)
-                } else {
-                    due
-                });
+                record.status.next_update = Some(operations::rescheduled(
+                    record,
+                    source.update_interval_hours,
+                    unix_secs(),
+                ));
             }
         }
         if candidate.material.index_pin.is_some() {

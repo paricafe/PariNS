@@ -18,6 +18,46 @@ fn lookup(cache: &Cache, q: &Message, outgoing: Option<ClientSubnet>, now: Insta
 }
 
 #[test]
+fn explanation_follows_failure_and_stale_selection_without_observing_a_hit() {
+    let now = Instant::now();
+    for failure in [Failure::Final, Failure::StaleFallback] {
+        for with_stale in [false, true] {
+            let mut config = CacheConfig::default();
+            config.stale.enabled = true;
+            let cache = Cache::new(config);
+            let q = query("explain-failure.test.");
+            if with_stale {
+                insert(&cache, &q, &answer(&q, 1, 10), Scope::NoEcs, now);
+            }
+            let later = now + Duration::from_secs(20);
+            assert!(fail(&cache, &q, Scope::NoEcs, later, failure).admitted());
+            let before = cache.inspect(q.queries[0].name(), None, later);
+            let counters = cache.diagnostics_snapshot();
+            let explanation = cache.explain(&q, None, later);
+            assert_eq!(
+                explanation["state"],
+                if with_stale && failure == Failure::StaleFallback {
+                    "stale"
+                } else {
+                    "failure"
+                }
+            );
+            assert_eq!(
+                explanation["reason"],
+                match (failure, with_stale) {
+                    (Failure::Final, _) => "cached_dnssec_failure",
+                    (Failure::StaleFallback, true) => "cached_failure_stale_fallback",
+                    (Failure::StaleFallback, false) => "cached_upstream_failure",
+                }
+            );
+            assert_eq!(cache.inspect(q.queries[0].name(), None, later), before);
+            assert_eq!(cache.diagnostics_snapshot(), counters);
+            assert_eq!(cache.refresh_outcomes(), (0, 0));
+        }
+    }
+}
+
+#[test]
 fn a_failure_is_cached_for_its_ttl_in_its_own_network_only() {
     let cache = Cache::new(CacheConfig::default());
     let q = query("failing.test.");

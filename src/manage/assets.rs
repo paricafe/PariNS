@@ -7,6 +7,8 @@
 //! as a document from another build, and the document itself stay `no-store`
 //! (set for every other response in [`super::handle`]). HEAD gets the same
 //! headers without a body. API, WebSocket and DoH responses are never compressed.
+//! The document's Turnstile marker is selected with its CSP, so the browser
+//! never infers that document's permissions from a later account setting.
 
 use axum::{
     body::Body,
@@ -70,6 +72,28 @@ pub(super) fn find(path: &str) -> Option<&'static Asset> {
         "/theme-init.js" => Some(&THEME),
         _ => None,
     }
+}
+
+/// The marker and response policy describe the same document, even when the
+/// account's Turnstile setting changes before the browser reads login options.
+pub(super) fn document(request: &Parts, turnstile: bool) -> Response {
+    let asset = find("/").expect("embedded console document");
+    let mut response = asset.response(request);
+    if turnstile {
+        let body = std::str::from_utf8(asset.plain)
+            .expect("console document is UTF-8")
+            .replace(
+                r#"name="parins-turnstile" content="disabled""#,
+                r#"name="parins-turnstile" content="enabled""#,
+            );
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, body.len().into());
+        if request.method != Method::HEAD {
+            *response.body_mut() = Body::from(body);
+        }
+    }
+    response
 }
 
 impl Asset {
@@ -273,5 +297,20 @@ mod tests {
         }
         assert!(find("/index.html").is_none());
         assert!(find("/assets/app.js.br").is_none());
+    }
+
+    #[tokio::test]
+    async fn document_marker_tracks_its_turnstile_policy_for_get_and_head() {
+        for enabled in [false, true] {
+            let response = document(&request("GET", "/", &[]), enabled);
+            let length = response.headers()[header::CONTENT_LENGTH].clone();
+            let body = String::from_utf8(bytes(response.into_body()).await).unwrap();
+            let setting = if enabled { "enabled" } else { "disabled" };
+            assert!(body.contains(&format!(r#"name="parins-turnstile" content="{setting}""#)));
+            assert_eq!(body.matches("parins-turnstile").count(), 1);
+            let head = document(&request("HEAD", "/", &[]), enabled);
+            assert_eq!(head.headers()[header::CONTENT_LENGTH], length);
+            assert!(bytes(head.into_body()).await.is_empty());
+        }
     }
 }

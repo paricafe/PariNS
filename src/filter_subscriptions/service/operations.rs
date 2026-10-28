@@ -289,14 +289,15 @@ impl Service {
                         .and_then(|e| e.retry_after_unix);
                     let delay =
                         (retry_backoff_ms(count, identity) / 1000).min(u64::from(interval) * 3600);
+                    let now = unix_secs();
                     failures.push((
                         source.fingerprint,
                         StoredStatus {
-                            last_attempt: Some(unix_secs()),
+                            last_attempt: Some(now),
                             next_update: Some(
                                 retry_after
-                                    .unwrap_or(unix_secs() + delay)
-                                    .max(unix_secs() + 60),
+                                    .unwrap_or(now.saturating_add(delay))
+                                    .clamp(now.saturating_add(60), retry_ceiling(now, interval)),
                             ),
                             failures: count,
                             last_error: Some(failure.code),
@@ -696,16 +697,11 @@ impl Service {
             let fp = source.identity()?.fingerprint;
             if let Some(record) = store.record(&fp) {
                 let mut status = record.status.clone();
-                let due = if status.failures > 0 {
-                    status.next_update.unwrap_or(unix_secs())
-                } else {
-                    periodic(record.prepared_at, source.update_interval_hours)
-                };
-                status.next_update = Some(if due <= unix_secs() {
-                    unix_secs() + rand::random_range(60..=300)
-                } else {
-                    due
-                });
+                status.next_update = Some(rescheduled(
+                    record,
+                    source.update_interval_hours,
+                    unix_secs(),
+                ));
                 store.update_status(&fp, status)?;
             }
         }
@@ -853,4 +849,24 @@ pub(super) fn periodic(at: u64, hours: u16) -> u64 {
     let period = u64::from(hours) * 3600;
     let jitter = period / 10;
     at.saturating_add(period - jitter + rand::random_range(0..=2 * jitter))
+}
+
+fn retry_ceiling(at: u64, hours: u16) -> u64 {
+    at.saturating_add((u64::from(hours) * 3600).max(60))
+}
+
+pub(super) fn rescheduled(record: &SourceRecord, hours: u16, now: u64) -> u64 {
+    let due = if record.status.failures > 0 {
+        record.status.next_update.unwrap_or(now).min(retry_ceiling(
+            record.status.last_attempt.unwrap_or(now),
+            hours,
+        ))
+    } else {
+        periodic(record.prepared_at, hours)
+    };
+    if due <= now {
+        now.saturating_add(rand::random_range(60..=300))
+    } else {
+        due
+    }
 }

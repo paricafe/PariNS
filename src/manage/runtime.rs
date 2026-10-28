@@ -1,4 +1,7 @@
 //! Managed DNS lifecycle. Configuration transactions survive HTTP disconnects.
+//! HTTP management survives unavailable DNS identities; saved DNS startup owns
+//! their retry and publishes its CertificateSet after binding. HTTPS management
+//! must prepare its identity before serving.
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
@@ -328,9 +331,21 @@ impl Manager {
             cache_report.reason = Some("software update recovery requires a cold cache".into());
         }
         if let Some(config) = config {
-            let snapshot = tokio::task::spawn_blocking(move || Snapshot::prepare(&config, address))
-                .await?
-                .map_err(|error| anyhow!("management TLS stage failed: {error:#}"))?;
+            let snapshot = tokio::task::spawn_blocking(move || {
+                if config.doh.is_some() {
+                    Snapshot::prepare(&config, address)
+                } else {
+                    match Snapshot::prepare(&config, address) {
+                        Ok(snapshot) => Ok(snapshot),
+                        Err(error) if error.is::<super::transport::CertificateInvalid>() => {
+                            Snapshot::describe(&config, address)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+            })
+            .await?
+            .map_err(|error| anyhow!("management TLS stage failed: {error:#}"))?;
             active.lock().unwrap().snapshot = Arc::new(snapshot);
         }
         let mut this = Self {
@@ -565,7 +580,20 @@ impl Manager {
                 self.filters.ready(),
                 "subscription_material_missing: DNS policy unavailable"
             );
-            let certificates = self.active.lock().unwrap().snapshot.certificates.clone();
+            let current = self.active.lock().unwrap().snapshot.clone();
+            // HTTP management can start while DNS identities are unavailable.
+            // A successful DNS start publishes the same set its listeners use.
+            let candidate = if current.certificates.is_none() {
+                let config = config.clone();
+                let address = self.address;
+                Some(
+                    tokio::task::spawn_blocking(move || Snapshot::prepare(&config, address))
+                        .await??,
+                )
+            } else {
+                None
+            };
+            let certificates = candidate.as_ref().unwrap_or(&current).certificates.clone();
             let server = Server::bind_with_policy(
                 config.clone(),
                 certificates,
@@ -584,17 +612,23 @@ impl Manager {
             }
             let listen = server.local_addr();
             self.generation = self.generation.saturating_add(1);
-            Ok::<_, anyhow::Error>(Running::start(
-                server,
-                config,
-                listen,
-                self.services.clone(),
-                self.generation,
+            Ok::<_, anyhow::Error>((
+                Running::start(
+                    server,
+                    config,
+                    listen,
+                    self.services.clone(),
+                    self.generation,
+                ),
+                candidate,
             ))
         }
         .await;
         match result {
-            Ok(running) => {
+            Ok((running, candidate)) => {
+                if let Some(candidate) = candidate {
+                    self.publish(candidate);
+                }
                 self.running = Some(running);
                 self.last_error = None;
                 self.startup_recovered();

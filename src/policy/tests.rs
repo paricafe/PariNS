@@ -598,8 +598,15 @@ fn layered(local: &str, sources: &[(&str, Group, u16)]) -> Policy {
 #[test]
 fn the_most_specific_rule_chooses_the_method() {
     let method = |p: &Policy, name: &str| {
-        p.block_query(&question(name, RecordType::A, false))
-            .map(|(_, trace)| (trace.rule, trace.source_id, trace.response))
+        let query = question(name, RecordType::A, false);
+        p.block_query(&query).map(|(_, trace)| {
+            let explanation = p.explain(query.queries[0].name());
+            assert_eq!(explanation.decision, Decision::Blocked);
+            let witness = explanation.witness.unwrap();
+            assert_eq!(witness.rule, trace.rule);
+            assert_eq!(witness.source_id, trace.source_id);
+            (trace.rule, trace.source_id, trace.response)
+        })
     };
     let local = |rule: &str, response: &str| Some((rule.to_string(), None, response.to_string()));
     let source = |rule: &str, id: &str, response: &str| {

@@ -17,6 +17,9 @@
 //!   fences, and publish both outcomes for reconciliation without replaying Stage.
 //!   A ManualRequired operation refuses every Stage. An Abort for an operation root
 //!   never began records an Aborted fence for it.
+//! - A matching Commit that fails a pre-installation check records Failed before
+//!   returning. Boot rollback publishes AwaitingReadiness in both the operation
+//!   and its launch descriptor so the application can request verification.
 //! - Launch readiness hashes `/proc/PID/exe` only after a health receipt from that
 //!   PID/InvocationID, once per process; `Type=simple` start returns before execve.
 //! - Installer registration keeps prior terminal operations and fences. Only a
@@ -424,11 +427,9 @@ impl Executor {
                 {
                     return self.finish(journal, Phase::Failed, Some("plan_expired"));
                 }
-                let current = service().await?;
-                if current.get("InvocationID") != Some(&invocation_id)
-                    || !current.get("ActiveState").is_some_and(|v| v == "active")
-                {
-                    return self.finish(journal, Phase::Failed, Some("config_changed"));
+                let current = service().await;
+                if !self.commit_service(journal, &invocation_id, current)? {
+                    return Ok(());
                 }
                 self.commit(journal).await
             }
@@ -451,6 +452,28 @@ impl Executor {
                 }
             }
         }
+    }
+    /// A consumed, matching Commit must leave a terminal if its service check fails.
+    fn commit_service(
+        &self,
+        journal: &mut Journal,
+        invocation_id: &str,
+        current: Result<BTreeMap<String, String>>,
+    ) -> Result<bool> {
+        let current = match current {
+            Ok(current) => current,
+            Err(error) => {
+                self.finish(journal, Phase::Failed, Some(failure_code(&error)))?;
+                return Err(error);
+            }
+        };
+        if current.get("InvocationID").map(String::as_str) != Some(invocation_id)
+            || !current.get("ActiveState").is_some_and(|v| v == "active")
+        {
+            self.finish(journal, Phase::Failed, Some("config_changed"))?;
+            return Ok(false);
+        }
+        Ok(true)
     }
     fn abort(&self, journal: &mut Journal, inbox: &Inbox) -> Result<()> {
         if terminal_fence(journal, inbox)? {
@@ -744,13 +767,10 @@ impl Executor {
         );
         Ok(())
     }
-    fn launch(&self, journal: &mut Journal, rollback: bool) -> Result<()> {
+    /// Publish the operation and its launch descriptor in the same phase.
+    fn launch(&self, journal: &mut Journal, phase: Phase) -> Result<()> {
         let op = journal.operation.as_mut().context("missing operation")?;
-        let phase = if rollback {
-            Phase::RollingBack
-        } else {
-            Phase::Starting
-        };
+        let rollback = phase != Phase::Starting;
         op.pending_launch = Some(PendingLaunch {
             operation_id: op.status.operation_id.clone(),
             launch_nonce: format!("{:032x}", rand::random::<u128>()),
@@ -770,19 +790,27 @@ impl Executor {
         self.persist(journal)
     }
     async fn commit(&mut self, journal: &mut Journal) -> Result<()> {
-        let op = journal.operation.as_ref().context("missing operation")?;
-        ensure!(
-            self.actual_hash()? == op.old.sha256,
-            "installed identity changed"
-        );
-        let dir = self.candidate_dir(journal)?;
-        ensure!(
-            fs::sha256(dir.file("candidate", MAX_BINARY_BYTES, true)?)? == op.candidate.sha256,
-            "candidate changed"
-        );
-        if self.copy_live_to_backup(journal).is_err() {
-            return self.finish(journal, Phase::Failed, Some("verification_failed"));
-        }
+        let verified: Result<Dir> = (|| {
+            let op = journal.operation.as_ref().context("missing operation")?;
+            ensure!(
+                self.actual_hash()? == op.old.sha256,
+                "installed identity changed"
+            );
+            let dir = self.candidate_dir(journal)?;
+            ensure!(
+                fs::sha256(dir.file("candidate", MAX_BINARY_BYTES, true)?)? == op.candidate.sha256,
+                "candidate changed"
+            );
+            self.copy_live_to_backup(journal)?;
+            Ok(dir)
+        })();
+        let dir = match verified {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.finish(journal, Phase::Failed, Some(failure_code(&error)))?;
+                return Err(error);
+            }
+        };
         self.phase(journal, Phase::Committing)?;
         self.phase(journal, Phase::Stopping)?;
         if stop_clean().await.is_err() {
@@ -792,7 +820,7 @@ impl Executor {
         }
         let result: Result<()> = async {
             dir.rename_to("candidate", &self.live, "parins")?;
-            self.launch(journal, false)?;
+            self.launch(journal, Phase::Starting)?;
             control("start").await?;
             self.phase(journal, Phase::Validating)?;
             self.wait_ready(journal).await?;
@@ -909,9 +937,16 @@ impl Executor {
             fs::sync_file(&output)?;
             dir.rename_to("rollback", &self.live, "parins")?;
         }
-        self.launch(journal, true)?;
+        self.launch(
+            journal,
+            if boot {
+                Phase::AwaitingReadiness
+            } else {
+                Phase::RollingBack
+            },
+        )?;
         if boot {
-            return self.phase(journal, Phase::AwaitingReadiness);
+            return Ok(());
         }
         journal
             .operation
@@ -983,7 +1018,7 @@ impl Executor {
         {
             // Live is still the old program and it was never stopped. Prove its
             // readiness instead of stopping and restarting it.
-            self.launch(&mut journal, true)?;
+            self.launch(&mut journal, Phase::RollingBack)?;
             if self.wait_ready(&journal).await.is_ok() {
                 return self.finish(&mut journal, Phase::RolledBack, Some("interrupted"));
             }
@@ -1910,6 +1945,85 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(serde_json::to_value(&journal.operation).unwrap(), owner);
+    }
+
+    #[test]
+    fn a_consumed_commit_service_read_failure_has_a_durable_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let executor = Executor::fixture(dir.path()).unwrap();
+        let mut journal = previous_journal();
+        journal.operation.as_mut().unwrap().status.phase = Phase::Staged;
+        journal.last_operation = None;
+        executor.persist(&journal).unwrap();
+        assert!(
+            executor
+                .commit_service(
+                    &mut journal,
+                    &"e".repeat(32),
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "systemctl show timed out"
+                    )
+                    .into())
+                )
+                .is_err()
+        );
+        let saved: Journal =
+            serde_json::from_slice(&std::fs::read(dir.path().join("journal.json")).unwrap())
+                .unwrap();
+        let public: PublicStatus =
+            serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).unwrap())
+                .unwrap();
+        for status in [saved.status(), public] {
+            let terminal = status
+                .terminal_for(&"a".repeat(32), &"f".repeat(32))
+                .unwrap();
+            assert_eq!(terminal.phase, Phase::Failed);
+            assert_eq!(terminal.reason.as_deref(), Some("verification_failed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_verification_failure_before_stop_is_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut executor = Executor::fixture(dir.path()).unwrap();
+        let mut journal = previous_journal();
+        journal.operation.as_mut().unwrap().status.phase = Phase::Staged;
+        journal.last_operation = None;
+        // No live binary exists; fail before any system service operation.
+        assert!(executor.commit(&mut journal).await.is_err());
+        let saved: Journal =
+            serde_json::from_slice(&std::fs::read(dir.path().join("journal.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.operation.unwrap().status.phase, Phase::Failed);
+    }
+
+    #[test]
+    fn boot_recovery_publishes_the_phase_the_application_verifies() {
+        for rollback_started in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let executor = Executor::fixture(dir.path()).unwrap();
+            let mut journal = previous_journal();
+            let op = journal.operation.as_mut().unwrap();
+            op.status.phase = Phase::AwaitingBootRecovery;
+            op.rollback_started = rollback_started;
+            journal.last_operation = None;
+            executor
+                .launch(&mut journal, Phase::AwaitingReadiness)
+                .unwrap();
+            let saved: Journal =
+                serde_json::from_slice(&std::fs::read(dir.path().join("journal.json")).unwrap())
+                    .unwrap();
+            let status = saved.status();
+            assert_eq!(
+                status.active_operation.unwrap().phase,
+                Phase::AwaitingReadiness
+            );
+            let pending = status.pending_launch.unwrap();
+            assert_eq!(pending.phase, Phase::AwaitingReadiness);
+            assert!(pending.skip_cache_restore);
+            assert_eq!(pending.identity, journal.installed);
+        }
     }
 
     #[test]

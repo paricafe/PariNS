@@ -338,12 +338,20 @@ impl Client {
         let connection = self.connection(spec, address, attempt, used).await?;
         let mut sender = connection.sender.clone();
         let in_flight = InFlight::new(&connection.usage);
-        let (request, outbound) = super::transport::doh_get(spec, query)?;
+        let (request, outbound) = super::transport::doh_request(spec, query)?;
+        let (parts, body) = request.into_parts();
         attempt.stage(Stage::RequestWrite);
-        // A GET is complete once its HEADERS frame is written: the server may
-        // answer it even if FIN or anything later fails.
-        let mut stream = RequestGuard(sender.send_request(request).await?, false);
+        // Once HEADERS were written, a later failure must never replay the query.
+        let mut stream = RequestGuard(
+            sender
+                .send_request(http::Request::from_parts(parts, ()))
+                .await?,
+            false,
+        );
         *sent = true;
+        if !body.is_empty() {
+            stream.0.send_data(body).await?;
+        }
         stream.0.finish().await?;
         Ok((stream, outbound, in_flight))
     }

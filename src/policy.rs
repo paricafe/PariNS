@@ -546,25 +546,35 @@ impl Policy {
                 decision: Decision::Unmatched,
                 witness: None,
             },
-            Some(found) => Explanation {
-                decision: if (found.group as u8) < 2 {
-                    Decision::Allowed
+            Some(found) => {
+                let found = if (found.group as u8) >= 2 {
+                    self.data
+                        .index
+                        .block_match(name, self.data.responses.local_slots)
+                        .expect("blocked lookup has a matching block rule")
                 } else {
-                    Decision::Blocked
-                },
-                witness: Some(Witness {
-                    source_id: {
-                        let id = &self.data.source_ids[usize::from(found.source_slot)];
-                        (!id.is_empty()).then(|| id.clone())
-                    },
-                    rule: self.data.index.rule(name, found),
-                    scope: if (found.group as u8).is_multiple_of(2) {
-                        Scope::Suffix
+                    found
+                };
+                Explanation {
+                    decision: if (found.group as u8) < 2 {
+                        Decision::Allowed
                     } else {
-                        Scope::Exact
+                        Decision::Blocked
                     },
-                }),
-            },
+                    witness: Some(Witness {
+                        source_id: {
+                            let id = &self.data.source_ids[usize::from(found.source_slot)];
+                            (!id.is_empty()).then(|| id.clone())
+                        },
+                        rule: self.data.index.rule(name, found),
+                        scope: if (found.group as u8).is_multiple_of(2) {
+                            Scope::Suffix
+                        } else {
+                            Scope::Exact
+                        },
+                    }),
+                }
+            }
         }
     }
     /// Parse and validate a complete replacement before the caller publishes it.

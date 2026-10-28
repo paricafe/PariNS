@@ -3,11 +3,12 @@
 //! Every attempt to query an authoritative server, over UDP or TCP, is admitted
 //! before its own timeout starts: it takes one concurrency permit, held until the
 //! attempt ends, and one token from a shared rate bucket.
+//! UDP streams send once per admitted attempt; the pool owns subsequent attempts.
 //! Closing the bounds at shutdown fails queries waiting for a permit at once and
 //! queries waiting for a token when they wake.
 
 use std::{
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -18,8 +19,8 @@ use std::{
 use futures_util::{FutureExt, future::BoxFuture};
 use hickory_resolver::{
     Admission, ConnectionProvider, PoolContext,
-    config::ConnectionConfig,
-    net::{NetError, runtime::TokioRuntimeProvider},
+    config::{ConnectionConfig, ProtocolConfig},
+    net::{NetError, runtime::TokioRuntimeProvider, udp::UdpClientStream},
 };
 use tokio::{
     sync::Semaphore,
@@ -124,6 +125,18 @@ impl ConnectionProvider for Provider {
         config: &ConnectionConfig,
         cx: &PoolContext,
     ) -> Result<Self::FutureConn, NetError> {
+        if matches!(config.protocol, ProtocolConfig::Udp) {
+            let stream =
+                UdpClientStream::builder(SocketAddr::new(ip, config.port), self.runtime.clone())
+                    .with_timeout(Some(cx.options.timeout))
+                    .with_os_port_selection(cx.options.os_port_selection)
+                    .avoid_local_ports(cx.options.avoid_local_udp_ports.clone())
+                    .with_bind_addr(config.bind_addr)
+                    // Each send must pass through admit; retries belong to the pool.
+                    .with_max_retries(1)
+                    .exchange();
+            return Ok(async move { Ok(stream) }.boxed());
+        }
         self.runtime.new_connection(ip, config, cx)
     }
 
@@ -154,7 +167,70 @@ impl ConnectionProvider for Provider {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
+    use hickory_proto::{
+        op::{DnsRequestOptions, Query},
+        rr::{Name, RecordType},
+    };
+    use hickory_resolver::{
+        NameServerPool, TlsConfig,
+        config::{NameServerConfig, ResolverOpts},
+        net::xfer::DnsHandle,
+    };
+
     use super::*;
+
+    #[tokio::test]
+    async fn each_udp_send_uses_one_admission() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let bounds = Bounds::new(1, 1);
+        let mut config = NameServerConfig::udp(address.ip());
+        config.connections[0].port = address.port();
+        let mut options = ResolverOpts::default();
+        options.timeout = Duration::from_secs(2);
+        options.server_attempt_timeout = Some(Duration::from_millis(800));
+        options.num_concurrent_reqs = 1;
+        let pool = NameServerPool::from_config(
+            [config],
+            Arc::new(PoolContext::new(options, TlsConfig::new().unwrap())),
+            Provider::new(bounds.clone()),
+        );
+        let lookups: Vec<_> = ["first.example.", "second.example."]
+            .into_iter()
+            .map(|name| {
+                let mut lookup = pool.lookup(
+                    Query::query(Name::from_ascii(name).unwrap(), RecordType::A),
+                    DnsRequestOptions::default(),
+                );
+                tokio::spawn(async move { lookup.next().await })
+            })
+            .collect();
+        let mut packet = [0; 2048];
+        tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        let first = Instant::now();
+        assert_eq!(bounds.sent.load(Ordering::Relaxed), 1);
+        assert_eq!(bounds.inflight(1), 1);
+        // A lost response must not cause UdpClientStream's internal 333 ms resend.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(700), server.recv_from(&mut packet))
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_millis(700), server.recv_from(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.elapsed() >= Duration::from_millis(900));
+        assert_eq!(bounds.sent.load(Ordering::Relaxed), 2);
+        for lookup in lookups {
+            assert!(lookup.await.unwrap().unwrap().is_err());
+        }
+        assert_eq!(bounds.inflight(1), 0);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn cancelled_waits_leave_no_debt() {

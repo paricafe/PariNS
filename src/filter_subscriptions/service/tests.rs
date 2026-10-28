@@ -1,7 +1,7 @@
 use super::super::{
     download::{REPRESENTATION, Validators},
     settings::SourceSettings,
-    store::PreparedMetadata,
+    store::{PreparedMetadata, SourceStatus as StoredStatus},
 };
 use super::*;
 use crate::https_reader::WireResponse;
@@ -716,6 +716,107 @@ async fn metadata_schedule_changes_and_aggregate_failure_have_bounded_next_due()
         service.snapshot().sources[0].error.as_ref().unwrap().code,
         "subscription_memory_limit"
     );
+}
+
+#[tokio::test]
+async fn remote_retry_after_is_bounded_and_stays_bounded_after_reopen() {
+    for retry_after in ["18446744073709551615", "Fri, 31 Dec 9999 23:59:59 GMT"] {
+        let mut one = source("one");
+        one.update_interval_hours = 1;
+        let (dir, service) = fixture(vec![one]).await;
+        let settings = service.state.lock().unwrap().settings.clone();
+        let original = service.snapshot();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_str(retry_after).unwrap(),
+        );
+        *service.responses.lock().unwrap() = Some(
+            vec![vec![WireResponse {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                headers,
+                body: Box::pin(futures_util::stream::empty()),
+                _connection: None,
+            }]]
+            .into(),
+        );
+        let before = unix_secs();
+        let begin = service.begin(refresh(&service)).await.unwrap();
+        let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+        service.commit(candidate).await.unwrap();
+        let state = service.snapshot();
+        let due = state.sources[0].next_update.unwrap();
+        assert!((before + 3600..=unix_secs() + 3600).contains(&due));
+        assert_eq!(state.sources[0].failures, 1);
+        assert_eq!(state.content_revision, original.content_revision);
+        assert_eq!(state.generation, original.generation);
+        assert!(service.next_due(due - 1).is_none());
+        assert!(service.next_due(due).is_some());
+        service.close();
+        drop(service);
+        let service = Service::open(
+            dir.path().join("sources"),
+            Policy::default(),
+            settings,
+            1,
+            vec![],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(service.snapshot().sources[0].next_update, Some(due));
+        assert_eq!(service.snapshot().sources[0].failures, 1);
+        assert!(service.next_due(due).is_some());
+    }
+}
+
+#[tokio::test]
+async fn failed_schedule_is_recapped_when_the_interval_changes_or_the_store_reopens() {
+    let mut one = source("one");
+    one.update_interval_hours = 168;
+    let (dir, service) = fixture(vec![one]).await;
+    let attempted = unix_secs();
+    {
+        let mut locked = service.store.lock().unwrap();
+        let store = locked.as_mut().unwrap();
+        let record = store.records()[0].clone();
+        store
+            .update_status(
+                &record.fingerprint,
+                StoredStatus {
+                    failures: 1,
+                    last_attempt: Some(attempted),
+                    next_update: Some(u64::MAX),
+                    last_error: Some("subscription_download".into()),
+                    error_line: None,
+                },
+            )
+            .unwrap();
+        service.observe_store(store);
+    }
+    let mut settings = service.state.lock().unwrap().settings.clone();
+    settings.sources[0].update_interval_hours = 1;
+    let candidate = service
+        .prepare_config(settings.clone(), Policy::default(), 1)
+        .await
+        .unwrap();
+    service.publish_config(candidate, 2);
+    let due = attempted + 3600;
+    assert_eq!(service.snapshot().sources[0].next_update, Some(due));
+    service.close();
+    drop(service);
+    let service = Service::open(
+        dir.path().join("sources"),
+        Policy::default(),
+        settings,
+        2,
+        vec![],
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(service.snapshot().sources[0].next_update, Some(due));
+    assert!(service.next_due(due).is_some());
 }
 
 #[tokio::test]

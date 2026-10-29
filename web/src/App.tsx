@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react';
 import { DURATION, SPRING_IOS, SPRING_IOS_FAST } from './components/beui/motion';
-import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
 import { Activity, BookOpenText, CircleArrowUp, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
 import { translate, presentIssue, type Language } from './i18n';
@@ -114,10 +115,19 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
   const confirmAction = useConfirm();
   const navigate = useNavigate();
   const location = useLocation();
+  const navigationType = useNavigationType();
   const reduced = useReducedMotion();
+  const [navigationHint, setNavigationHint] = useState<{ label: string; left: number; top: number; anchor: HTMLElement } | null>(null);
+  const hintTimer = useRef<number | undefined>(undefined);
   // Page transitions use the Web Animations API: time-based, no inline styles left behind, and already
   // finished if the tab was hidden. Phones push the new page in from the right (iOS); wider screens fade it up.
   const routeContent = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    // Browser history restores its own scroll position on POP navigation.
+    if (navigationType === 'POP') return;
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    document.getElementById('main-content')?.focus({ preventScroll: true });
+  }, [location.key, navigationType]);
   useEffect(() => {
     const element = routeContent.current;
     if (!element?.animate) return;
@@ -134,7 +144,16 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
   const barMaterial = useTransform(scrollY, [0, 48], [0, 1]);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [logoutError, setLogoutError] = useState<ConfigIssue | null>(null);
-  useEffect(() => { setMobileOpen(false); }, [location.pathname]);
+  useEffect(() => { setMobileOpen(false); setNavigationHint(null); }, [location.pathname]);
+  useEffect(() => {
+    if (!navigationHint) return;
+    const hide = () => { window.clearTimeout(hintTimer.current); setNavigationHint(null); };
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') hide(); };
+    window.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
+    window.addEventListener('keydown', key);
+    return () => { window.clearTimeout(hintTimer.current); window.removeEventListener('scroll', hide, true); window.removeEventListener('resize', hide); window.removeEventListener('keydown', key); };
+  }, [navigationHint]);
   useEffect(() => {
     if (!config.dirty) return;
     const warning = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
@@ -149,10 +168,21 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
     try { await logout(); } catch (reason) { setLogoutError(toConfigIssue(reason)); }
   };
   const current = navigation.find((item) => item.path === location.pathname);
+  const showNavigationHint = (element: HTMLElement, label: string) => {
+    window.clearTimeout(hintTimer.current);
+    if (!window.matchMedia?.('(min-width: 768px) and (max-width: 1023px)').matches) return;
+    const box = element.getBoundingClientRect();
+    setNavigationHint({ label, left: box.right + 8, top: (box.top + box.bottom) / 2, anchor: element });
+  };
+  const hideNavigationHint = () => { window.clearTimeout(hintTimer.current); hintTimer.current = window.setTimeout(() => setNavigationHint(null), 100); };
   const nav = (scope: string) => <nav className="nav-groups" aria-label={t('pagesLabel')}>
     {(['observe', 'config'] as const).map((group) => <div className="nav-group" key={group}>
       <span className="nav-caption">{t(group === 'observe' ? 'observe' : 'configuration')}</span>
-      {navigation.filter((item) => item.group === group).map((item) => <NavLink key={item.path} to={item.path} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`} onClick={(event) => {
+      {navigation.filter((item) => item.group === group).map((item) => <NavLink key={item.path} to={item.path} aria-label={t(item.key)} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+        onFocus={(event) => showNavigationHint(event.currentTarget, t(item.key))}
+        onBlur={(event) => { if (!event.currentTarget.matches(':hover')) hideNavigationHint(); }}
+        onPointerEnter={(event) => showNavigationHint(event.currentTarget, t(item.key))}
+        onPointerLeave={(event) => { if (document.activeElement !== event.currentTarget) hideNavigationHint(); }} onClick={(event) => {
         const draft = config.draft;
         if (item.path === '/advanced' && draft && (Object.keys(draft.fields).length || Object.keys(draft.optional).length || draft.rules !== null)) {
           event.preventDefault();
@@ -169,6 +199,8 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
     </div>)}
   </nav>;
   return <div className="app-shell">
+    {navigationHint && createPortal(<span className="nav-tooltip" aria-hidden="true" style={{ left: navigationHint.left, top: navigationHint.top }}
+      onPointerEnter={() => window.clearTimeout(hintTimer.current)} onPointerLeave={() => { if (document.activeElement !== navigationHint.anchor) hideNavigationHint(); }}>{navigationHint.label}</span>, document.body)}
     <aside className="sidebar" aria-label={t('navLabel')}>
       <div className="sidebar-brand"><span className="brand-mark" aria-hidden="true">P</span><span><strong>PariNS</strong><small>{t('brand')}</small></span><button type="button" className="icon-button mobile-close" onClick={() => setMobileOpen(false)} aria-label={t('closeNavigation')}><X size={20} /></button></div>
       {nav('desktop')}

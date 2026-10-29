@@ -8,9 +8,26 @@ vi.mock('../../session/context', () => ({ useSession: () => ({ api: { request: m
 vi.mock('../../components/ConfirmProvider', () => ({ useConfirm: () => mocks.confirm }));
 afterEach(() => { cleanup(); mocks.request.mockReset(); });
 
-const variant = (scope: string, state: string) => ({ name: 'example.test.', qtype: 'A', scope, state, dnssec_ok: false, edns: true, hits: 3 });
+const variant = (scope: string, state: string) => ({ name: 'example.test.', qtype: 'A', scope, state, dnssec_ok: false, edns: true, checking_disabled: false, recursion_desired: true, hits: 3 });
 
 describe('cache inspection', () => {
+  it('shows candidate flag differences against the submitted inspection, preserving the server explanation', async () => {
+    mocks.request.mockResolvedValue({ epoch: 1,
+      explanation: { state: 'miss', reason: 'no_matching_retained_entry', scope: null },
+      inspection: { variants: [{ ...variant('exact_ecs:192.0.2.0/24', 'fresh'), edns: false }], truncated: false } });
+    render(<CacheInspect language="en" dirty={false} />);
+    fireEvent.change(screen.getByLabelText('Domain'), { target: { value: 'example.test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
+    expect(await screen.findByText('Different request flags: EDNS')).toBeTruthy();
+    expect(screen.getByText('EDNS=0 · DO=0 · CD=0 · RD=1')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('EDNS'));
+    expect(screen.getByText('EDNS=1 · DO=0 · CD=0 · RD=1')).toBeTruthy();
+    expect(screen.getByText('Different request flags: EDNS')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
+    await waitFor(() => expect(screen.queryByText('Different request flags: EDNS')).toBeNull());
+    expect(screen.getByText('Miss: this query must ask an upstream.')).toBeTruthy();
+    expect(mocks.request).toHaveBeenLastCalledWith('cache/inspect', 'POST', expect.objectContaining({ edns: false }));
+  });
   it('explains a cached DNSSEC failure without suggesting another upstream request', async () => {
     mocks.request.mockResolvedValue({ epoch: 1,
       explanation: { state: 'failure', reason: 'cached_dnssec_failure', scope: 'no_ecs' },

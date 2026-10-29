@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Info } from 'lucide-react';
 import { SPRING_IOS_FAST } from './beui/motion';
@@ -8,7 +8,21 @@ export function InfoTip({ text, label }: { text: string; label: string }) {
   const [open, setOpen] = useState(false);
   const reduced = useReducedMotion();
   const root = useRef<HTMLSpanElement>(null);
+  const bubble = useRef<HTMLSpanElement>(null);
+  const [left, setLeft] = useState(-8);
   const id = useId();
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      if (!root.current || !bubble.current) return;
+      const anchor = root.current.getBoundingClientRect();
+      const right = document.documentElement.clientWidth - 8;
+      setLeft(Math.max(8 - anchor.left, Math.min(-8, right - anchor.left - bubble.current.offsetWidth)));
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [open, text]);
   useEffect(() => {
     if (!open) return;
     const down = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
@@ -26,7 +40,7 @@ export function InfoTip({ text, label }: { text: string; label: string }) {
       onClick={() => setOpen(!open)}>
       <Info size={15} aria-hidden="true" />
     </button>
-    <AnimatePresence>{open && <motion.span id={id} role="note" className="info-bubble"
+    <AnimatePresence>{open && <motion.span ref={bubble} id={id} role="note" className="info-bubble" style={{ left }}
       initial={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.94, y: -4 }} animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0 }} transition={reduced ? { duration: 0.12 } : SPRING_IOS_FAST}>{text}</motion.span>}</AnimatePresence>
   </span>;

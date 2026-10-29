@@ -33,7 +33,7 @@
   --divider: rgb(18 21 40 / .09); --control-border: rgb(18 21 40 / .2); --control-bg: rgb(255 255 255 / .62);
   --primary: #5b4dff; --primary-2: #0e9f92; --on-primary: #fff; --accent-soft: rgb(91 77 255 / .12);
   --focus: #5b4dff;
-  --ok: #0f8a45; --danger: #c81e3a; --warning: #a85507;
+  --ok: #08723b; --danger: #c81e3a; --warning: #a85507;
   --shadow: 0 1px 1px rgb(0 0 0 / .03), 0 8px 24px -16px rgb(0 0 0 / .12);
   --shadow-lift: 0 2px 6px rgb(0 0 0 / .04), 0 16px 36px -18px rgb(0 0 0 / .2);
   --radius: 24px; --radius-lg: 28px; --radius-control: 14px; --radius-sm: var(--radius-control); --radius-inner: 16px;
@@ -256,6 +256,7 @@ h3 { font-size: 15px; }
 .nav-item:hover { color: var(--text); background: var(--hover); }
 .nav-item.active { color: var(--text); font-weight: 650; background: transparent; }
 .nav-item svg { flex: 0 0 auto; }
+.nav-tooltip { position: fixed; z-index: 60; transform: translateY(-50%); padding: 7px 11px; border-radius: var(--radius-control); background: var(--surface-strong); color: var(--text); box-shadow: var(--shadow-lift); font-size: 13px; font-weight: 600; white-space: nowrap; }
 .nav-indicator { position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: color-mix(in srgb, var(--surface-strong) 78%, transparent); box-shadow: var(--glass-highlight); }
 .shell-main { min-width: 0; }
 .topbar { position: sticky; top: 0; z-index: 30; height: 64px; display: flex; align-items: center; gap: 12px; padding: 0 28px; background: color-mix(in srgb, var(--canvas) 62%, transparent); -webkit-backdrop-filter: blur(14px) saturate(150%); backdrop-filter: blur(14px) saturate(150%); border-bottom: 1px solid var(--edge-soft); }
@@ -309,6 +310,7 @@ meter { width: 100%; }
 .inspection-result { border-top: 1px solid var(--divider); margin-top: 18px; padding-top: 18px; }
 .variant-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .variant-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--divider); border-radius: var(--radius-inner); padding: 6px 6px 6px 12px; background: var(--raised); overflow-wrap: anywhere; }
+.variant-info { display: grid; gap: 4px; min-width: 0; }
 .more-options summary { cursor: pointer; font-weight: 600; width: fit-content; }
 .more-options[open] summary { margin-bottom: 10px; }
 

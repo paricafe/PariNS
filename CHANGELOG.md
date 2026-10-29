@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.2.0 — 2026-10-29
+
+### Fixed
+
+- Compact console navigation retains accessible names and visible labels on focus
+  or hover. Opening another page returns to its beginning while browser history
+  keeps its scroll restoration.
+- Light-theme success labels have stronger text contrast, and field help stays
+  within narrow viewports.
+- Cache inspection shows each candidate's DNS request flags and their differences
+  from the submitted inspection, preserving the cache's matching decisions.
+
 ## v0.1.30 — 2026-10-28
 
 ### Upgrade

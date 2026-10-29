@@ -178,7 +178,7 @@ export function CacheRules({ language }: { language: Language }) {
   </section>;
 }
 
-interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'failure' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Record<string, unknown>[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
+interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'failure' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Variant[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
 /** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
 export function restoreSummary(report: SnapshotReport, language: Language): string {
@@ -246,17 +246,24 @@ function CacheUsage({ language }: { language: Language }) {
   </>;
 }
 
-interface Variant { name: string; qtype: string; scope: string; state: 'fresh' | 'stale' | 'expired' }
+interface RequestFlags { edns: boolean; dnssec_ok: boolean; checking_disabled: boolean; recursion_desired: boolean }
+interface Variant extends RequestFlags { name: string; qtype: string; scope: string; state: 'fresh' | 'stale' | 'expired' }
+const requestFlags = [['edns', 'EDNS'], ['dnssec_ok', 'DO'], ['checking_disabled', 'CD'], ['recursion_desired', 'RD']] as const;
+const flagSummary = (flags: RequestFlags) => requestFlags.map(([key, label]) => `${label}=${Number(flags[key])}`).join(' · ');
 
 export function CacheInspect({ language, dirty }: { language: Language; dirty: boolean }) {
   const { api } = useSession();
   const confirmAction = useConfirm();
   const [name, setName] = useState(''); const [qtype, setQtype] = useState('A'); const [subnet, setSubnet] = useState('');
   const [edns, setEdns] = useState(true); const [dnssec, setDnssec] = useState(false); const [cd, setCd] = useState(false); const [rd, setRd] = useState(true);
-  const [result, setResult] = useState<Inspection | null>(null); const [error, setError] = useState<ConfigIssue | null>(null);
+  const [result, setResult] = useState<(Inspection & { flags: RequestFlags }) | null>(null); const [error, setError] = useState<ConfigIssue | null>(null);
   const [working, setWorking] = useState(false);
   const t = (key: string) => translate(`views.${key}`, language);
-  const request = () => api.request<Inspection>('cache/inspect', 'POST', { name: name.trim(), qtype, subnet: subnet.trim() || null, edns, dnssec_ok: dnssec, checking_disabled: cd, recursion_desired: rd });
+  const request = async () => {
+    const flags = { edns, dnssec_ok: dnssec, checking_disabled: cd, recursion_desired: rd };
+    const response = await api.request<Inspection>('cache/inspect', 'POST', { name: name.trim(), qtype, subnet: subnet.trim() || null, ...flags });
+    return { ...response, flags };
+  };
   const inspect = async (event: FormEvent) => {
     event.preventDefault(); setWorking(true); setResult(null); setError(null);
     try { setResult(await request()); }
@@ -272,7 +279,7 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
       setResult(await request());
     } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
   };
-  const variants = (result?.inspection.variants ?? []) as unknown as Variant[];
+  const variants = result?.inspection.variants ?? [];
   return <section className="panel"><h2>{t('inspectTitle')}</h2>{dirty && <p className="notice">{t('inspectActiveConfig')}</p>}
     <form onSubmit={(event) => void inspect(event)} className="fields-grid">
       <label className="field">{t('name')}<input value={name} onChange={(event) => setName(event.target.value)} required spellCheck={false} /></label>
@@ -287,12 +294,18 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
     {error && <p className="error" role="alert">{presentIssue(error, language)}</p>}
     {result && <div className="inspection-result"><h3>{t(`explain${result.explanation.state[0].toUpperCase()}${result.explanation.state.slice(1)}`)}</h3>
       <p>{t('explanation').replace('{reason}', t(result.explanation.reason)).replace('{scope}', (result.explanation.scope === null ? t('none') : hasTranslation(`views.${result.explanation.scope}`) ? t(result.explanation.scope) : result.explanation.scope))}</p>
+      <p className="small">{t('inspectionFlags')} <span className="mono">{flagSummary(result.flags)}</span></p>
       {result.inspection.ecs_sharing && <p>{t(`ecsSharing${result.inspection.ecs_sharing[0].toUpperCase()}${result.inspection.ecs_sharing.slice(1)}`)}</p>}
       <p className="muted small">{t('variants')}: {variants.length}</p>
-      <ul className="variant-list">{variants.map((variant, index) => <li key={index} className="variant-row">
-        <span>{scopeNote(variant.scope, language)} · {t(`entry_${variant.state}`)}</span>
+      <ul className="variant-list">{variants.map((variant, index) => {
+        const different = requestFlags.filter(([key]) => variant[key] !== result.flags[key]).map(([, label]) => label).join(', ');
+        return <li key={index} className="variant-row">
+        <div className="variant-info"><span>{scopeNote(variant.scope, language)} · {t(`entry_${variant.state}`)}</span>
+          <span className="mono small">{flagSummary(variant)}</span>
+          {different && <strong className="small">{translate('views.variantFlagsDiffer', language, { flags: different })}</strong>}
+        </div>
         <button type="button" className="button danger" disabled={working} onClick={(event) => void clear(variant, event.currentTarget)}>{t('clearEntry')}</button>
-      </li>)}</ul>
+      </li>; })}</ul>
       {result.inspection.truncated && <p>{t('variantsTruncated')}</p>}
     </div>}
   </section>;

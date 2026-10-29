@@ -1,0 +1,52 @@
+CHANGELOG.md
+  s_aa37914330e67a::t_7f8d512827c5eb 5-6
+  s_aa37914330e67a::t_9ea79f14222125 7-16
+scripts/bootstrap.sh
+  s_aa37914330e67a::t_7f8d512827c5eb 11-12,41
+web/src/pages/config/CacheInspect.test.tsx
+  s_aa37914330e67a::t_9ea79f14222125 11,14-27,29-30
+  s_aa37914330e67a::t_4146fd78b8d5fc 28
+web/src/components/InfoTip.tsx
+  s_aa37914330e67a::t_fd4097f4d7f998 1,11-12,14-25,43
+web/src/i18n/views.ts
+  s_aa37914330e67a::t_fd4097f4d7f998 76-78
+web/src/components/InfoTip.test.tsx
+  s_aa37914330e67a::t_9ea79f14222125 2,6,9-23
+Cargo.toml
+  s_aa37914330e67a::t_7f8d512827c5eb 3
+web/src/style.css
+  s_aa37914330e67a::t_9ea79f14222125 259,313
+  s_aa37914330e67a::t_fd4097f4d7f998 36
+web/src/App.tsx
+  s_aa37914330e67a::t_9ea79f14222125 120-121,150-151,154-155,172,175,177,183,185,202-203
+  s_aa37914330e67a::t_fd4097f4d7f998 1-2,5,118,125-130,147-149,152-153,156,171,173-174,176,181-182,184
+web/src/pages/config/SettingsPage.tsx
+  s_aa37914330e67a::t_fd4097f4d7f998 249-252,259,262-266,297,303-304,306
+  s_aa37914330e67a::t_4146fd78b8d5fc 181,282,300-302,305,308
+Cargo.lock
+  s_9e3b28a29e4d21::t_b5a2862c879546 1236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "863dd63f0c8db2140591e240aaf9e62d238013ff",
+  "prompts": {},
+  "sessions": {
+    "s_9e3b28a29e4d21": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd59-f9e9-7cc3-816d-e1a2d857965a",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+web/src/style.css
+  s_aa37914330e67a::t_d86701e713201e 257,260,269-270
+CHANGELOG.md
+  s_aa37914330e67a::t_186fdffb8311a8 5-6
+  s_aa37914330e67a::t_d39e97d07bc1cb 7-11
+Cargo.toml
+  s_aa37914330e67a::t_186fdffb8311a8 3
+scripts/bootstrap.sh
+  s_aa37914330e67a::t_186fdffb8311a8 11-12,41
+Cargo.lock
+  s_9e3b28a29e4d21::t_10549b8085f1ee 1236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3a72ee4613a27061dd8f1df0a8d56822c90551ca",
+  "prompts": {},
+  "sessions": {
+    "s_9e3b28a29e4d21": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd59-f9e9-7cc3-816d-e1a2d857965a",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.2.1 — 2026-10-30
+
+### Fixed
+
+- Console page focus no longer draws a border around the full content area.
+  Selected navigation items use a tinted background and accent text in both themes.
+
 ## v0.2.0 — 2026-10-29
 
 ### Fixed

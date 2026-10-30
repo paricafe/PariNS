@@ -254,10 +254,10 @@ h3 { font-size: 15px; }
 .nav-caption { display: block; color: var(--faint); padding: 0 12px; font-size: 12px; font-weight: 600; letter-spacing: .02em; margin-bottom: 6px; }
 .nav-item { position: relative; isolation: isolate; display: flex; align-items: center; gap: 11px; padding: 9px 12px; min-height: 40px; border-radius: calc(var(--radius-lg) - 12px); text-decoration: none; color: var(--muted); font-weight: 550; transition: color .2s ease, background-color .2s ease; }
 .nav-item:hover { color: var(--text); background: var(--hover); }
-.nav-item.active { color: var(--text); font-weight: 650; background: transparent; }
+.nav-item.active { color: color-mix(in srgb, var(--primary) 80%, var(--text)); font-weight: 650; background: transparent; }
 .nav-item svg { flex: 0 0 auto; }
 .nav-tooltip { position: fixed; z-index: 60; transform: translateY(-50%); padding: 7px 11px; border-radius: var(--radius-control); background: var(--surface-strong); color: var(--text); box-shadow: var(--shadow-lift); font-size: 13px; font-weight: 600; white-space: nowrap; }
-.nav-indicator { position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: color-mix(in srgb, var(--surface-strong) 78%, transparent); box-shadow: var(--glass-highlight); }
+.nav-indicator { position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 22%, transparent); }
 .shell-main { min-width: 0; }
 .topbar { position: sticky; top: 0; z-index: 30; height: 64px; display: flex; align-items: center; gap: 12px; padding: 0 28px; background: color-mix(in srgb, var(--canvas) 62%, transparent); -webkit-backdrop-filter: blur(14px) saturate(150%); backdrop-filter: blur(14px) saturate(150%); border-bottom: 1px solid var(--edge-soft); }
 .topbar-title { font-weight: 650; font-size: 14px; color: var(--muted); }
@@ -266,6 +266,8 @@ h3 { font-size: 15px; }
 .theme-button-icon { display: grid; place-items: center; grid-area: 1 / 1; }
 .preferences select { min-height: 34px; border-radius: var(--radius-pill); border-color: var(--edge-soft); background: var(--surface); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font-size: 13px; padding: 5px 12px; }
 .main-content { width: min(100%, 1280px); margin: 0 auto; padding: 24px 32px 112px; min-height: calc(100vh - 64px); }
+/* Route changes focus this landmark; interactive controls keep their visible focus rings. */
+.main-content:focus { outline: none; }
 .page-stack, .settings-stack { display: grid; gap: 18px; }
 /* Cards enter in sequence once; polling re-renders keep their elements. */
 .page-stack > *, .settings-stack > * { animation: rise .55s var(--ease-out) both; }

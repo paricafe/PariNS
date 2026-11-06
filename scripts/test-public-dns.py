@@ -77,7 +77,7 @@ async def probe(args, result):
     from aioquic.asyncio import QuicConnectionProtocol
     from aioquic.quic.configuration import QuicConfiguration
     from aioquic.quic.connection import QuicConnection
-    from aioquic.quic.events import HandshakeCompleted, ProtocolNegotiated
+    from aioquic.quic.events import HandshakeCompleted, ProtocolNegotiated, StreamDataReceived
     from aioquic.h3.connection import H3Connection
     from aioquic.h3.events import DataReceived, HeadersReceived
 
@@ -121,6 +121,10 @@ async def probe(args, result):
                             self.response.set_result(bytes(self.body))
                     except ValueError as error:
                         self.response.set_exception(error)
+                # H3 owns its request and control streams. Generic StreamWriters
+                # would close them on collection, including peer-only streams.
+                if isinstance(event, StreamDataReceived):
+                    return
             super().quic_event_received(event)
 
     configuration = QuicConfiguration(

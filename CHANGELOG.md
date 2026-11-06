@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- The public HTTP/3 acceptance client keeps request and control streams owned by
+  HTTP/3 instead of closing them through generic QUIC stream writers.
+
 ## v0.2.2 — 2026-11-06
 
 ### Upgrade

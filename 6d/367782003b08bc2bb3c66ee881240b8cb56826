@@ -1,0 +1,26 @@
+scripts/test-public-dns.py
+  s_aa37914330e67a::t_55ae9a06b8107a 81,121-133
+  s_aa37914330e67a::t_326a5057f6b265 134
+CHANGELOG.md
+  s_aa37914330e67a::t_55ae9a06b8107a 9-10
+scripts/test-public-dns-tests.py
+  s_aa37914330e67a::t_71b7c58f06b4c3 252-253
+  s_aa37914330e67a::t_12b2fdb0565311 21,169,196,199-202,206-211,251,254-257,260,263-267,302-309
+  s_aa37914330e67a::t_15540434112d78 310
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6d367782003b08bc2bb3c66ee881240b8cb56826",
+  "prompts": {},
+  "sessions": {
+    "s_aa37914330e67a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6.1-terra"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

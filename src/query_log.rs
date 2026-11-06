@@ -36,8 +36,8 @@ impl Settings {
             "query_log.retention_secs must be 60..=2592000"
         );
         anyhow::ensure!(
-            (1_048_576..=536_870_912).contains(&self.max_bytes),
-            "query_log.max_bytes must be 1048576..=536870912"
+            (1_048_576..=2_147_483_648).contains(&self.max_bytes),
+            "query_log.max_bytes must be 1048576..=2147483648"
         );
         Ok(())
     }
@@ -351,6 +351,34 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_log_byte_budget_and_database_capacity() {
+        for max_bytes in [1_048_576, 1_610_612_736, 2_147_483_648] {
+            let settings = Settings {
+                max_bytes,
+                ..Default::default()
+            };
+            assert!(settings.validate().is_ok(), "{max_bytes}");
+        }
+        for max_bytes in [1_048_575, 2_147_483_649] {
+            let settings = Settings {
+                max_bytes,
+                ..Default::default()
+            };
+            assert!(settings.validate().is_err(), "{max_bytes}");
+        }
+
+        let mut runtime = crate::storage::RuntimeSettings::default();
+        runtime.query_log.max_bytes = 1_610_612_736;
+        runtime.storage.max_database_bytes = 1_610_612_735;
+        assert_eq!(
+            runtime.validate().unwrap_err().to_string(),
+            "query_log.max_bytes must not exceed storage.max_database_bytes"
+        );
+        runtime.storage.max_database_bytes = 1_610_612_736;
+        assert!(runtime.validate().is_ok());
+    }
 
     #[tokio::test]
     async fn an_undelivered_answer_is_recorded_as_cancelled_with_its_decisions() {

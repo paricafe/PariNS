@@ -1,3 +1,6 @@
+// @vitest-environment jsdom
+import { createElement } from "react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import {
   ModelError, cacheRuleDraft, convertFieldValue, decodeCacheRule, defaultCacheRule,
@@ -5,6 +8,7 @@ import {
   settingPages, splitListener,
 } from "../index";
 import { presentIssue } from "../../i18n";
+import { UnitInput } from "../../components/UnitInput";
 
 describe("configuration form model", () => {
   it("describes the settings paths and one DoH listener with an HTTP/3 switch", () => {
@@ -153,6 +157,30 @@ describe("unit field ranges", () => {
     try { convertFieldValue(fieldFor(path), draft); } catch (error) { return error as ModelError; }
     throw new Error("expected a range error");
   };
+
+  it("validates the query log byte budget after exact decimal unit conversion", () => {
+    const field = fieldFor("query_log.max_bytes");
+    let draft = "";
+    const view = render(createElement(UnitInput, {
+      id: "log-budget", label: "Log budget", family: "bytes", max: field.max,
+      value: "1073741824", language: "en", onChange: (value: string) => { draft = value; },
+    }));
+    try {
+      const input = screen.getByRole("textbox");
+      fireEvent.change(input, { target: { value: "1.5" } });
+      expect(draft).toBe("1610612736");
+      expect(convertFieldValue(field, draft)).toBe(1610612736);
+      fireEvent.change(input, { target: { value: "2" } });
+      expect(convertFieldValue(field, draft)).toBe(2147483648);
+      expect(convertFieldValue(field, "1048576")).toBe(1048576);
+      for (const raw of ["1048575", "2147483649"]) {
+        expect(() => convertFieldValue(field, raw)).toThrow(ModelError);
+      }
+    } finally {
+      view.unmount();
+      cleanup();
+    }
+  });
 
   it("reports unit field bounds in their largest exact unit, in both languages", () => {
     // 65 GB is above the 64 GiB snapshot limit.

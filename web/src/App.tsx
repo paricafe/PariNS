@@ -24,6 +24,7 @@ import { UpdateHint } from './features/updates/UpdatePanel';
 import { AccountControls } from './features/account/AccountControls';
 import { useAutoConfirm } from './components/useAutoConfirm';
 import { getPath } from './model/config';
+import { ConfigErrorNotice } from './config/fieldErrors';
 
 const navigation = [
   { path: '/overview', key: 'overview', icon: Activity, group: 'observe' },
@@ -213,7 +214,7 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
     </header><main id="main-content" tabIndex={-1} className="main-content">
       <a className="skip-target sr-only" id="main-content-start" href="#main-content">{t('skip')}</a>
       {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
-      {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <p role="alert" className="notice error">{presentIssue(config.error, language)}</p>}
+      {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <ConfigErrorNotice error={config.error} language={language} onDismiss={() => config.setError(null)} />}
       <div ref={routeContent} className="route-content"><Routes>
         <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
         <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} sourceNames={Object.fromEntries((config.draft?.savedSources ?? []).map((source) => [source.id, source.name]))} />} />

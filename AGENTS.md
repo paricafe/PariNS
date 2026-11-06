@@ -324,6 +324,9 @@ meaningful behavior or regression gap.
 
 - Keep every `--ephemeral-ci` guard. Tests never change host DNS, firewall rules,
   certificate trust or system services; use isolated fixtures for local acceptance.
+- Public DNS acceptance uses `scripts/test-public-dns.py` for one DoQ or HTTP/3
+  query to an explicitly authorized address, certificate hostname and port. Keep
+  public-CA verification and the bounded deadline; no application retries or load.
 - For performance changes, keep a baseline, repeat the same workload with
   correctness checks (`examples/bench_cache.rs` for the cache), and report
   regressions and variance; cache operations per second are not wire DNS QPS.

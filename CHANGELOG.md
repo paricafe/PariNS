@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## v0.2.2 — 2026-11-06
+
+### Upgrade
+
+- Query-log byte budgets above 512 MiB require this release. Reduce that budget
+  before downgrading to a version with the former limit.
+
+### Added
+
+- Authenticated cache diagnostics show each shard's positive and negative budgets
+  and admission evictions by limiting resource and the victim's lifetime state.
+- The public DNS acceptance probe supports verified HTTP/3 as well as DoQ, with
+  separate handshake and response timings and bounded response validation.
+
+### Changed
+
+- The configurable query-log byte ceiling is 2 GiB; defaults and the independent
+  database, queue and retention limits are unchanged.
+
+### Fixed
+
+- Narrow console unit controls remain visible, destructive confirmations have
+  stronger text contrast, and validation identifies and focuses the owning field.
+- Recursive outbound rate accounting no longer counts the same refill interval
+  twice when concurrent callers acquire the token-bucket lock out of order.
+
 ## v0.2.1 — 2026-10-30
 
 ### Fixed

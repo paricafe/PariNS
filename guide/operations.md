@@ -305,6 +305,14 @@ result made before the cancellation. This includes an answer that fails to write
 on any transport. Prefetch is not logged. Query data never appears
 in metrics or the service log.
 
+`query_log.max_bytes` accepts 1 MiB through 2 GiB and must not exceed
+`storage.max_database_bytes`; the default remains unchanged. A retention duration
+is an upper age limit, not a guaranteed coverage window. Size a desired window
+from its observed request rate and per-record charge, then allow for database
+indexes, WAL and filesystem headroom. Check actual coverage and cleanup reasons
+after the window has elapsed. Before downgrading to a version limited to 512 MiB,
+reduce the configured log byte budget to that version's supported range.
+
 **Statistics.** The **Overview** page shows totals, the cache hit rate, blocked
 queries, latency and response codes, plus trends sampled once a minute (7 days by
 default). The hit rate is the share of cache lookups that needed no upstream request
@@ -331,6 +339,17 @@ the prior version can open it and return to its own journal mode.
 Refresh diagnostics reset when the cache generation changes and are not saved
 with statistics or snapshots. Inspection does not mark an entry as used; unused
 expired entries are counted when a lookup or cleanup encounters them.
+
+Authenticated status includes `diagnostics.cache.capacity.shards`: each shard's
+positive and negative resident entry/byte usage and limits, plus admission
+evictions by `entry_limit`, `byte_limit`, `entry_and_byte_limit` or `variant_limit`.
+Each cause separates victims that were `fresh`, `retained` past fresh lifetime
+but within retention, or `expired` past retention when evicted. These counters
+exclude expiry cleanup, replacement and explicit invalidation, and restart with
+the cache generation. Compare deltas only with the same cache `since_ms`.
+Reading this state does not expire entries or update recency, hits or refresh
+outcomes. Resident entry counts are not a census of fresh answers; byte charges
+can outlive eviction while a reader holds the entry.
 
 The storage status shows a low-space warning when free space falls below 10% or
 below the database limit plus twice the snapshot limit plus 64 MiB.

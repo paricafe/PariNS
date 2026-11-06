@@ -3,6 +3,80 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(usize)]
+pub(super) enum EvictionReason {
+    #[serde(rename = "entry_limit")]
+    Entries,
+    #[serde(rename = "byte_limit")]
+    Bytes,
+    #[serde(rename = "entry_and_byte_limit")]
+    EntriesAndBytes,
+    #[serde(rename = "variant_limit")]
+    Variants,
+}
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(super) enum EvictionState {
+    Fresh,
+    Retained,
+    Expired,
+}
+
+#[derive(Default)]
+pub(super) struct Evictions([[u64; 3]; 4]);
+
+#[derive(Serialize)]
+pub(super) struct EvictionSnapshot {
+    reason: EvictionReason,
+    fresh: u64,
+    retained: u64,
+    expired: u64,
+}
+
+impl Evictions {
+    pub fn record(&mut self, reason: EvictionReason, state: EvictionState) {
+        self.0[reason as usize][state as usize] += 1;
+    }
+
+    pub fn snapshot(&self) -> [EvictionSnapshot; 4] {
+        [
+            EvictionReason::Entries,
+            EvictionReason::Bytes,
+            EvictionReason::EntriesAndBytes,
+            EvictionReason::Variants,
+        ]
+        .map(|reason| {
+            let [fresh, retained, expired] = self.0[reason as usize];
+            EvictionSnapshot {
+                reason,
+                fresh,
+                retained,
+                expired,
+            }
+        })
+    }
+}
+
+/// Resident occupancy, not a census of fresh answers. Byte charges include held readers.
+#[derive(Serialize)]
+pub(super) struct PartitionSnapshot {
+    pub entries: usize,
+    pub max_entries: usize,
+    pub bytes: usize,
+    pub max_bytes: usize,
+    pub evictions: [EvictionSnapshot; 4],
+}
+
+#[derive(Serialize)]
+pub(super) struct ShardSnapshot {
+    pub shard: usize,
+    pub positive: PartitionSnapshot,
+    pub negative: PartitionSnapshot,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(usize)]

@@ -12,14 +12,20 @@ on:
         required: true
         type: string
       port:
-        description: DoQ UDP port
+        description: UDP port (normally 853 for DoQ, 443 for HTTP/3)
         required: true
         default: '853'
         type: string
+      protocol:
+        description: DNS transport
+        required: true
+        default: doq
+        type: choice
+        options: [doq, h3]
 permissions:
   contents: read
 jobs:
-  doq:
+  probe:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -30,22 +36,23 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/parins-doq-client"
           "$RUNNER_TEMP/parins-doq-client/bin/pip" install --disable-pip-version-check --only-binary=:all: aioquic==1.2.0 dnspython==2.7.0 certifi==2026.7.22
-          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("scripts/test-public-doq.py").read_text())'
-      - name: One verified DoQ query
+          "$RUNNER_TEMP/parins-doq-client/bin/python" scripts/test-public-dns-tests.py
+      - name: One verified DNS query
         env:
           DOQ_ADDRESS: ${{ inputs.address }}
           DOQ_SERVER_NAME: ${{ inputs.server_name }}
           DOQ_PORT: ${{ inputs.port }}
+          DNS_PROTOCOL: ${{ inputs.protocol }}
         run: |
           set -o pipefail
           mkdir -p artifacts/public-dns
-          "$RUNNER_TEMP/parins-doq-client/bin/python" scripts/test-public-doq.py \
+          "$RUNNER_TEMP/parins-doq-client/bin/python" scripts/test-public-dns.py \
             --address "$DOQ_ADDRESS" --server-name "$DOQ_SERVER_NAME" --port "$DOQ_PORT" \
-            | tee artifacts/public-dns/doq.json
+            --protocol "$DNS_PROTOCOL" | tee artifacts/public-dns/probe.json
       - name: Preserve probe evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: public-doq-${{ github.run_id }}
+          name: public-dns-${{ github.run_id }}
           if-no-files-found: warn
-          path: artifacts/public-dns/doq.json
+          path: artifacts/public-dns/probe.json

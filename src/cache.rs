@@ -8,6 +8,10 @@
 //! observed lookup first returns it stale or it leaves the cache unseen
 //! (retention expiry, eviction, invalidation or replacement). Entries still
 //! waiting when a generation ends are not counted.
+//! Capacity diagnostics copy bounded per-shard partition occupancy and admission
+//! eviction counters. Victims are classified at eviction as fresh, retained past
+//! fresh lifetime, or expired past retention. Reading diagnostics never scans,
+//! expires or touches entries; resident occupancy is not a fresh working-set size.
 
 use std::{
     collections::{HashMap, hash_map::RandomState},
@@ -41,6 +45,7 @@ mod sharing;
 pub use decision::{
     DecisionReason, LookupDecision, LookupOutcome, LookupResult, StoreDecision, StoreOutcome,
 };
+use decision::{EvictionReason, EvictionState, Evictions, PartitionSnapshot, ShardSnapshot};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Key {
@@ -141,6 +146,7 @@ struct Partition {
     charged: Arc<AtomicUsize>,
     max_entries: usize,
     max_bytes: usize,
+    evictions: Evictions,
 }
 
 impl Partition {
@@ -152,6 +158,17 @@ impl Partition {
             charged: Arc::new(AtomicUsize::new(0)),
             max_entries,
             max_bytes,
+            evictions: Evictions::default(),
+        }
+    }
+
+    fn snapshot(&self) -> PartitionSnapshot {
+        PartitionSnapshot {
+            entries: self.lru.len(),
+            max_entries: self.max_entries,
+            bytes: self.charged.load(Ordering::Relaxed),
+            max_bytes: self.max_bytes,
+            evictions: self.evictions.snapshot(),
         }
     }
 }
@@ -369,6 +386,22 @@ impl Cache {
         }
     }
 
+    fn evict(&self, shard: &mut Shard, part: usize, id: u64, now: Instant, reason: EvictionReason) {
+        let partition = &mut shard.partitions[part];
+        let entry = partition.lru.peek(&id).expect("admission eviction target");
+        let age = now.saturating_duration_since(entry.inserted);
+        let state = if age < entry.lifetime {
+            EvictionState::Fresh
+        } else if age < entry.retention {
+            EvictionState::Retained
+        } else {
+            EvictionState::Expired
+        };
+        partition.evictions.record(reason, state);
+        shard.counts.evictions += 1;
+        self.remove(shard, part, id);
+    }
+
     fn prune(&self, shard: &mut Shard, key: &Key, now: Instant) {
         let expired: Vec<_> = shard
             .buckets
@@ -440,6 +473,21 @@ impl Cache {
         object.insert("ecs_shared_hits".into(), json!(hits));
         object.insert("ecs_shared_entries".into(), json!(entries));
         object.insert("ecs_sharing_revocations".into(), json!(revocations));
+        // Copy fixed-size state under each lock; serialize only after releasing it.
+        let capacity: Vec<_> = self
+            .shards
+            .iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                let shard = shard.lock().expect("cache shard poisoned");
+                ShardSnapshot {
+                    shard: index,
+                    positive: shard.partitions[0].snapshot(),
+                    negative: shard.partitions[1].snapshot(),
+                }
+            })
+            .collect();
+        object.insert("capacity".into(), json!({"shards":capacity}));
         value
     }
 
@@ -951,22 +999,25 @@ impl Cache {
                 return StoreDecision::rejected(DecisionReason::VariantLimit, superseded);
             };
             let (p, id) = (usize::from(entry.negative), entry.id);
-            self.remove(shard, p, id);
-            shard.counts.evictions += 1;
+            self.evict(shard, p, id, now, EvictionReason::Variants);
         }
         loop {
             let p = &shard.partitions[part];
-            if p.lru.len() < p.max_entries
-                && p.charged.load(Ordering::Relaxed) + charge <= p.max_bytes
-            {
+            let entry_limit = p.lru.len() >= p.max_entries;
+            let byte_limit = p.charged.load(Ordering::Relaxed) + charge > p.max_bytes;
+            if !entry_limit && !byte_limit {
                 break;
             }
             let Some((&id, _)) = p.lru.peek_lru() else {
                 shard.counts.rejections += 1;
                 return StoreDecision::rejected(DecisionReason::Capacity, superseded);
             };
-            self.remove(shard, part, id);
-            shard.counts.evictions += 1;
+            let reason = match (entry_limit, byte_limit) {
+                (true, true) => EvictionReason::EntriesAndBytes,
+                (true, false) => EvictionReason::Entries,
+                _ => EvictionReason::Bytes,
+            };
+            self.evict(shard, part, id, now, reason);
         }
         shard.clock += 1;
         let id = shard.clock;

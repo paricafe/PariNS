@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { BannerProvider } from '../../components/Banner';
 import { ConfirmProvider } from '../../components/ConfirmProvider';
@@ -49,10 +49,31 @@ describe('resolution mode settings', () => {
     expect((screen.getByLabelText('地址（每行一个）') as HTMLTextAreaElement).disabled).toBe(false);
   });
 
-  it('keeps a hidden recursion field reachable while it holds a validation error', () => {
+  it('opens and focuses a hidden recursion field and associates its validation error', async () => {
     mocks.fields = { 'recursion.max_depth': '3' };
     mocks.error = new ModelError('settings.validation.range', 'recursion.max_depth', { min: 4, max: 64 });
-    render(page());
-    expect(screen.getByRole('heading', { name: 'Recursive resolution' })).toBeTruthy();
+    const inertAtFocus: boolean[] = [];
+    const recordFocus = (event: FocusEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.id === 'setting-recursion-max_depth') inertAtFocus.push(Boolean(target.closest('[inert]')));
+    };
+    document.addEventListener('focus', recordFocus, true);
+    try {
+      render(page());
+      expect(screen.getByRole('heading', { name: 'Recursive resolution' })).toBeTruthy();
+      const input = screen.getByLabelText('Maximum depth');
+      await waitFor(() => expect(document.activeElement).toBe(input));
+      expect(inertAtFocus).toEqual([false]);
+      expect(input.getAttribute('aria-invalid')).toBe('true');
+      const descriptions = (input.getAttribute('aria-describedby') ?? '').split(/\s+/).map((id) => document.getElementById(id)?.textContent).join(' ');
+      expect(descriptions).toContain('Enter a whole number from 4 to 64.');
+      const more = within(input.closest('section')!).getByRole('button', { name: 'More options' });
+      expect(more.getAttribute('aria-expanded')).toBe('true');
+      fireEvent.click(more);
+      expect(more.getAttribute('aria-expanded')).toBe('false');
+      expect(input.closest('[inert]')).not.toBeNull();
+    } finally {
+      document.removeEventListener('focus', recordFocus, true);
+    }
   });
 });

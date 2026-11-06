@@ -129,7 +129,7 @@ export const settingPages = {
     )),
   ]),
   storage: page("storage", [
-    group("queryLog", [visible(field("query_log.enabled", "checkbox", true)), number("query_log.max_entries", 1, 1000000), number("query_log.max_bytes", 1048576, 536870912), number("query_log.retention_secs", 60, 2592000)]),
+    group("queryLog", [visible(field("query_log.enabled", "checkbox", true)), number("query_log.max_entries", 1, 1000000), number("query_log.max_bytes", 1048576, 2147483648), number("query_log.retention_secs", 60, 2592000)]),
     group("statistics", [number("statistics.retention_secs", 3600, 31536000), number("statistics.max_samples", 60, 525600), number("statistics.reset_interval_days", 0, 3650, true)]),
     group("storageAdvanced", [number("storage.max_database_bytes", 16777216, 4294967296, true), advanced(number("storage.flush_interval_ms", 100, 5000)), advanced(number("storage.cleanup_interval_secs", 10, 3600)), advanced(number("storage.queue_max_entries", 128, 65536)), advanced(number("storage.queue_max_bytes", 1048576, 67108864))]),
   ]),

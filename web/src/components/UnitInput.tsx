@@ -33,8 +33,8 @@ function offeredUnits(family: UnitFamily, max: number | undefined, current: numb
   return UNITS[family].filter(([, factor]) => max === undefined || factor <= max || factor === current);
 }
 
-export function UnitInput({ id, label, family, max, value, disabled, language, onChange, describedBy }: {
-  id: string; label: string; family: UnitFamily; max?: number; value: string; disabled?: boolean; language: Language; onChange(value: string): void; describedBy?: string;
+export function UnitInput({ id, label, family, max, value, disabled, language, onChange, describedBy, invalid }: {
+  id: string; label: string; family: UnitFamily; max?: number; value: string; disabled?: boolean; language: Language; onChange(value: string): void; describedBy?: string; invalid?: boolean;
 }) {
   const [state, setState] = useState(() => initial(family, value));
   const emitted = useRef(value);
@@ -47,7 +47,7 @@ export function UnitInput({ id, label, family, max, value, disabled, language, o
     onChange(next);
   };
   return <div className="unit-input">
-    <input id={id} type="text" inputMode="decimal" value={state.text} disabled={disabled} spellCheck={false} autoComplete="off" aria-describedby={describedBy}
+    <input id={id} type="text" inputMode="decimal" value={state.text} disabled={disabled} spellCheck={false} autoComplete="off" aria-describedby={describedBy} aria-invalid={invalid || undefined}
       onChange={(event) => emit(event.target.value, state.factor)} />
     <Segmented label={`${label} · ${translate('shell.unit', language)}`} value={String(state.factor)} disabled={disabled}
       options={offeredUnits(family, max, state.factor).map(([key, factor]) => ({ value: String(factor), label: translate(`shell.unit_${key}`, language) }))}

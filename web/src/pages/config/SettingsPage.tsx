@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Ellipsis } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { SPRING_IOS } from '../../components/beui/motion';
@@ -27,32 +27,38 @@ import { SubscriptionsPanel } from '../../features/subscriptions/SubscriptionsPa
 import { UnitInput, unitFamily } from '../../components/UnitInput';
 import { cacheBreakdown, cacheHitRate, type StatusView } from '../observability/metrics';
 import { scopeNote } from '../observability/diagnostics';
+import { cacheRuleFields, ConfigErrorNotice, fieldErrorTarget, matchesFieldError } from '../../config/fieldErrors';
 
 const cacheTabs = ['usage', 'settings', 'rules', 'inspect'] as const;
 type CacheTab = typeof cacheTabs[number];
 
-function FieldRow({ field, language, value, onChange, disabled }: { field: SettingField; language: Language; value: RawFieldValue; onChange(value: RawFieldValue): void; disabled?: boolean }) {
+function FieldRow({ field, language, value, onChange, disabled, issue }: { field: SettingField; language: Language; value: RawFieldValue; onChange(value: RawFieldValue): void; disabled?: boolean; issue?: ModelError }) {
   const id = `setting-${field.path.replaceAll('.', '-')}`;
   const t = (key: string) => translate(key, language);
   const label = t(field.labelKey);
   const help = field.helpKey ? t(field.helpKey) : null;
   const tip = help && !field.visibleHelp ? <InfoTip text={help} label={translate('shell.about', language, { label })} /> : null;
   const noteId = help && field.visibleHelp ? `${id}-help` : undefined;
+  const errorId = issue ? `${id}-error` : undefined;
+  const describedBy = [noteId, errorId].filter(Boolean).join(' ') || undefined;
+  const invalid = issue ? true : undefined;
+  const errorNote = issue ? <small id={errorId} className="row-note field-error">{presentIssue(issue, language)}</small> : null;
   const note = noteId ? <small id={noteId} className="row-note">{help}</small> : null;
   // "wide" rows (text fields, unit inputs, steppers) stack under the label on phones; switches and short pickers stay inline.
   const row = (control: ReactNode, layout: 'inline' | 'wide' | 'stacked' = 'wide', labelFor: string | undefined = id) => <div className="row" data-layout={layout}>
     <div className="row-label">{labelFor ? <label htmlFor={labelFor}>{label}</label> : <span>{label}</span>}{tip}</div>
-    <div className="row-control">{control}</div>{note}
+    <div className="row-control">{control}</div>{note}{errorNote}
   </div>;
   if (field.type === 'endpoint') {
     const parts = typeof value === 'object' ? value : { address: '', port: '' };
     return <div className="row" data-layout="wide">
       <div className="row-label"><span>{label}</span></div>
       <div className="row-control endpoint-grid">
-        <input id={`${id}-address`} aria-label={t('settings.listener.address.label')} value={parts.address} disabled={disabled} spellCheck={false} autoComplete="off" placeholder={t('settings.listener.address.placeholder')} onChange={(event) => onChange({ ...parts, address: event.target.value })} />
-        <input id={`${id}-port`} aria-label={t('settings.listener.port.label')} className="port-input" value={parts.port} disabled={disabled} inputMode="numeric" spellCheck={false} autoComplete="off" placeholder="853" onChange={(event) => onChange({ ...parts, port: event.target.value })} />
+        <input id={`${id}-address`} aria-label={t('settings.listener.address.label')} value={parts.address} disabled={disabled} spellCheck={false} autoComplete="off" aria-invalid={invalid} aria-describedby={describedBy} placeholder={t('settings.listener.address.placeholder')} onChange={(event) => onChange({ ...parts, address: event.target.value })} />
+        <input id={`${id}-port`} aria-label={t('settings.listener.port.label')} className="port-input" value={parts.port} disabled={disabled} inputMode="numeric" spellCheck={false} autoComplete="off" aria-invalid={invalid} aria-describedby={describedBy} placeholder="853" onChange={(event) => onChange({ ...parts, port: event.target.value })} />
       </div>
       {/^0+$/.test(parts.port.trim()) && <small className="row-note">{t('settings.listener.port.automatic')}</small>}
+      {errorNote}
     </div>;
   }
   if (field.type === 'checkbox') return <div className="row" data-layout="inline">
@@ -62,35 +68,50 @@ function FieldRow({ field, language, value, onChange, disabled }: { field: Setti
   </div>;
   const textValue = typeof value === 'string' ? value : '';
   const family = field.type === 'number' ? unitFamily(field.path) : null;
-  if (family) return row(<UnitInput id={id} label={label} family={family} max={field.max} value={textValue} disabled={disabled} language={language} onChange={onChange} describedBy={noteId} />);
+  if (family) return row(<UnitInput id={id} label={label} family={family} max={field.max} value={textValue} disabled={disabled} language={language} onChange={onChange} describedBy={describedBy} invalid={invalid} />);
   if (field.type === 'number' && field.min !== undefined && field.max !== undefined && field.max - field.min <= 256)
-    return row(<Stepper id={id} label={label} value={textValue} min={field.min} max={field.max} disabled={disabled} language={language} onChange={onChange} describedBy={noteId} />);
+    return row(<Stepper id={id} label={label} value={textValue} min={field.min} max={field.max} disabled={disabled} language={language} onChange={onChange} describedBy={describedBy} invalid={invalid} />);
   if (field.type === 'select') {
     const options = (field.options ?? []).map(([choice, key]) => ({ value: choice, label: t(key) }));
     return row(options.length <= 4 ? <Segmented id={id} label={label} value={textValue} options={options} disabled={disabled} onChange={onChange} />
       : <Select id={id} label={label} value={textValue} options={options} disabled={disabled} onChange={onChange} />, options.length <= 2 ? 'inline' : 'wide', undefined);
   }
-  if (field.type === 'lines') return row(<textarea id={id} rows={4} value={textValue} disabled={disabled} spellCheck={false} aria-describedby={noteId}
+  if (field.type === 'lines') return row(<textarea id={id} rows={4} value={textValue} disabled={disabled} spellCheck={false} aria-describedby={describedBy} aria-invalid={invalid}
     placeholder={hasTranslation(`settings.${field.path}.placeholder`) ? t(`settings.${field.path}.placeholder`) : undefined} onChange={(event) => onChange(event.target.value)} />, 'stacked');
-  return row(<input id={id} type="text" className={field.type === 'number' ? 'number-input' : undefined} inputMode={field.type === 'number' ? 'numeric' : undefined} value={textValue} disabled={disabled} spellCheck={false} autoComplete="off" aria-describedby={noteId}
+  return row(<input id={id} type="text" className={field.type === 'number' ? 'number-input' : undefined} inputMode={field.type === 'number' ? 'numeric' : undefined} value={textValue} disabled={disabled} spellCheck={false} autoComplete="off" aria-describedby={describedBy} aria-invalid={invalid}
     placeholder={hasTranslation(`settings.${field.path}.placeholder`) ? t(`settings.${field.path}.placeholder`) : undefined} onChange={(event) => onChange(event.target.value)} />);
 }
 
 function GenericSettings({ pageId, language }: { pageId: SettingPageId; language: Language }) {
   const { draft, locked, updateField, setOptional, error } = useConfig();
   const [moreOpen, setMoreOpen] = useState<ReadonlySet<string>>(new Set());
+  const focusedError = useRef<ConfigIssue | null>(null);
   const page = settingPages[pageId];
-  // A validation error on a field under “More options” opens that row so focus can reach it.
-  useEffect(() => {
-    if (!(error instanceof ModelError) || !error.path) return;
+  // Focus belongs to the field owner, after its collapsed row has become interactive.
+  useLayoutEffect(() => {
+    if (!error) { focusedError.current = null; return; }
+    if (focusedError.current === error || !(error instanceof ModelError) || !error.path) return;
+    const target = fieldErrorTarget(error.path);
+    if (target?.page !== pageId || target.kind || !target.id) return;
     const owner = page.groups.find((group) => group.fields.some((field) => field.advanced && (error.path === field.path || error.path?.startsWith(`${field.path}.`))));
-    if (owner) setMoreOpen((open) => new Set(open).add(owner.id));
-  }, [error, page]);
+    if (owner && !moreOpen.has(owner.id)) {
+      setMoreOpen((open) => new Set(open).add(owner.id));
+      return;
+    }
+    // Wait for the browser to apply visibility/inert and the route landmark's focus.
+    const frame = window.requestAnimationFrame(() => {
+      const element = document.getElementById(target.id!);
+      const input = element?.matches('input, textarea, button') ? element : element?.querySelector<HTMLElement>('input, textarea, button');
+      input?.focus();
+      if (document.activeElement === input) focusedError.current = error;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [error, page, pageId, moreOpen]);
   if (!draft) return <p className="muted">{translate('app.connecting', language)}</p>;
   const t = (key: string) => translate(key, language);
   const value = (field: SettingField) => draft.fields[field.path] ?? fieldDisplayValue(getPath(draft.settings, field.path), field);
   const recursive = (draft.fields['resolution.mode'] ?? getPath(draft.settings, 'resolution.mode')) === 'recursive';
-  const hasError = (field: SettingField) => error instanceof ModelError && error.path === field.path;
+  const hasError = (field: SettingField) => matchesFieldError(error, field.path);
   // A conditional group or field stays visible while it holds a validation error, so focus can reach it.
   const shown = (condition: { path: string; value: string } | undefined) => !condition || (draft.fields[condition.path] ?? getPath(draft.settings, condition.path)) === condition.value;
   return <div className="settings-stack">{page.groups.map((group) => {
@@ -103,7 +124,7 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
     const more = visible.filter((field) => field.advanced);
     const open = moreOpen.has(group.id);
     const headingId = `group-${group.id}`;
-    const rows = (fields: readonly SettingField[]) => fields.map((field) => <FieldRow key={field.path} field={field} language={language} disabled={disabled} value={value(field)} onChange={(next) => updateField(field.path, next)} />);
+    const rows = (fields: readonly SettingField[]) => fields.map((field) => <FieldRow key={field.path} field={field} language={language} disabled={disabled} value={value(field)} issue={matchesFieldError(error, field.path) ? error : undefined} onChange={(next) => updateField(field.path, next)} />);
     return <section className="settings-group" key={group.id} aria-labelledby={headingId}>
       <h2 id={headingId} className="group-title">{t(group.titleKey)}</h2>
       <div className="grouped">
@@ -140,11 +161,21 @@ function TomlChanges({ language }: { language: Language }) {
 }
 
 export function CacheRules({ language }: { language: Language }) {
-  const { draft, locked, setRules } = useConfig();
+  const { draft, locked, setRules, error } = useConfig();
   const reduced = useReducedMotion();
   // Row keys follow add, move and remove, so a removed row is the one that animates out.
   const keys = useRef<number[]>([]);
   const serial = useRef(0);
+  // The rule editor owns stable row IDs; errors address positions in the current draft.
+  useEffect(() => {
+    const target = error instanceof ModelError && error.path ? fieldErrorTarget(error.path) : null;
+    if (target?.kind !== 'rule' || target.index === undefined) return;
+    const field = error instanceof ModelError ? error.path?.split('.').at(-1) : null;
+    const key = keys.current[target.index];
+    if (key === undefined || !field) return;
+    const timer = window.setTimeout(() => document.getElementById(`rule-${key}-${field}`)?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [error]);
   const t = (key: string) => translate(`views.${key}`, language);
   if (!draft) return null;
   const rules = draft.rules ?? configList(draft.settings, 'cache.rules').map((rule) => cacheRuleDraft(rule));
@@ -159,18 +190,18 @@ export function CacheRules({ language }: { language: Language }) {
     suffix: [['false', 'exact'], ['true', 'suffix']], bypass: [['false', 'allow'], ['true', 'bypass']],
     prefetch: [['', 'inherit'], ['true', 'on'], ['false', 'off']], stale: [['', 'inherit'], ['true', 'on'], ['false', 'off']],
   };
-  const labels: [keyof CacheRuleDraft, string][] = [['name', 'name'], ['suffix', 'match'], ['qtype', 'qtype'], ['bypass', 'behavior'], ['max_ttl_secs', 'positiveTtl'], ['negative_ttl_cap_secs', 'negativeTtl'], ['prefetch', 'prefetch'], ['stale', 'stale']];
   return <section className="panel">
     <div className="heading-row"><div className="row-label"><h2>{t('rules')}</h2><InfoTip text={t('rulesHelp')} label={translate('shell.about', language, { label: t('rules') })} /></div>
       <button type="button" className="button secondary" disabled={locked || rules.length >= 4096} onClick={() => { keys.current = [...keys.current, serial.current++]; setRules([...rules, cacheRuleDraft(defaultCacheRule())]); }}>{t('addRule')}</button></div>
     {rules.length === 0 && <p className="muted">{t('noRules')}</p>}
     <div className="rule-list"><AnimatePresence initial={false}>{rules.map((rule, index) => { const id = keys.current[index]; const number = { number: index + 1 }; return <motion.fieldset className="rule-row" disabled={locked} key={id}
       initial={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} animate={{ opacity: 1, height: 'auto', transitionEnd: { overflow: 'visible' } }} exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><legend>{translate('views.rule', language, number)}</legend>
-      <div className="fields-grid">{labels.map(([key, label]) => <div className="field" key={key}>
-        <label htmlFor={`rule-${id}-${key}`}>{t(label)}</label>
-        {choices[key] ? <Segmented id={`rule-${id}-${key}`} label={t(label)} value={rule[key]} disabled={locked} onChange={(value) => update(index, key, value)} options={choices[key]!.map(([value, option]) => ({ value, label: t(option) }))} />
-          : <input id={`rule-${id}-${key}`} value={rule[key]} inputMode={key.endsWith('_secs') ? 'numeric' : undefined} spellCheck={false} autoComplete="off" onChange={(event) => update(index, key, event.target.value)} />}
-      </div>)}</div>
+      <div className="fields-grid">{cacheRuleFields.map(([key, label]) => { const inputId = `rule-${id}-${key}`; const issue = matchesFieldError(error, `cache.rules.${index}.${key}`) ? error : null; return <div className="field" key={key}>
+        <label htmlFor={inputId}>{t(label)}</label>
+        {choices[key] ? <Segmented id={inputId} label={t(label)} value={rule[key]} disabled={locked} onChange={(value) => update(index, key, value)} options={choices[key]!.map(([value, option]) => ({ value, label: t(option) }))} />
+          : <input id={inputId} value={rule[key]} inputMode={key.endsWith('_secs') ? 'numeric' : undefined} spellCheck={false} autoComplete="off" aria-invalid={issue ? true : undefined} aria-describedby={issue ? `${inputId}-error` : undefined} onChange={(event) => update(index, key, event.target.value)} />}
+        {issue && <small id={`${inputId}-error`} className="field-error">{presentIssue(issue, language)}</small>}
+      </div>; })}</div>
       <div className="rule-actions"><button type="button" className="button quiet" aria-label={translate('views.moveRuleUp', language, number)} disabled={locked || index === 0} onClick={() => move(index, index - 1)}>↑</button>
         <button type="button" className="button quiet" aria-label={translate('views.moveRuleDown', language, number)} disabled={locked || index === rules.length - 1} onClick={() => move(index, index + 1)}>↓</button>
         <button type="button" className="button quiet" disabled={locked} onClick={() => { keys.current = keys.current.filter((_, at) => at !== index); setRules(rules.filter((_, at) => at !== index)); }}>{t('removeRule')}</button></div>
@@ -371,17 +402,23 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   }, [pageId, needsFormFlush, needsParse]);
   useEffect(() => {
     if (!(error instanceof ModelError) || !error.path || pageId === 'advanced') return;
+    const target = fieldErrorTarget(error.path);
+    if (!target || target.page !== pageId) return;
     const rule = /^cache\.rules\.(\d+)\.([a-z_]+)$/.exec(error.path);
     if (rule && cacheTab !== 'rules') { setCacheTab('rules'); return; }
+    if (rule) return; // CacheRules maps the current position to its stable row ID.
     if (pageId === 'cache' && !rule && cacheTab !== 'settings') { setCacheTab('settings'); return; }
-    const id = rule ? `rule-${rule[1]}-${rule[2]}` : `setting-${error.path.replaceAll('.', '-')}`;
-    // Rows under “More options” open on the error; focus once their height transition has started.
-    window.setTimeout(() => document.getElementById(id)?.focus(), 0);
+    if (target.kind !== 'source' || !target.id) return;
+    const id = target.id;
+    const timer = window.setTimeout(() => {
+      const element = document.getElementById(id);
+      (element?.matches('input, textarea, button') ? element : element?.querySelector<HTMLElement>('input, textarea, button'))?.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [error, pageId, cacheTab]);
   const t = (key: string) => translate(key, language);
   const errorPage = error instanceof ModelError && error.path
-    ? (Object.entries(settingPages).find(([, page]) => page.groups.some((group) => group.fields.some((field) => error.path === field.path || error.path?.startsWith(`${field.path}.`))))?.[0] as SettingPageId | undefined)
-      ?? (error.path.startsWith('cache.rules.') ? 'cache' : error.path.startsWith('filter_subscriptions.') ? 'filters' : 'dns')
+    ? fieldErrorTarget(error.path)?.page ?? 'dns'
     : 'dns';
   const intro = pageId === 'advanced' ? null : t(settingPages[pageId].introKey);
   const title = pageId === 'advanced' ? t('app.advanced') : t(settingPages[pageId].titleKey);
@@ -408,7 +445,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   ];
   return <div className="page-stack"><header className="page-head large-title"><div><h1>{title}</h1>{intro && <p className="muted">{intro}</p>}</div>
       <Menu label={t('shell.more')} icon={<Ellipsis size={17} aria-hidden="true" />} actions={actions} /></header>
-    {error && <div className="notice error" role="alert">{presentIssue(error, language)}<button type="button" onClick={() => setError(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
+    {error && <ConfigErrorNotice error={error} language={language} onDismiss={() => setError(null)} />}
     {notice && <div className="notice" role="status">{notice}<button type="button" onClick={() => setNotice(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
     {pageId === 'advanced' ? needsFormFlush ? <div className="notice"><p>{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate(`/${errorPage}`)}>{t('app.returnToEdit')}</button></div> : <section className="panel"><div className="toml-tools button-group"><button type="button" className="button secondary" disabled={!draft || busy} onClick={check}>{t('ui.validate')}</button><TomlChanges language={language} /></div><label htmlFor="advanced-toml" className="sr-only">TOML</label><textarea id="advanced-toml" className="toml-editor" value={draft?.toml ?? ''} disabled={busy || draft?.unknownApply} spellCheck={false} onChange={(event) => setToml(event.target.value)} /></section>
       : pageId === 'cache' ? <>

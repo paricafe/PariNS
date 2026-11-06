@@ -6,8 +6,8 @@ import { translate, type Language } from '../i18n';
  * Rust validation; − and + only step a clean integer within the field's
  * declared bounds, which mirror the Rust schema.
  */
-export function Stepper({ id, label, value, min, max, disabled, language, onChange, describedBy }: {
-  id: string; label: string; value: string; min: number; max: number; disabled?: boolean; language: Language; onChange(value: string): void; describedBy?: string;
+export function Stepper({ id, label, value, min, max, disabled, language, onChange, describedBy, invalid }: {
+  id: string; label: string; value: string; min: number; max: number; disabled?: boolean; language: Language; onChange(value: string): void; describedBy?: string; invalid?: boolean;
 }) {
   const current = /^\d+$/.test(value.trim()) ? Number(value.trim()) : null;
   const step = (delta: 1 | -1) => {
@@ -15,7 +15,7 @@ export function Stepper({ id, label, value, min, max, disabled, language, onChan
     onChange(String(Math.min(max, Math.max(min, base + delta))));
   };
   return <div className="stepper">
-    <input id={id} type="text" inputMode="numeric" value={value} disabled={disabled} spellCheck={false} autoComplete="off" aria-describedby={describedBy} onChange={(event) => onChange(event.target.value)} />
+    <input id={id} type="text" inputMode="numeric" value={value} disabled={disabled} spellCheck={false} autoComplete="off" aria-describedby={describedBy} aria-invalid={invalid || undefined} onChange={(event) => onChange(event.target.value)} />
     <div className="stepper-buttons">
       <button type="button" aria-label={translate('shell.decrease', language, { label })} disabled={disabled || current !== null && current <= min} onClick={() => step(-1)}><Minus size={15} aria-hidden="true" /></button>
       <button type="button" aria-label={translate('shell.increase', language, { label })} disabled={disabled || current !== null && current >= max} onClick={() => step(1)}><Plus size={15} aria-hidden="true" /></button>

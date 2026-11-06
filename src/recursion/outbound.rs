@@ -75,7 +75,8 @@ impl Bounds {
                 let elapsed = now.saturating_duration_since(bucket.1).as_secs_f64();
                 // The bucket holds one second of tokens, so the sustained rate is a hard cap.
                 bucket.0 = (bucket.0 + elapsed * self.rate).min(self.rate);
-                bucket.1 = now;
+                // Lock acquisition can reorder observations; never count an interval twice.
+                bucket.1 = bucket.1.max(now);
                 if bucket.0 >= 1.0 {
                     bucket.0 -= 1.0;
                     None
@@ -230,6 +231,33 @@ mod tests {
             assert!(lookup.await.unwrap().unwrap().is_err());
         }
         assert_eq!(bounds.inflight(1), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_caller_does_not_refill_accounted_time_twice() {
+        let bounds = Bounds::new(10, 4);
+        let start = Instant::now();
+        let accounted = start + Duration::from_millis(200);
+        // A newer caller acquired the lock first and left one earned token.
+        *bounds.bucket.lock().unwrap() = (1.0, accounted);
+
+        // The delayed caller can use that token, but must not rewind the bucket.
+        assert!(bounds.take().await);
+        assert_eq!(*bounds.bucket.lock().unwrap(), (0.0, accounted));
+
+        tokio::time::advance(Duration::from_millis(200)).await;
+        let waiter = tokio::spawn({
+            let bounds = bounds.clone();
+            async move { bounds.take().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        tokio::time::advance(Duration::from_millis(99)).await;
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(waiter.await.unwrap());
+        assert_eq!(Instant::now(), start + Duration::from_millis(300));
     }
 
     #[tokio::test(start_paused = true)]

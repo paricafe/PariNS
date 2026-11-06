@@ -145,7 +145,7 @@ developer machine or an existing installation, and keep their guards.
 | `filter-lifecycle.yml` (manual) | `scripts/test-systemd.sh --ephemeral-ci --package DIR --filter-lifecycle` | Subscription refresh and restart under a fixed 2 CPU / 2 GiB cgroup with a pinned load generator. Fix the workload and targets before running and keep all rounds. |
 | `update-check.yml` (manual) | `scripts/test-systemd.sh --ephemeral-ci --package DIR --official-updater-check` | The update check of a real published release. Never rebuild with a forged official identity. |
 | `update-recovery.yml` (manual, or on harness changes) | `python3 -B scripts/test-update-reboot.py --ephemeral-ci ...` | Update recovery across normal reboot, hard reset and journal-volume disk-full in a disposable QEMU guest. Uses a development package; does not cover official upgrades or power loss. |
-| `public-dns-acceptance.yml` (manual) | `scripts/test-public-doq.py` | One verified DoQ query to an operator-chosen public address, host name and port. Never hardcode deployment targets or add production credentials. |
+| `public-dns-acceptance.yml` (manual) | `scripts/test-public-dns.py` | One verified DoQ or HTTP/3 DNS query to an operator-chosen public address, host name and port. Never hardcode deployment targets or add production credentials. |
 
 ## Hickory fork
 

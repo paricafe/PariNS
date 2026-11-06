@@ -803,6 +803,19 @@ async fn dual_endpoint(tls: &rustls::ServerConfig) -> (quinn::Endpoint, TcpListe
     panic!("no available dual TCP/UDP test port")
 }
 
+async fn silent_udp_and_tcp() -> (TcpListener, UdpSocket) {
+    // TCP and UDP allocate ephemeral ports independently; reserve both before use.
+    for _ in 0..32 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        match UdpSocket::bind(listener.local_addr().unwrap()).await {
+            Ok(udp) => return (listener, udp),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("bind silent UDP: {error}"),
+        }
+    }
+    panic!("no available silent UDP/TCP test port")
+}
+
 async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
     use bytes::Bytes;
     let connection = endpoint.accept().await.unwrap().await.unwrap();
@@ -974,10 +987,9 @@ async fn h3_preferred_reuses_connection_concurrently_preserves_edns_and_closes_o
 async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
     use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome, Reason, Stage};
     let (_dir, ca, tls) = identity(b"h2");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, silent) = silent_udp_and_tcp().await;
     let address = listener.local_addr().unwrap();
     // A bound silent UDP port simulates a firewall dropping QUIC packets.
-    let silent = UdpSocket::bind(address).await.unwrap();
     let peers = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let received = peers.clone();
     let blackhole = tokio::spawn(async move {
@@ -1124,9 +1136,8 @@ async fn dot_slot_wait_and_h3_connecting_wait_consume_original_deadline() {
 #[tokio::test]
 async fn h3_preference_off_uses_h2_without_quic_packets() {
     let (_dir, ca, tls) = identity(b"h2");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, udp) = silent_udp_and_tcp().await;
     let address = listener.local_addr().unwrap();
-    let udp = UdpSocket::bind(address).await.unwrap();
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
     config.upstreams.ca_file = Some(ca);
     let server = tokio::spawn(serve_h2(listener, tls, 1));

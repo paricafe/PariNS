@@ -78,7 +78,7 @@ async def probe(args, result):
     from aioquic.quic.configuration import QuicConfiguration
     from aioquic.quic.connection import QuicConnection
     from aioquic.quic.events import HandshakeCompleted, ProtocolNegotiated, StreamDataReceived
-    from aioquic.h3.connection import H3Connection
+    from aioquic.h3.connection import H3Connection, ProtocolError
     from aioquic.h3.events import DataReceived, HeadersReceived
 
     result["client"] = {
@@ -116,10 +116,21 @@ async def probe(args, result):
                             require(len(self.body) + len(item.data) <= 65535,
                                     "oversized DNS response")
                             self.body.extend(item.data)
-                        if isinstance(item, (DataReceived, HeadersReceived)) and item.stream_ended:
-                            validate_http_headers(self.headers)
-                            self.response.set_result(bytes(self.body))
                     except ValueError as error:
+                        self.response.set_exception(error)
+                # aioquic 1.2.0 omits the HTTP end event when an ignored frame
+                # follows DATA. Its decoded stream still owns FIN, QPACK blocking
+                # and partial-frame state; accept only a fully parsed valid end.
+                stream = self.http._stream.get(self.stream_id)
+                if (self.response is not None and not self.response.done()
+                        and not self.http._is_done and stream is not None
+                        and stream.ended and not stream.blocked
+                        and not stream.buffer and stream.frame_size is None):
+                    try:
+                        validate_http_headers(self.headers)
+                        self.http._check_content_length(stream)
+                        self.response.set_result(bytes(self.body))
+                    except (ValueError, ProtocolError) as error:
                         self.response.set_exception(error)
                 # H3 owns its request and control streams. Generic StreamWriters
                 # would close them on collection, including peer-only streams.

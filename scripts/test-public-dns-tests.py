@@ -18,7 +18,7 @@ import dns.message
 import dns.rcode
 import dns.rrset
 from aioquic.asyncio import QuicConnectionProtocol, serve
-from aioquic.h3.connection import H3Connection
+from aioquic.h3.connection import H3Connection, MessageError, encode_frame
 from aioquic.h3.events import DataReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import StreamDataReceived
@@ -166,7 +166,7 @@ class LoopbackTransportTests(unittest.IsolatedAsyncioTestCase):
         self.cert_file = str(cert_file)
         self.key_file = str(key_file)
 
-    async def run_loopback(self, transport_name):
+    async def run_loopback(self, transport_name, response_variant="normal"):
         received = []
         headers_received = []
         tasks = set()
@@ -193,14 +193,22 @@ class LoopbackTransportTests(unittest.IsolatedAsyncioTestCase):
 
             async def respond(self, stream_id, request):
                 wire = answer(request)
-                self.http.send_headers(stream_id, [
+                headers = [
                     (b":status", b"200"),
                     (b"content-type", b"application/dns-message"),
-                ])
+                ]
+                if response_variant == "wrong_length":
+                    headers.append((b"content-length", str(len(wire) + 1).encode("ascii")))
+                self.http.send_headers(stream_id, headers)
                 self.transmit()
                 # Exercise separate response-header and body deliveries.
                 await asyncio.sleep(0.05)
-                self.http.send_data(stream_id, wire, end_stream=True)
+                self.http.send_data(stream_id, wire, end_stream=response_variant == "normal")
+                if response_variant != "normal":
+                    grease = encode_frame(0x21, b"grease")
+                    if response_variant == "truncated":
+                        grease = grease[:-1]
+                    self._quic.send_stream_data(stream_id, grease, end_stream=True)
                 self.transmit()
 
             def quic_event_received(self, event):
@@ -240,14 +248,23 @@ class LoopbackTransportTests(unittest.IsolatedAsyncioTestCase):
             )
             result = {"received_datagrams": 0}
             with patch.object(certifi, "where", return_value=str(self.ca_file)):
-                await asyncio.wait_for(probe.probe(args, result), timeout=3)
-            self.assertEqual(result["stage"], "complete")
+                if response_variant in ("truncated", "wrong_length"):
+                    error_type = asyncio.TimeoutError if response_variant == "truncated" else MessageError
+                    with self.assertRaises(error_type):
+                        await asyncio.wait_for(probe.probe(args, result), timeout=0.5)
+                    self.assertFalse(result.get("dns_response_received", False))
+                else:
+                    await asyncio.wait_for(probe.probe(args, result), timeout=3)
             self.assertTrue(result["handshake_completed"])
             self.assertEqual(result["negotiated_alpn"], transport_name)
-            self.assertTrue(result["dns_response_received"])
-            self.assertEqual(result["answer_records"], 1)
+            self.assertTrue(result["dns_query_written"])
             self.assertEqual(len(received), 1)
             self.assertEqual(received[0].question[0].name.to_text(), "example.com.")
+            if response_variant in ("truncated", "wrong_length"):
+                return
+            self.assertEqual(result["stage"], "complete")
+            self.assertTrue(result["dns_response_received"])
+            self.assertEqual(result["answer_records"], 1)
             if transport_name == "h3":
                 self.assertEqual(len(headers_received), 1)
                 self.assertIn((b":method", b"POST"), headers_received[0])
@@ -281,6 +298,15 @@ class LoopbackTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_doq_dns_query_succeeds(self):
         await self.run_loopback("doq")
+
+    async def test_http3_dns_query_with_ignored_final_frame_succeeds(self):
+        await self.run_loopback("h3", "grease")
+
+    async def test_http3_truncated_ignored_frame_is_rejected(self):
+        await self.run_loopback("h3", "truncated")
+
+    async def test_http3_wrong_content_length_with_ignored_frame_is_rejected(self):
+        await self.run_loopback("h3", "wrong_length")
 
 
 if __name__ == "__main__":

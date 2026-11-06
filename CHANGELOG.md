@@ -6,6 +6,8 @@
 
 - The public HTTP/3 acceptance client keeps request and control streams owned by
   HTTP/3 instead of closing them through generic QUIC stream writers.
+- It recognizes a complete response followed by ignored extension frames while
+  rejecting incomplete framing and mismatched content lengths.
 
 ## v0.2.2 — 2026-11-06
 

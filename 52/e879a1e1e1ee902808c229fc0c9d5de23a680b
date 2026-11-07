@@ -1,0 +1,22 @@
+guide/architecture.md
+  s_b27ab66ab5950d::t_ea7729addec231 1-77,82-116
+  s_b27ab66ab5950d::t_42662d61b8980f 78-81
+guide/development.md
+  s_b27ab66ab5950d::t_ea7729addec231 11-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "52e879a1e1e1ee902808c229fc0c9d5de23a680b",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

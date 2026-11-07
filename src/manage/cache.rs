@@ -72,7 +72,7 @@ impl Inspect {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Invalidate {
-    pub epoch: u64,
+    pub cache_token: String,
     #[serde(default)]
     pub all: bool,
     pub name: Option<String>,
@@ -120,9 +120,9 @@ mod tests {
     #[test]
     fn invalidation_requires_explicit_scope_and_rejects_ambiguous_clear() {
         for value in [
-            json!({"epoch":0}),
-            json!({"epoch":0,"all":true,"name":"test"}),
-            json!({"epoch":0,"all":true,"qtype":"A"}),
+            json!({"cache_token":"cache:0"}),
+            json!({"cache_token":"cache:0","all":true,"name":"test"}),
+            json!({"cache_token":"cache:0","all":true,"qtype":"A"}),
         ] {
             assert!(
                 serde_json::from_value::<Invalidate>(value)
@@ -131,8 +131,10 @@ mod tests {
                     .is_err()
             );
         }
-        let input: Invalidate =
-            serde_json::from_value(json!({"epoch":0,"name":"TEST","scope":"privacy_v6"})).unwrap();
+        let input: Invalidate = serde_json::from_value(
+            json!({"cache_token":"cache:0","name":"TEST","scope":"privacy_v6"}),
+        )
+        .unwrap();
         assert_eq!(
             input.selection().unwrap(),
             (

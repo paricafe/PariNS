@@ -209,7 +209,7 @@ export function CacheRules({ language }: { language: Language }) {
   </section>;
 }
 
-interface Inspection { epoch: number; explanation: { state: 'fresh' | 'stale' | 'failure' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Variant[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
+interface Inspection { cache_token: string; explanation: { state: 'fresh' | 'stale' | 'failure' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Variant[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
 /** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
 export function restoreSummary(report: SnapshotReport, language: Language): string {
@@ -265,7 +265,7 @@ function CacheUsage({ language }: { language: Language }) {
         {cache && <button type="button" className="button danger" disabled={working} onClick={async (event) => {
           const trigger = event.currentTarget;
           if (!status?.cache || !await confirmAction(t('clearAllConfirm'), 'views.clearAll', trigger)) return;
-          setWorking(true); try { await api.request('cache/invalidate', 'POST', { all: true, epoch: status.cache.epoch }); await load(); banner(t('cleared')); } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
+          setWorking(true); try { await api.request('cache/invalidate', 'POST', { all: true, cache_token: status.cache.cache_token }); await load(); banner(t('cleared')); } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
         }}>{t('clearAll')}</button>}</div>
     </section>
     {persistence && <section className="settings-group" aria-labelledby="cache-restore-title">
@@ -301,12 +301,12 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
     catch (reason) { setError(toConfigIssue(reason)); }
     finally { setWorking(false); }
   };
-  /** Clears the listed entry's name, type and scope against the inspected epoch, then shows the cache again. */
+  /** Clears the listed entry's name, type and scope against the inspected cache token, then shows the cache again. */
   const clear = async (variant: Variant, trigger: HTMLElement) => {
     if (!result || !await confirmAction(t('clearEntryConfirm'), 'views.clearEntry', trigger)) return;
     setWorking(true); setError(null);
     try {
-      await api.request('cache/invalidate', 'POST', { name: variant.name, qtype: variant.qtype, scope: variant.scope, epoch: result.epoch });
+      await api.request('cache/invalidate', 'POST', { name: variant.name, qtype: variant.qtype, scope: variant.scope, cache_token: result.cache_token });
       setResult(await request());
     } catch (reason) { setError(toConfigIssue(reason)); } finally { setWorking(false); }
   };

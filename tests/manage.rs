@@ -1001,6 +1001,7 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
         .await
         .expect(200);
     assert_eq!(inspection["explanation"]["state"], "fresh");
+    assert_eq!(inspection["cache_token"], status["cache"]["cache_token"]);
     assert_eq!(
         inspection["inspection"]["variants"]
             .as_array()
@@ -1017,16 +1018,15 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
         "inspection is non-touching"
     );
     for body in [
-        json!({"epoch":inspection["epoch"]}),
-        json!({"epoch":inspection["epoch"],"all":true,"name":"cache.test"}),
+        json!({"cache_token":inspection["cache_token"]}),
+        json!({"cache_token":inspection["cache_token"],"all":true,"name":"cache.test"}),
     ] {
         server
             .request("POST", "/api/cache/invalidate", Some(&token), Some(body))
             .await
             .expect(422);
     }
-    let selected =
-        json!({"epoch":inspection["epoch"],"name":"cache.test", "qtype":"A", "scope":"no_ecs"});
+    let selected = json!({"cache_token":inspection["cache_token"],"name":"cache.test", "qtype":"A", "scope":"no_ecs"});
     let removed = server
         .request(
             "POST",
@@ -1088,6 +1088,31 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
     assert_eq!(after["generation"], status["generation"]);
     assert_eq!(after["listen"], status["listen"]);
     assert_eq!(after["cache"]["entries"], 0);
+    // A page inspected the first cache at epoch zero. A replacement starts at
+    // that same epoch, but the page must not be allowed to clear its new data.
+    client
+        .send_to(&query("cache.test.").to_vec().unwrap(), dns)
+        .await
+        .unwrap();
+    let mut bytes = [0; 4096];
+    timeout(DEADLINE, client.recv(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    server
+        .request(
+            "POST",
+            "/api/cache/invalidate",
+            Some(&token),
+            Some(json!({"cache_token":inspection["cache_token"],"all":true})),
+        )
+        .await
+        .expect(409);
+    let retained = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert_eq!(retained["cache"]["entries"], 1);
     let bypass = server
         .request(
             "POST",
@@ -1118,6 +1143,94 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
         .expect(200);
     assert_eq!(rollback["restart_required"], false);
     assert_dns(dns).await;
+    let current = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    let storage =
+        format!("{source}\n[storage]\nflush_interval_ms = 500\n[updates]\nauto_check = false\n");
+    server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&token),
+            Some(json!({"toml":storage,"revision":3})),
+        )
+        .await
+        .expect(200);
+    let preserved = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert_eq!(
+        preserved["cache"]["cache_token"],
+        current["cache"]["cache_token"]
+    );
+    let updates = storage.replace("auto_check = false", "auto_check = true");
+    server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&token),
+            Some(json!({"toml":updates,"revision":4})),
+        )
+        .await
+        .expect(200);
+    let preserved = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert_eq!(
+        preserved["cache"]["cache_token"],
+        current["cache"]["cache_token"]
+    );
+    // A full DNS restart also creates a different cache at the same epoch.
+    let restart = updates.replace("query_timeout_ms = 200", "query_timeout_ms = 250");
+    let applied = server
+        .request(
+            "PUT",
+            "/api/config",
+            Some(&token),
+            Some(json!({"toml":restart,"revision":5})),
+        )
+        .await
+        .expect(200);
+    assert_eq!(applied["restart_required"], true);
+    server
+        .request(
+            "POST",
+            "/api/cache/invalidate",
+            Some(&token),
+            Some(json!({"cache_token":current["cache"]["cache_token"],"all":true})),
+        )
+        .await
+        .expect(409);
+    let fresh = server
+        .request("GET", "/api/status", Some(&token), None)
+        .await
+        .expect(200);
+    assert_ne!(
+        fresh["cache"]["cache_token"],
+        current["cache"]["cache_token"]
+    );
+    server
+        .request(
+            "POST",
+            "/api/cache/invalidate",
+            Some(&token),
+            Some(json!({"cache_token":fresh["cache"]["cache_token"],"all":true})),
+        )
+        .await
+        .expect(200);
+    server
+        .request(
+            "POST",
+            "/api/cache/invalidate",
+            Some(&token),
+            Some(json!({"epoch":0,"all":true})),
+        )
+        .await
+        .expect(400);
     server.finish().await;
     mock.abort();
     let _ = mock.await;

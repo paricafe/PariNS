@@ -601,20 +601,23 @@ async fn operations_other_than_configuration_saves_need_no_client_revision() {
     let status = request(&shared, &headers, "GET", "/api/status", json!(null))
         .await
         .unwrap();
-    let epoch = status["cache"]["epoch"].as_u64().unwrap();
+    let cache_token = &status["cache"]["cache_token"];
     assert_eq!(
         post(
             "/api/cache/invalidate",
-            json!({"epoch":epoch + 1,"all":true})
+            json!({"cache_token":"obsolete-cache:0","all":true})
         )
         .await
         .unwrap_err()
         .1,
         "CACHE_EPOCH"
     );
-    post("/api/cache/invalidate", json!({"epoch":epoch,"all":true}))
-        .await
-        .unwrap();
+    post(
+        "/api/cache/invalidate",
+        json!({"cache_token":cache_token,"all":true}),
+    )
+    .await
+    .unwrap();
     let storage = &status["storage"];
     for (path, field) in [
         ("/api/query-log/clear", "log_epoch"),

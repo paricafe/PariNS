@@ -26,7 +26,7 @@ export interface ListenerStatus {
 
 /** Cache usage and counters of the running generation. */
 export interface CacheUsage {
-  epoch: number; entries: number; max_entries: number; bytes: number; max_bytes: number;
+  cache_token: string; epoch: number; entries: number; max_entries: number; bytes: number; max_bytes: number;
   positive_entries: number; negative_entries: number; hits: number; stale_hits: number; misses: number; bypasses: number;
   evictions: number; rejections: number; ecs_shared_hits: number; ecs_shared_entries: number; ecs_sharing_revocations: number;
 }

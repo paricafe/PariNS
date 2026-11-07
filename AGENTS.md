@@ -109,6 +109,8 @@ until preview/validation.
   that ignores Padding bytes but preserves request intent.
 - Inspection and explanation are read-only: no upstream requests, recency or
   hit-counter changes. Filtering never contaminates cached upstream answers.
+  Management invalidation uses an opaque token identifying both the cache instance
+  and its epoch; replacing a cache must invalidate every previously issued token.
 - One aggregate radix policy serves local and subscription rules; Config keeps local
   rules, not an index. Each request holds its policy generation across cache, CNAME
   and stale handling. Preserve semantic cache restoration checks.

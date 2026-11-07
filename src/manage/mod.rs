@@ -924,7 +924,7 @@ async fn api(
             let cache = resolver.cache();
             let now = Instant::now();
             Ok(json!({
-                "epoch": cache.epoch(),
+                "cache_token": cache.invalidation_token(),
                 "inspection": cache.inspect(query.queries[0].name(), Some(query.queries[0].query_type()), now),
                 "explanation": cache.explain(&query, subnet, now),
             }))
@@ -940,7 +940,7 @@ async fn api(
                 .resolver()
                 .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
             let cache = resolver.cache();
-            if cache.epoch() != input.epoch {
+            if cache.invalidation_token() != input.cache_token {
                 return Err(error(
                     StatusCode::CONFLICT,
                     "CACHE_EPOCH",
@@ -948,7 +948,7 @@ async fn api(
                 ));
             }
             let removed = cache.invalidate(name.as_ref(), kind, scope);
-            Ok(json!({"removed":removed,"epoch":cache.epoch()}))
+            Ok(json!({"removed":removed,"cache_token":cache.invalidation_token()}))
         }
         ("GET", "/api/config") => {
             let manager = shared.manager.lock().await;

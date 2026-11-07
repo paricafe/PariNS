@@ -12,6 +12,8 @@
 //! eviction counters. Victims are classified at eviction as fresh, retained past
 //! fresh lifetime, or expired past retention. Reading diagnostics never scans,
 //! expires or touches entries; resident occupancy is not a fresh working-set size.
+//! Management invalidation tokens bind this cache instance and its current epoch;
+//! the epoch alone only fences admission within this instance.
 
 use std::{
     collections::{HashMap, hash_map::RandomState},
@@ -266,6 +268,7 @@ pub struct Hit {
 }
 
 pub struct Cache {
+    identity: u128,
     config: CacheConfig,
     shards: Vec<Mutex<Shard>>,
     hasher: RandomState,
@@ -344,6 +347,7 @@ impl Cache {
             )
         });
         Self {
+            identity: rand::random(),
             config,
             shards,
             hasher: RandomState::new(),
@@ -361,6 +365,16 @@ impl Cache {
     }
     pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
+    }
+
+    /// Opaque management precondition; never restored from a snapshot or reused
+    /// by a replacement cache. Internal admission continues to use `epoch`.
+    pub fn invalidation_token(&self) -> String {
+        self.token_at_epoch(self.epoch())
+    }
+
+    fn token_at_epoch(&self, epoch: u64) -> String {
+        format!("{:032x}:{epoch}", self.identity)
     }
 
     fn shard(&self, key: &Key) -> usize {
@@ -1106,6 +1120,10 @@ impl Cache {
 
     /// Charge includes entry allocations still held by readers; it is not RSS.
     pub fn snapshot(&self) -> Value {
+        // Capture the precondition before reading shards: an invalidation
+        // concurrent with observation must make this token obsolete.
+        let epoch = self.epoch();
+        let cache_token = self.token_at_epoch(epoch);
         let mut counts = Counts::default();
         let (mut positive, mut negative, mut bytes, mut learned, mut failures) = (0, 0, 0, 0, 0);
         for shard in &self.shards {
@@ -1133,7 +1151,7 @@ impl Cache {
             "misses":counts.misses,"bypasses":self.bypasses.load(Ordering::Relaxed),
             "evictions":counts.evictions,"rejections":counts.rejections,
             "max_entries":self.config.max_entries,"max_bytes":self.config.max_bytes,
-            "shards":self.shards.len(),"epoch":self.epoch(),
+            "shards":self.shards.len(),"epoch":epoch,"cache_token":cache_token,
             "ecs_shared_hits":counts.shared_hits,"ecs_shared_entries":learned,
             "ecs_sharing_revocations":counts.revocations,
             "servfail_entries":failures,"servfail_hits":counts.failure_hits,

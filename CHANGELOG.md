@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Cache invalidation rejects inspection tokens from a replaced cache, including
+  after cache hot updates and DNS restarts. API clients must use `cache_token`
+  from status or inspection instead of an epoch-only invalidation request.
 - The public HTTP/3 acceptance client keeps request and control streams owned by
   HTTP/3 instead of closing them through generic QUIC stream writers.
 - It recognizes a complete response followed by ignored extension frames while

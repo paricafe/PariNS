@@ -135,6 +135,8 @@ until preview/validation.
   reconstruct responses outside shard locks. Bound queues,
   cache state, background work and total shutdown. Every spawned task has an owner
   and explicit cancellation; refresh and foreground coalescing never cross generations.
+  Flight registries keep weak references and bound retained records; joining an
+  active key must not scan other groups, while capacity admission reclaims dead work.
 - Shutdown: only streams with a complete query can force a stop; others are
   cancelled at once. Peer close notification uses at most half the grace; a forced
   stop records its first bounded cause and logs it when no clean snapshot is

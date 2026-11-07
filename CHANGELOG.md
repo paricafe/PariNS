@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Joining an active in-flight query no longer scans the entire sharing registry;
+  dead records are reclaimed on same-key replacement or capacity admission.
 - Management status, statistics and query-log reads remain available while a
   configuration transaction prepares material or persists its saved state.
 - Cache invalidation rejects inspection tokens from a replaced cache, including

@@ -1,5 +1,7 @@
 //! Bounded in-flight sharing, driven by callers rather than detached tasks.
 //! Weak registry references cannot keep IO alive after the last caller drops.
+//! Active-key joins do constant-size registry work. Dead groups are removed on
+//! same-key replacement or before capacity admission; retained records stay bounded.
 
 use crate::config::CoalescingConfig;
 use futures_util::future::{BoxFuture, FutureExt, Shared, WeakShared};
@@ -110,17 +112,21 @@ impl Flights {
             return Ok((Hold::new(work.shared(), Arc::default()), Role::Bypass, sent));
         };
         let mut groups = self.groups.lock().expect("flight lock poisoned");
-        // Reap completed/dead weak entries before applying the group budget.
-        groups.retain(|_, (weak, ..)| weak.upgrade().is_some_and(|f| f.peek().is_none()));
-        if let Some((shared, sent, holds)) = groups
-            .get(&key)
-            .and_then(|(weak, sent, holds)| Some((weak.upgrade()?, sent.clone(), holds.clone())))
-        {
+        if let Some((shared, sent, holds)) = groups.get(&key).and_then(|(weak, sent, holds)| {
+            let shared = weak.upgrade().filter(|work| work.peek().is_none())?;
+            Some((shared, sent.clone(), holds.clone()))
+        }) {
             // All new holds are made under this lock. Other holders can only leave.
             if holds.load(Ordering::Acquire) >= self.config.max_waiters {
                 return Err(());
             }
             return Ok((Hold::new(shared, holds), Role::Joined, sent));
+        }
+        // A finished result still held by a departing caller must not be joined.
+        // Remove only this key unless capacity admission needs a full collection.
+        groups.remove(&key);
+        if groups.len() >= self.config.max_groups {
+            groups.retain(|_, (weak, ..)| weak.upgrade().is_some_and(|f| f.peek().is_none()));
         }
         if groups.len() >= self.config.max_groups {
             return Err(());
@@ -142,6 +148,10 @@ impl Flights {
 fn key(query: &Message) -> Option<Vec<u8>> {
     crate::protocol::canonical_work_key(query)
 }
+
+#[cfg(test)]
+#[path = "flight/bench.rs"]
+mod bench;
 
 #[cfg(test)]
 mod tests {

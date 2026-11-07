@@ -57,6 +57,7 @@ The binary uses Tokio's multi-threaded runtime with one worker per CPU by defaul
 cargo run --locked --release --example bench -- 1000 32
 cargo run --locked --release --example bench_dot -- 1000 8
 cargo run --locked --release --example bench_cache -- --seconds 1 --repeats 3
+cargo test --locked --release --lib flight::bench::registry -- --exact --ignored --nocapture
 ```
 
 - `bench`: resolver scenarios (warm cache, cold single upstream, cold parallel
@@ -65,6 +66,10 @@ cargo run --locked --release --example bench_cache -- --seconds 1 --repeats 3
 - `bench_cache`: cache operations with 1, 2 and 4 workers, with correctness checks.
   `--case Multi --workers 2` picks one case; `PARINS_BENCH_SHARDS`,
   `PARINS_BENCH_MAX_ENTRIES` and `PARINS_BENCH_MAX_BYTES` override the cache shape.
+- `flight::bench::registry`: an opt-in registry CPU microbenchmark, with five
+  rounds of active-key joins and distinct-key turnover at 128, 1024 and 4096 groups.
+  It emits JSON with per-join timings and checks group roles and capacity; it does
+  no network IO and measures no wire DNS QPS.
 
 These are in-process microbenchmarks; `bench_cache` counts cache operations, which
 are not wire DNS queries. For a performance change, keep a baseline, repeat the same

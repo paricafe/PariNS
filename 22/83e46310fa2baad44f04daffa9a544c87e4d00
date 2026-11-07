@@ -1,0 +1,45 @@
+tests/manage.rs
+  s_b27ab66ab5950d::t_6df821c203d2df 1146-1149,1152,1159-1164,1169-1170,1177-1182,1187-1189,1196-1199,1206-1211,1216,1223-1225,1232-1233
+  s_b27ab66ab5950d::t_c320155e7ea487 1029,1150-1151,1153-1158,1165-1168,1171-1176,1183-1186,1190-1195,1200-1205,1212-1215,1217-1222,1226-1231
+  s_b27ab66ab5950d::t_fdf50f5e2178d6 1004
+  s_b27ab66ab5950d::t_4a0a7dbf772096 1021-1022,1107
+  s_b27ab66ab5950d::t_4370795b2365d4 1091-1106,1108-1115
+web/src/pages/config/SettingsPage.tsx
+  s_b27ab66ab5950d::t_4a0a7dbf772096 212,268,304,309
+src/manage/cache.rs
+  s_b27ab66ab5950d::t_c320155e7ea487 134-137
+  s_b27ab66ab5950d::t_d51058a61b5539 75,123-125
+src/cache.rs
+  s_b27ab66ab5950d::t_d51058a61b5539 15-16,271,350,370-372,374-375
+  s_b27ab66ab5950d::t_fdf50f5e2178d6 373,376-379,1123-1126,1154
+web/src/pages/observability/metrics.ts
+  s_b27ab66ab5950d::t_4a0a7dbf772096 29
+src/manage/account_tests.rs
+  s_b27ab66ab5950d::t_4a0a7dbf772096 604,608
+  s_b27ab66ab5950d::t_c320155e7ea487 615-620
+AGENTS.md
+  s_b27ab66ab5950d::t_6df821c203d2df 112-113
+CHANGELOG.md
+  s_b27ab66ab5950d::t_6df821c203d2df 7-9
+web/src/pages/config/CacheInspect.test.tsx
+  s_b27ab66ab5950d::t_33ed8eaa124940 5,15-41
+  s_b27ab66ab5950d::t_4a0a7dbf772096 43,60,72,74,87
+src/manage/mod.rs
+  s_b27ab66ab5950d::t_7271d03c60f679 927,943,951
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2283e46310fa2baad44f04daffa9a544c87e4d00",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

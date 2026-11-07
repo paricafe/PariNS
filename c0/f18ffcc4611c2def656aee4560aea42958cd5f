@@ -1,0 +1,51 @@
+src/manage/runtime.rs
+  s_b27ab66ab5950d::t_bf51c21fe9690e 5-6
+  s_b27ab66ab5950d::t_b664b2c4e63f7c 407
+  s_b27ab66ab5950d::t_1249c97e4a2bec 161,354,356,381,385-406,409,459,563,642,674,737,776,814,837-839,855,859
+src/manage/turnstile_tests.rs
+  s_b27ab66ab5950d::t_a19b1eb6169127 50-53
+AGENTS.md
+  s_b27ab66ab5950d::t_bf51c21fe9690e 249-252
+src/manage/dns_retry.rs
+  s_b27ab66ab5950d::t_1249c97e4a2bec 82
+src/manage/filters.rs
+  s_b27ab66ab5950d::t_a19b1eb6169127 199-202
+src/manage/observation.rs
+  s_b27ab66ab5950d::t_b664b2c4e63f7c 8-11,15-19,49-53,61-65,73-74,79-81
+  s_b27ab66ab5950d::t_22fbe56978e35d 1-7,12-14,20-48,54-60,66-72,75-78,82-110
+src/manage/mod.rs
+  s_b27ab66ab5950d::t_1249c97e4a2bec 14,82,839,850,864
+  s_b27ab66ab5950d::t_a19b1eb6169127 1279-1282,1484-1487,1561-1564,1663-1666,1708-1711,1768-1771
+  s_b27ab66ab5950d::t_b664b2c4e63f7c 836
+CHANGELOG.md
+  s_b27ab66ab5950d::t_bf51c21fe9690e 7-8
+src/manage/updates/operation.rs
+  s_b27ab66ab5950d::t_bf51c21fe9690e 1320
+src/manage/account_tests.rs
+  s_b27ab66ab5950d::t_a19b1eb6169127 31-34
+  s_b27ab66ab5950d::t_b664b2c4e63f7c 65-67,73-81,83-85,100-102
+  s_b27ab66ab5950d::t_b35af187776acc 56-64,68-71,82,86-88,98-99,103-104,116
+  s_b27ab66ab5950d::t_998b7a5f9e683c 72
+  s_b27ab66ab5950d::t_c6d661826d90b9 97,105-108,112-115
+  s_b27ab66ab5950d::t_56e93411204b10 89-96,109-111,117-120
+  s_b27ab66ab5950d::t_b3427ee3f980da 121-122
+src/manage/live.rs
+  s_b27ab66ab5950d::t_1249c97e4a2bec 608
+  s_b27ab66ab5950d::t_c6d661826d90b9 23-24,196
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c0f18ffcc4611c2def656aee4560aea42958cd5f",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

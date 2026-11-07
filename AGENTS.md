@@ -246,7 +246,10 @@ until preview/validation.
   retention after arbitrary policy changes; report restart requirements accurately.
 - RuntimeServices owns process metrics and the bounded SQLite worker across DNS
   generations. Logs, totals and trends have independent durable epochs; status is a
-  cached observation, not a hot-path disk query. Cache/storage-only applies never
+  cached observation, not a hot-path disk query. Management observation reads do
+  not acquire Manager: it publishes committed metadata and weak runtime references,
+  while metrics, health, cache and storage stay with their existing owners.
+  Cache/storage-only applies never
   publish candidate certificate changes. The worker opens and integrity-checks an
   existing database in the background (`checking`), so DNS startup never waits for
   it; only shutdown interrupts the check, and writes meanwhile use the bounded queue.

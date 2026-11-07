@@ -20,8 +20,8 @@
 //!   awaits the tasks inside its existing drain bound.
 //! - Polling runs on the storage worker through at most [`QUERIES`] concurrent
 //!   requests, leaving its bounded control queue to other operations. State
-//!   comes from the cached storage status. Manager is locked only to clone
-//!   RuntimeServices before the upgrade, never across socket IO.
+//!   comes from the cached storage status. RuntimeServices is captured through
+//!   the process observation handle, without Manager or socket IO under its lock.
 //! - Each accepted subscription receives one `subscribed` acknowledgement
 //!   before its entries. Independent `state` updates never acknowledge a
 //!   subscription; clients discard prior batches until every queued change is
@@ -193,7 +193,7 @@ pub(super) async fn upgrade(
         .extensions
         .remove::<hyper::upgrade::OnUpgrade>()
         .ok_or_else(upgrade_required)?;
-    let services = shared.manager.lock().await.services.clone();
+    let services = shared.observation.services.clone();
     let live = Live {
         // Only a receiver: the Session copy below drops at return, so removal
         // from Active closes this channel.
@@ -605,6 +605,7 @@ mod tests {
         let shared = Arc::new(Shared {
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
             live: Default::default(),
+            observation: manager.observation.clone(),
             manager: Arc::new(tokio::sync::Mutex::new(manager)),
             active,
             auth: auth_budget::Budget::new(),

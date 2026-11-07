@@ -2,6 +2,8 @@
 //! HTTP management survives unavailable DNS identities; saved DNS startup owns
 //! their retry and publishes its CertificateSet after binding. HTTPS management
 //! must prepare its identity before serving.
+//! Committed observation metadata is published separately from the transaction
+//! mutex so slow candidate preparation cannot block status and storage readers.
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
@@ -156,6 +158,7 @@ pub(super) struct Manager {
     pub filters: Arc<crate::filter_subscriptions::service::Service>,
     pub updates: Arc<super::updates::Coordinator>,
     pub services: Arc<RuntimeServices>,
+    pub observation: Arc<super::observation::Observation>,
     persistence: Arc<CachePersistence>,
     cache_report: SnapshotReport,
     cache_ready: bool,
@@ -348,7 +351,9 @@ impl Manager {
             .map_err(|error| anyhow!("management TLS stage failed: {error:#}"))?;
             active.lock().unwrap().snapshot = Arc::new(snapshot);
         }
+        let observation = super::observation::Observation::new(services.clone(), active.clone());
         let mut this = Self {
+            observation,
             filters,
             updates,
             services,
@@ -373,45 +378,35 @@ impl Manager {
             this.restore(&saved.toml, if skip_restore { None } else { consumed.ok() })
                 .await;
         }
+        this.publish_observation();
         Ok(this)
     }
 
+    fn observation_metadata(&self) -> super::observation::Metadata {
+        super::observation::Metadata {
+            revision: self.saved.as_ref().map_or(0, |s| s.revision),
+            generation: self.generation,
+            last_error: self.last_error.clone(),
+            rollback_error: self.rollback_error.clone(),
+            cache_report: self.cache_report.clone(),
+            last_reload: self.last_reload.clone(),
+            running: self.running.as_ref().map(|r| super::observation::Running {
+                resolver: Arc::downgrade(&r.resolver),
+                listen: r.listen,
+                doh_listen: r.doh_listen,
+                listeners: r.listeners.clone(),
+                started: r.started,
+            }),
+        }
+    }
+
+    fn publish_observation(&self) {
+        self.observation.publish(self.observation_metadata());
+    }
+
+    #[cfg(test)]
     pub fn status(&self) -> serde_json::Value {
-        let health = self.services.health.snapshot();
-        // A degraded generation is running: its other listeners serve.
-        let running = self.running.as_ref().filter(|r| {
-            (health.ready || health.state == HealthState::Degraded) && !r.task.is_finished()
-        });
-        serde_json::json!({
-            "running": running.is_some(),
-            "last_error": if self.running.is_some() && running.is_none() {
-                Some("DNS task exited; restarting automatically".to_string())
-            } else { self.last_error.clone() },
-            "revision": self.saved.as_ref().map_or(0, |s| s.revision),
-            "rollback_unavailable": self.rollback_error,
-            "resolution_mode": running.map(|r| r.resolver.resolution_mode()),
-            "metrics": self.services.metrics.snapshot(),
-            "metrics_scope": "process",
-            "dns_health": health,
-            "diagnostics": {"cache":running.map(|r| r.resolver.cache().diagnostics_snapshot()),"quic":self.services.metrics.quic.snapshot(),"upstreams":running.and_then(|r| r.resolver.upstream_diagnostics()),"recursion":running.and_then(|r| r.resolver.recursion_diagnostics())},
-            "certificates": self.certificate_status(),
-            "storage": self.services.storage.status(),
-            "cache_persistence": self.cache_report,
-            // Addresses are reported only for listeners that are serving.
-            "listen": running
-                .filter(|r| r.listeners.serving(crate::server::ListenerKind::Dns))
-                .map(|r| r.listen.to_string()),
-            "listeners": running.map(|r| r.listeners.snapshot()),
-            "doh_listen": running
-                .filter(|r| r.listeners.serving(crate::server::ListenerKind::Doh))
-                .and_then(|r| r.doh_listen)
-                .map(|a| a.to_string()),
-            "doh_http3": running.is_some_and(|r| r.listeners.serving(crate::server::ListenerKind::Doh3)),
-            "uptime_seconds": running.map(|r| r.started.elapsed().as_secs()),
-            "generation": self.generation,
-            "cache": running.map(|r| r.resolver.cache().snapshot()),
-            "refresh": running.map(|r| r.resolver.refresh_snapshot()),
-        })
+        self.observation.render(&self.observation_metadata())
     }
 
     pub fn transport_change(&self, toml: &str, request_host: &str) -> Result<Value> {
@@ -419,10 +414,6 @@ impl Manager {
         let candidate = Snapshot::describe(&config, self.address)?;
         let current = self.active.lock().unwrap().snapshot.clone();
         Ok(current.change(&candidate, request_host, self.address))
-    }
-
-    pub fn transport(&self) -> Value {
-        self.active.lock().unwrap().snapshot.view()
     }
 
     fn certificate_status(&self) -> Value {
@@ -465,6 +456,7 @@ impl Manager {
         self.last_reload = Some(
             serde_json::json!({"attempt_id":self.reload_attempt,"source":source,"started_at_ms":started,"completed_at_ms":crate::clock::unix_ms(),"outcome":outcome,"error_code":error_code}),
         );
+        self.publish_observation();
         result.map_err(|error| {
             if error.is::<crate::tls::ManagementNameMismatch>() {
                 error
@@ -568,6 +560,7 @@ impl Manager {
             // Retrying cannot help: the local rules are compiled only when a
             // configuration is applied. Keep the real reason visible.
             self.last_error = Some(format!("DNS unavailable: {error}"));
+            self.publish_observation();
             return;
         }
         let result = async {
@@ -646,6 +639,7 @@ impl Manager {
                 self.startup_failed(error);
             }
         }
+        self.publish_observation();
     }
 
     /// Counts the failure; logging is rate limited by [`crate::server::FailureLog`].
@@ -677,6 +671,7 @@ impl Manager {
         };
         self.last_error = Some(format!("DNS unavailable: {reason}"));
         self.startup_failed(reason);
+        self.publish_observation();
     }
 
     fn startup_recovered(&mut self) {
@@ -739,6 +734,7 @@ impl Manager {
             self.filters.set_revision(next.revision);
             self.saved = Some(next);
             self.rollback_error = None;
+            self.publish_observation();
             return Ok(false);
         }
         ensure!(
@@ -777,6 +773,7 @@ impl Manager {
             self.saved = Some(next);
             self.rollback_error = None;
             self.last_error = None;
+            self.publish_observation();
             return Ok(false);
         }
         let previous = self.saved.clone();
@@ -814,7 +811,7 @@ impl Manager {
             ))
         }
         .await;
-        match result {
+        let applied = match result {
             Ok(running) => {
                 self.publish(candidate);
                 self.running = Some(running);
@@ -837,7 +834,9 @@ impl Manager {
                 }
                 Err(error.context("configuration not applied"))
             }
-        }
+        };
+        self.publish_observation();
+        applied
     }
 
     fn publish(&self, mut candidate: Snapshot) {
@@ -853,9 +852,11 @@ impl Manager {
 
     pub async fn stop(&mut self) {
         if let Some(running) = self.running.take() {
+            self.publish_observation();
             let _ = running.stop().await;
         }
         self.services.set_dns_state(false, self.generation);
+        self.publish_observation();
     }
 
     /// Called once after management mutations are closed and drained.

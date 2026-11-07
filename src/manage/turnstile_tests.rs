@@ -47,6 +47,10 @@ async fn fixture() -> (tempfile::TempDir, Arc<Shared>) {
     let shared = Arc::new(Shared {
         filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
         live: Default::default(),
+        observation: {
+            let owner = manager.lock().await;
+            owner.observation.clone()
+        },
         manager,
         active,
         auth: auth_budget::Budget::new(),

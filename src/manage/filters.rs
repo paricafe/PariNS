@@ -196,6 +196,10 @@ mod tests {
             .unwrap(),
         ));
         let shared = Arc::new(Shared {
+            observation: {
+                let owner = manager.lock().await;
+                owner.observation.clone()
+            },
             manager,
             active: active.clone(),
             auth: crate::manage::auth_budget::Budget::new(),

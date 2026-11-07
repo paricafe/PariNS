@@ -11,6 +11,7 @@ pub mod check;
 mod dns_retry;
 mod filters;
 mod live;
+mod observation;
 mod runtime;
 mod settings;
 pub(crate) mod store;
@@ -78,6 +79,7 @@ struct Shared {
     filter_tasks: tokio::sync::Mutex<JoinSet<()>>,
     live: live::Hub,
     manager: Arc<tokio::sync::Mutex<Manager>>,
+    observation: Arc<observation::Observation>,
     active: Arc<Mutex<Active>>,
     auth: auth_budget::Budget,
     mutation: Arc<Semaphore>,
@@ -831,15 +833,10 @@ async fn api(
             .await
             .map_err(|_| internal())?
         }
-        ("GET", "/api/status") => {
-            let manager = shared.manager.lock().await;
-            let mut status = manager.status();
-            status["transport"] = manager.transport();
-            Ok(status)
-        }
+        ("GET", "/api/status") => Ok(shared.observation.status()),
         ("GET", "/api/stats") => {
             let input = history_options(query)?;
-            let services = shared.manager.lock().await.services.clone();
+            let services = shared.observation.services.clone();
             Ok(json!(
                 services
                     .storage
@@ -850,7 +847,7 @@ async fn api(
         }
         ("POST", "/api/query-log/list") => {
             let input: crate::query_log::ListOptions = decode(body)?;
-            let services = shared.manager.lock().await.services.clone();
+            let services = shared.observation.services.clone();
             Ok(json!({"page":services.storage.list_logs(input).await.map_err(storage_error)?}))
         }
         ("POST", "/api/query-log/clear" | "/api/stats/reset" | "/api/stats/history/clear") => {
@@ -864,7 +861,7 @@ async fn api(
                 .await?;
             tokio::spawn(async move {
                 let _permit = permit;
-                let services = shared.manager.lock().await.services.clone();
+                let services = shared.observation.services.clone();
                 let result = match action {
                     0 => services.storage.clear_logs(epoch).await,
                     1 => services.storage.reset_totals(epoch).await,
@@ -1279,6 +1276,10 @@ pub async fn serve(
     let shared = Arc::new(Shared {
         filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
         live: Default::default(),
+        observation: {
+            let owner = manager.lock().await;
+            owner.observation.clone()
+        },
         manager: manager.clone(),
         active: active.clone(),
         auth: auth_budget::Budget::new(),
@@ -1480,6 +1481,10 @@ mod tests {
         let shared = Arc::new(Shared {
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
             live: Default::default(),
+            observation: {
+                let owner = manager.lock().await;
+                owner.observation.clone()
+            },
             manager: manager.clone(),
             active: active.clone(),
             auth: auth_budget::Budget::new(),
@@ -1553,6 +1558,10 @@ mod tests {
         let shared = super::Shared {
             filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             live: Default::default(),
+            observation: {
+                let owner = manager.lock().await;
+                owner.observation.clone()
+            },
             manager,
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
@@ -1651,6 +1660,10 @@ mod tests {
         let shared = super::Shared {
             filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             live: Default::default(),
+            observation: {
+                let owner = manager.lock().await;
+                owner.observation.clone()
+            },
             manager,
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
@@ -1692,6 +1705,10 @@ mod tests {
         let shared = Arc::new(super::Shared {
             filter_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             live: Default::default(),
+            observation: {
+                let owner = manager.lock().await;
+                owner.observation.clone()
+            },
             manager: manager.clone(),
             active: active.clone(),
             auth: super::auth_budget::Budget::new(),
@@ -1748,6 +1765,10 @@ mod tests {
         let shared = Arc::new(Shared {
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
             live: Default::default(),
+            observation: {
+                let owner = manager.lock().await;
+                owner.observation.clone()
+            },
             manager: manager.clone(),
             active: active.clone(),
             auth: auth_budget::Budget::new(),

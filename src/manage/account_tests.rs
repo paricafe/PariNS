@@ -28,6 +28,10 @@ async fn fixture() -> (tempfile::TempDir, Arc<Shared>, HeaderMap) {
     let shared = Arc::new(Shared {
         filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
         live: Default::default(),
+        observation: {
+            let owner = manager.lock().await;
+            owner.observation.clone()
+        },
         manager,
         active,
         auth: auth_budget::Budget::new(),
@@ -47,6 +51,73 @@ async fn fixture() -> (tempfile::TempDir, Arc<Shared>, HeaderMap) {
         HeaderValue::from_str(&session.binding).unwrap(),
     );
     (temp, shared, headers)
+}
+
+#[tokio::test]
+async fn observations_respond_while_configuration_preparation_holds_manager() {
+    let (_temp, shared, headers) = fixture().await;
+    let before = request(&shared, &headers, "GET", "/api/status", json!(null))
+        .await
+        .unwrap();
+    let mut manager = shared.manager.lock().await;
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml = next
+        .toml
+        .replace("query_timeout_ms=200", "query_timeout_ms=201");
+    let mut applying = Box::pin(manager.apply(next));
+    // Poll only to the asynchronous preparation boundary, then keep its owner
+    // suspended. This is a deterministic slow preparation, not a timed sleep.
+    assert!(futures_util::poll!(&mut applying).is_pending());
+    let reads = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        let status = request(&shared, &headers, "GET", "/api/status", json!(null))
+            .await
+            .unwrap();
+        request(&shared, &headers, "GET", "/api/stats", json!(null))
+            .await
+            .unwrap();
+        request(&shared, &headers, "POST", "/api/query-log/list", json!({}))
+            .await
+            .unwrap();
+        status
+    })
+    .await
+    .expect("observations must not wait for configuration preparation");
+    assert_eq!(reads["revision"], before["revision"]);
+    assert_eq!(reads["generation"], before["generation"]);
+    assert_eq!(reads["dns_health"]["ready"], true);
+    shared
+        .observation
+        .services
+        .metrics
+        .inc(crate::metrics::Counter::CacheHits);
+    let live = request(&shared, &headers, "GET", "/api/status", json!(null))
+        .await
+        .unwrap();
+    assert_eq!(live["metrics"]["counters"]["cache_hits"], 1);
+    assert!(applying.await.unwrap());
+    drop(manager);
+    let after = request(&shared, &headers, "GET", "/api/status", json!(null))
+        .await
+        .unwrap();
+    assert_eq!(after["revision"], 3);
+    assert!(after["generation"].as_u64() > before["generation"].as_u64());
+    let manager = shared.manager.lock().await;
+    let resolver = Arc::downgrade(manager.resolver().unwrap());
+    manager.simulate_exit();
+    tokio::task::yield_now().await;
+    let failed = request(&shared, &headers, "GET", "/api/status", json!(null))
+        .await
+        .unwrap();
+    assert_eq!(failed["running"], false);
+    assert_eq!(failed["dns_health"]["state"], "failed");
+    assert!(failed["cache"].is_null());
+    drop(manager);
+    shared.manager.lock().await.terminal_shutdown().await;
+    assert!(
+        resolver.upgrade().is_none(),
+        "observation must not retain a stopped Resolver"
+    );
 }
 
 async fn request(

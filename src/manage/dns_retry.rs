@@ -79,6 +79,7 @@ mod tests {
         let shared = Arc::new(Shared {
             filter_tasks: tokio::sync::Mutex::new(JoinSet::new()),
             live: Default::default(),
+            observation: manager.observation.clone(),
             manager: Arc::new(tokio::sync::Mutex::new(manager)),
             active,
             auth: auth_budget::Budget::new(),

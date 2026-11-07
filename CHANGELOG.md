@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Management status, statistics and query-log reads remain available while a
+  configuration transaction prepares material or persists its saved state.
 - Cache invalidation rejects inspection tokens from a replaced cache, including
   after cache hot updates and DNS restarts. API clients must use `cache_token`
   from status or inspection instead of an epoch-only invalidation request.

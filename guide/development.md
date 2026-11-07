@@ -8,6 +8,9 @@ rules and module ownership are in [AGENTS.md](../AGENTS.md); detailed invariants
 in each module's `//!` documentation. [ci.yml](../.github/workflows/ci.yml) is the
 full CI gate.
 
+See [Architecture](architecture.md) for request flow, state lifetimes, management
+observation and the configuration and terminal shutdown boundaries.
+
 ## Build and test
 
 The console is a React and TypeScript app in `web/`. Its build output in `web/dist/`

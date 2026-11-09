@@ -53,8 +53,17 @@ async fn fixture() -> (tempfile::TempDir, Arc<Shared>, HeaderMap) {
     (temp, shared, headers)
 }
 
-#[tokio::test]
-async fn reads_respond_while_owned_configuration_preparation_is_suspended() {
+#[test]
+fn reads_respond_while_owned_configuration_preparation_is_suspended() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(reads_during_blocked_preparation());
+}
+
+async fn reads_during_blocked_preparation() {
     let (_temp, shared, headers) = fixture().await;
     let before = request(&shared, &headers, "GET", "/api/status", json!(null))
         .await
@@ -67,9 +76,18 @@ async fn reads_respond_while_owned_configuration_preparation_is_suspended() {
         .replace("query_timeout_ms=200", "query_timeout_ms=201");
     let preparation = manager.preparation(next).unwrap();
     drop(manager);
+    // Occupy this test runtime's only blocking thread before real preparation
+    // queues its file work. Dropping the sender also releases it after a panic.
+    let (release, wait) = std::sync::mpsc::channel();
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let blocker = tokio::task::spawn_blocking(move || {
+        let _ = started.send(());
+        let _ = wait.recv();
+    });
+    waiting.await.unwrap();
     let mut applying = Box::pin(preparation.run());
-    // Poll only to the asynchronous preparation boundary, then keep its owner
-    // suspended. This is a deterministic slow preparation, not a timed sleep.
+    // The queued worker cannot finish before the reads; no scheduler race or
+    // timed sleep decides whether the preparation future is still pending.
     assert!(futures_util::poll!(&mut applying).is_pending());
     let reads = tokio::time::timeout(std::time::Duration::from_millis(500), async {
         let status = request(&shared, &headers, "GET", "/api/status", json!(null))
@@ -104,6 +122,8 @@ async fn reads_respond_while_owned_configuration_preparation_is_suspended() {
         .await
         .unwrap();
     assert_eq!(live["metrics"]["counters"]["cache_hits"], 1);
+    release.send(()).unwrap();
+    blocker.await.unwrap();
     let prepared = applying.await.unwrap();
     assert!(shared.manager.lock().await.commit(prepared).await.unwrap());
     let after = request(&shared, &headers, "GET", "/api/status", json!(null))

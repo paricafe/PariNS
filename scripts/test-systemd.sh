@@ -957,7 +957,7 @@ sudo systemctl start parins-updater.path
 attempt=0
 until sudo jq -e '.operation.status.operation_id == "dddddddddddddddddddddddddddddddd" and (.operation.status.phase | IN("succeeded", "rolled_back", "failed", "manual_required"))' /var/lib/parins-updater/private/journal.json >/dev/null; do
     attempt=$((attempt + 1))
-    [ "$attempt" -lt 150 ] || { printf '%s\n' 'Online commit did not reach a terminal phase.' >&2; exit 1; }
+    [ "$attempt" -lt 900 ] || { printf '%s\n' 'Online commit did not reach a terminal phase.' >&2; exit 1; }
     sleep 1
 done
 sudo jq -e '.operation.status.phase == "succeeded" and .operation.status.reason == null and .installed == .operation.candidate and .operation.pending_launch == null' /var/lib/parins-updater/private/journal.json >/dev/null || {
@@ -974,6 +974,51 @@ http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: applicat
 binding=$(jq -er '.session.binding' "$fixture/response.json")
 check_dns
 printf '%s\n' 'Online Commit, swap, Type=simple start and readiness passed.'
+# Prove the observation-only installer handoff against the real root executable,
+# process identity and storage health. The journal remains pending until verify.
+sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
+restore_nonce=33333333333333333333333333333333
+sudo python3 - "$restore_nonce" "$revision" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path('/var/lib/parins-updater/private/journal.json')
+journal = json.loads(path.read_text())
+assert journal['installation_pending'] is None
+assert journal['operation']['status']['phase'] == 'succeeded'
+nonce = sys.argv[1]
+journal['installation_pending'] = dict(
+    nonce=nonce, config_revision=int(sys.argv[2]),
+    launch=dict(operation_id=nonce, phase_nonce=nonce, launch_nonce='4' * 32,
+                identity=journal['installed'], skip_cache_restore=True,
+                phase='awaiting_readiness', initialized=True))
+temporary = path.with_name('.installation-wait-fixture')
+with temporary.open('x') as output:
+    os.fchmod(output.fileno(), 0o600)
+    json.dump(journal, output)
+    output.flush()
+    os.fsync(output.fileno())
+os.replace(temporary, path)
+fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+sudo /usr/libexec/parins-updater recover
+sudo systemctl start parins-managed.service
+sudo cp /var/lib/parins-updater/private/journal.json "$fixture/wait-journal.json"
+sudo cp /var/lib/parins-updater/status.json "$fixture/wait-status.json"
+sudo /usr/libexec/parins-updater install-wait "$restore_nonce"
+sudo cmp "$fixture/wait-journal.json" /var/lib/parins-updater/private/journal.json
+sudo cmp "$fixture/wait-status.json" /var/lib/parins-updater/status.json
+sudo jq -e '.pending_launch != null and .capability.reason == "installation_pending"' /var/lib/parins-updater/status.json >/dev/null
+sudo /usr/libexec/parins-updater install-verify "$restore_nonce"
+sudo jq -e '.installation_pending == null and .operation.status.phase == "succeeded"' /var/lib/parins-updater/private/journal.json >/dev/null
+sudo systemctl start parins-updater.path
+printf '%s\n' 'Installer wait preserved the pending journal/status; verified completion passed.'
 # ManualRequired recovery by reinstallation, with the update request path left
 # active as in production. The restarted service holds an older invocation's
 # commit intent and writes an Abort request on its own, including inside the

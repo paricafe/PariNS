@@ -364,7 +364,12 @@ rollback() {
             if "$was_active" && "$new_started"; then
                 restore_nonce=$("$helper" install-restore <&9 9<&-) || { printf '%s\n' 'Manual recovery required: prior version was not started.' >&2; exit "$status"; }
                 flock -u 9; exec 9>&-; lock_held=false
-                systemctl start parins-managed.service && "$helper" install-verify "$restore_nonce" || printf '%s\n' 'Manual recovery required: prior version readiness not confirmed.' >&2
+                # The packaged helper supplies the longer storage wait without
+                # committing. The restored helper validates its own unit contract
+                # and completes the matching installation with fresh health.
+                systemctl start parins-managed.service &&
+                    "$helper" install-wait "$restore_nonce" &&
+                    "$helper_target" install-verify "$restore_nonce" || printf '%s\n' 'Manual recovery required: prior version readiness not confirmed.' >&2
             else
                 flock -u 9; exec 9>&-; lock_held=false
                 if "$was_active" && ! "$new_started"; then systemctl start parins-managed.service || true; fi

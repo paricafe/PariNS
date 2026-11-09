@@ -8,9 +8,10 @@ StartLimitBurst=8
 Type=oneshot
 ExecStart=/usr/libexec/parins-updater run
 ExecStopPost=/usr/libexec/parins-updater recover
-TimeoutStartSec=600
-# One 145s stop, 60s start job, 60s readiness and durable file work.
-TimeoutStopSec=360
+# Candidate and rollback: each has a 160s stop bound, 60s start and 180s readiness.
+TimeoutStartSec=900
+# One recovery launch plus unit validation and durable file work.
+TimeoutStopSec=480
 Restart=no
 User=root
 UMask=0077

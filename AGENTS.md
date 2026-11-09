@@ -304,6 +304,11 @@ until preview/validation.
   as `aborted`; the application keeps its own abort reason. Details: `src/update/executor/mod.rs`.
 - Releases that require new root updater behavior raise the helper protocol so
   older helpers require the complete installer before an online update.
+- Root launch verification has one 180-second monotonic budget, including ten
+  seconds of fresh, identity-bound DNS and storage readiness. Installer rollback
+  waits with the packaged helper without committing, then the restored helper
+  validates its own units and completes the installation. Service timeouts cover
+  candidate and rollback launches, with a separate recovery budget.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners; it also validates the saved rollback copy. Candidate preflight runs as the app user; root never
   executes the candidate. The preflight compares only digests of version-independent

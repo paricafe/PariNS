@@ -222,7 +222,10 @@ and a native `cc` compiler for service fixture checks. They cover these contract
   and never prints a token from a symlinked, hard-linked or malformed file. An
   initialized reinstall is recognized only after its read-only preflight succeeds.
 - Staging and `--dry-run` start no service and run no candidate binary.
-- A failed replacement restores the previous files.
+- A failed replacement restores the previous files. Recovery fixtures exercise
+  the actual EXIT handler with distinct packaged/restored helpers: the packaged
+  helper waits without committing, the restored helper verifies its own unit
+  contract, and either failure leaves readiness unconfirmed.
 - Service readiness fixtures wait for stable, matching-generation DNS readiness
   before UDP/TCP probes, independently of management HTTP readiness. Their
   unprivileged regression cases run through `test-install.sh`; real service
@@ -231,6 +234,15 @@ and a native `cc` compiler for service fixture checks. They cover these contract
   contract and real DNS probes; current builds must supply every readiness field.
   Preflight rejection uses a fixture-owned native executable with a fixed exit
   status, independent of host utility packaging.
+
+The root executor's launch-loop tests use Tokio's paused monotonic clock. They
+cover storage becoming ready after the former one-minute deadline, restored
+identities, the fresh ten-second stability window, process replacement, missing
+or stalled health and a blocked observation. Unit timeout checks keep systemd's
+candidate/rollback and recovery budgets above the corresponding launch budgets.
+The real systemd suite also invokes `install-wait` against an initialized process,
+compares the journal and public status byte for byte, and requires `install-verify`
+to complete the pending installation.
 
 ## Acceptance workflows
 

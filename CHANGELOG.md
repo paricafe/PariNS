@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Upgrade
+
+- The storage-readiness fix requires helper protocol 5. Run the complete installer
+  to replace the program, root helper and service files; an online program-only
+  update cannot supply the new helper behavior.
+
+### Fixed
+
+- Installation, online updates and rollback allow up to three minutes per launch
+  for storage checking and ten seconds of fresh, verified DNS/storage health.
+  systemd's outer update and recovery timeouts cover the longer launch budgets.
+- Installer rollback waits with the packaged helper, then verifies with the
+  restored helper so the previous service files retain their strict validation.
+
 ## v0.2.3 — 2026-11-09
 
 ### Upgrade

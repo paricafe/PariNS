@@ -35,6 +35,85 @@ sh -eu -c '
     exec 9>&-
     trap rollback EXIT
 ' sh "$fixture/rollback-function.sh"
+# A failed candidate restores the old helper and unit contract. The packaged
+# helper may wait longer, but only the restored helper may finish verification.
+# Exercise the real EXIT handler with distinct helper executables and failures
+# on either side of that handoff, without touching host services.
+for recovery_case in ready wait-failed verify-failed; do
+    recovery="$fixture/$recovery_case"
+    mkdir -p "$recovery/backup" "$recovery/bin" "$recovery/units" "$recovery/private" "$recovery/libexec"
+    printf 'old program\n' > "$recovery/backup/parins"
+    for recovery_unit in parins-managed.service parins-updater.service parins-updater.path parins-update-recovery.service; do
+        printf 'old unit contract\n' > "$recovery/backup/$recovery_unit"
+        printf 'new unit contract\n' > "$recovery/units/$recovery_unit"
+    done
+    printf '{}\n' > "$recovery/backup/journal.json"
+    cat > "$recovery/packaged-helper" <<'PACKAGED_HELPER'
+#!/bin/sh
+set -eu
+printf 'packaged:%s\n' "$1" >> "$RECOVERY_FIXTURE/calls"
+case "$1" in
+    rebuild-status) : ;;
+    install-restore) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+    install-wait)
+        [ "$2" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]
+        # No inherited installer lock; this operation acquires its own.
+        ! ( : <&9 ) 2>/dev/null
+        [ "$RECOVERY_CASE" != wait-failed ]
+        ;;
+    *) exit 81 ;;
+esac
+PACKAGED_HELPER
+    cat > "$recovery/backup/parins-updater" <<'RESTORED_HELPER'
+#!/bin/sh
+set -eu
+printf 'restored:%s\n' "$1" >> "$RECOVERY_FIXTURE/calls"
+[ "$1" = install-verify ] && [ "$2" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]
+! ( : <&9 ) 2>/dev/null
+grep -Fxq 'old program' "$RECOVERY_FIXTURE/bin/parins"
+for unit in parins-managed.service parins-updater.service parins-updater.path parins-update-recovery.service; do
+    grep -Fxq 'old unit contract' "$RECOVERY_FIXTURE/units/$unit"
+done
+[ "$RECOVERY_CASE" != verify-failed ]
+printf 'completed\n' > "$RECOVERY_FIXTURE/completed"
+RESTORED_HELPER
+    chmod 0755 "$recovery/packaged-helper" "$recovery/backup/parins-updater"
+    recovery_status=0
+    RECOVERY_FIXTURE="$recovery" RECOVERY_CASE="$recovery_case" sh -eu -c '
+        . "$1/rollback-function.sh"
+        root= changed=true committed=false stopped=true was_active=true was_enabled=true
+        had_binary=true had_unit=true new_started=true lock_held=true request_path_stopped=true
+        backup=$2/backup bin_dir=$2/bin binary_target=$2/bin/parins
+        unit_dir=$2/units unit_target=$2/units/parins-managed.service
+        helper=$2/packaged-helper helper_target=$2/libexec/parins-updater
+        updater_dir=$2 updater_private=$2/private
+        flock() { [ "$1" = -u ]; }
+        mktemp() {
+            case "$1" in
+                /usr/libexec/.rollback.*) command mktemp "$RECOVERY_FIXTURE/libexec/.rollback.XXXXXX" ;;
+                *) command mktemp "$@" ;;
+            esac
+        }
+        systemctl() {
+            printf "systemctl:%s\n" "$1" >> "$RECOVERY_FIXTURE/systemctl"
+            case "$1" in show) printf "0\n" ;; esac
+        }
+        exec 9>"$2/private/lock"
+        trap rollback EXIT
+        exit 42
+    ' sh "$fixture" "$recovery" > "$recovery/output" 2>&1 || recovery_status=$?
+    [ "$recovery_status" -eq 42 ] || { cat "$recovery/output" >&2; exit 1; }
+    printf 'packaged:rebuild-status\npackaged:install-restore\npackaged:install-wait\n' > "$recovery/expected"
+    if [ "$recovery_case" != wait-failed ]; then printf 'restored:install-verify\n' >> "$recovery/expected"; fi
+    cmp "$recovery/expected" "$recovery/calls"
+    if [ "$recovery_case" = ready ]; then
+        test -f "$recovery/completed"
+        ! grep -q 'Manual recovery required' "$recovery/output"
+    else
+        test ! -f "$recovery/completed"
+        grep -Fq 'Manual recovery required: prior version readiness not confirmed.' "$recovery/output"
+    fi
+done
 # The namespace is pinned in the installer across both preflight calls. Inspect
 # the actual parent's FD while the child runs, without nsenter or privilege.
 sed -n '/^        low_preflight() /,/^        [})]$/p' "$repo/scripts/install.sh" > "$fixture/preflight-function.sh"

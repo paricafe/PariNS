@@ -22,6 +22,9 @@
 //!   and its launch descriptor so the application can request verification.
 //! - Launch readiness hashes `/proc/PID/exe` only after a health receipt from that
 //!   PID/InvocationID, once per process; `Type=simple` start returns before execve.
+//!   Each launch has a 180-second monotonic budget, including ten seconds of fresh
+//!   stable DNS/storage health. Installer rollback waits with the packaged helper
+//!   before the restored helper validates its own units and commits readiness.
 //! - Installer registration keeps prior terminal operations and fences. Only a
 //!   reinstallation that proved readiness closes a ManualRequired operation, as
 //!   Failed/`superseded_by_installation` with the same ID and phase nonce; a failed
@@ -29,6 +32,7 @@
 //!   re-verify.
 mod fs;
 mod journal;
+mod readiness;
 
 use crate::clock::unix_ms;
 use crate::update::{
@@ -39,7 +43,7 @@ use crate::update::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use fs::Dir;
-use journal::{ExecutableIdentity, Installation, Journal, Operation, Readiness};
+use journal::{ExecutableIdentity, Installation, Journal, Operation};
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -51,6 +55,8 @@ const ROOT_STATE: &str = "/var/lib/parins-updater";
 const LIVE_DIR: &str = "/opt/parins-managed";
 const STATE: &str = "/var/lib/parins-managed";
 const PRIVATE_STATE: &str = "/var/lib/private/parins-managed";
+const STOP_WAIT_SECS: u64 = 160;
+const START_WAIT_SECS: u64 = 60;
 
 fn failure_code(error: &anyhow::Error) -> &'static str {
     if error
@@ -92,7 +98,7 @@ pub async fn run_cli() -> Result<()> {
             || (args.len() == 2
                 && matches!(
                     args[0].as_str(),
-                    "install-verify" | "install-rollback-check"
+                    "install-verify" | "install-wait" | "install-rollback-check"
                 )
                 && valid_id(&args[1])),
         "invalid fixed updater operation"
@@ -115,6 +121,7 @@ pub async fn run_cli() -> Result<()> {
         "install-check" => executor.install_check(),
         "install-restore" => executor.install_restore(),
         "install-verify" => executor.install_verify(&args[1]).await,
+        "install-wait" => executor.wait_installation(&args[1]).await.map(|_| ()),
         "install-rollback-check" => executor.install_match(&args[1]).map(|_| ()),
         "rebuild-status" => {
             let journal = Journal::load(&executor.private)?;
@@ -346,14 +353,19 @@ impl Executor {
     }
     async fn install_verify(&self, nonce: &str) -> Result<()> {
         validate_units().await?;
-        let mut journal = self.install_match(nonce)?;
+        let mut journal = self.wait_installation(nonce).await?;
+        self.complete_installation(&mut journal)
+    }
+    /// Observation only: the restored helper owns unit validation and completion.
+    async fn wait_installation(&self, nonce: &str) -> Result<Journal> {
+        let journal = self.install_match(nonce)?;
         let pending = journal
             .installation_pending
             .as_ref()
             .context("missing installation")?;
         self.wait_launch(&pending.launch, pending.config_revision.unwrap_or(0))
             .await?;
-        self.complete_installation(&mut journal)
+        Ok(journal)
     }
     /// Only after the installed program proved readiness.
     fn complete_installation(&self, journal: &mut Journal) -> Result<()> {
@@ -849,21 +861,14 @@ impl Executor {
         self.wait_launch(pending, op.config_revision).await
     }
     async fn wait_launch(&self, pending: &PendingLaunch, config_revision: u64) -> Result<()> {
-        let start = Instant::now();
-        let mut readiness = Readiness::default();
-        let mut invocation = String::new();
         let mut executable = ExecutableIdentity::default();
-        while start.elapsed() < Duration::from_secs(60) {
+        readiness::wait(pending, config_revision, async || {
             let info = service().await?;
             let pid = info
                 .get("MainPID")
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
             let current = info.get("InvocationID").cloned().unwrap_or_default();
-            if invocation != current {
-                readiness = Readiness::default();
-                invocation = current.clone();
-            }
             let health = Dir::open(Path::new("/run/parins-managed"), false)
                 .and_then(|dir| dir.read("update-health.json", 8192, false))
                 .and_then(|bytes| Ok(serde_json::from_slice::<Health>(&bytes)?))
@@ -881,20 +886,10 @@ impl Executor {
                         .ok()
                 },
             );
-            let matching = health.as_ref().filter(|_| verified && valid_id(&current));
-            if readiness.observe(
-                start.elapsed().as_millis() as u64,
-                matching,
-                pending,
-                pid,
-                &current,
-                config_revision,
-            ) {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        bail!("readiness_failed")
+            let matching = health.filter(|_| verified && valid_id(&current));
+            Ok((matching, pid, current))
+        })
+        .await
     }
     async fn rollback(&self, journal: &mut Journal, reason: &str, boot: bool) -> Result<()> {
         let op = journal.operation.as_ref().context("missing operation")?;
@@ -1147,7 +1142,15 @@ async fn systemctl(arguments: &[&str], seconds: u64) -> Result<String> {
     .context("systemctl deadline exceeded")?
 }
 async fn control(action: &str) -> Result<()> {
-    systemctl(&[action, UNIT], if action == "stop" { 160 } else { 60 }).await?;
+    systemctl(
+        &[action, UNIT],
+        if action == "stop" {
+            STOP_WAIT_SECS
+        } else {
+            START_WAIT_SECS
+        },
+    )
+    .await?;
     Ok(())
 }
 async fn service() -> Result<BTreeMap<String, String>> {
@@ -1460,6 +1463,28 @@ pub(crate) fn consume_abort_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_timeouts_cover_candidate_rollback_and_recovery() {
+        fn seconds(unit: &str, key: &str) -> u64 {
+            unit.lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        let unit = include_str!("../../../deploy/parins-updater.service");
+        let launch = STOP_WAIT_SECS + START_WAIT_SECS + readiness::LAUNCH_WAIT.as_secs();
+        // Leave time outside launch phases for validation and durable file work.
+        assert!(seconds(unit, "TimeoutStartSec=") >= 2 * launch + 60);
+        assert!(seconds(unit, "TimeoutStopSec=") >= launch + 60);
+        assert!(
+            seconds(
+                include_str!("../../../deploy/parins-managed.service"),
+                "TimeoutStopSec="
+            ) < STOP_WAIT_SECS
+        );
+    }
 
     fn stage_request() -> Inbox {
         Inbox {

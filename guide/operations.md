@@ -128,8 +128,12 @@ by the installer.
    differed. Check the configuration and certificates; if the current
    configuration is fine, change and save a setting once, then update again.
 3. DNS stops briefly, the new program starts, and the update completes only when DNS
-   (every listener) and storage are ready. Otherwise the previous program is put
-   back automatically. Sign in again afterwards.
+   (every listener) and storage are ready. Each launch has up to three minutes,
+   including ten continuous seconds of fresh health reports from the verified
+   process. A large database may still be checking while DNS already serves;
+   DNS readiness alone does not complete the update. Otherwise the previous
+   program is put back automatically with its own launch budget. Sign in again
+   afterwards.
 
 Settings are locked while an update runs. Only the program is replaced. A release
 that changes the updater itself says **This release must be installed manually with
@@ -137,8 +141,12 @@ the installer**; run the [install command](deployment.md#install) again. Automat
 rollback restores the program, not data: it never restores an old database or
 removes new history.
 
-Version 0.1.30 requires updater protocol 4 for its recovery fixes. Upgrade older
-helpers with the complete installer; it replaces both the program and the helper.
+The Unreleased storage-readiness fix requires helper protocol 5. Upgrade older
+helpers with the complete installer; it replaces the program, helper and service
+files. A program-only online update cannot upgrade the helper. During installer
+rollback the packaged helper waits for storage without completing the installation;
+the restored helper then validates the restored service files and fresh health
+before completing recovery.
 
 If PariNS cancels an update before the program was replaced, the console shows its
 own reason and the root journal records the update as `aborted`.

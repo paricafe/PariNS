@@ -1,0 +1,28 @@
+src/flight.rs
+  s_b27ab66ab5950d::t_448b88b5859188 114-115,117-118
+guide/development.md
+  s_b27ab66ab5950d::t_c3d4d612665eea 69,82-86
+src/flight/bench.rs
+  s_b27ab66ab5950d::t_fafd654973487e 96-128,165-166,170,172-173,178-194,205
+  s_b27ab66ab5950d::t_0d2a92fb35feb0 129-164,167-169,171,174-177,195-204
+  s_b27ab66ab5950d::t_448b88b5859188 9-23
+  s_b27ab66ab5950d::t_352ca764557cc3 206
+AGENTS.md
+  s_b27ab66ab5950d::t_825b6b3daa5f81 248-249
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "db246c99d88a8513a2ee789af51baf740c933ef6",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

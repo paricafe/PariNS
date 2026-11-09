@@ -1,0 +1,31 @@
+AGENTS.md
+  s_b27ab66ab5950d::t_d2ed27a7d62b9d 343-344
+guide/development.md
+  s_b27ab66ab5950d::t_d2ed27a7d62b9d 186-189
+  s_b27ab66ab5950d::t_f7a7a4719feb45 190-191
+scripts/test-install.sh
+  s_b27ab66ab5950d::t_d2ed27a7d62b9d 309
+scripts/test-systemd.sh
+  s_b27ab66ab5950d::t_f7a7a4719feb45 371-378
+  s_b27ab66ab5950d::t_8e58ba157d12e7 379-381,383-388
+  s_b27ab66ab5950d::t_58181f4ed645b5 77,154-163,193,208,210,215,217,361-370,382,389-397,399-401,435,437,440,442,444,449,452
+scripts/test-systemd-readiness.sh
+  s_b27ab66ab5950d::t_d2ed27a7d62b9d 1-10,12-19,22-29,31-52,54-65
+  s_b27ab66ab5950d::t_f7a7a4719feb45 11,20-21,30,53,66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cbe3c4ba11c8610beb67b7589f0125e393ddfdb1",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

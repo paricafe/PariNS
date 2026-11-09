@@ -63,4 +63,30 @@ for readiness_case in transition wrong-revision transport invalid-json starting 
     }
     ! grep -q 'private-.*-sentinel' "$readiness_fixture/$readiness_case/output"
 done
-printf '%s\n' 'Service readiness fixture checks passed (11 cases).'
+# The real cleanup removes the private wait snapshots, but an unexpected file
+# must still fail the fixture instead of broadening removal to the directory.
+sed -n '/^cleanup() {/,/^}$/p' "$repo/scripts/test-systemd.sh" > "$readiness_fixture/cleanup.sh"
+for cleanup_case in known unknown; do
+    cleanup_dir="$readiness_fixture/cleanup-$cleanup_case"
+    mkdir "$cleanup_dir"
+    : > "$cleanup_dir/wait-journal.json"
+    : > "$cleanup_dir/wait-status.json"
+    [ "$cleanup_case" != unknown ] || : > "$cleanup_dir/unexpected"
+    cleanup_status=0
+    sh -eu -c '
+        . "$1/cleanup.sh"
+        fixture=$2 installed=false opt_mode=755 acceptance_stage=fixture-cleanup
+        fs_trace_stop() { :; }
+        fs_tmpfs_remove() { :; }
+        fs_offline_remove() { :; }
+        sudo() { [ "$*" = "chmod 755 /opt" ]; }
+        cleanup
+    ' sh "$readiness_fixture" "$cleanup_dir" > "$readiness_fixture/cleanup-$cleanup_case.log" 2>&1 || cleanup_status=$?
+    if [ "$cleanup_case" = known ]; then
+        [ "$cleanup_status" -eq 0 ] && [ ! -e "$cleanup_dir" ]
+    else
+        [ "$cleanup_status" -eq 1 ] && [ -f "$cleanup_dir/unexpected" ]
+        [ ! -e "$cleanup_dir/wait-journal.json" ] && [ ! -e "$cleanup_dir/wait-status.json" ]
+    fi
+done
+printf '%s\n' 'Service readiness fixture checks passed (11 readiness, 2 cleanup cases).'

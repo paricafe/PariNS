@@ -174,7 +174,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log preflight-reject home-error.log install.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log preflight-reject home-error.log install.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus wait-journal.json wait-status.json; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1

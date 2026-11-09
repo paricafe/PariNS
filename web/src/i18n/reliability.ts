@@ -13,6 +13,7 @@ export const reliabilityMessages = {
   source_api: ['控制台', 'Console'], source_signal: ['系统信号（SIGHUP）', 'System signal (SIGHUP)'],
   result_applied: ['已更新', 'Updated'], result_unchanged: ['无变化', 'Unchanged'], result_failed: ['失败', 'Failed'],
   unconfigured: ['未设置', 'Not set up'], starting: ['正在启动', 'Starting'], running: ['运行中', 'Running'], degraded: ['部分可用', 'Degraded'], stopped: ['已停止', 'Stopped'],
+  stopping: ['正在停止', 'Stopping'],
   runtimeFailed: ['运行中意外停止', 'Stopped unexpectedly'], startupFailed: ['启动失败', 'Failed to start'], notReady: ['未就绪', 'Not ready'],
   runtimeGeneration: ['DNS 状态自 {time} 起', 'DNS state since {time}'],
   diagnostics: ['缓存决策', 'Cache decisions'], diagnosticsScope: ['自 {time} 缓存重建以来', 'Since the cache was rebuilt at {time}'],

@@ -20,6 +20,7 @@ function fakeApi(handler: (path: string, body?: unknown) => unknown): ApiClient 
 }
 
 const status: StatusView = {
+  lifecycle_phase: 'stable',
   running: true, last_error: null, listen: "127.0.0.1:5353", uptime_seconds: 3600, generation: 2,
   dns_health: { state: 'running', ready: true, generation: 2, changed_at_ms: Date.now(), code: null }, resolution_mode: 'forward', diagnostics: { cache: null, upstreams: null, recursion: null, quic: { scope: 'process', doq: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 }, doh3: { handshake_inflight: 0, handshake_established: 0, stream_inflight: 0, stream_response_handed_to_transport: 0 } } },
   metrics: {
@@ -96,6 +97,13 @@ describe("observability data math", () => {
 });
 
 describe("OverviewPage", () => {
+  it.each(['starting', 'stopping'] as const)('shows the %s phase before interpreting the runtime health sample', async (phase) => {
+    const changing = { ...status, lifecycle_phase: phase, running: false, dns_health: { ...status.dns_health, ready: false } };
+    render(<OverviewPage api={fakeApi((path) => path === 'status' ? changing : stats)} language="en" onOpenDns={() => {}} />);
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(`DNS is ${phase}`));
+    expect(screen.getByText('Not ready')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
   it('judges upstream health only from a polled window of upstream counters', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

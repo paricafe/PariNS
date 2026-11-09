@@ -34,6 +34,7 @@ export interface CacheUsage {
 /** `GET /api/status`, the fields the console reads. */
 export interface StatusView {
   running: boolean;
+  lifecycle_phase: 'stable' | 'starting' | 'stopping';
   last_error: string | null;
   listen: string | null;
   uptime_seconds: number | null;

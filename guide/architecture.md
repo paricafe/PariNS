@@ -64,6 +64,10 @@ read lock; status, statistics and query-log reads do not acquire the configurati
 mutex. Metrics, health, listeners, cache and storage are read from their owners.
 Status combines these observations rather than promising one atomic snapshot of
 all counters. It cannot keep a stopped Resolver alive or authorize a mutation.
+`lifecycle_phase` distinguishes stable state from starting and stopping. Status
+readiness additionally requires a stable matching generation; runtime readiness
+and history retain their existing health owner. A generation mismatch means a
+handover, not proof that a task exited. One status render pins one cache instance.
 
 ## Configuration transactions
 

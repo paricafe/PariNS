@@ -120,6 +120,47 @@ async fn observations_respond_while_configuration_preparation_holds_manager() {
     );
 }
 
+#[tokio::test]
+async fn status_marks_an_in_progress_stop_without_reporting_an_exit_or_readiness() {
+    let (_temp, shared, headers) = fixture().await;
+    let mut manager = shared.manager.lock().await;
+    let mut stopping = Box::pin(manager.stop());
+    // Keep the stop owner at its first drain await, before DNS processes it.
+    assert!(futures_util::poll!(&mut stopping).is_pending());
+    let status = request(&shared, &headers, "GET", "/api/status", json!(null))
+        .await
+        .unwrap();
+    assert_eq!(status["dns_health"]["ready"], false);
+    assert_eq!(status["lifecycle_phase"], "stopping");
+    assert!(status["last_error"].is_null());
+    stopping.await;
+    let stopped = shared.observation.status();
+    assert_eq!(stopped["lifecycle_phase"], "stable");
+    assert_eq!(stopped["running"], false);
+    assert_eq!(stopped["dns_health"]["ready"], false);
+    manager.retry_startup().await;
+    let started = shared.observation.status();
+    assert_eq!(started["lifecycle_phase"], "stable");
+    assert_eq!(started["dns_health"]["ready"], true);
+    manager.terminal_shutdown().await;
+}
+
+#[tokio::test]
+async fn status_does_not_report_an_exit_when_health_has_advanced_past_its_metadata() {
+    let (_temp, shared, _headers) = fixture().await;
+    let generation = shared.observation.status()["generation"].as_u64().unwrap();
+    shared.observation.services.set_dns_health(
+        crate::runtime_health::State::Running,
+        generation + 1,
+        None,
+    );
+    let status = shared.observation.status();
+    assert_eq!(status["lifecycle_phase"], "starting");
+    assert_eq!(status["dns_health"]["ready"], false);
+    assert!(status["last_error"].is_null());
+    shared.manager.lock().await.terminal_shutdown().await;
+}
+
 async fn request(
     shared: &Arc<Shared>,
     headers: &HeaderMap,

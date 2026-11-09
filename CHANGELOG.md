@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Management status and the console distinguish DNS startup and draining from
+  unexpected exits, and report not ready until the published generation is stable.
 - Joining an active in-flight query no longer scans the entire sharing registry;
   dead records are reclaimed on same-key replacement or capacity admission.
 - Management status, statistics and query-log reads remain available while a

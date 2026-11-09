@@ -3,6 +3,8 @@
 //! boundaries. Counters, health, cache and storage remain live observations of
 //! their existing owners; no configuration, credentials or mutation authority is
 //! copied here. Readers release this short lock before consulting those owners.
+//! Management readiness also requires a stable, matching published generation;
+//! transition phases never turn an expected handover into a runtime failure.
 use super::Active;
 use crate::{
     cache::persistence::SnapshotReport,
@@ -29,6 +31,7 @@ pub(super) struct Running {
 
 #[derive(Clone, Default)]
 pub(super) struct Metadata {
+    pub phase: Phase,
     pub revision: u64,
     pub generation: u64,
     pub last_error: Option<String>,
@@ -36,6 +39,15 @@ pub(super) struct Metadata {
     pub cache_report: SnapshotReport,
     pub last_reload: Option<Value>,
     pub running: Option<Running>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Phase {
+    #[default]
+    Stable,
+    Starting,
+    Stopping,
 }
 
 pub(super) struct Observation {
@@ -67,7 +79,12 @@ impl Observation {
     }
 
     pub fn render(&self, metadata: &Metadata) -> Value {
-        let health = self.services.health.snapshot();
+        let mut health = self.services.health.snapshot();
+        let phase = if metadata.phase == Phase::Stable && health.generation != metadata.generation {
+            Phase::Starting
+        } else {
+            metadata.phase
+        };
         let resolver = metadata.running.as_ref().and_then(|r| r.resolver.upgrade());
         let running = metadata.running.as_ref().filter(|_| {
             resolver.is_some()
@@ -75,6 +92,10 @@ impl Observation {
                 && (health.ready || health.state == HealthState::Degraded)
         });
         let resolver = resolver.filter(|_| running.is_some());
+        let cache = resolver.as_ref().map(|r| r.cache());
+        // This is management readiness, not a second health publisher. The
+        // runtime's health and history continue to observe the original fact.
+        health.ready &= phase == Phase::Stable;
         let transport = self.active.lock().unwrap().snapshot.clone();
         let mut certificates = transport
             .certificates
@@ -84,7 +105,9 @@ impl Observation {
         certificates["last_reload"] = json!(metadata.last_reload);
         json!({
             "running": running.is_some(),
-            "last_error": if metadata.running.is_some() && running.is_none() {
+            "lifecycle_phase": phase,
+            "last_error": if phase != Phase::Stable { None }
+            else if metadata.running.is_some() && running.is_none() {
                 Some("DNS task exited; restarting automatically".to_string())
             } else { metadata.last_error.clone() },
             "revision": metadata.revision,
@@ -92,7 +115,7 @@ impl Observation {
             "resolution_mode": resolver.as_ref().map(|r| r.resolution_mode()),
             "metrics": self.services.metrics.snapshot(), "metrics_scope":"process",
             "dns_health": health,
-            "diagnostics": {"cache":resolver.as_ref().map(|r| r.cache().diagnostics_snapshot()),"quic":self.services.metrics.quic.snapshot(),"upstreams":resolver.as_ref().and_then(|r| r.upstream_diagnostics()),"recursion":resolver.as_ref().and_then(|r| r.recursion_diagnostics())},
+            "diagnostics": {"cache":cache.as_ref().map(|c| c.diagnostics_snapshot()),"quic":self.services.metrics.quic.snapshot(),"upstreams":resolver.as_ref().and_then(|r| r.upstream_diagnostics()),"recursion":resolver.as_ref().and_then(|r| r.recursion_diagnostics())},
             "certificates": certificates,
             "storage": self.services.storage.status(),
             "cache_persistence": metadata.cache_report,
@@ -102,7 +125,7 @@ impl Observation {
             "doh_http3": running.is_some_and(|r| r.listeners.serving(ListenerKind::Doh3)),
             "uptime_seconds": running.map(|r| r.started.elapsed().as_secs()),
             "generation": metadata.generation,
-            "cache": resolver.as_ref().map(|r| r.cache().snapshot()),
+            "cache": cache.as_ref().map(|c| c.snapshot()),
             "refresh": resolver.as_ref().map(|r| r.refresh_snapshot()),
             "transport": transport.view(),
         })

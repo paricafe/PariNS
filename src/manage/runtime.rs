@@ -9,6 +9,7 @@
 mod tests;
 use super::{
     Active,
+    observation::Phase,
     store::{MAX_CONFIG, Store, Stored},
     transport::Snapshot,
 };
@@ -167,6 +168,7 @@ pub(super) struct Manager {
     /// Turnstile keys, published after their own Store write.
     pub turnstile: super::turnstile::State,
     running: Option<Running>,
+    phase: Phase,
     pub last_error: Option<String>,
     generation: u64,
     address: SocketAddr,
@@ -364,6 +366,7 @@ impl Manager {
             saved,
             turnstile,
             running: None,
+            phase: Phase::Stable,
             last_error: None,
             generation: 0,
             address,
@@ -384,6 +387,7 @@ impl Manager {
 
     fn observation_metadata(&self) -> super::observation::Metadata {
         super::observation::Metadata {
+            phase: self.phase,
             revision: self.saved.as_ref().map_or(0, |s| s.revision),
             generation: self.generation,
             last_error: self.last_error.clone(),
@@ -563,6 +567,8 @@ impl Manager {
             self.publish_observation();
             return;
         }
+        self.phase = Phase::Starting;
+        self.publish_observation();
         let result = async {
             ensure!(
                 self.cache_ready,
@@ -639,6 +645,7 @@ impl Manager {
                 self.startup_failed(error);
             }
         }
+        self.phase = Phase::Stable;
         self.publish_observation();
     }
 
@@ -778,6 +785,8 @@ impl Manager {
         }
         let previous = self.saved.clone();
         self.stop().await;
+        self.phase = Phase::Starting;
+        self.publish_observation();
         let result = async {
             let server = Server::bind_with_policy(
                 config.clone(),
@@ -835,6 +844,7 @@ impl Manager {
                 Err(error.context("configuration not applied"))
             }
         };
+        self.phase = Phase::Stable;
         self.publish_observation();
         applied
     }
@@ -851,11 +861,13 @@ impl Manager {
     }
 
     pub async fn stop(&mut self) {
+        self.phase = Phase::Stopping;
+        self.publish_observation();
         if let Some(running) = self.running.take() {
-            self.publish_observation();
             let _ = running.stop().await;
         }
         self.services.set_dns_state(false, self.generation);
+        self.phase = Phase::Stable;
         self.publish_observation();
     }
 

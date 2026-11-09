@@ -159,8 +159,11 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
   const average = averageLatencyMillis(latency);
   const blocked = counters ? (counters.query_blocked ?? 0) + (counters.response_blocked ?? 0) : null;
   const health = status?.dns_health.state;
+  const transition = status?.lifecycle_phase === 'stable' ? null : status?.lifecycle_phase;
   const recursive = status?.resolution_mode === 'recursive';
   const [headline, tone]: [string, Tone] = status === null ? [t('shell.headlineLoading'), 'idle']
+    : transition === 'starting' ? [t('shell.headlineStarting'), 'warn']
+      : transition === 'stopping' ? [t('shell.headlineStopping'), 'warn']
     : health === 'failed' ? [t('shell.headlineFailed'), 'bad']
       : health === 'degraded' ? [t('shell.headlineDegraded'), 'warn']
       : health === 'unconfigured' ? [t('shell.headlineUnconfigured'), 'idle']
@@ -168,6 +171,8 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
           : health === 'starting' || !status.dns_health.ready ? [t('shell.headlineStarting'), 'warn']
             : troubled ? [t(recursive ? 'shell.headlineRecursion' : 'shell.headlineUpstream'), 'warn'] : troubled === null ? [t('shell.headlineRunning'), 'ok'] : [t('shell.headlineHealthy'), 'ok'];
   const summary = status === null ? null
+    : transition === 'starting' ? t('shell.summaryStarting')
+      : transition === 'stopping' ? t('shell.summaryStopping')
     : health === 'failed' ? t('shell.summaryFailed')
       : health === 'degraded' ? t('shell.summaryDegraded')
       : !running || health === 'stopped' || health === 'unconfigured' ? t('shell.summaryStopped')
@@ -205,7 +210,7 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
     <section className="panel status-strip" data-tone={tone} aria-label={t("ui.maintenance")}>
       <span className="pulse" aria-hidden="true" />
       <div className="status-strip-main">
-        {status === null ? <strong>{t("ui.loadingStatus")}</strong> : !(running && status.dns_health.ready) && <strong>{t(`reliability.${health === 'failed' ? status.dns_health.code === 'startup_failed' ? 'startupFailed' : 'runtimeFailed' : health}`)}</strong>}
+        {status === null ? <strong>{t("ui.loadingStatus")}</strong> : !(running && status.dns_health.ready) && <strong>{t(`reliability.${transition ?? (health === 'failed' ? status.dns_health.code === 'startup_failed' ? 'startupFailed' : 'runtimeFailed' : health)}`)}</strong>}
         <span className={running && status?.dns_health.ready ? undefined : 'muted'}>{status && !status.dns_health.ready && <span>{t('reliability.notReady')}</span>}{status?.listen ? <>{!status.dns_health.ready && ' · '}{t('shell.statusListening', { address: status.listen })}</> : health === 'unconfigured' && <> · {t("app.notConfigured")}</>}{running && status?.uptime_seconds != null && <> · {t('shell.statusUp', { duration: uptime(status.uptime_seconds, language) })}</>}</span>
       </div>
       <dl className="status-strip-facts">

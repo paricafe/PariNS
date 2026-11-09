@@ -253,6 +253,8 @@ until preview/validation.
   cached observation, not a hot-path disk query. Management observation reads do
   not acquire Manager: it publishes committed metadata and weak runtime references,
   while metrics, health, cache and storage stay with their existing owners.
+  Status publishes an explicit lifecycle phase; management readiness requires a
+  stable matching generation. Expected transitions never imply a task failure.
   Cache/storage-only applies never
   publish candidate certificate changes. The worker opens and integrity-checks an
   existing database in the background (`checking`), so DNS startup never waits for

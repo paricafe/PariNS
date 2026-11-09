@@ -2,8 +2,23 @@
 
 ## Unreleased
 
+## v0.2.3 — 2026-11-09
+
+### Upgrade
+
+- Management API clients must use the opaque `cache_token` from current status or
+  cache inspection when invalidating entries. Epoch-only requests are rejected;
+  obtain a new token after a cache replacement or DNS restart.
+
+### Added
+
+- A repeatable isolated UDP wire baseline provides strict response checks, driver
+  controls and separate profiling passes for performance investigations.
+
 ### Fixed
 
+- Management startup retains its bound listener instead of releasing and rebinding
+  the address, avoiding the startup port reservation race.
 - Console navigation reaches the new management origin after a confirmed address
   change; cross-site API, asset and embedded requests remain blocked.
 - Management status and the console distinguish DNS startup and draining from
@@ -16,8 +31,7 @@
 - Management status, statistics and query-log reads remain available while a
   configuration transaction prepares material or persists its saved state.
 - Cache invalidation rejects inspection tokens from a replaced cache, including
-  after cache hot updates and DNS restarts. API clients must use `cache_token`
-  from status or inspection instead of an epoch-only invalidation request.
+  after cache hot updates and DNS restarts.
 - The public HTTP/3 acceptance client keeps request and control streams owned by
   HTTP/3 instead of closing them through generic QUIC stream writers.
 - It recognizes a complete response followed by ignored extension frames while

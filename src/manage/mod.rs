@@ -182,6 +182,9 @@ fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> 
     ApiError(status, code, message.into())
 }
 fn invalid(err: anyhow::Error) -> ApiError {
+    if err.is::<runtime::RevisionChanged>() {
+        return error(StatusCode::CONFLICT, "REVISION", err.to_string());
+    }
     if err.is::<crate::filter_subscriptions::service::Failure>() {
         return filters::api_error(err);
     }
@@ -705,7 +708,7 @@ async fn api(
             let original = transport.clone();
             let result = tokio::spawn(async move {
                 let _permit = permit;
-                let mut manager = control.manager.lock().await;
+                let manager = control.manager.lock().await;
                 if manager.saved.is_some() {
                     return Err(already_setup());
                 }
@@ -722,16 +725,19 @@ async fn api(
                 let change = manager
                     .transport_change(&setup.toml, &host)
                     .map_err(invalid)?;
-                manager
-                    .apply(Stored {
+                let preparation = manager
+                    .preparation(Stored {
                         username: setup.username,
                         password_hash: hash,
                         toml: setup.toml,
                         previous: None,
                         revision: 1,
                     })
-                    .await
                     .map_err(invalid)?;
+                drop(manager);
+                let prepared = preparation.run().await.map_err(invalid)?;
+                let mut manager = control.manager.lock().await;
+                manager.commit(prepared).await.map_err(invalid)?;
                 let next = control.active.lock().unwrap().snapshot.clone();
                 let session = if next.realm == original.realm {
                     Some(control.session(&original)?)
@@ -1029,7 +1035,7 @@ async fn api(
             let host = host.to_owned();
             tokio::spawn(async move {
                 let _permit = permit;
-                let mut manager = shared.manager.lock().await;
+                let manager = shared.manager.lock().await;
                 let saved = manager.saved.as_ref().ok_or_else(internal)?;
                 if revision != saved.revision {
                     return Err(error(
@@ -1056,7 +1062,11 @@ async fn api(
                     ..saved.clone()
                 };
                 let revision = next.revision;
-                let restarted = manager.apply(next).await.map_err(invalid)?;
+                let preparation = manager.preparation(next).map_err(invalid)?;
+                drop(manager);
+                let prepared = preparation.run().await.map_err(invalid)?;
+                let mut manager = shared.manager.lock().await;
+                let restarted = manager.commit(prepared).await.map_err(invalid)?;
                 Ok(json!({"revision":revision,"restart_required":restarted,"transport_change":change}))
             })
             .await

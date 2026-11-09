@@ -4,6 +4,8 @@
 //! must prepare its identity before serving.
 //! Committed observation metadata is published separately from the transaction
 //! mutex so slow candidate preparation cannot block status and storage readers.
+//! Accepted tasks retain the mutation permit, prepare owned candidates without
+//! Manager, then reacquire it and recheck the saved revision before committing.
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
@@ -221,6 +223,62 @@ impl ChangeImpact {
         self == Self::Restart
     }
 }
+
+/// An accepted transaction owns this input while the mutation permit remains
+/// held. Preparing files and policy never requires the Manager mutex.
+pub(super) struct Preparation {
+    next: Stored,
+    expected_revision: u64,
+    impact: ChangeImpact,
+    dir: PathBuf,
+    address: SocketAddr,
+    filters: Arc<crate::filter_subscriptions::service::Service>,
+}
+
+pub(super) struct PreparedCandidate {
+    next: Stored,
+    expected_revision: u64,
+    config: Config,
+    material: Option<(
+        Snapshot,
+        crate::filter_subscriptions::service::ConfigCandidate,
+    )>,
+}
+
+impl Preparation {
+    pub async fn run(self) -> Result<PreparedCandidate> {
+        let (config, material) = if self.impact == ChangeImpact::UpdatesOnly {
+            (Config::parse_in(&self.next.toml, &self.dir)?, None)
+        } else {
+            let (config, snapshot) =
+                prepare(self.dir, self.address, self.next.toml.clone()).await?;
+            let filters = self
+                .filters
+                .prepare_config_from_source(
+                    config.filter_subscriptions.clone(),
+                    config.local_policy_source(),
+                    self.expected_revision,
+                )
+                .await?;
+            (config, Some((snapshot, filters)))
+        };
+        Ok(PreparedCandidate {
+            next: self.next,
+            expected_revision: self.expected_revision,
+            config,
+            material,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct RevisionChanged;
+impl std::fmt::Display for RevisionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Configuration changed; reload before saving")
+    }
+}
+impl std::error::Error for RevisionChanged {}
 
 impl Validation {
     pub async fn run(self, toml: String) -> Result<Config> {
@@ -745,13 +803,44 @@ impl Manager {
         self.restore(&toml, None).await;
     }
 
-    /// Returns whether listener restart was necessary.
-    pub async fn apply(&mut self, next: Stored) -> Result<bool> {
+    pub fn preparation(&self, next: Stored) -> Result<Preparation> {
         let impact = self.change_impact(&next.toml)?;
+        ensure!(
+            impact == ChangeImpact::UpdatesOnly || self.cache_ready,
+            "cannot start DNS before clean snapshot is durably consumed; restart after resolving the storage error"
+        );
+        Ok(Preparation {
+            next,
+            expected_revision: self.saved.as_ref().map_or(0, |s| s.revision),
+            impact,
+            dir: self.store.dir.clone(),
+            address: self.address,
+            filters: self.filters.clone(),
+        })
+    }
+
+    /// Test convenience: production releases Manager while preparation runs.
+    #[cfg(test)]
+    pub async fn apply(&mut self, next: Stored) -> Result<bool> {
+        let prepared = self.preparation(next)?.run().await?;
+        self.commit(prepared).await
+    }
+
+    /// Only Manager may commit prepared state. Returns whether listeners restarted.
+    pub async fn commit(&mut self, prepared: PreparedCandidate) -> Result<bool> {
+        ensure!(
+            prepared.expected_revision == self.saved.as_ref().map_or(0, |s| s.revision),
+            RevisionChanged
+        );
+        let PreparedCandidate {
+            next,
+            config,
+            material,
+            ..
+        } = prepared;
         // Management-only settings do not inspect changed certificate files,
         // restart a stopped DNS service, or publish new storage/cache settings.
-        if impact == ChangeImpact::UpdatesOnly {
-            let config = Config::parse_in(&next.toml, &self.store.dir)?;
+        let Some((candidate, filter_candidate)) = material else {
             let store = self.store.clone();
             let copy = next.clone();
             tokio::task::spawn_blocking(move || store.save(&copy)).await??;
@@ -763,22 +852,7 @@ impl Manager {
             self.rollback_error = None;
             self.publish_observation();
             return Ok(false);
-        }
-        ensure!(
-            self.cache_ready,
-            "cannot start DNS before clean snapshot is durably consumed; restart after resolving the storage error"
-        );
-        let (config, candidate) =
-            prepare(self.store.dir.clone(), self.address, next.toml.clone()).await?;
-        let local = config.local_policy_source();
-        let filter_candidate = self
-            .filters
-            .prepare_config_from_source(
-                config.filter_subscriptions.clone(),
-                local,
-                self.saved.as_ref().map_or(0, |s| s.revision),
-            )
-            .await?;
+        };
         // The task can finish while preparation awaits. Reclassify against the
         // live owner rather than applying a hot change to a departed runtime.
         if let Some(ChangeImpact::Hot { replace_cache }) =

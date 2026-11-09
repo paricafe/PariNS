@@ -77,6 +77,21 @@ mutation permit serializes accepted changes; accepted transactions outlive their
 initiating HTTP connection. Network uncertainty is confirmed through reads rather
 than replaying a mutation.
 
+The task takes a short Manager lock to copy preparation input, releases it while
+reading material and building the candidate, and reacquires it to commit. The
+mutation permit remains held throughout. Commit rechecks the saved revision and
+the live hot-update target; failed preparation publishes no candidate state.
+
+```mermaid
+flowchart LR
+    Accepted[Accepted task and mutation permit] --> Input[Manager: copy input]
+    Input --> Prepare[Prepare without Manager lock]
+    Prepare --> Candidate[PreparedCandidate]
+    Candidate --> Commit[Manager: check revision and live target]
+    Commit --> Persist[Bind if needed, then persist]
+    Persist --> Publish[Publish committed state and lifecycle phase]
+```
+
 `ChangeImpact` names updates-only, hot (with explicit cache replacement), and
 restart changes. Validation and application use the same source-document
 classification; a stopped or exited runtime cannot receive a hot change.
@@ -92,8 +107,9 @@ candidate must bind every listener before persistence.
 
 Read-only observation remains available during preparation and persistence. Its
 configuration revision advances only after the transaction commits. Credentials,
-session checks, update freeze and authoritative configuration reads keep their
-existing owners and serialization.
+session checks and update freeze keep their existing owners. Session and saved
+configuration reads remain available during candidate preparation; persistence
+and runtime replacement remain serialized by Manager.
 
 ## Startup and terminal shutdown
 

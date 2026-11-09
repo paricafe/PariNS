@@ -248,6 +248,9 @@ until preview/validation.
   typed change-impact classification drives validation, restart reporting and apply, keeping
   schema validation without reloading unchanged DNS material. Do not promise cache
   retention after arbitrary policy changes; report restart requirements accurately.
+  Accepted configuration tasks keep the mutation permit while preparing owned
+  candidates outside Manager; only Manager commits after checking the saved revision
+  and whether the hot-update target still runs.
 - RuntimeServices owns process metrics and the bounded SQLite worker across DNS
   generations. Logs, totals and trends have independent durable epochs; status is a
   cached observation, not a hot-path disk query. Management observation reads do

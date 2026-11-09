@@ -6,6 +6,9 @@
 
 - Management status and the console distinguish DNS startup and draining from
   unexpected exits, and report not ready until the published generation is stable.
+- Configuration candidate preparation releases the management mutex while the
+  accepted transaction retains its mutation permit; session and saved-configuration
+  reads remain available, and commit rechecks the saved revision and live target.
 - Joining an active in-flight query no longer scans the entire sharing registry;
   dead records are reclaimed on same-key replacement or capacity admission.
 - Management status, statistics and query-log reads remain available while a

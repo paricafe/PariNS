@@ -54,18 +54,20 @@ async fn fixture() -> (tempfile::TempDir, Arc<Shared>, HeaderMap) {
 }
 
 #[tokio::test]
-async fn observations_respond_while_configuration_preparation_holds_manager() {
+async fn reads_respond_while_owned_configuration_preparation_is_suspended() {
     let (_temp, shared, headers) = fixture().await;
     let before = request(&shared, &headers, "GET", "/api/status", json!(null))
         .await
         .unwrap();
-    let mut manager = shared.manager.lock().await;
+    let manager = shared.manager.lock().await;
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.toml = next
         .toml
         .replace("query_timeout_ms=200", "query_timeout_ms=201");
-    let mut applying = Box::pin(manager.apply(next));
+    let preparation = manager.preparation(next).unwrap();
+    drop(manager);
+    let mut applying = Box::pin(preparation.run());
     // Poll only to the asynchronous preparation boundary, then keep its owner
     // suspended. This is a deterministic slow preparation, not a timed sleep.
     assert!(futures_util::poll!(&mut applying).is_pending());
@@ -79,6 +81,13 @@ async fn observations_respond_while_configuration_preparation_holds_manager() {
         request(&shared, &headers, "POST", "/api/query-log/list", json!({}))
             .await
             .unwrap();
+        request(&shared, &headers, "GET", "/api/session", json!(null))
+            .await
+            .unwrap();
+        let config = request(&shared, &headers, "GET", "/api/config", json!(null))
+            .await
+            .unwrap();
+        assert_eq!(config["revision"], before["revision"]);
         status
     })
     .await
@@ -95,8 +104,8 @@ async fn observations_respond_while_configuration_preparation_holds_manager() {
         .await
         .unwrap();
     assert_eq!(live["metrics"]["counters"]["cache_hits"], 1);
-    assert!(applying.await.unwrap());
-    drop(manager);
+    let prepared = applying.await.unwrap();
+    assert!(shared.manager.lock().await.commit(prepared).await.unwrap());
     let after = request(&shared, &headers, "GET", "/api/status", json!(null))
         .await
         .unwrap();
@@ -294,6 +303,46 @@ async fn configuration_impact_matches_validation_and_runtime_ownership() {
         );
     }
     shared.manager.lock().await.terminal_shutdown().await;
+}
+
+#[tokio::test]
+async fn prepared_configuration_rechecks_revision_and_recovers_an_exited_hot_target() {
+    let (_temp, shared, _headers) = fixture().await;
+    let manager = shared.manager.lock().await;
+    let mut stale = manager.saved.clone().unwrap();
+    stale.revision += 1;
+    stale.toml.push_str("\n[updates]\nauto_check=false\n");
+    let preparation = manager.preparation(stale).unwrap();
+    drop(manager);
+    let stale = preparation.run().await.unwrap();
+    let mut manager = shared.manager.lock().await;
+    let mut next = manager.saved.clone().unwrap();
+    next.revision += 1;
+    next.toml
+        .push_str("\n[updates]\ncheck_interval_hours=168\n");
+    manager.apply(next).await.unwrap();
+    let before = manager.saved.as_ref().unwrap().toml.clone();
+    let rejected = invalid(manager.commit(stale).await.unwrap_err());
+    assert_eq!(rejected.0, StatusCode::CONFLICT);
+    assert_eq!(rejected.1, "REVISION");
+    assert_eq!(manager.saved.as_ref().unwrap().toml, before);
+    let mut hot = manager.saved.clone().unwrap();
+    hot.revision += 1;
+    hot.toml.push_str("\n[storage]\nflush_interval_ms=500\n");
+    let preparation = manager.preparation(hot).unwrap();
+    let generation = manager.status()["generation"].as_u64().unwrap();
+    drop(manager);
+    let prepared = preparation.run().await.unwrap();
+    let mut manager = shared.manager.lock().await;
+    manager.simulate_exit();
+    tokio::task::yield_now().await;
+    assert!(
+        manager.commit(prepared).await.unwrap(),
+        "an exited hot target requires a restart"
+    );
+    assert!(manager.status()["generation"].as_u64().unwrap() > generation);
+    assert_eq!(shared.observation.status()["lifecycle_phase"], "stable");
+    manager.terminal_shutdown().await;
 }
 
 #[tokio::test]

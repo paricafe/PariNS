@@ -2197,6 +2197,66 @@ async fn validation_does_not_hold_the_manager_lock_while_reading_rules() {
 }
 
 #[tokio::test]
+async fn apply_preparation_keeps_session_and_configuration_reads_available() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Arc::new(Management::start(&directory).await);
+    let token = server.setup(&directory, &configuration()).await;
+    let before = server.config(&token).await;
+    let fifo = temporary.path().join("apply-rules.fifo");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let toml = format!("filter_file = {}\n{}", json!(fifo), configuration());
+    let pending = {
+        let server = server.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            server
+                .request(
+                    "PUT",
+                    "/api/config",
+                    Some(&token),
+                    Some(json!({"toml":toml,"revision":1})),
+                )
+                .await
+        })
+    };
+    // The FIFO holds the candidate's blocking reader until cleanup below.
+    sleep(Duration::from_millis(300)).await;
+    let reads = timeout(Duration::from_secs(2), async {
+        server
+            .request("GET", "/api/session", Some(&token), None)
+            .await
+            .expect(200);
+        server.config(&token).await
+    })
+    .await;
+    // Always release the reader, including when the old implementation times out.
+    tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new().write(true).open(fifo).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(pending.await.unwrap().status, 422);
+    let after = server.config(&token).await;
+    assert_eq!(
+        after, before,
+        "failed preparation must not publish or persist"
+    );
+    assert_eq!(
+        reads.ok(),
+        Some(before),
+        "reads waited for candidate preparation"
+    );
+    Arc::try_unwrap(server).ok().unwrap().finish().await;
+}
+
+#[tokio::test]
 async fn candidate_port_collision_restores_previous_dns_without_committing() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");

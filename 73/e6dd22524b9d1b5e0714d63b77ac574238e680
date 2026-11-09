@@ -1,0 +1,52 @@
+deploy/parins-updater.service
+  s_b27ab66ab5950d::t_c3551a2d6beb6b 11-14
+scripts/install.sh
+  s_b27ab66ab5950d::t_c3551a2d6beb6b 367-372
+src/update/executor/readiness.rs
+  s_b27ab66ab5950d::t_991ed35d8b9e2c 45-48,53-100,109-115,117-124,138-161,170-172
+  s_b27ab66ab5950d::t_1a5f2dca5e63ae 49-52,101-108,128-137,162-169
+  s_b27ab66ab5950d::t_d0ab8e906ce42f 1-8,10-40,42-44
+  s_b27ab66ab5950d::t_96ddee9f980904 9,41,116,125-127
+scripts/test-install.sh
+  s_b27ab66ab5950d::t_049d26e516d16c 91-96
+  s_b27ab66ab5950d::t_96ddee9f980904 98
+  s_b27ab66ab5950d::t_3364f9cb6cefe9 38-90,97,99-116
+guide/operations.md
+  s_b27ab66ab5950d::t_049d26e516d16c 131-136,144-149
+CHANGELOG.md
+  s_b27ab66ab5950d::t_049d26e516d16c 5-18
+src/update/executor/mod.rs
+  s_b27ab66ab5950d::t_1a5f2dca5e63ae 1147-1153,1481-1486
+  s_b27ab66ab5950d::t_049d26e516d16c 1467-1480,1487-1488
+  s_b27ab66ab5950d::t_d0ab8e906ce42f 35,46,865,889-892
+  s_b27ab66ab5950d::t_96ddee9f980904 58-59,1145-1146
+  s_b27ab66ab5950d::t_c3551a2d6beb6b 25-27,101,124,356-361,368
+scripts/test-systemd.sh
+  s_b27ab66ab5950d::t_c3551a2d6beb6b 960
+  s_b27ab66ab5950d::t_edd13c0bf97540 977-1016,1018-1021
+  s_b27ab66ab5950d::t_b1eb57bbaff897 1017
+src/update/contract.rs
+  s_b27ab66ab5950d::t_c3551a2d6beb6b 12
+AGENTS.md
+  s_b27ab66ab5950d::t_049d26e516d16c 307-311
+guide/development.md
+  s_b27ab66ab5950d::t_049d26e516d16c 225-228,238-242
+  s_b27ab66ab5950d::t_edd13c0bf97540 243-245
+  s_b27ab66ab5950d::t_52d82d86d89e19 246
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "73e6dd22524b9d1b5e0714d63b77ac574238e680",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

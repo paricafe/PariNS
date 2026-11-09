@@ -1,0 +1,40 @@
+src/manage/observation.rs
+  s_b27ab66ab5950d::t_33481555afdae9 6-7,34,44-52,82-87,95-98,108-110,118,128
+CHANGELOG.md
+  s_b27ab66ab5950d::t_cc4e40da6492af 7-8
+web/src/pages/observability/metrics.ts
+  s_b27ab66ab5950d::t_db79339687bcd4 37
+web/src/i18n/reliability.ts
+  s_b27ab66ab5950d::t_db79339687bcd4 16
+src/manage/runtime.rs
+  s_b27ab66ab5950d::t_33481555afdae9 12,171
+  s_b27ab66ab5950d::t_c2b144bbafcb98 369,390,570-571,648,788-789,847,864-865,870
+web/src/pages/observability/OverviewPage.tsx
+  s_b27ab66ab5950d::t_db79339687bcd4 162,165-166,174-175,213
+web/src/i18n/shell.ts
+  s_b27ab66ab5950d::t_db79339687bcd4 15,25
+web/src/pages/observability/__tests__/observability.test.tsx
+  s_b27ab66ab5950d::t_db79339687bcd4 23,100-106
+guide/architecture.md
+  s_b27ab66ab5950d::t_cc4e40da6492af 67-70
+AGENTS.md
+  s_b27ab66ab5950d::t_1b0676e0ef60e8 256-257
+src/manage/account_tests.rs
+  s_b27ab66ab5950d::t_f9fac54c91c482 123-163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fb125c413b7de6b3d6f1e9912abf8b7a9dda9586",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

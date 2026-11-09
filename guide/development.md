@@ -11,6 +11,11 @@ full CI gate.
 See [Architecture](architecture.md) for request flow, state lifetimes, management
 observation and the configuration and terminal shutdown boundaries.
 
+Management fixtures bind an ephemeral `TcpListener` and transfer it directly to
+`manage::serve`. Keep that socket open through startup; releasing its port before
+rebinding races with other fixtures and outgoing connections. Readiness is a
+successful management response, not a bare TCP connection.
+
 ## Build and test
 
 The console is a React and TypeScript app in `web/`. Its build output in `web/dist/`

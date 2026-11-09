@@ -75,8 +75,7 @@ struct Management {
 
 impl Management {
     async fn start(directory: &Path) -> Self {
-        // The public entry point binds its own listener, so reserve an ephemeral
-        // address briefly before handing it to serve. Every test is isolated.
+        // Keep ownership of the bound socket through server initialization.
         let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
         Self::start_reserved(directory, reservation).await
     }
@@ -95,26 +94,18 @@ impl Management {
         } else {
             listen
         };
-        drop(reservation);
         let directory = directory.to_owned();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            manage::serve(&directory, listen, async {
+            let result = manage::serve(&directory, reservation, async {
                 let _ = stopped.await;
             })
-            .await
-        });
-        timeout(DEADLINE, async {
-            loop {
-                if TcpStream::connect(address).await.is_ok() {
-                    break;
-                }
-                assert!(!task.is_finished(), "management exited before binding");
-                sleep(Duration::from_millis(5)).await;
+            .await;
+            if let Err(error) = &result {
+                eprintln!("management fixture {listen} exited: {error:#}");
             }
-        })
-        .await
-        .unwrap();
+            result
+        });
         let server = Self {
             address,
             stop: Some(stop),
@@ -154,16 +145,28 @@ impl Management {
     }
 
     async fn raw_at(&self, address: SocketAddr, bytes: &[u8]) -> Response {
+        // Only the request line: never print Cookie, binding or credential bodies.
+        let request = request_label(bytes);
         timeout(DEADLINE, async {
             let mut stream = self.connect_at(address).await;
-            stream.write_all(bytes).await.unwrap();
-            stream.flush().await.unwrap();
+            let local = stream.local_addr().unwrap();
+            let failed = |phase: &str, error: std::io::Error| -> ! {
+                panic!("HTTP {request} {local} -> {address} failed during {phase}; management_finished={}: {error}", self.task.as_ref().is_some_and(|task| task.is_finished()))
+            };
+            if let Err(error) = stream.write_all(bytes).await {
+                let mut received = String::new();
+                let _ = timeout(Duration::from_secs(1), stream.read_to_string(&mut received)).await;
+                panic!("HTTP {request} {local} -> {address} failed during request write: {error}; received_bytes={} response={}", received.len(), request_label(received.as_bytes()));
+            }
+            stream.flush().await.unwrap_or_else(|error| failed("request flush", error));
             let mut response = String::new();
-            stream.read_to_string(&mut response).await.unwrap();
+            if let Err(error) = stream.read_to_string(&mut response).await {
+                panic!("HTTP {request} {local} -> {address} failed during response read: {error}; received_bytes={} response={}", response.len(), request_label(response.as_bytes()));
+            }
             parse_response(&response)
         })
         .await
-        .expect("HTTP request deadline")
+        .unwrap_or_else(|_| panic!("HTTP {request} -> {address} exceeded request deadline"))
     }
 
     async fn connect(&self) -> TcpStream {
@@ -231,6 +234,19 @@ impl Management {
             .unwrap();
         let _rebound = TcpListener::bind(self.address).await.unwrap();
     }
+}
+
+fn request_label(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(
+        bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default(),
+    )
+    .trim_end()
+    .chars()
+    .take(160)
+    .collect()
 }
 
 fn parse_response(response: &str) -> Response {
@@ -358,6 +374,27 @@ async fn assert_dns(address: SocketAddr) {
     assert_eq!(response.queries, request.queries);
     assert_eq!(response.response_code, ResponseCode::NoError);
     assert!(response.answers.is_empty());
+}
+
+#[tokio::test]
+async fn management_startup_keeps_its_reserved_listener() {
+    let temporary = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let directory = temporary.path().join("state");
+    let mut starting = Box::pin(Management::start_reserved(&directory, listener));
+    // Suspend startup before its spawned server can run. Rebinding here used
+    // to succeed, so another parallel fixture could steal this address.
+    assert!(futures_util::poll!(&mut starting).is_pending());
+    let competing = TcpListener::bind(address).await;
+    let reserved = competing.is_err();
+    drop(competing);
+    let server = starting.await;
+    server.finish().await;
+    assert!(
+        reserved,
+        "startup released its listening socket before serving"
+    );
 }
 
 /// Idle connections exhaust a low descriptor limit, so accepting fails with
@@ -1651,7 +1688,8 @@ async fn saved_https_with_missing_identity_fails_startup_closed() {
     server.setup_with(&token, &candidate).await.expect(200);
     server.finish().await;
     std::fs::remove_file(&cert_path).unwrap();
-    let result = manage::serve(&directory, "127.0.0.1:0".parse().unwrap(), async {}).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let result = manage::serve(&directory, listener, async {}).await;
     assert!(
         result
             .unwrap_err()

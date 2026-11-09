@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use parins::config::Config;
 
 fn main() -> Result<()> {
@@ -110,7 +110,10 @@ async fn run() -> Result<()> {
         }
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        return parins::manage::serve(&state_dir, web_listen, async {
+        let listener = tokio::net::TcpListener::bind(web_listen)
+            .await
+            .with_context(|| format!("bind management listener {web_listen}"))?;
+        return parins::manage::serve(&state_dir, listener, async {
             tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
         })
         .await;

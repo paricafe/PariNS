@@ -203,7 +203,9 @@ until preview/validation.
 ## Management, runtime and security
 
 - Mutations keep authentication, Host/Origin checks, atomic persistence and failure
-  recovery. Configuration saves and rollback carry the saved revision as an
+  recovery. The management entry point consumes a bound listener; callers never
+  release a reserved address and race to rebind it during startup. Configuration
+  saves and rollback carry the saved revision as an
   optimistic-concurrency check; the console keeps it internal, never shows it, and on
   a conflict reloads while keeping the draft (non-overlapping edits merge, otherwise
   the administrator chooses). Other operations (subscription work, certificate

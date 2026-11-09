@@ -89,8 +89,9 @@ existing owners and serialization.
 
 ## Startup and terminal shutdown
 
-File mode loads TOML directly and owns its subscription scheduler. Managed mode
-binds management, opens the private Store and RuntimeServices, and starts the
+File mode loads TOML directly and owns its subscription scheduler. The managed
+entry point takes ownership of a bound socket without releasing its address,
+opens the private Store and RuntimeServices, and starts the
 saved DNS configuration; process-owned schedulers manage subscriptions, startup
 retry and software checks.
 

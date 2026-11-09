@@ -2,6 +2,8 @@
 //! Connections serve one request each; only a live query log WebSocket (`live`)
 //! outlives its request, under that module's own limits and shutdown drain. The
 //! listener rides out per-connection accept errors like the DNS listeners.
+//! The caller transfers a bound management socket; startup never releases and
+//! rebinds its address while private state and DNS are being prepared.
 mod account;
 mod assets;
 mod auth_budget;
@@ -20,7 +22,7 @@ mod turnstile;
 mod update_checks;
 mod updates;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
     Extension, Router,
     body::{Body, to_bytes},
@@ -1246,16 +1248,13 @@ async fn handle_inner(
     Ok(response)
 }
 
-/// Bind the management listener before starting any saved DNS configuration.
+/// Own the bound management listener before starting any saved DNS configuration.
 pub async fn serve(
     directory: &Path,
-    address: SocketAddr,
+    listener: TcpListener,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    let listener = TcpListener::bind(address)
-        .await
-        .with_context(|| format!("bind management listener {address}"))?;
     let address = listener.local_addr()?;
     let store = Store::open(directory)?;
     if store.read()?.is_none() {

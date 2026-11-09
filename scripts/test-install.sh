@@ -256,6 +256,7 @@ ln -s "$binary" "$fixture/binary-stage/opt/parins-managed/parins"
 expect_failure --root "$fixture/binary-stage" --binary "$binary"
 ln -s "$binary" "$fixture/source-link"
 expect_failure --root "$fixture/binary-stage" --binary "$fixture/source-link"
+grep -Fq 'binary must be a regular non-symlink file' "$fixture/failure.log"
 expect_failure --root '' --binary "$binary"
 expect_failure --root relative --binary "$binary"
 expect_failure --root / --binary "$binary"
@@ -306,5 +307,13 @@ rm "$stage/var/lib/parins-managed"
 # The same private backing without its logical link is not silently adopted.
 expect_failure --root "$stage" --binary "$binary"
 [ ! -e "$fixture/systemctl-called" ]
+sed -n '/^make_rejecting_candidate() {/,/^}$/p' "$repo/scripts/test-systemd.sh" > "$fixture/native-candidate-function.sh"
+sh -eu -c '
+    . "$1/native-candidate-function.sh"
+    make_rejecting_candidate "$1/preflight-reject"
+    status=0
+    "$1/preflight-reject" --manage --check --state-dir /unused-fixture || status=$?
+    [ "$status" -eq 1 ]
+' sh "$fixture"
 sh "$repo/scripts/test-systemd-readiness.sh"
 printf 'Installer fixture checks passed. Retained fixtures: %s\n' "$fixture"

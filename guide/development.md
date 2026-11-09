@@ -167,7 +167,8 @@ version, so move the Unreleased entries there.
 ## Installer and bootstrap checks
 
 `sh scripts/test-install.sh` and `sh scripts/test-bootstrap.sh` run without root or
-systemd in staged directories (`--root`). They cover these contracts:
+systemd in staged directories (`--root`). Installer fixtures also require `jq`
+and a native `cc` compiler for service fixture checks. They cover these contracts:
 
 - The bootstrap uses the Cargo version and the default, unpinned entry point.
   `sh scripts/test-bootstrap.sh --package ARCHIVE.tar.gz` stages a real native package
@@ -189,6 +190,8 @@ systemd in staged directories (`--root`). They cover these contracts:
   failures report a named stage and fixed status fields without credentials.
   The explicit official updater control retains the immutable v0.1.5 status
   contract and real DNS probes; current builds must supply every readiness field.
+  Preflight rejection uses a fixture-owned native executable with a fixed exit
+  status, independent of host utility packaging.
 
 ## Acceptance workflows
 

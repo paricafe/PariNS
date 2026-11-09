@@ -48,7 +48,7 @@ if [ -n "$package" ]; then
 fi
 helper="$(dirname "$binary")/parins-updater"
 [ -f "$binary" ] && [ -f "$helper" ] && [ -f "$installer" ]
-for command in sudo systemctl systemd-analyze curl jq openssl python3 ip ss sha256sum; do
+for command in sudo systemctl systemd-analyze curl jq openssl python3 ip ss sha256sum cc; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing: %s\n' "$command" >&2; exit 1; }
 done
 if "$official_updater_check"; then
@@ -174,7 +174,7 @@ cleanup() {
     sudo chmod "$opt_mode" /opt || status=1
     # Only our known private fixture files; installed state remains on the
     # disposable runner until it is destroyed, with the service disabled.
-    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log home-error.log install.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus; do
+    for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log preflight-reject home-error.log install.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus; do
         rm -f "$fixture/$name"
     done
     rmdir "$fixture" || status=1
@@ -395,6 +395,12 @@ wait_dns_ready() {
         sleep 1
     done
 }
+make_rejecting_candidate() {
+    # Host utilities can be provider symlinks or multicall executables. This
+    # private native file must reach app-user preflight with a fixed exit code.
+    printf '%s\n' 'int main(void) { return 1; }' | cc -x c -o "$1" -
+    [ -f "$1" ] && [ ! -L "$1" ] && [ -x "$1" ]
+}
 check_dns() {
     acceptance_stage=dns-readiness
     wait_dns_ready
@@ -452,13 +458,18 @@ check_dns
 acceptance_stage=candidate-preflight-rejection
 # A valid native executable that exits immediately fails read-only preflight
 # before replacement or stopping the previously active service.
-if sudo sh "$installer" --binary /bin/false --helper "$helper" --build-info "$build_info" > "$fixture/refusal.log" 2>&1; then
+make_rejecting_candidate "$fixture/preflight-reject"
+if sudo sh "$installer" --binary "$fixture/preflight-reject" --helper "$helper" --build-info "$build_info" > "$fixture/refusal.log" 2>&1; then
     printf '%s\n' 'Expected read-only preflight failure without replacing the running service.' >&2
     exit 1
 fi
+acceptance_stage=candidate-preflight-refusal-contract
 grep -Fq 'read-only candidate preflight failed' "$fixture/refusal.log"
+acceptance_stage=refused-candidate-service-active
 sudo systemctl is-active --quiet parins-managed.service
+acceptance_stage=refused-candidate-binary-preserved
 sudo cmp "$binary" /opt/parins-managed/parins
+acceptance_stage=refused-candidate-state-preserved
 sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 sudo stat -c '%n %u %g %a %i %s' /var/lib/parins /var/lib/parins/tls /var/lib/parins/tls/external.pem > "$fixture/tls-after"
 cmp "$fixture/tls-before" "$fixture/tls-after"

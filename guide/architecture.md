@@ -77,6 +77,10 @@ mutation permit serializes accepted changes; accepted transactions outlive their
 initiating HTTP connection. Network uncertainty is confirmed through reads rather
 than replaying a mutation.
 
+`ChangeImpact` names updates-only, hot (with explicit cache replacement), and
+restart changes. Validation and application use the same source-document
+classification; a stopped or exited runtime cannot receive a hot change.
+
 Updates-only changes preserve a stopped or running DNS service. Supported cache,
 storage, statistics and filtering changes preserve listeners, replacing only the
 state whose behavior changed. Candidate material is prepared before stopping DNS.

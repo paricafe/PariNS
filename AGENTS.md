@@ -245,7 +245,7 @@ until preview/validation.
 - Validate and persist before publishing replacement state. Cache-only, storage-only
   and updates-only changes preserve listeners; updates-only changes also keep caches,
   RuntimeServices, certificates and sessions and leave stopped DNS stopped. One
-  updates-only classification drives validation, restart impact and apply, keeping
+  typed change-impact classification drives validation, restart reporting and apply, keeping
   schema validation without reloading unchanged DNS material. Do not promise cache
   retention after arbitrary policy changes; report restart requirements accurately.
 - RuntimeServices owns process metrics and the bounded SQLite worker across DNS

@@ -205,12 +205,26 @@ pub(super) struct Validation {
     address: SocketAddr,
     filters: Arc<crate::filter_subscriptions::service::Service>,
     revision: u64,
-    updates_only: bool,
+    impact: ChangeImpact,
+}
+
+/// One interpretation shared by validation, restart reporting and application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChangeImpact {
+    UpdatesOnly,
+    Hot { replace_cache: bool },
+    Restart,
+}
+
+impl ChangeImpact {
+    pub fn restart_required(self) -> bool {
+        self == Self::Restart
+    }
 }
 
 impl Validation {
     pub async fn run(self, toml: String) -> Result<Config> {
-        if self.updates_only {
+        if self.impact == ChangeImpact::UpdatesOnly {
             return Config::parse_in(&toml, &self.dir);
         }
         let config = prepare(self.dir, self.address, toml).await?.0;
@@ -499,17 +513,20 @@ impl Manager {
 
     /// Compare source documents, not compiled rules. Updates-only changes also
     /// retain a stopped DNS state; cache/storage/filter changes require live DNS.
-    pub fn hot_update(&self, next: &str) -> Option<bool> {
-        if self.updates_only(next).ok()? {
-            return Some(false);
+    pub fn change_impact(&self, next: &str) -> Result<ChangeImpact> {
+        if self.updates_only(next)? {
+            return Ok(ChangeImpact::UpdatesOnly);
         }
-        self.cache_only_change(next, &Config::parse(next).ok()?.cache)
+        let config = Config::parse(next)?;
+        Ok(self
+            .hot_change(next, &config.cache)
+            .unwrap_or(ChangeImpact::Restart))
     }
 
     /// Whether `next` differs from the running configuration only in cache,
     /// storage, statistics, update or filter settings, and if so whether the
     /// cache itself changes. `next_cache` is the cache section parsed from `next`.
-    fn cache_only_change(&self, next: &str, next_cache: &CacheConfig) -> Option<bool> {
+    fn hot_change(&self, next: &str, next_cache: &CacheConfig) -> Option<ChangeImpact> {
         let running = self.running.as_ref().filter(|r| !r.task.is_finished())?;
         let previous = self.saved.as_ref()?;
         let split =
@@ -540,7 +557,9 @@ impl Manager {
             (Some((a, old, original)), Some((b, new, candidate)))
                 if a == b && original != candidate =>
             {
-                Some(old != new)
+                Some(ChangeImpact::Hot {
+                    replace_cache: old != new,
+                })
             }
             _ => None,
         }
@@ -555,7 +574,7 @@ impl Manager {
             address: self.address,
             filters: self.filters.clone(),
             revision: self.saved.as_ref().map_or(0, |s| s.revision),
-            updates_only: self.updates_only(toml)?,
+            impact: self.change_impact(toml)?,
         })
     }
 
@@ -728,9 +747,10 @@ impl Manager {
 
     /// Returns whether listener restart was necessary.
     pub async fn apply(&mut self, next: Stored) -> Result<bool> {
+        let impact = self.change_impact(&next.toml)?;
         // Management-only settings do not inspect changed certificate files,
         // restart a stopped DNS service, or publish new storage/cache settings.
-        if self.updates_only(&next.toml)? {
+        if impact == ChangeImpact::UpdatesOnly {
             let config = Config::parse_in(&next.toml, &self.store.dir)?;
             let store = self.store.clone();
             let copy = next.clone();
@@ -759,7 +779,11 @@ impl Manager {
                 self.saved.as_ref().map_or(0, |s| s.revision),
             )
             .await?;
-        if let Some(replace_cache) = self.cache_only_change(&next.toml, &config.cache) {
+        // The task can finish while preparation awaits. Reclassify against the
+        // live owner rather than applying a hot change to a departed runtime.
+        if let Some(ChangeImpact::Hot { replace_cache }) =
+            self.hot_change(&next.toml, &config.cache)
+        {
             // Manager's mutex serializes this transaction. There is no fallible
             // IO after persist and no await between live swap and revision update.
             let store = self.store.clone();

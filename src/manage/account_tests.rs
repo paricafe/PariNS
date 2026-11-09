@@ -191,6 +191,112 @@ fn rotation() -> Value {
 }
 
 #[tokio::test]
+async fn configuration_impact_matches_validation_and_runtime_ownership() {
+    use super::super::runtime::ChangeImpact;
+    let (_temp, shared, headers) = fixture().await;
+    let base = shared
+        .manager
+        .lock()
+        .await
+        .saved
+        .as_ref()
+        .unwrap()
+        .toml
+        .clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen = listener.local_addr().unwrap();
+    drop(listener);
+    let cases = [
+        (
+            format!("{base}\n[updates]\nauto_check=false\n"),
+            ChangeImpact::UpdatesOnly,
+        ),
+        (
+            format!("{base}\n[storage]\nflush_interval_ms=500\n"),
+            ChangeImpact::Hot {
+                replace_cache: false,
+            },
+        ),
+        (
+            format!("{base}\n[statistics]\nretention_secs=3600\n"),
+            ChangeImpact::Hot {
+                replace_cache: false,
+            },
+        ),
+        (
+            format!("{base}\n[filter]\nenabled=true\nblock_exact=['blocked.test']\n"),
+            ChangeImpact::Hot {
+                replace_cache: false,
+            },
+        ),
+        (
+            format!("{base}\n[cache]\nmax_entries=64\n"),
+            ChangeImpact::Hot {
+                replace_cache: true,
+            },
+        ),
+        (
+            format!("{base}\n[storage]\nflush_interval_ms=500\n[cache]\nmax_entries=65\n"),
+            ChangeImpact::Hot {
+                replace_cache: true,
+            },
+        ),
+        (
+            base.replace("127.0.0.1:0", &listen.to_string()),
+            ChangeImpact::Restart,
+        ),
+    ];
+    for (toml, impact) in cases {
+        let (revision, generation, resolver, cache) = {
+            let manager = shared.manager.lock().await;
+            assert_eq!(manager.change_impact(&toml).unwrap(), impact);
+            let resolver = manager.resolver().unwrap().clone();
+            (
+                manager.saved.as_ref().unwrap().revision,
+                manager.status()["generation"].clone(),
+                resolver.clone(),
+                resolver.cache(),
+            )
+        };
+        let validated = request(
+            &shared,
+            &headers,
+            "POST",
+            "/api/config/validate",
+            json!({"toml":toml}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(validated["restart_required"], impact.restart_required());
+        let applied = request(
+            &shared,
+            &headers,
+            "PUT",
+            "/api/config",
+            json!({"toml":toml,"revision":revision}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied["restart_required"], impact.restart_required());
+        let manager = shared.manager.lock().await;
+        let current = manager.resolver().unwrap();
+        assert_eq!(!Arc::ptr_eq(&resolver, current), impact.restart_required());
+        let replaced = matches!(
+            impact,
+            ChangeImpact::Hot {
+                replace_cache: true
+            } | ChangeImpact::Restart
+        );
+        assert_eq!(!Arc::ptr_eq(&cache, &current.cache()), replaced);
+        assert_eq!(
+            manager.status()["generation"] != generation,
+            impact.restart_required()
+        );
+    }
+    shared.manager.lock().await.terminal_shutdown().await;
+}
+
+#[tokio::test]
 async fn credential_rotation_rejects_invalid_input_and_preserves_failed_save_and_sessions() {
     let (_temp, shared, headers) = fixture().await;
     let state_path = shared.manager.lock().await.store.dir.join("state.json");

@@ -982,7 +982,10 @@ async fn api(
                     .transport_change(&document.toml, host)
                     .map_err(invalid)?;
                 (
-                    manager.hot_update(&document.toml).is_none(),
+                    manager
+                        .change_impact(&document.toml)
+                        .map_err(invalid)?
+                        .restart_required(),
                     change,
                     manager.validation(&document.toml).map_err(invalid)?,
                 )

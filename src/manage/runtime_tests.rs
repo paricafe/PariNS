@@ -589,7 +589,10 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
         .run(next.toml.clone())
         .await
         .unwrap();
-    assert_eq!(manager.hot_update(&next.toml), Some(false));
+    assert_eq!(
+        manager.change_impact(&next.toml).unwrap(),
+        ChangeImpact::UpdatesOnly
+    );
     assert!(!manager.apply(next).await.unwrap());
     assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
     assert!(Arc::ptr_eq(&cache, &manager.resolver().unwrap().cache()));
@@ -619,7 +622,10 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
         .run(next.toml.clone())
         .await
         .unwrap();
-    assert_eq!(manager.hot_update(&next.toml), Some(false));
+    assert_eq!(
+        manager.change_impact(&next.toml).unwrap(),
+        ChangeImpact::UpdatesOnly
+    );
     assert!(!manager.apply(next).await.unwrap());
     assert!(manager.resolver().is_none());
     assert_eq!(manager.generation, generation);

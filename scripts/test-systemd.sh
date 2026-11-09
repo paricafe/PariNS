@@ -74,6 +74,7 @@ sudo -n true
 opt_mode=$(sudo stat -c %a /opt)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/parins-systemd-test.XXXXXX")
 installed=false
+acceptance_stage=initialization
 fs_uid= fs_chain=
 fs_trace_job= fs_tracer_pid= fs_fault_pid= fs_fault_ns= fs_staging=
 fs_tmpfs_active=false
@@ -150,6 +151,16 @@ fs_offline_remove() {
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
+    if [ "$status" -ne 0 ]; then
+        printf 'Service acceptance failed during %s (exit %s).\n' "$acceptance_stage" "$status" >&2
+        if [ -s "$fixture/status.json" ]; then
+            # Fixed diagnostic fields only; never dump accounts, bindings,
+            # configuration, endpoint addresses or arbitrary error text.
+            jq '{running, lifecycle_phase, revision, generation,
+                 dns_health: (.dns_health | {state, ready, generation, code})}' \
+                "$fixture/status.json" >&2 || true
+        fi
+    fi
     fs_trace_stop || status=1
     fs_tmpfs_remove || status=1
     fs_offline_remove || status=1
@@ -179,6 +190,7 @@ if [ -z "$build_info" ]; then
 fi
 sudo chmod go-w /opt
 install_service() {
+    acceptance_stage=installation
     if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info" > "$fixture/install.log" 2>&1; then
         # Keep the one-time setup token out of CI logs.
         sed -E 's/^( +)[0-9a-f]{64}$/\1<setup token>/' "$fixture/install.log"
@@ -193,12 +205,16 @@ install_service() {
         fi
         return "$install_status"
     fi
+    acceptance_stage=installed-service-active
     sudo systemctl is-active --quiet parins-managed.service
+    acceptance_stage=installed-binary-identity
     sudo cmp "$binary" /opt/parins-managed/parins
     # A committed install keeps no preflight copy and at most two backups. The
     # official-A updater suite runs the immutable v0.1.5 installer.
     if ! "$official_updater_check"; then
+        acceptance_stage=installed-private-preflight-cleanup
         sudo test ! -e /opt/parins-managed/.update/install-preflight
+        acceptance_stage=installed-backup-budget
         [ "$(sudo find /opt/parins-managed -maxdepth 1 -name '.install-backup.*' -type d | wc -l)" -le 2 ]
     fi
 }
@@ -342,10 +358,47 @@ sudo test -s /var/lib/parins-managed/state.json
 [ "$(sudo stat -c %a /var/lib/parins-managed/state.json)" = 600 ]
 sudo cat /var/lib/parins-managed/state.json > "$fixture/state-copy"
 
+wait_dns_ready() {
+    dns_attempt=0
+    dns_deadline=$(( $(date +%s) + 30 ))
+    while :; do
+        http --max-time 5 -H "X-PariNS-Session: $binding" \
+            http://127.0.0.1:3000/api/status > "$fixture/status.json" || return $?
+        jq -e --argjson revision "$revision" '.revision == $revision' "$fixture/status.json" >/dev/null || {
+            printf '%s\n' 'DNS readiness observed an unexpected saved revision.' >&2
+            return 1
+        }
+        # The explicit official-A control uses immutable v0.1.5, whose status
+        # predates lifecycle health. Keep that named suite's original contract;
+        # current builds must supply every readiness field, never infer it.
+        if jq -e --argjson official_a "$official_updater_check" \
+            '.running == true and .last_error == null and
+             ($official_a or (.lifecycle_phase == "stable" and
+              .dns_health.ready == true and .dns_health.generation == .generation))' \
+            "$fixture/status.json" >/dev/null; then
+            if [ "$dns_attempt" -gt 0 ]; then
+                printf 'DNS readiness reached after %s pending observations.\n' "$dns_attempt"
+            fi
+            return 0
+        fi
+        if [ "$dns_attempt" -eq 0 ]; then
+            printf '%s\n' 'Waiting for DNS readiness:' >&2
+            jq '{running, lifecycle_phase, revision, generation,
+                 dns_health: (.dns_health | {state, ready, generation, code})}' \
+                "$fixture/status.json" >&2
+        fi
+        dns_attempt=$((dns_attempt + 1))
+        if [ "$dns_attempt" -ge 30 ] || [ "$(date +%s)" -ge "$dns_deadline" ]; then
+            printf '%s\n' 'DNS did not reach stable matching-generation readiness within the acceptance budget.' >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
 check_dns() {
-    http --max-time 5 -H "X-PariNS-Session: $binding" \
-        http://127.0.0.1:3000/api/status > "$fixture/status.json"
-    jq -e --argjson revision "$revision" '.running == true and .revision == $revision and .last_error == null' "$fixture/status.json" >/dev/null
+    acceptance_stage=dns-readiness
+    wait_dns_ready
+    acceptance_stage=dns-udp-tcp-probes
     address=$(jq -er '.listen' "$fixture/status.json")
     python3 - "$address" <<'PY'
 import socket
@@ -379,17 +432,24 @@ PY
 }
 check_dns
 install_service
+acceptance_stage=initialized-install-guidance
 expect_initialized_install_message
+acceptance_stage=initialized-install-no-generated-identity
 ! sudo test -e /var/lib/parins-managed/https-identity.pem
 ! sudo test -e /var/lib/parins-managed/https-cert.pem
+acceptance_stage=initialized-install-state-preservation
 sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
+acceptance_stage=initialized-install-session-revocation
 session | jq -e '.setup_required == false and .authenticated == false' >/dev/null
+acceptance_stage=initialized-install-login
 http --max-time 15 -H 'Origin: http://127.0.0.1:3000' \
     -H 'Content-Type: application/json' \
     --data-binary "@$fixture/credentials.json" http://127.0.0.1:3000/api/login > "$fixture/response.json"
 binding=$(jq -er '.session.binding' "$fixture/response.json")
+acceptance_stage=initialized-install-authenticated-session
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 check_dns
+acceptance_stage=candidate-preflight-rejection
 # A valid native executable that exits immediately fails read-only preflight
 # before replacement or stopping the previously active service.
 if sudo sh "$installer" --binary /bin/false --helper "$helper" --build-info "$build_info" > "$fixture/refusal.log" 2>&1; then

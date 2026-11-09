@@ -183,6 +183,12 @@ systemd in staged directories (`--root`). They cover these contracts:
   initialized reinstall is recognized only after its read-only preflight succeeds.
 - Staging and `--dry-run` start no service and run no candidate binary.
 - A failed replacement restores the previous files.
+- Service readiness fixtures wait for stable, matching-generation DNS readiness
+  before UDP/TCP probes, independently of management HTTP readiness. Their
+  unprivileged regression cases run through `test-install.sh`; real service
+  failures report a named stage and fixed status fields without credentials.
+  The explicit official updater control retains the immutable v0.1.5 status
+  contract and real DNS probes; current builds must supply every readiness field.
 
 ## Acceptance workflows
 

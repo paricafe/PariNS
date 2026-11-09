@@ -340,6 +340,8 @@ meaningful behavior or regression gap.
 
 - Keep every `--ephemeral-ci` guard. Tests never change host DNS, firewall rules,
   certificate trust or system services; use isolated fixtures for local acceptance.
+  Service acceptance waits for stable, matching-generation DNS readiness and
+  reports named failure stages without credentials or arbitrary error text.
 - Public DNS acceptance uses `scripts/test-public-dns.py` for one DoQ or HTTP/3
   query to an explicitly authorized address, certificate hostname and port. Keep
   public-CA verification and the bounded deadline; no application retries or load.

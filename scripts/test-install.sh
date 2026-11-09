@@ -306,4 +306,5 @@ rm "$stage/var/lib/parins-managed"
 # The same private backing without its logical link is not silently adopted.
 expect_failure --root "$stage" --binary "$binary"
 [ ! -e "$fixture/systemctl-called" ]
+sh "$repo/scripts/test-systemd-readiness.sh"
 printf 'Installer fixture checks passed. Retained fixtures: %s\n' "$fixture"

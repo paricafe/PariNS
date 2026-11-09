@@ -59,6 +59,40 @@ root:
 The binary uses Tokio's multi-threaded runtime with one worker per CPU by default;
 `TOKIO_WORKER_THREADS=2` selects two.
 
+## Console end-to-end acceptance
+
+Run the built, embedded console against its real Rust API, a disposable private
+state directory, loopback listeners and a synthetic DNS upstream. Disable automatic
+update checks and use a unique `.localhost` management hostname to isolate browser
+Cookies. Do not change host DNS, certificate trust or system services.
+
+Verify each boundary separately and record the browser, binary and observed result:
+
+1. Reject an incorrect login, then sign in through the keyboard.
+2. Save a cache-only edit from the TOML editor. Confirm that the saved value changes
+   while the DNS listener and running generation remain in place.
+3. Hold an accepted DNS query at the fixture upstream, save a restart-requiring
+   edit, and refresh Overview in a second authenticated tab. It must show stopping
+   and not ready; release the query within the shutdown grace and confirm its
+   answer and the replacement generation's readiness.
+4. In the disposable fixture only, make configuration persistence fail after
+   candidate preparation. Confirm an error, retained draft, unchanged saved
+   revision and restored DNS. Restore the fixture before continuing.
+5. Discard the failed draft and use Undo last save. Confirm the restored values
+   and a usable DNS listener.
+6. Change the management hostname. Confirm the stated destination, automatic
+   navigation and a new login; the old session must not authorize the new realm.
+7. Send real DNS queries and confirm Overview totals and query-log entries,
+   including a new entry through live refresh. Sign out and confirm the login page.
+8. Repeat navigation and error handling at a narrow viewport with the keyboard;
+   check focus, reachable controls and horizontal overflow. Inspect application
+   console errors separately from browser extension errors.
+
+Do not count component mocks as this acceptance. HTTP/HTTPS transition coverage
+also needs a certificate the browser already trusts; never bypass its warnings.
+The management integration suite separately exercises TLS with pinned test roots
+and checks cross-site navigation, API rejection and session invalidation.
+
 ## Benchmarks
 
 ```sh

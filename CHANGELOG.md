@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Console navigation reaches the new management origin after a confirmed address
+  change; cross-site API, asset and embedded requests remain blocked.
 - Management status and the console distinguish DNS startup and draining from
   unexpected exits, and report not ready until the published generation is stable.
 - Configuration candidate preparation releases the management mutex while the

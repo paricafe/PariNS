@@ -472,6 +472,101 @@ async fn descriptor_exhaustion_pauses_the_management_listener_without_exiting() 
 }
 
 #[tokio::test]
+async fn console_navigation_allows_reconnect_but_keeps_cross_site_api_and_embeds_blocked() {
+    let temporary = tempfile::tempdir().unwrap();
+    let server = Management::start(&temporary.path().join("state")).await;
+    let navigation =
+        "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n";
+    for (method, path, host, extra, expected) in [
+        (
+            "GET",
+            "/",
+            server.address.to_string(),
+            navigation.to_owned(),
+            200,
+        ),
+        (
+            "GET",
+            "/api/session",
+            server.address.to_string(),
+            navigation.to_owned(),
+            403,
+        ),
+        (
+            "GET",
+            "/assets/app.js",
+            server.address.to_string(),
+            navigation.to_owned(),
+            403,
+        ),
+        (
+            "POST",
+            "/",
+            server.address.to_string(),
+            navigation.to_owned(),
+            403,
+        ),
+        (
+            "GET",
+            "/",
+            "attacker.example".to_owned(),
+            navigation.to_owned(),
+            403,
+        ),
+        (
+            "GET",
+            "/",
+            server.address.to_string(),
+            format!("{navigation}Origin: http://attacker.example\r\n"),
+            403,
+        ),
+        (
+            "GET",
+            "/",
+            server.address.to_string(),
+            navigation.replace("document", "iframe"),
+            403,
+        ),
+        (
+            "GET",
+            "/",
+            server.address.to_string(),
+            navigation.replace("navigate", "cors"),
+            403,
+        ),
+        (
+            "GET",
+            "/",
+            server.address.to_string(),
+            format!("{navigation}Sec-Fetch-Mode: cors\r\n"),
+            403,
+        ),
+        (
+            "GET",
+            "/",
+            server.address.to_string(),
+            format!("{navigation}Sec-Fetch-Dest: iframe\r\n"),
+            403,
+        ),
+        (
+            "GET",
+            "/",
+            server.address.to_string(),
+            "Sec-Fetch-Site: cross-site\r\n".to_owned(),
+            403,
+        ),
+    ] {
+        let request =
+            format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n");
+        let response = server.raw(request.as_bytes()).await;
+        assert_eq!(response.status, expected, "{request}: {}", response.body);
+        assert!(response.headers.contains("x-frame-options: deny"));
+        assert!(!response.headers.contains("set-cookie:"));
+    }
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong_host() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");

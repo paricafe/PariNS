@@ -203,7 +203,9 @@ until preview/validation.
 ## Management, runtime and security
 
 - Mutations keep authentication, Host/Origin checks, atomic persistence and failure
-  recovery. The management entry point consumes a bound listener; callers never
+  recovery. Cross-site entry permits only top-level GET navigation of the console
+  document after Host/Origin checks; APIs, assets and embedded requests stay blocked.
+  The management entry point consumes a bound listener; callers never
   release a reserved address and race to rebind it during startup. Configuration
   saves and rollback carry the saved revision as an
   optimistic-concurrency check; the console keeps it internal, never shows it, and on

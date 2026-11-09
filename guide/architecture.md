@@ -133,6 +133,12 @@ plus an in-memory session binding. The browser never persists that binding,
 credentials or configuration drafts. Live-log sockets have their own admission,
 authentication, resource limits and shutdown owner.
 
+Changing the management origin navigates to the new console document and revokes
+existing sessions. Cross-site entry permits only a top-level `GET /` navigation
+(`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`) after Host/Origin checks.
+API, asset and embedded requests remain blocked across sites; the new document
+loads its assets and signs in through same-origin requests.
+
 The application update coordinator persists intent and uses the existing mutation
 permit for the update freeze. The root updater accepts only fixed operations and
 fixed installation paths; its journal is the installed-identity authority. It

@@ -4,6 +4,8 @@
 //! listener rides out per-connection accept errors like the DNS listeners.
 //! The caller transfers a bound management socket; startup never releases and
 //! rebinds its address while private state and DNS are being prepared.
+//! Cross-site entry is limited to top-level GET navigation of the console
+//! document; API, asset and embedded requests retain their origin checks.
 mod account;
 mod assets;
 mod auth_budget;
@@ -1142,6 +1144,19 @@ async fn handle_inner(
     let mut hosts = hosts.iter();
     let host = hosts.next().and_then(|h| h.to_str().ok()).unwrap_or("");
     let unsafe_method = parts.method != "GET" && parts.method != "HEAD";
+    // A confirmed address change navigates from the old console origin. Only
+    // its public document may be entered cross-site, never an API or embed.
+    let document_navigation = parts.method == "GET"
+        && parts.uri.path() == "/"
+        && [
+            ("sec-fetch-mode", "navigate"),
+            ("sec-fetch-dest", "document"),
+        ]
+        .into_iter()
+        .all(|(name, expected)| {
+            let mut values = parts.headers.get_all(name).iter();
+            values.next().is_some_and(|value| value == expected) && values.next().is_none()
+        });
     shared.ensure_current(&transport)?;
     if !host_allowed(shared.address, host, &transport)
         || hosts.next().is_some()
@@ -1151,7 +1166,7 @@ async fn handle_inner(
             if unsafe_method {
                 site != "same-origin"
             } else {
-                site == "cross-site"
+                site == "cross-site" && !document_navigation
             }
         })
     {

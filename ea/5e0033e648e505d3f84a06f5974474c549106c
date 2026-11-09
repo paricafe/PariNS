@@ -1,0 +1,33 @@
+guide/architecture.md
+  s_b27ab66ab5950d::t_fb060cc91ce989 136-140
+  s_b27ab66ab5950d::t_ea7729addec231 141
+AGENTS.md
+  s_b27ab66ab5950d::t_fb060cc91ce989 206-208
+tests/manage.rs
+  s_b27ab66ab5950d::t_68da13155ddcde 478-479,481-557,559-560
+  s_b27ab66ab5950d::t_9de0b8565969df 475-477,480,558,561-568
+  s_b27ab66ab5950d::t_056dc8bbc09374 474
+CHANGELOG.md
+  s_b27ab66ab5950d::t_fb060cc91ce989 7-8
+guide/development.md
+  s_b27ab66ab5950d::t_49751bfe5763da 62-95
+src/manage/mod.rs
+  s_b27ab66ab5950d::t_68da13155ddcde 1151-1159
+  s_b27ab66ab5950d::t_fb060cc91ce989 7-8,1147-1150,1169
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ea5e0033e648e505d3f84a06f5974474c549106c",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

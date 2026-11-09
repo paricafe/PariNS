@@ -1,0 +1,25 @@
+CHANGELOG.md
+  s_b27ab66ab5950d::t_785bfe22da9a8d 13-14
+Cargo.toml
+  s_b27ab66ab5950d::t_785bfe22da9a8d 35
+src/storage/database.rs
+  s_b27ab66ab5950d::t_2bcd6a9548c910 975,979,1074-1077,1080,1097-1099,1101,1117,1213,1233,1236
+Cargo.lock
+  s_b27ab66ab5950d::t_ad88ab104e1c3c 1031,1033,1527,1529
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a08627a858d9f525255cc86aa59821473251085c",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

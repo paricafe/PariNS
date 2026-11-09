@@ -1,0 +1,45 @@
+CHANGELOG.md
+  s_b27ab66ab5950d::t_8d9c264060bfbf 9-11
+src/manage/mod.rs
+  s_b27ab66ab5950d::t_d5d5791a6a7db4 711,1038
+  s_b27ab66ab5950d::t_215e3c7217024a 185-187,728-729,737-740,1065-1069
+tests/manage.rs
+  s_b27ab66ab5950d::t_e9a50610073bb1 2207-2213,2219-2226,2232-2235,2237-2238,2240-2244,2247-2255,2257
+  s_b27ab66ab5950d::t_4a976cbbdc0544 2256
+  s_b27ab66ab5950d::t_1ac6f681ea1003 2200-2206,2214-2218,2227-2231,2236,2239,2245-2246
+  s_b27ab66ab5950d::t_391c935f0ba9f0 2199
+  s_b27ab66ab5950d::t_3cb4cf98667ca8 2258
+src/manage/runtime.rs
+  s_b27ab66ab5950d::t_215e3c7217024a 227-241,246-252,255-282,806,808-834,843,855
+  s_b27ab66ab5950d::t_8729142a3f521f 242-245,253-254,835-840
+  s_b27ab66ab5950d::t_8d9c264060bfbf 7-8
+AGENTS.md
+  s_b27ab66ab5950d::t_8d9c264060bfbf 251
+  s_b27ab66ab5950d::t_491b1cb623ae29 252-253
+src/manage/account_tests.rs
+  s_b27ab66ab5950d::t_92abe52cf38738 309-310,312-320,323-332,334-338,344-345
+  s_b27ab66ab5950d::t_474643ea849c00 84-87,321-322,339-342
+  s_b27ab66ab5950d::t_d5d5791a6a7db4 57,62,68-70,90,107-108
+  s_b27ab66ab5950d::t_5a7ccd32645d85 308
+  s_b27ab66ab5950d::t_8d9c264060bfbf 311,333,343
+  s_b27ab66ab5950d::t_058c3eb2a1f7da 88-89
+  s_b27ab66ab5950d::t_e8954c0a0d9205 346-347
+guide/architecture.md
+  s_b27ab66ab5950d::t_8d9c264060bfbf 79-82,99-101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a35c9d99d6528fa6c7dbd5c8528ffbffb3010969",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

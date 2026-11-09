@@ -66,6 +66,7 @@ cargo run --locked --release --example bench -- 1000 32
 cargo run --locked --release --example bench_dot -- 1000 8
 cargo run --locked --release --example bench_cache -- --seconds 1 --repeats 3
 cargo test --locked --release --lib flight::bench::registry -- --exact --ignored --nocapture
+cargo test --locked --release --lib flight::bench::concurrent_registry -- --exact --ignored --nocapture
 ```
 
 - `bench`: resolver scenarios (warm cache, cold single upstream, cold parallel
@@ -78,6 +79,11 @@ cargo test --locked --release --lib flight::bench::registry -- --exact --ignored
   rounds of active-key joins and distinct-key turnover at 128, 1024 and 4096 groups.
   It emits JSON with per-join timings and checks group roles and capacity; it does
   no network IO and measures no wire DNS QPS.
+- `flight::bench::concurrent_registry`: five rounds at 128/4096 groups with 1/4/8
+  callers, comparing one hot key, uniform active keys and distinct-key turnover.
+  It checks roles and capacity and emits join and lock-acquisition percentiles.
+  Preallocated thread-local timing buffers exist only in tests; their overhead is
+  included. Wall throughput also includes query construction and holder turnover.
 
 These are in-process microbenchmarks; `bench_cache` counts cache operations, which
 are not wire DNS queries. For a performance change, keep a baseline, repeat the same

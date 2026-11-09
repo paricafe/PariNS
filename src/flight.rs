@@ -111,7 +111,11 @@ impl Flights {
         let Some(key) = self.config.enabled.then(|| key(query)).flatten() else {
             return Ok((Hold::new(work.shared(), Arc::default()), Role::Bypass, sent));
         };
+        #[cfg(test)]
+        let waiting = bench::before_lock();
         let mut groups = self.groups.lock().expect("flight lock poisoned");
+        #[cfg(test)]
+        bench::after_lock(waiting);
         if let Some((shared, sent, holds)) = groups.get(&key).and_then(|(weak, sent, holds)| {
             let shared = weak.upgrade().filter(|work| work.peek().is_none())?;
             Some((shared, sent.clone(), holds.clone()))

@@ -245,8 +245,8 @@ until preview/validation.
 - Validate and persist before publishing replacement state. Cache-only, storage-only
   and updates-only changes preserve listeners; updates-only changes also keep caches,
   RuntimeServices, certificates and sessions and leave stopped DNS stopped. One
-  typed change-impact classification drives validation, restart reporting and apply, keeping
-  schema validation without reloading unchanged DNS material. Do not promise cache
+  typed change-impact classification drives validation, restart reporting and apply.
+  Updates-only validation checks the schema without reloading DNS material. Do not promise cache
   retention after arbitrary policy changes; report restart requirements accurately.
   Accepted configuration tasks keep the mutation permit while preparing owned
   candidates outside Manager; only Manager commits after checking the saved revision

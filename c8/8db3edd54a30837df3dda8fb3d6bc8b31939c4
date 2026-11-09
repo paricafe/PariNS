@@ -1,0 +1,21 @@
+scripts/test-systemd-readiness.sh
+  s_b27ab66ab5950d::t_49660140a16c4a 66-92
+scripts/test-systemd.sh
+  s_b27ab66ab5950d::t_d5b03b4f7f7765 177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c88db3edd54a30837df3dda8fb3d6bc8b31939c4",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

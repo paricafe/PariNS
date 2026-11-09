@@ -348,6 +348,8 @@ meaningful behavior or regression gap.
 - For performance changes, keep a baseline, repeat the same workload with
   correctness checks (`examples/bench_cache.rs` for the cache), and report
   regressions and variance; cache operations per second are not wire DNS QPS.
+  `scripts/bench-dns.mjs` measures isolated UDP wire load with driver controls;
+  keep profiling passes separate and do not treat sampled stacks as lock timings.
 
 ## Documentation and delivery
 

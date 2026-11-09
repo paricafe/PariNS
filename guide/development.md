@@ -123,6 +123,45 @@ These are in-process microbenchmarks; `bench_cache` counts cache operations, whi
 are not wire DNS queries. For a performance change, keep a baseline, repeat the same
 workload on a quiet host, and report variance and regressions.
 
+### UDP wire baseline
+
+`scripts/bench-dns.mjs` starts the production binary with private fixture data,
+kernel-assigned loopback DNS/admin ports and a synthetic UDP upstream. It reuses
+the lifecycle suites' fixed-rate sender and answer oracle. The driver and mock
+upstream share one Node process; the server runs separately. It requires Node,
+`ps`, and an already built binary; it changes no host DNS or service settings.
+
+```sh
+node --test scripts/test-wire-load.mjs
+node scripts/bench-dns.mjs --binary target/release/parins --output docs/wire-baseline --seconds 5 --repeats 5 --rates 1000,4000 --workers 4
+```
+
+The five cases are a direct-upstream driver control, warm cache, unique names with
+20 ms upstream delay, one shared uncached name with 20 ms delay, and unique names
+with 200 ms delay to retain more active groups. Every response must match its DNS
+ID, question, answer, flags and TTL. Cache/upstream counters verify the intended
+path. Each round rotates case order and retains failed trials. Correct QPS uses
+the fixed offered-load duration; scheduled latency includes driver lag, while
+wire latency starts at actual send time. A passed trial means complete correct
+delivery at the offered rate, not a production capacity or latency SLA.
+
+The new output directory contains provenance (binary and harness digests, source
+diff, tool versions and host), per-trial JSON/logs and a repeated-run summary.
+Parent directories are created as needed; an existing output directory is refused.
+CPU comes from process `ps` time; RSS is sampled once per second. These are
+co-located, unconstrained process observations, not Linux cgroup/OOM evidence or
+lifetime memory peaks. The managed lifecycle wrapper retains its Linux resource
+gates separately.
+
+On macOS, add `--profile` with at least five seconds per trial to capture a separate
+three-second `sample` pass under the many-active workload. That pass is excluded
+from the baseline summary. Stack samples can locate waiting paths; they do not
+measure mutex acquisition percentiles. Compare a contention hypothesis with the
+correctness, throughput, driver-control and repeated latency evidence before
+changing shared locks. `examples/bench.rs` remains an in-process Resolver benchmark.
+CI runs the five cases once at 200 QPS as a correctness smoke test, without treating
+the shared runner's timings as a performance baseline.
+
 ## Packaging and releases
 
 ```sh

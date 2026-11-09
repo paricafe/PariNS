@@ -67,22 +67,24 @@ export function ioStat(text) {
   }));
 }
 
-export async function runWirePhase({ name, port, duration, output, slo: SLO, warmup, readMetrics, observeResources, itemFor, onAction, actionKey, safeCode, errorDiagnostic }) {
+// Fixed-rate UDP measurement. Callers own resource interpretation and acceptance;
+// finish runs before socket cleanup, preserving the lifecycle suites' boundary.
+export async function runWireLoad({ name, port, duration, slo: SLO, warmup, readMetrics, observeResources, itemFor, onAction, actionKey, expectCacheHit = true, resourceIntervalMs = 100 }, finish) {
   await warmup();
   const warmBefore = await readMetrics();
   await warmup();
   const warmAfter = await readMetrics();
-  assert.equal(warmAfter.cache_hits, warmBefore.cache_hits + 1, 'fresh-cache group must really hit cache');
+  if (expectCacheHit) assert.equal(warmAfter.cache_hits, warmBefore.cache_hits + 1, 'fresh-cache group must really hit cache');
   const socket = dgram.createSocket('udp4');
   await new Promise(resolve => socket.bind(0, '127.0.0.1', resolve));
   const pending = new Map(); const expired = new Set(); let nextId = 0;
   const result = { name, duration_ms: duration, configured_qps: SLO.rate,
     planned: plannedCount(duration, SLO.rate), sent: 0, correct: 0, timeouts: 0,
     invalid: 0, late: 0, unexpected: 0, send_errors: 0, never_sent: 0,
-    groups: {}, resource_samples: [], fresh_cache_probe_verified: true };
+    groups: {}, resource_samples: [], fresh_cache_probe_verified: expectCacheHit };
   const latencies = [], wireLatencies = [], lags = []; let sentCount = 0;
   let action, actionError, samplingError, samplingDone = false;
-  let started;
+  let started; let sampler = Promise.resolve();
   const expire = (id, entry) => {
     pending.delete(id); expired.add(id); result.timeouts++; entry.group.timeouts++;
     latencies.push(Math.max(SLO.client_deadline_ms, performance.now() - entry.due));
@@ -106,9 +108,9 @@ export async function runWirePhase({ name, port, duration, output, slo: SLO, war
   try {
     const before = await observeResources(); result.resource_samples.push(before);
     started = performance.now();
-    const sampler = (async () => {
+    sampler = (async () => {
       while (!samplingDone) {
-        await delay(100);
+        await delay(resourceIntervalMs);
         if (!samplingDone) result.resource_samples.push(await observeResources());
       }
     })().catch(error => { samplingError = error; });
@@ -153,6 +155,19 @@ export async function runWirePhase({ name, port, duration, output, slo: SLO, war
     result.scheduled_latency_ms = distribution(latencies);
     result.wire_latency_ms = distribution(wireLatencies);
     result.driver_lag_ms = distribution(lags);
+    return await finish(result, { before, after, samplingError, actionError });
+  } finally {
+    samplingDone = true;
+    await sampler;
+    for (const entry of pending.values()) clearTimeout(entry.timer);
+    socket.close();
+  }
+}
+
+// The managed lifecycle suites keep their strict Linux cgroup and SLO contract.
+export async function runWirePhase(options) {
+  const { name, output, slo: SLO, onAction, actionKey, safeCode, errorDiagnostic } = options;
+  return runWireLoad(options, async (result, { before, after, samplingError, actionError }) => {
     result.cpu_seconds = (after.cpu.usage_usec - before.cpu.usage_usec) / 1e6;
     result.cpu_average_cores = result.cpu_seconds / (result.actual_elapsed_ms / 1000);
     result.rss_sample_peak_bytes = Math.max(...result.resource_samples.map(s => s.rss_bytes));
@@ -180,10 +195,6 @@ export async function runWirePhase({ name, port, duration, output, slo: SLO, war
     console.log(JSON.stringify({ event: 'phase_complete', name, result: result.result,
       correct_qps: result.correct_qps, scheduled_p99_ms: result.scheduled_latency_ms.p99, failures: result.failures }));
     return result;
-  } finally {
-    samplingDone = true;
-    for (const entry of pending.values()) clearTimeout(entry.timer);
-    socket.close();
-  }
+  });
 }
 

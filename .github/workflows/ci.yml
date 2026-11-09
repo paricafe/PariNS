@@ -48,6 +48,12 @@ jobs:
       - name: Release notes regression
         if: runner.os == 'Linux'
         run: node --test scripts/test-release-notes.mjs scripts/test-update-manifest.mjs
+      - name: DNS wire load regression
+        if: runner.os == 'Linux'
+        run: |
+          node --test scripts/test-wire-load.mjs
+          node scripts/test-filter-lifecycle.mjs --self-test
+          node scripts/test-update-check.mjs --self-test
       - if: runner.os == 'Linux'
         run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -57,6 +63,9 @@ jobs:
         run: sh scripts/test-udp.sh --ephemeral-ci
       - if: runner.os == 'Linux'
         run: cargo build --locked --release
+      - name: Isolated DNS wire baseline smoke
+        if: runner.os == 'Linux'
+        run: node scripts/bench-dns.mjs --binary target/release/parins --output target/wire-baseline-ci/run --seconds 1 --repeats 1 --rates 200 --workers 2
       - if: runner.os == 'Linux'
         run: ./target/release/parins --config parins.example.toml --check
       - name: Installer fixture tests

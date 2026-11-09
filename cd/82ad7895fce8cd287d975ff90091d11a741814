@@ -1,0 +1,25 @@
+scripts/test-install.sh
+  s_b27ab66ab5950d::t_f4926c680f3855 259
+  s_b27ab66ab5950d::t_f4fb18580519c3 310-317
+guide/development.md
+  s_b27ab66ab5950d::t_f4fb18580519c3 193-194
+  s_b27ab66ab5950d::t_a6ba6829fd0bdb 170-171
+scripts/test-systemd.sh
+  s_b27ab66ab5950d::t_f4fb18580519c3 51,177,398-403,461-462,466,468,470,472
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cd82ad7895fce8cd287d975ff90091d11a741814",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

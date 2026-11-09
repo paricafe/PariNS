@@ -972,11 +972,11 @@ impl Database {
         Ok(())
     }
     /// A slow scan yields to writes and uses the existing busy response.
-    fn bounded<T>(&self, budget: Duration, read: impl FnOnce() -> Result<T>) -> Result<T> {
+    fn bounded<T>(&mut self, budget: Duration, read: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
         let deadline = Instant::now() + budget;
         self.conn
             .progress_handler(1000, Some(move || Instant::now() >= deadline))?;
-        let result = read();
+        let result = read(self);
         self.conn.progress_handler(0, None::<fn() -> bool>)?;
         result
     }
@@ -1071,13 +1071,13 @@ impl Database {
         }
         Ok(entries)
     }
-    fn list(&self, shared: &Shared, options: ListOptions) -> Result<Page> {
-        self.bounded(Duration::from_millis(500), || {
-            let total = epoch(&self.conn, "log_count")? as usize;
-            let log_epoch = epoch(&self.conn, "log_epoch")?;
+    fn list(&mut self, shared: &Shared, options: ListOptions) -> Result<Page> {
+        self.bounded(Duration::from_millis(500), |db| {
+            let total = epoch(&db.conn, "log_count")? as usize;
+            let log_epoch = epoch(&db.conn, "log_epoch")?;
             let limit = options.limit.unwrap_or(50);
             let before_id = options.before_id;
-            let mut entries = self.select(before_id, None, options, limit)?;
+            let mut entries = db.select(before_id, None, options, limit)?;
             let next_cursor = if entries.len() > limit {
                 entries.truncate(limit);
                 entries.last().map(|e| e.id)
@@ -1094,11 +1094,11 @@ impl Database {
             })
         })
     }
-    fn newer(&self, after_id: Option<u64>, filter: ListOptions) -> Result<Newer> {
-        self.bounded(Duration::from_millis(500), || {
-            let log_epoch = epoch(&self.conn, "log_epoch")?;
+    fn newer(&mut self, after_id: Option<u64>, filter: ListOptions) -> Result<Newer> {
+        self.bounded(Duration::from_millis(500), |db| {
+            let log_epoch = epoch(&db.conn, "log_epoch")?;
             let scanned_to: u64 =
-                self.conn
+                db.conn
                     .query_row("SELECT COALESCE(MAX(id),0) FROM query_log", [], |r| {
                         r.get::<_, i64>(0)
                     })? as u64;
@@ -1114,7 +1114,7 @@ impl Database {
             let mut entries = if scanned_to <= after_id {
                 Vec::new()
             } else {
-                self.select(None, Some(after_id), filter, NEWER_LIMIT)?
+                db.select(None, Some(after_id), filter, NEWER_LIMIT)?
             };
             let more = entries.len() > NEWER_LIMIT;
             entries.truncate(NEWER_LIMIT);
@@ -1210,7 +1210,7 @@ impl Database {
             removed,
         })
     }
-    fn statistics(&self, shared: &Shared, options: HistoryOptions) -> Result<StatisticsView> {
+    fn statistics(&mut self, shared: &Shared, options: HistoryOptions) -> Result<StatisticsView> {
         let now = unix_ms();
         let duration = match options.range.as_deref() {
             Some("1h") => 3_600_000,
@@ -1230,10 +1230,10 @@ impl Database {
         let width = (to.saturating_sub(from).max(1))
             .div_ceil(options.max_points.unwrap_or(1000) as u64)
             .max(1);
-        let samples = self.bounded(Duration::from_secs(2), || -> Result<Vec<Point>> {
+        let samples = self.bounded(Duration::from_secs(2), |db| -> Result<Vec<Point>> {
             let shape = shared.metrics.snapshot();
             let mut points: BTreeMap<u64, Point> = BTreeMap::new();
-            let mut statement = self.conn.prepare_cached("SELECT payload FROM statistics_points WHERE time_ms>=?1 AND time_ms<=?2 ORDER BY time_ms")?;
+            let mut statement = db.conn.prepare_cached("SELECT payload FROM statistics_points WHERE time_ms>=?1 AND time_ms<=?2 ORDER BY time_ms")?;
             let mut rows = statement.query(params![from, to])?;
             while let Some(row) = rows.next()? {
                 let bytes: Vec<u8> = row.get(0)?;

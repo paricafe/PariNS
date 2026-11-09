@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Upgrade bundled SQLite through `rusqlite` to address `RUSTSEC-2026-0459`
+  (CVE-2026-119375), which affects a database opened with a crafted mismatched WAL.
 - Installation, online updates and rollback allow up to three minutes per launch
   for storage checking and ten seconds of fresh, verified DNS/storage health.
   systemd's outer update and recovery timeouts cover the longer launch budgets.

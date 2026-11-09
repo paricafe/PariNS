@@ -1,0 +1,19 @@
+src/manage/account_tests.rs
+  s_b27ab66ab5950d::t_b0932e0f9b6f5c 56-66,79-87,89-90,125-126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "436ce52f6b74db0a4ae2b3be2f69ea9f00c9abe8",
+  "prompts": {},
+  "sessions": {
+    "s_b27ab66ab5950d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}

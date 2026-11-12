@@ -14,7 +14,7 @@ PariNS runs in one of two modes:
 - Linux on x86_64 or aarch64 (ARM64), with systemd as the service manager.
 - Root access (`sudo`).
 - `curl`, `tar` and `sha256sum` or `shasum`, plus common base tools the installer
-  uses (`flock`, `nsenter`, `setpriv`, `timeout`, `prlimit`, `getent`). The
+  uses (`flock`, `timeout`, `prlimit`, `getent`). The
   installer stops and names any missing command.
 
 No Rust, Node.js, Git or container runtime is needed on the host.

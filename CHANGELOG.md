@@ -4,11 +4,18 @@
 
 ### Upgrade
 
-- The storage-readiness fix requires helper protocol 5. Run the complete installer
+- Installer preflight requires helper protocol 6. Run the complete installer
   to replace the program, root helper and service files; an online program-only
   update cannot supply the new helper behavior.
 
 ### Fixed
+
+- Drop privileges inside the trusted installer helper before executing the candidate.
+- Limit management connections per source and bound request body time separately.
+- Sample rejected UDP history and skip its DNS decoding when history is disabled.
+- Reject special files for local filtering rules and upstream CAs, and cap CA input size.
+- Reject IPv4 multicast destinations for recursive lookups.
+- Update `rustix` to address `RUSTSEC-2026-0486`.
 
 - Upgrade bundled SQLite through `rusqlite` to address `RUSTSEC-2026-0459`
   (CVE-2026-119375), which affects a database opened with a crafted mismatched WAL.

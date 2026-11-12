@@ -33,7 +33,7 @@ equivalent answers, because they share one cache.
 | `prefer_h3` | `false` | | Try HTTP/3 first for `https://` endpoints, with verified HTTP/2 as fallback. |
 | `max_parallel` | `32` | 1–32 | Parallel mode only: endpoints queried at once; must be at least the number of servers. |
 | `max_extra_inflight` | `128` | 1–65536 | Parallel mode only: extra requests (beyond the first of each query) in flight across all queries. When used up, fewer endpoints are queried. |
-| `ca_file` | none | path | PEM roots that replace the built-in WebPKI roots for encrypted upstreams. |
+| `ca_file` | none | path | PEM roots that replace the built-in WebPKI roots for encrypted upstreams. Must resolve to a regular file of at most 1 MiB. |
 
 `[upstreams.dot_pool]` reuses authenticated connections to each `tls://` endpoint:
 

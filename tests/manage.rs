@@ -2226,13 +2226,13 @@ async fn rule_file_errors_never_return_file_content() {
     server.finish().await;
 }
 
-/// Validation reads certificates and compiles rules without the Manager lock:
-/// a rule file that blocks on open must not stall status or session reads.
 #[tokio::test]
-async fn validation_does_not_hold_the_manager_lock_while_reading_rules() {
+async fn special_rule_file_is_rejected_promptly_without_publishing() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("state");
-    let server = Arc::new(Management::start(&directory).await);
+    let server = Management::start(&directory).await;
+    let token = server.setup(&directory, &configuration()).await;
+    let before = server.config(&token).await;
     let fifo = temporary.path().join("rules.fifo");
     assert!(
         std::process::Command::new("mkfifo")
@@ -2242,113 +2242,20 @@ async fn validation_does_not_hold_the_manager_lock_while_reading_rules() {
             .success()
     );
     let toml = format!("filter_file = {}\n{}", json!(fifo), configuration());
-    let setup = std::fs::read_to_string(directory.join("setup-token")).unwrap();
-    let preview = String::from_utf8(server.wire(
-        "POST",
-        "/api/setup/preview",
-        None,
-        Some(json!({"toml":toml})),
-    ))
-    .unwrap()
-    .replacen(
-        "\r\n\r\n",
-        &format!("\r\nX-PariNS-Setup: {setup}\r\n\r\n"),
-        1,
-    );
-    // Opening the FIFO blocks the rule reader until a writer opens it.
-    let blocked = |wire: Vec<u8>, probe: &'static str, token: Option<String>| {
-        let server = server.clone();
-        let fifo = fifo.clone();
-        async move {
-            let pending = {
-                let server = server.clone();
-                tokio::spawn(async move { server.raw(&wire).await })
-            };
-            sleep(Duration::from_millis(300)).await;
-            let probed = timeout(
-                Duration::from_secs(2),
-                server.request("GET", probe, token.as_deref(), None),
-            )
-            .await
-            .map(|response| response.status);
-            tokio::task::spawn_blocking(move || {
-                std::fs::OpenOptions::new().write(true).open(fifo).unwrap()
-            })
-            .await
-            .unwrap();
-            assert_eq!(pending.await.unwrap().status, 422);
-            assert_eq!(probed.ok(), Some(200), "{probe} waited for validation");
-        }
-    };
-    blocked(preview.into_bytes(), "/api/session", None).await;
-    let token = server.setup(&directory, &configuration()).await;
-    let validate = server.wire(
-        "POST",
-        "/api/config/validate",
-        Some(&token),
-        Some(json!({"toml":toml})),
-    );
-    blocked(validate, "/api/status", Some(token)).await;
-}
-
-#[tokio::test]
-async fn apply_preparation_keeps_session_and_configuration_reads_available() {
-    let temporary = tempfile::tempdir().unwrap();
-    let directory = temporary.path().join("state");
-    let server = Arc::new(Management::start(&directory).await);
-    let token = server.setup(&directory, &configuration()).await;
-    let before = server.config(&token).await;
-    let fifo = temporary.path().join("apply-rules.fifo");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let toml = format!("filter_file = {}\n{}", json!(fifo), configuration());
-    let pending = {
-        let server = server.clone();
-        let token = token.clone();
-        tokio::spawn(async move {
-            server
-                .request(
-                    "PUT",
-                    "/api/config",
-                    Some(&token),
-                    Some(json!({"toml":toml,"revision":1})),
-                )
-                .await
-        })
-    };
-    // The FIFO holds the candidate's blocking reader until cleanup below.
-    sleep(Duration::from_millis(300)).await;
-    let reads = timeout(Duration::from_secs(2), async {
-        server
-            .request("GET", "/api/session", Some(&token), None)
-            .await
-            .expect(200);
-        server.config(&token).await
-    })
-    .await;
-    // Always release the reader, including when the old implementation times out.
-    tokio::task::spawn_blocking(move || {
-        std::fs::OpenOptions::new().write(true).open(fifo).unwrap()
-    })
-    .await
-    .unwrap();
-    assert_eq!(pending.await.unwrap().status, 422);
-    let after = server.config(&token).await;
-    assert_eq!(
-        after, before,
-        "failed preparation must not publish or persist"
-    );
-    assert_eq!(
-        reads.ok(),
-        Some(before),
-        "reads waited for candidate preparation"
-    );
-    Arc::try_unwrap(server).ok().unwrap().finish().await;
+    for (method, path, body) in [
+        ("POST", "/api/config/validate", json!({"toml": toml})),
+        ("PUT", "/api/config", json!({"toml": toml, "revision": 1})),
+    ] {
+        timeout(
+            Duration::from_secs(2),
+            server.request(method, path, Some(&token), Some(body)),
+        )
+        .await
+        .expect("special file must not block preparation")
+        .expect(422);
+    }
+    assert_eq!(server.config(&token).await, before);
+    server.finish().await;
 }
 
 #[tokio::test]

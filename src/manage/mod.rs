@@ -1218,13 +1218,22 @@ async fn handle_inner(
             "Use application/json",
         ));
     }
-    let bytes = to_bytes(body, BODY_LIMIT).await.map_err(|_| {
-        error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "BODY_LIMIT",
-            "Request body is too large or incomplete",
-        )
-    })?;
+    let bytes = timeout(Duration::from_secs(5), to_bytes(body, BODY_LIMIT))
+        .await
+        .map_err(|_| {
+            error(
+                StatusCode::REQUEST_TIMEOUT,
+                "BODY_TIMEOUT",
+                "Request body timed out",
+            )
+        })?
+        .map_err(|_| {
+            error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "BODY_LIMIT",
+                "Request body is too large or incomplete",
+            )
+        })?;
     let mut cookie = None;
     let mut response = axum::Json(
         api(
@@ -1340,6 +1349,10 @@ pub async fn serve(
         }
     }
     let permits = Arc::new(Semaphore::new(32));
+    let sources = Arc::new(crate::limits::Limiter::new(&crate::limits::Settings {
+        enabled: true,
+        ..Default::default()
+    }));
     let mut tasks = JoinSet::new();
     let mut reload_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut reload_pending = false;
@@ -1363,10 +1376,11 @@ pub async fn serve(
                     Err(error) => break Err(error.into()),
                 };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
+                let Ok(source) = sources.try_connection(peer.ip()) else { continue; };
                 let snapshot = active.lock().unwrap().snapshot.clone();
                 let service = TowerToHyperService::new(router.clone().layer(Extension(peer)).layer(Extension(snapshot.clone())));
                 tasks.spawn(async move {
-                    let _permit = permit;
+                    let _permits = (permit, source);
                     let mut builder = hyper::server::conn::http1::Builder::new();
                     builder.max_headers(32).timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(5));
                     if let Some(tls) = &snapshot.tls {

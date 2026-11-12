@@ -173,6 +173,7 @@ impl Recursion {
             qname_minimization: QNameMinimization::Relaxed,
             ..RecursorOptions::default()
         };
+        options.deny_server.push("224.0.0.0/4".parse()?);
         let mut roots: Vec<IpAddr> = ROOTS_V4.iter().copied().map(IpAddr::V4).collect();
         if settings.ipv6 {
             roots.extend(ROOTS_V6.iter().copied().map(IpAddr::V6));

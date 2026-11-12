@@ -16,7 +16,8 @@ sudo systemctl restart parins-managed.service
 (including a public IP mapped by NAT), `localhost`, and `[web].public_host` when it is
 set. Other host names, other ports and cross-origin requests are rejected.
 Forwarding headers are ignored, so PariNS is not designed to sit behind a reverse
-proxy.
+proxy. Connections are limited per socket source (IPv6 by /64), and request
+bodies have a separate read deadline.
 
 **Sessions.** A sign-in lasts eight hours in an HttpOnly, SameSite=Strict cookie:
 `parins_session_http` over HTTP, or a Secure `__Host-parins_session` over HTTPS. It
@@ -141,7 +142,7 @@ the installer**; run the [install command](deployment.md#install) again. Automat
 rollback restores the program, not data: it never restores an old database or
 removes new history.
 
-The Unreleased storage-readiness fix requires helper protocol 5. Upgrade older
+The Unreleased installer preflight requires helper protocol 6. Upgrade older
 helpers with the complete installer; it replaces the program, helper and service
 files. A program-only online update cannot upgrade the helper. During installer
 rollback the packaged helper waits for storage without completing the installation;
@@ -304,6 +305,9 @@ paging, clearing, and timed refresh (1, 3, 5 or 10 seconds) over an authenticate
 WebSocket (`/api/query-log/live`). Records appear after they are written, up to
 `storage.flush_interval_ms` late. Each session may hold 2 live connections and the
 service 16; idle ones close after 30 seconds. Treat the log as private browsing data.
+
+Rejected UDP queries are sampled in the log. The UDP drop metric counts all
+drops.
 
 The log keeps records until `max_entries`, `max_bytes`, `retention_secs` or the
 database limit is reached, whichever comes first; the page shows the actual oldest

@@ -283,8 +283,7 @@ impl Resolver {
         transport: &str,
         reply: Option<&Message>,
     ) -> Delivery<'_> {
-        let query = protocol::decode(bytes).ok();
-        let mut log = self.query_log.pending(query.as_ref(), peer, transport);
+        let mut log = self.query_log.pending_wire(bytes, peer, transport);
         if let Some(log) = &mut log {
             log.resolve(reply);
         }

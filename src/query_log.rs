@@ -232,15 +232,35 @@ impl QueryLog {
         peer: IpAddr,
         transport: &str,
     ) -> Option<Pending<'_>> {
+        Some(self.pending_at(self.begin()?, query, peer, transport))
+    }
+
+    pub(crate) fn pending_wire(
+        &self,
+        bytes: &[u8],
+        peer: IpAddr,
+        transport: &str,
+    ) -> Option<Pending<'_>> {
         let epoch = self.begin()?;
-        Some(Pending {
+        let query = crate::protocol::decode(bytes).ok();
+        Some(self.pending_at(epoch, query.as_ref(), peer, transport))
+    }
+
+    fn pending_at(
+        &self,
+        epoch: u64,
+        query: Option<&Message>,
+        peer: IpAddr,
+        transport: &str,
+    ) -> Pending<'_> {
+        Pending {
             log: self,
             epoch,
             started: Instant::now(),
             entry: Some(Entry::request(query, peer, transport)),
             trace: Trace::default(),
             resolved: false,
-        })
+        }
     }
     pub(crate) fn record(&self, epoch: u64, entry: Entry) {
         self.storage.record_log(epoch, entry);

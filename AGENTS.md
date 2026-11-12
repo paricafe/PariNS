@@ -155,6 +155,8 @@ until preview/validation.
   coalescing group until it ends. Unsent work, work
   over that budget and work of a replaced or stopped generation cancel with the
   caller. Details: `src/resolver.rs` (`Waiting`).
+- Recursion rejects IPv4 multicast authority addresses in addition to Hickory’s
+  default destination filters. UDP rejection history is sampled before decoding.
 - Recursion admits every authoritative query attempt through one global rate bucket
   and concurrency limit before the server's attempt timeout starts, so queueing never
   counts against or penalizes a server; a token is taken only when it is used, and
@@ -210,7 +212,8 @@ until preview/validation.
   saves and rollback carry the saved revision as an
   optimistic-concurrency check; the console keeps it internal, never shows it, and on
   a conflict reloads while keeping the draft (non-overlapping edits merge, otherwise
-  the administrator chooses). Other operations (subscription work, certificate
+  the administrator chooses). Management admission also caps connections per socket
+  source and bounds request body reads separately. Other operations (subscription work, certificate
   reload and import, cache invalidation, storage clears, software updates) act on
   the server's current saved state and take no client revision; epochs still guard
   data the administrator saw. Attempt budgets use the socket peer, never forwarding
@@ -311,7 +314,8 @@ until preview/validation.
   candidate and rollback launches, with a separate recovery budget.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners; it also validates the saved rollback copy. Candidate preflight runs as the app user; root never
-  executes the candidate. The preflight compares only digests of version-independent
+  executes the candidate. The installer helper drops credentials and capabilities
+  without executing any program from the target mount namespace as root. The preflight compares only digests of version-independent
   inputs (saved revision and TOML, rule files, selected subscription content and
   catalog revision, certificates, upstream CA), never encodings a version derives,
   and logs which categories differ.

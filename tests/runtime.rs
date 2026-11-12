@@ -642,12 +642,12 @@ async fn binary_sighup_reloads_rule_file_and_sigterm_exits_cleanly() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn binary_blocked_reload_does_not_hide_sigterm_or_publish_clean_cache() {
+async fn binary_rejects_special_rule_file_on_reload_and_shuts_down_cleanly() {
     sighup_process_case(true).await;
 }
 
 #[cfg(unix)]
-async fn sighup_process_case(block_reload: bool) {
+async fn sighup_process_case(reject_reload: bool) {
     // Always reap the owned child, including when an assertion or deadline fails.
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
@@ -732,10 +732,7 @@ async fn sighup_process_case(block_reload: bool) {
     })
     .await
     .unwrap();
-    if block_reload {
-        // No writer opens this owned FIFO: Policy::load blocks in File::open,
-        // before the regular-file check. The elapsed assertion below proves
-        // shutdown actually encountered the outstanding reload.
+    if reject_reload {
         std::fs::remove_file(&rules).unwrap();
         assert!(
             std::process::Command::new("mkfifo")
@@ -753,7 +750,6 @@ async fn sighup_process_case(block_reload: bool) {
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let stopping = std::time::Instant::now();
     assert!(
         std::process::Command::new("kill")
             .args(["-TERM", &child.0.id().to_string()])
@@ -772,15 +768,11 @@ async fn sighup_process_case(block_reload: bool) {
     .await
     .unwrap();
     assert!(status.success());
-    if block_reload {
-        assert!(stopping.elapsed() >= Duration::from_secs(5));
-    }
-    assert_eq!(
+    assert!(
         directory
             .path()
             .join("data/dns-cache-clean.snapshot")
-            .exists(),
-        !block_reload
+            .exists()
     );
     timeout(WAIT, mock).await.unwrap().unwrap();
     TcpListener::bind(address).await.unwrap();

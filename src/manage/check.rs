@@ -1,10 +1,11 @@
 //! Candidate preflight is read-only: no Store::open, runtime, database, lock,
 //! cache consumption, listener, or background task is constructed here.
 use super::{store, transport::Snapshot};
+use crate::private_files::read_regular;
 use crate::{config::Config, tls::CertificateRole};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
-use std::{fs::File, io::Read, net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path};
 
 pub use crate::update::ipc::{CheckInputs, CheckReport};
 
@@ -44,7 +45,7 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
         format!("{:x}", digest.finalize())
     };
     let rule_files = match &config.filter_file {
-        Some(path) => bounded(path, 8 * 1024 * 1024, "filter file")?,
+        Some(path) => read_regular(path, 8 * 1024 * 1024, "filter file")?,
         None => Vec::new(),
     };
     let (sources, content_revision) = crate::filter_subscriptions::service::selected_content(
@@ -75,7 +76,7 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     // External regular symlinks are allowed as with the existing TLS loader,
     // but not devices or unbounded IO.
     let upstream_ca = match &config.upstreams.ca_file {
-        Some(path) => bounded(path, 1024 * 1024, "upstream CA")?,
+        Some(path) => read_regular(path, 1024 * 1024, "upstream CA")?,
         None => Vec::new(),
     };
     Ok(CheckReport {
@@ -88,15 +89,6 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
             upstream_ca: digest(&[&upstream_ca]),
         },
     })
-}
-
-fn bounded(path: &Path, limit: u64, what: &str) -> Result<Vec<u8>> {
-    let file = File::open(path).with_context(|| format!("open {what}"))?;
-    ensure!(file.metadata()?.is_file(), "{what} must be a regular file");
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= limit, "{what} exceeds {limit} bytes");
-    Ok(bytes)
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@ ipnet = "2"
 lru = "0.18.4"
 rand = "0.10"
 rusqlite = { version = "0.41.1", default-features = false, features = ["libsqlite3-sys", "bundled", "hooks", "fallible_uint", "limits", "cache"] }
-rustix = { version = "1", features = ["fs", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 sha2 = "0.10"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
@@ -51,6 +51,10 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["net", "uio"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["sched", "user"] }
+rustix = { version = "1.1.6", features = ["thread"] }
 
 [dev-dependencies]
 tempfile = "3"

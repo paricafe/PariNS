@@ -858,6 +858,7 @@ async fn serve_plain(
     let metrics = resolver.metrics().clone();
     let mut tasks = JoinSet::new();
     let mut buffer = vec![0; protocol::MAX_MESSAGE];
+    let mut next_rejection_log = tokio::time::Instant::now();
     let outcome: Result<()> = loop {
         if *ingress.stop.borrow() {
             break Ok(());
@@ -889,15 +890,18 @@ async fn serve_plain(
                     metrics.inc(Counter::UdpDropped);
                     continue;
                 };
-                let Some(source) = ingress.admit_query(peer.ip()) else {
+                let admitted = ingress.admit_query(peer.ip()).and_then(|source| {
+                    Some((source, ingress.queries.clone().try_acquire_owned().ok()?))
+                });
+                let Some((source, permit)) = admitted else {
                     metrics.inc(Counter::UdpDropped);
-                    resolver.log_rejected(&buffer[..length], peer.ip(), "udp", None);
+                    // Bound parsing work in the receive loop even with history enabled.
+                    let now = tokio::time::Instant::now();
+                    if now >= next_rejection_log {
+                        next_rejection_log = now + Duration::from_millis(10);
+                        resolver.log_rejected(&buffer[..length], peer.ip(), "udp", None);
+                    }
                     continue;
-                };
-                let Ok(permit) = ingress.queries.clone().try_acquire_owned() else {
-                    metrics.inc(Counter::UdpDropped);
-                    resolver.log_rejected(&buffer[..length], peer.ip(), "udp", None);
-                    continue
                 };
                 let bytes = buffer[..length].to_vec();
                 let socket = udp.clone();

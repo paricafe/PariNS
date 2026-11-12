@@ -2,7 +2,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
     io::Read,
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
@@ -271,10 +270,8 @@ impl LocalPolicySource {
             Self::File(path) => {
                 check()?;
                 const MAX: usize = 8 * 1024 * 1024;
-                let mut file = File::open(path).context("open filter file")?;
-                let metadata = file.metadata()?;
-                ensure!(metadata.is_file(), "filter file must be a regular file");
-                let length = usize::try_from(metadata.len())?;
+                let mut file = crate::private_files::open_regular(path, "filter file")?;
+                let length = usize::try_from(file.metadata()?.len())?;
                 ensure!(length <= MAX, "filter file exceeds 8 MiB");
                 // Reserve the bounded input buffer before reading. Keep it
                 // charged alongside parsed rules and the candidate index.

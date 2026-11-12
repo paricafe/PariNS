@@ -7,6 +7,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Open external configuration material without waiting for a FIFO writer.
+pub(crate) fn open_regular(path: &Path, what: &str) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)
+        .with_context(|| format!("open {what}"))?;
+    ensure!(file.metadata()?.is_file(), "{what} must be a regular file");
+    Ok(file)
+}
+
+pub(crate) fn read_regular(path: &Path, limit: u64, what: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = open_regular(path, what)?;
+    ensure!(
+        file.metadata()?.len() <= limit,
+        "{what} exceeds {limit} bytes"
+    );
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "{what} exceeds {limit} bytes");
+    Ok(bytes)
+}
+
 pub(crate) fn create_private(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options

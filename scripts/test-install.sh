@@ -115,11 +115,12 @@ RESTORED_HELPER
     fi
 done
 # The namespace is pinned in the installer across both preflight calls. Inspect
-# the actual parent's FD while the child runs, without nsenter or privilege.
+# the actual parent's FD while the child runs, without entering it or requiring privilege.
 sed -n '/^        low_preflight() /,/^        [})]$/p' "$repo/scripts/install.sh" > "$fixture/preflight-function.sh"
 cat > "$fixture/tools/env" <<'MOCK_ENV'
 #!/bin/sh
 set -eu
+case "$*" in *" /fixture-helper install-preflight "*) ;; *) exit 73 ;; esac
 namespace=
 for argument do case "$argument" in --mount=*) namespace=${argument#--mount=} ;; esac; done
 [ -n "$namespace" ]
@@ -144,7 +145,7 @@ preflight_shell=sh
 if command -v dash >/dev/null 2>&1; then preflight_shell=dash; fi
 "$preflight_shell" -eu -c '
     . "$1/preflight-function.sh"
-    updater_private=$1 groups= uid=1234 gid=1234 preflight=/unused-candidate
+    updater_private=$1 groups= uid=1234 gid=1234 helper=/fixture-helper
     printf namespace > "$1/namespace-pin"
     exec 8<"$1/namespace-pin" 9>"$1/installer-lock"
     mount_namespace="/proc/$$/fd/8"

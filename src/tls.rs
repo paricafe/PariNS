@@ -173,7 +173,8 @@ fn checked_identity(
 pub(crate) fn client_config(ca_file: Option<&Path>, alpn: &[u8]) -> Result<ClientConfig> {
     let mut roots = RootCertStore::empty();
     if let Some(path) = ca_file {
-        for cert in CertificateDer::pem_file_iter(path).context("open TLS CA file")? {
+        let pem = crate::private_files::read_regular(path, 1024 * 1024, "upstream CA file")?;
+        for cert in CertificateDer::pem_slice_iter(&pem) {
             roots.add(cert?)?;
         }
         ensure!(!roots.is_empty(), "TLS CA file has no certificates");

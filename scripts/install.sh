@@ -274,7 +274,7 @@ done
 [ -d "$updater_private" ] || install -d -m 0700 "$updater_private"
 request_path_stopped=false request_path_enabled=true
 if [ -z "$root" ]; then
-    for command in flock nsenter setpriv timeout prlimit; do command -v "$command" >/dev/null 2>&1 || fail "missing installer dependency: $command"; done
+    for command in flock timeout prlimit; do command -v "$command" >/dev/null 2>&1 || fail "missing installer dependency: $command"; done
     # The helper duplicates this held descriptor during register. Closing it
     # before registration would open an installer/updater race.
     exec 9>"$updater_private/lock"
@@ -413,19 +413,20 @@ if [ -z "$root" ]; then
         low_preflight() (
             # dash applies command redirections in its calling shell before
             # forking. Keep FD 8 pinned in the installer while the child closes
-            # its copies and opens the parent's /proc/PID/fd/8 through nsenter.
-            if [ -n "$groups" ]; then set -- --groups "$groups"; else set -- --clear-groups; fi
+            # its copies and opens the parent's /proc/PID/fd/8 in the trusted helper.
             # Two output files at 32 KiB each bound the combined output to
             # 64 KiB without losing the candidate's exit status in a pipeline.
             env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C timeout --signal=KILL 30 \
-                prlimit --fsize=32768 -- nsenter --mount="$mount_namespace" -- \
-                setpriv --reuid "$uid" --regid "$gid" "$@" --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- \
-                "$preflight" --manage --check --state-dir /var/lib/parins-managed --web-listen 0.0.0.0:3000 \
+                prlimit --fsize=32768 -- "$helper" install-preflight --mount="$mount_namespace" "$uid" "$gid" "$groups" \
                 </dev/null 8<&- 9<&- >"$updater_private/install-preflight.json" 2>"$updater_private/install-preflight-error.txt"
         )
+        same_invocation() {
+            [ "$(systemctl show --property=MainPID --value parins-managed.service 8<&- 9>&-)" = "$original_pid" ] &&
+                [ "$(systemctl show --property=InvocationID --value parins-managed.service 8<&- 9>&-)" = "$original_invocation" ]
+        }
+        same_invocation || fail 'running service changed before preflight'
         low_preflight || fail 'read-only candidate preflight failed; no installation files were replaced'
-        [ "$(systemctl show --property=MainPID --value parins-managed.service 8<&- 9>&-)" = "$original_pid" ] && \
-            [ "$(systemctl show --property=InvocationID --value parins-managed.service 8<&- 9>&-)" = "$original_invocation" ] || fail 'running service changed during preflight'
+        same_invocation || fail 'running service changed during preflight'
         systemctl stop parins-managed.service 8<&- 9>&-
         stopped=true
         [ "$(systemctl show --property=MainPID --value parins-managed.service 8<&- 9>&-)" = 0 ] || fail 'service has not exited'

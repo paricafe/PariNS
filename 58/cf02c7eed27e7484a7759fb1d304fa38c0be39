@@ -1,0 +1,245 @@
+src/manage/mod.rs
+  9a7ad195e09b6ee2 1221-1236,1352-1355,1379,1383
+tests/runtime.rs
+  9a7ad195e09b6ee2 645,650,735,771,775
+src/server.rs
+  9a7ad195e09b6ee2 861,893-896,898-903
+scripts/test-install.sh
+  9a7ad195e09b6ee2 118,123,148
+guide/deployment.md
+  9a7ad195e09b6ee2 17
+Cargo.toml
+  9a7ad195e09b6ee2 36,55-57
+scripts/install.sh
+  9a7ad195e09b6ee2 277,416,420,423-427,429
+guide/configuration.md
+  9a7ad195e09b6ee2 36
+src/recursion.rs
+  9a7ad195e09b6ee2 176
+guide/operations.md
+  9a7ad195e09b6ee2 19-20,145,309-310
+tests/manage.rs
+  9a7ad195e09b6ee2 2230,2233,2236,2245-2258
+src/update/contract.rs
+  9a7ad195e09b6ee2 12
+AGENTS.md
+  9a7ad195e09b6ee2 158-159,215-216,317-318
+src/tls.rs
+  9a7ad195e09b6ee2 176-177
+src/bin/parins-updater.rs
+  9a7ad195e09b6ee2 1-12,14,20-73,75-101
+src/private_files.rs
+  9a7ad195e09b6ee2 10-33
+src/resolver.rs
+  9a7ad195e09b6ee2 286
+src/query_log.rs
+  9a7ad195e09b6ee2 235-242,245-256,263
+src/manage/check.rs
+  9a7ad195e09b6ee2 4,8,48,79
+CHANGELOG.md
+  9a7ad195e09b6ee2 7,13-18
+src/policy.rs
+  9a7ad195e09b6ee2 273-274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.10",
+  "base_commit_sha": "58cf02c7eed27e7484a7759fb1d304fa38c0be39",
+  "prompts": {
+    "9a7ad195e09b6ee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cde8-5745-7a00-95f4-133782f6e2ea",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede",
+      "messages": [],
+      "total_additions": 337,
+      "total_deletions": 215,
+      "accepted_lines": 337,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "tests/manage.rs": {
+          "additions": 17,
+          "deletions": 110,
+          "accepted_lines": 17
+        },
+        "src/policy.rs": {
+          "additions": 2,
+          "deletions": 5,
+          "accepted_lines": 2
+        },
+        "docs/reviews/2026-11-06-production-followup/report.md": {
+          "additions": 29,
+          "deletions": 14,
+          "accepted_lines": 29
+        },
+        "src/resolver.rs": {
+          "additions": 1,
+          "deletions": 2,
+          "accepted_lines": 1
+        },
+        "src/tls.rs": {
+          "additions": 2,
+          "deletions": 1,
+          "accepted_lines": 2
+        },
+        "web/.impeccable/live/server.json": {
+          "deletions": 1
+        },
+        "src/update/contract.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "scripts/install.sh": {
+          "additions": 9,
+          "deletions": 8,
+          "accepted_lines": 9
+        },
+        "Cargo.toml": {
+          "additions": 5,
+          "deletions": 1,
+          "accepted_lines": 5
+        },
+        "guide/operations.md": {
+          "additions": 6,
+          "deletions": 2,
+          "accepted_lines": 6
+        },
+        "tests/runtime.rs": {
+          "additions": 5,
+          "deletions": 13,
+          "accepted_lines": 5
+        },
+        "src/manage/check.rs": {
+          "additions": 4,
+          "deletions": 12,
+          "accepted_lines": 4
+        },
+        "CHANGELOG.md": {
+          "additions": 8,
+          "deletions": 1,
+          "accepted_lines": 8
+        },
+        "docs/inbox/2026-11-06-production-data-analysis.md": {
+          "additions": 2,
+          "deletions": 2,
+          "accepted_lines": 2
+        },
+        ".deploy-private/release-0.2.2/trace-h3-via-ssh.py": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "guide/deployment.md": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/query_log.rs": {
+          "additions": 22,
+          "deletions": 2,
+          "accepted_lines": 22
+        },
+        "src/manage/mod.rs": {
+          "additions": 22,
+          "deletions": 8,
+          "accepted_lines": 22
+        },
+        "guide/configuration.md": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        ".deploy-private/release-0.2.2/control.py": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/recursion.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        ".deploy-private/notes.md": {
+          "additions": 16,
+          "deletions": 1,
+          "accepted_lines": 16
+        },
+        "src/bin/parins-updater.rs": {
+          "additions": 96,
+          "deletions": 1,
+          "accepted_lines": 96
+        },
+        "src/server.rs": {
+          "additions": 11,
+          "deletions": 7,
+          "accepted_lines": 11
+        },
+        "docs/architecture-improvement-acceptance.md": {
+          "additions": 36,
+          "deletions": 11,
+          "accepted_lines": 36
+        },
+        "AGENTS.md": {
+          "additions": 6,
+          "deletions": 2,
+          "accepted_lines": 6
+        },
+        "scripts/test-install.sh": {
+          "additions": 3,
+          "deletions": 2,
+          "accepted_lines": 3
+        },
+        "docs/inbox/2026-11-06-v0.2.2-deploy.md": {
+          "additions": 5,
+          "deletions": 4,
+          "accepted_lines": 5
+        },
+        "src/private_files.rs": {
+          "additions": 24,
+          "accepted_lines": 24
+        }
+      }
+    },
+    "a6feb89dc01a82e3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cd80-02bc-7741-90ea-e62892495167",
+        "model": "unknown"
+      },
+      "human_author": "Natsuki-Kaede",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "aa37914330e67ab9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c347-a32a-7140-b17a-0a88119d4202",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede",
+      "messages": [],
+      "total_additions": 199,
+      "total_deletions": 14,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "b27ab66ab5950deb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b5a8-f6ec-7a00-8a9d-099c2938030b",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede",
+      "messages": [],
+      "total_additions": 25,
+      "total_deletions": 6,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    }
+  }
+}

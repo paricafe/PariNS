@@ -1,0 +1,1180 @@
+web/src/components/beui/Switch.tsx
+  c28c27940ffc8d45 1-2
+tests/runtime.rs
+  c28c27940ffc8d45 1-2
+web/src/session/context.tsx
+  c28c27940ffc8d45 255
+src/cache/sharing.rs
+  c28c27940ffc8d45 1
+web/src/style.css
+  c28c27940ffc8d45 1
+src/update/ipc.rs
+  c28c27940ffc8d45 1
+guide/operations.md
+  c28c27940ffc8d45 251-254,398
+src/manage/turnstile.rs
+  c28c27940ffc8d45 1
+src/policy/canonical.rs
+  c28c27940ffc8d45 1
+web/src/components/beui/Button.tsx
+  c28c27940ffc8d45 1-2
+src/cache_persistence.rs
+  c28c27940ffc8d45 1
+src/cache/tests.rs
+  c28c27940ffc8d45 200
+src/config.rs
+  c28c27940ffc8d45 1
+src/protocol.rs
+  c28c27940ffc8d45 1-2
+.github/workflows/public-dns-acceptance.yml
+  c28c27940ffc8d45 31,53
+examples/bench_dot.rs
+  c28c27940ffc8d45 1
+src/cache.rs
+  c28c27940ffc8d45 1
+src/policy/radix_disk.rs
+  c28c27940ffc8d45 1
+tests/cancelled_fill.rs
+  c28c27940ffc8d45 1-2
+src/policy/radix.rs
+  c28c27940ffc8d45 297
+src/ecs.rs
+  c28c27940ffc8d45 21,24
+src/upstream.rs
+  c28c27940ffc8d45 1
+src/update/executor/readiness.rs
+  c28c27940ffc8d45 1
+web/src/pages/observability/__tests__/live.test.tsx
+  c28c27940ffc8d45 138,155
+src/manage/updates/operation.rs
+  c28c27940ffc8d45 1
+src/filter_subscriptions/settings.rs
+  c28c27940ffc8d45 1
+src/query_log.rs
+  c28c27940ffc8d45 1
+tests/cache_refresh.rs
+  c28c27940ffc8d45 59,293
+scripts/test-filter-subscriptions-systemd.mjs
+  c28c27940ffc8d45 1
+web/src/i18n/__tests__/updateCodes.test.ts
+  c28c27940ffc8d45 15-18
+web/src/appearance/preferences.ts
+  c28c27940ffc8d45 1
+src/storage/mod.rs
+  c28c27940ffc8d45 1
+examples/bench.rs
+  c28c27940ffc8d45 1
+.github/workflows/update-check.yml
+  c28c27940ffc8d45 14,18,51
+.github/workflows/update-recovery.yml
+  c28c27940ffc8d45 27,30,49
+src/manage/dns_retry.rs
+  c28c27940ffc8d45 1
+src/manage/store.rs
+  c28c27940ffc8d45 1
+src/policy/response.rs
+  c28c27940ffc8d45 1
+src/update/executor/mod.rs
+  c28c27940ffc8d45 1
+src/upstreams.rs
+  c28c27940ffc8d45 1
+web/src/appearance/imageStore.ts
+  c28c27940ffc8d45 1,45
+scripts/lib/wire-bench.mjs
+  c28c27940ffc8d45 1
+src/manage/transport.rs
+  c28c27940ffc8d45 1
+AGENTS.md
+  c28c27940ffc8d45 282-284
+scripts/test-update-reboot.py
+  c28c27940ffc8d45 101
+src/update/contract.rs
+  c28c27940ffc8d45 1
+tests/ecs.rs
+  c28c27940ffc8d45 131-135
+web/src/components/beui/Tabs.tsx
+  c28c27940ffc8d45 1-2
+guide/development.md
+  c28c27940ffc8d45 25-35,211-214,229-230,254-265,281-285
+src/manage/settings.rs
+  c28c27940ffc8d45 1
+src/upstreams/transport.rs
+  c28c27940ffc8d45 1
+guide/architecture.md
+  c28c27940ffc8d45 42-72,92-100,170-182,190-203,216-224
+src/manage/runtime.rs
+  c28c27940ffc8d45 1
+src/cache/persistence.rs
+  c28c27940ffc8d45 1
+src/manage/mod.rs
+  c28c27940ffc8d45 1
+.github/workflows/ci.yml
+  c28c27940ffc8d45 21,24,96
+web/src/pages/config/SettingsPage.tsx
+  c28c27940ffc8d45 399
+src/https_reader.rs
+  c28c27940ffc8d45 1-2
+src/manage/certificates.rs
+  c28c27940ffc8d45 1
+src/manage/live.rs
+  c28c27940ffc8d45 1
+src/metrics.rs
+  c28c27940ffc8d45 1
+.github/workflows/filter-acceptance.yml
+  c28c27940ffc8d45 20,23,55
+src/manage/check.rs
+  c28c27940ffc8d45 1
+scripts/test-filter-lifecycle.mjs
+  c28c27940ffc8d45 1,160,525
+src/filter_subscriptions/service/tests.rs
+  c28c27940ffc8d45 129
+scripts/test-update-check.mjs
+  c28c27940ffc8d45 1
+src/manage/updates.rs
+  c28c27940ffc8d45 1
+src/quic.rs
+  c28c27940ffc8d45 1,58
+src/tls/pool.rs
+  c28c27940ffc8d45 1
+web/scripts/prepare-dist.mjs
+  c28c27940ffc8d45 1
+web/src/appearance/image.ts
+  c28c27940ffc8d45 1
+.github/workflows/filter-lifecycle.yml
+  c28c27940ffc8d45 18,21,46
+scripts/test-update-reboot-guest.py
+  c28c27940ffc8d45 54
+web/src/features/subscriptions/subscriptions.test.tsx
+  c28c27940ffc8d45 111,113
+src/manage/auth_budget.rs
+  c28c27940ffc8d45 1-2
+src/policy/canonical_tests.rs
+  c28c27940ffc8d45 45
+src/update/executor/fs.rs
+  c28c27940ffc8d45 1
+src/filter_subscriptions/download.rs
+  c28c27940ffc8d45 1
+web/public/theme-init.js
+  c28c27940ffc8d45 1,5
+tests/common/mod.rs
+  c28c27940ffc8d45 1
+src/private_files.rs
+  c28c27940ffc8d45 1
+web/src/session/context.test.tsx
+  c28c27940ffc8d45 187,205
+tests/cache_encrypted.rs
+  c28c27940ffc8d45 1-2
+src/filter_subscriptions/service.rs
+  c28c27940ffc8d45 1
+src/recursion.rs
+  c28c27940ffc8d45 1
+src/resolver/refresh.rs
+  c28c27940ffc8d45 1,190
+tests/listener_shutdown.rs
+  c28c27940ffc8d45 1-2,5
+web/src/components/beui/Drawer.tsx
+  c28c27940ffc8d45 1-2
+src/filter_subscriptions/service/operations.rs
+  c28c27940ffc8d45 553-556
+.github/workflows/release.yml
+  c28c27940ffc8d45 32,36,96,110,113,116,131,144,147,150,155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.10",
+  "base_commit_sha": "2ac2d108d3a65c8dda52e2fcd7d45803b0ad96bd",
+  "prompts": {
+    "9a7ad195e09b6ee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cde8-5745-7a00-95f4-133782f6e2ea",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 64,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        ".deploy-private/notes.md": {
+          "accepted_lines": 15
+        },
+        "docs/inbox/2026-11-06-v0.2.2-deploy.md": {
+          "accepted_lines": 2
+        },
+        "docs/reviews/2026-11-06-production-followup/report.md": {
+          "accepted_lines": 22
+        },
+        "docs/architecture-improvement-acceptance.md": {
+          "accepted_lines": 25
+        }
+      }
+    },
+    "c28c27940ffc8d45": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d3a6-e5d1-78a3-a8fc-29e13c8773ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede",
+      "messages": [],
+      "total_additions": 286,
+      "total_deletions": 3365,
+      "accepted_lines": 265,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "web/src/pages/observability/DetailPopover.tsx": {
+          "deletions": 6
+        },
+        "src/update/executor/readiness.rs": {
+          "additions": 1,
+          "deletions": 3,
+          "accepted_lines": 1
+        },
+        "tests/admin.rs": {
+          "deletions": 4
+        },
+        "web/src/features/updates/UpdatePanel.tsx": {
+          "deletions": 3
+        },
+        "src/manage/runtime.rs": {
+          "additions": 1,
+          "deletions": 75,
+          "accepted_lines": 1
+        },
+        "src/resolver/refresh.rs": {
+          "additions": 2,
+          "deletions": 18,
+          "accepted_lines": 2
+        },
+        "web/src/features/subscriptions/download.ts": {
+          "deletions": 10
+        },
+        "tests/upstreams.rs": {
+          "deletions": 49
+        },
+        "examples/bench_cache.rs": {
+          "deletions": 4
+        },
+        "web/src/components/Odometer.tsx": {
+          "deletions": 6
+        },
+        "web/src/style.css": {
+          "additions": 1,
+          "deletions": 65,
+          "accepted_lines": 1
+        },
+        "src/manage/check.rs": {
+          "additions": 3,
+          "deletions": 14,
+          "accepted_lines": 1
+        },
+        "web/src/components/InfoTip.tsx": {
+          "deletions": 2
+        },
+        "src/cache/tests/servfail.rs": {
+          "deletions": 6
+        },
+        "src/runtime_health.rs": {
+          "deletions": 2
+        },
+        "scripts/test-update-reboot.py": {
+          "additions": 1,
+          "deletions": 18,
+          "accepted_lines": 1
+        },
+        "web/src/features/account/AccountControls.tsx": {
+          "deletions": 3
+        },
+        "examples/bench.rs": {
+          "additions": 1,
+          "deletions": 6,
+          "accepted_lines": 1
+        },
+        "scripts/test-udp.sh": {
+          "deletions": 3
+        },
+        "src/main.rs": {
+          "deletions": 14
+        },
+        "deploy/parins.service": {
+          "additions": 5,
+          "deletions": 5,
+          "accepted_lines": 5
+        },
+        "web/src/pages/observability/StorageStatusPanel.tsx": {
+          "deletions": 5
+        },
+        "src/limits.rs": {
+          "deletions": 12
+        },
+        "web/src/pages/config/DohRuntime.tsx": {
+          "deletions": 3
+        },
+        "web/src/features/account/TurnstilePanel.tsx": {
+          "deletions": 4
+        },
+        "web/src/config/context.tsx": {
+          "deletions": 29
+        },
+        "tests/cache_integration.rs": {
+          "deletions": 15
+        },
+        "tests/cache_refresh.rs": {
+          "additions": 2,
+          "deletions": 5,
+          "accepted_lines": 2
+        },
+        "web/src/appearance/appearance.test.tsx": {
+          "deletions": 7
+        },
+        "web/src/i18n/index.ts": {
+          "deletions": 3
+        },
+        "web/src/pages/observability/TrendChart.tsx": {
+          "deletions": 8
+        },
+        "scripts/install.sh": {
+          "deletions": 44
+        },
+        "src/update/reader.rs": {
+          "deletions": 5
+        },
+        "src/runtime_services.rs": {
+          "deletions": 8
+        },
+        "src/protocol.rs": {
+          "additions": 2,
+          "deletions": 31,
+          "accepted_lines": 2
+        },
+        "src/update/ipc.rs": {
+          "additions": 1,
+          "deletions": 15,
+          "accepted_lines": 1
+        },
+        ".github/workflows/update-check.yml": {
+          "additions": 3,
+          "deletions": 3,
+          "accepted_lines": 3
+        },
+        "src/https_reader.rs": {
+          "additions": 2,
+          "deletions": 11,
+          "accepted_lines": 2
+        },
+        "web/src/pages/observability/OverviewPage.tsx": {
+          "deletions": 10
+        },
+        "web/src/pages/config/StorageTools.test.tsx": {
+          "deletions": 1
+        },
+        "src/manage/account.rs": {
+          "deletions": 20
+        },
+        "src/update/executor/mod.rs": {
+          "additions": 1,
+          "deletions": 98,
+          "accepted_lines": 1
+        },
+        "tests/runtime.rs": {
+          "additions": 2,
+          "deletions": 9,
+          "accepted_lines": 2
+        },
+        "web/src/components/beui/motion.ts": {
+          "deletions": 3
+        },
+        "src/filter_subscriptions/mod.rs": {
+          "deletions": 30
+        },
+        "web/src/components/AppearanceSheet.tsx": {
+          "deletions": 1
+        },
+        ".github/workflows/public-dns-acceptance.yml": {
+          "additions": 2,
+          "deletions": 3,
+          "accepted_lines": 2
+        },
+        "src/config.rs": {
+          "additions": 1,
+          "deletions": 20,
+          "accepted_lines": 1
+        },
+        "src/filter_subscriptions/settings.rs": {
+          "additions": 1,
+          "deletions": 4,
+          "accepted_lines": 1
+        },
+        "web/src/components/beui/Switch.tsx": {
+          "additions": 2,
+          "deletions": 2,
+          "accepted_lines": 2
+        },
+        "web/src/i18n/__tests__/updateCodes.test.ts": {
+          "additions": 4,
+          "deletions": 10,
+          "accepted_lines": 4
+        },
+        "src/cache/tests/ecs_sharing.rs": {
+          "deletions": 41
+        },
+        "src/cache_persistence.rs": {
+          "additions": 1,
+          "deletions": 25,
+          "accepted_lines": 1
+        },
+        "web/src/pages/observability/LogsPage.tsx": {
+          "deletions": 20
+        },
+        "src/resolver.rs": {
+          "deletions": 55
+        },
+        "scripts/test-install.sh": {
+          "deletions": 23
+        },
+        "src/filter_subscriptions/writer.rs": {
+          "deletions": 4
+        },
+        "web/src/App.tsx": {
+          "deletions": 9
+        },
+        "tests/quic.rs": {
+          "deletions": 22
+        },
+        "web/src/model/values.ts": {
+          "deletions": 2
+        },
+        ".github/workflows/update-recovery.yml": {
+          "additions": 3,
+          "deletions": 4,
+          "accepted_lines": 3
+        },
+        "src/flight/bench.rs": {
+          "deletions": 2
+        },
+        "tests/servfail_cache.rs": {
+          "deletions": 5
+        },
+        "web/src/pages/config/StorageTools.tsx": {
+          "deletions": 2
+        },
+        "web/src/components/AppearanceSheet.test.tsx": {
+          "deletions": 1
+        },
+        "web/src/pages/config/CertificateTools.tsx": {
+          "deletions": 4
+        },
+        "src/manage/assets.rs": {
+          "deletions": 21
+        },
+        "tests/coalescing.rs": {
+          "deletions": 3
+        },
+        "src/filter_subscriptions/service/material.rs": {
+          "deletions": 17
+        },
+        "web/src/pages/config/CacheRules.test.tsx": {
+          "deletions": 2
+        },
+        "scripts/release-notes.mjs": {
+          "deletions": 1
+        },
+        "web/src/components/Disclosure.tsx": {
+          "deletions": 1
+        },
+        "src/storage/observation.rs": {
+          "deletions": 1
+        },
+        "src/manage/observation.rs": {
+          "deletions": 8
+        },
+        "tests/server.rs": {
+          "deletions": 12
+        },
+        "web/src/pages/config/ResolutionSettings.test.tsx": {
+          "deletions": 1
+        },
+        "web/src/config/context.test.tsx": {
+          "deletions": 1
+        },
+        "web/src/components/UnitInput.tsx": {
+          "deletions": 7
+        },
+        "src/query_log.rs": {
+          "additions": 1,
+          "deletions": 12,
+          "accepted_lines": 1
+        },
+        "scripts/lib/wire-bench.mjs": {
+          "additions": 1,
+          "deletions": 3,
+          "accepted_lines": 1
+        },
+        "web/src/pages/observability/metrics.ts": {
+          "deletions": 13
+        },
+        "web/src/session/context.test.tsx": {
+          "additions": 2,
+          "deletions": 2,
+          "accepted_lines": 2
+        },
+        "web/src/i18n/shell.ts": {
+          "deletions": 1
+        },
+        "src/metrics.rs": {
+          "additions": 1,
+          "deletions": 11,
+          "accepted_lines": 1
+        },
+        "src/upstreams.rs": {
+          "additions": 1,
+          "deletions": 15,
+          "accepted_lines": 1
+        },
+        "web/src/components/beui/components.test.tsx": {
+          "deletions": 2
+        },
+        "src/transport/tcp.rs": {
+          "deletions": 1
+        },
+        "src/filter_subscriptions/service.rs": {
+          "additions": 1,
+          "deletions": 30,
+          "accepted_lines": 1
+        },
+        "web/src/appearance/preferences.ts": {
+          "additions": 1,
+          "deletions": 10,
+          "accepted_lines": 1
+        },
+        "src/quic.rs": {
+          "additions": 2,
+          "deletions": 60,
+          "accepted_lines": 2
+        },
+        "src/filter_subscriptions/store.rs": {
+          "deletions": 45
+        },
+        "web/src/pages/observability/TransportDiagnostics.tsx": {
+          "deletions": 1
+        },
+        "web/src/components/ConfirmProvider.tsx": {
+          "deletions": 2
+        },
+        "web/src/session/context.tsx": {
+          "additions": 1,
+          "deletions": 12,
+          "accepted_lines": 1
+        },
+        "scripts/test-bootstrap.sh": {
+          "deletions": 13
+        },
+        "src/manage/updates/operation.rs": {
+          "additions": 1,
+          "deletions": 49,
+          "accepted_lines": 1
+        },
+        "src/manage/updates.rs": {
+          "additions": 1,
+          "deletions": 31,
+          "accepted_lines": 1
+        },
+        "web/src/pages/observability/__tests__/trend.test.tsx": {
+          "deletions": 2
+        },
+        "src/manage/store.rs": {
+          "additions": 1,
+          "deletions": 19,
+          "accepted_lines": 1
+        },
+        "src/ecs.rs": {
+          "additions": 2,
+          "deletions": 22,
+          "accepted_lines": 2
+        },
+        "web/src/features/subscriptions/SourceCard.tsx": {
+          "deletions": 2
+        },
+        "scripts/test-public-dns-tests.py": {
+          "deletions": 1
+        },
+        "web/src/pages/observability/__tests__/observability.test.tsx": {
+          "deletions": 7
+        },
+        "src/manage/updates/state.rs": {
+          "deletions": 3
+        },
+        "src/policy/response.rs": {
+          "additions": 3,
+          "deletions": 24,
+          "accepted_lines": 1
+        },
+        "Cargo.toml": {
+          "deletions": 2
+        },
+        "src/limits/tests.rs": {
+          "deletions": 2
+        },
+        "src/flight.rs": {
+          "deletions": 18
+        },
+        "src/transport/udp/packet_info.rs": {
+          "deletions": 6
+        },
+        "tests/cache_persistence.rs": {
+          "deletions": 11
+        },
+        "tests/tls_pool.rs": {
+          "deletions": 13
+        },
+        "AGENTS.md": {
+          "additions": 3,
+          "deletions": 2,
+          "accepted_lines": 3
+        },
+        "scripts/test-update-check.mjs": {
+          "additions": 1,
+          "deletions": 5,
+          "accepted_lines": 1
+        },
+        "src/doh.rs": {
+          "deletions": 28
+        },
+        "src/policy/tests.rs": {
+          "deletions": 18
+        },
+        "tests/doh.rs": {
+          "deletions": 16
+        },
+        "tests/manage/certificate_reload.rs": {
+          "deletions": 12
+        },
+        "src/storage/tests.rs": {
+          "deletions": 22
+        },
+        "scripts/bootstrap.sh": {
+          "deletions": 8
+        },
+        "web/src/features/account/account.test.tsx": {
+          "deletions": 2
+        },
+        "web/src/model/units.ts": {
+          "deletions": 2
+        },
+        "web/src/components/UnitInput.test.tsx": {
+          "deletions": 4
+        },
+        "web/src/pages/observability/logs.ts": {
+          "deletions": 2
+        },
+        "src/quic/diagnostics.rs": {
+          "deletions": 3
+        },
+        "web/src/appearance/imageStore.ts": {
+          "additions": 2,
+          "deletions": 3,
+          "accepted_lines": 2
+        },
+        "scripts/test-certificate-renewal-systemd.py": {
+          "deletions": 12
+        },
+        "web/src/features/subscriptions/subscriptions.test.tsx": {
+          "additions": 2,
+          "deletions": 3,
+          "accepted_lines": 2
+        },
+        "src/upstreams/transport.rs": {
+          "additions": 1,
+          "deletions": 72,
+          "accepted_lines": 1
+        },
+        "src/policy.rs": {
+          "deletions": 40
+        },
+        "guide/architecture.md": {
+          "additions": 83,
+          "deletions": 6,
+          "accepted_lines": 77
+        },
+        "src/transport/udp.rs": {
+          "deletions": 1
+        },
+        "src/manage/dns_retry.rs": {
+          "additions": 4,
+          "deletions": 22,
+          "accepted_lines": 1
+        },
+        "src/storage/mod.rs": {
+          "additions": 1,
+          "deletions": 19,
+          "accepted_lines": 1
+        },
+        "tests/support/runtime.rs": {
+          "deletions": 1
+        },
+        "src/transport/accept.rs": {
+          "deletions": 21
+        },
+        "src/tls/pool.rs": {
+          "additions": 3,
+          "deletions": 9,
+          "accepted_lines": 1
+        },
+        "web/src/components/Popover.tsx": {
+          "deletions": 7
+        },
+        "src/filter_subscriptions/handle.rs": {
+          "deletions": 2
+        },
+        "web/src/model/__tests__/model.test.ts": {
+          "deletions": 2
+        },
+        "web/src/components/beui/Button.tsx": {
+          "additions": 2,
+          "deletions": 1,
+          "accepted_lines": 2
+        },
+        "guide/development.md": {
+          "additions": 35,
+          "deletions": 1,
+          "accepted_lines": 35
+        },
+        "src/filter_subscriptions/service/operations.rs": {
+          "additions": 4,
+          "deletions": 16,
+          "accepted_lines": 4
+        },
+        ".github/workflows/ci.yml": {
+          "additions": 3,
+          "deletions": 5,
+          "accepted_lines": 3
+        },
+        "web/src/model/cacheRule.ts": {
+          "deletions": 2
+        },
+        "src/manage/live.rs": {
+          "additions": 1,
+          "deletions": 48,
+          "accepted_lines": 1
+        },
+        "web/src/pages/config/CertificateTools.test.tsx": {
+          "deletions": 1
+        },
+        "tests/tls.rs": {
+          "deletions": 3
+        },
+        "src/cache/decision.rs": {
+          "deletions": 1
+        },
+        "scripts/test-filter-lifecycle.mjs": {
+          "additions": 3,
+          "deletions": 9,
+          "accepted_lines": 3
+        },
+        "src/policy/radix.rs": {
+          "additions": 1,
+          "deletions": 12,
+          "accepted_lines": 1
+        },
+        "web/src/components/Backdrop.tsx": {
+          "deletions": 6
+        },
+        "src/manage/turnstile_tests.rs": {
+          "deletions": 11
+        },
+        "tests/quic_shutdown.rs": {
+          "deletions": 5
+        },
+        "tests/common/mod.rs": {
+          "additions": 1,
+          "deletions": 8,
+          "accepted_lines": 1
+        },
+        "web/src/components/ThemeButton.tsx": {
+          "deletions": 5
+        },
+        "src/upstreams/diagnostics.rs": {
+          "deletions": 8
+        },
+        "web/src/components/Stepper.tsx": {
+          "deletions": 5
+        },
+        "web/src/config/fieldErrors.tsx": {
+          "deletions": 1
+        },
+        "src/policy/canonical.rs": {
+          "additions": 1,
+          "deletions": 26,
+          "accepted_lines": 1
+        },
+        "tests/filter.rs": {
+          "deletions": 4
+        },
+        "web/src/pages/observability/diagnostics.ts": {
+          "deletions": 2
+        },
+        "web/scripts/prepare-dist.mjs": {
+          "additions": 1,
+          "deletions": 2,
+          "accepted_lines": 1
+        },
+        "web/src/components/Segmented.tsx": {
+          "deletions": 1
+        },
+        "tests/upstream_diagnostics.rs": {
+          "deletions": 2
+        },
+        "web/src/features/account/Turnstile.tsx": {
+          "deletions": 2
+        },
+        "web/src/components/Popover.test.tsx": {
+          "deletions": 3
+        },
+        "scripts/test-systemd.sh": {
+          "deletions": 95
+        },
+        "src/clock.rs": {
+          "deletions": 5
+        },
+        "tests/query_log.rs": {
+          "deletions": 7
+        },
+        "web/src/model/config.ts": {
+          "deletions": 4
+        },
+        "src/private_files.rs": {
+          "additions": 3,
+          "deletions": 10,
+          "accepted_lines": 1
+        },
+        "src/filter_subscriptions/service/tests.rs": {
+          "additions": 1,
+          "deletions": 16,
+          "accepted_lines": 1
+        },
+        "src/server.rs": {
+          "deletions": 80
+        },
+        "web/src/features/updates/updates.test.tsx": {
+          "deletions": 2
+        },
+        "web/public/theme-init.js": {
+          "additions": 2,
+          "deletions": 3,
+          "accepted_lines": 2
+        },
+        "web/src/features/subscriptions/types.ts": {
+          "deletions": 1
+        },
+        "src/quic/lifecycle.rs": {
+          "deletions": 5
+        },
+        "src/recursion.rs": {
+          "additions": 1,
+          "deletions": 71,
+          "accepted_lines": 1
+        },
+        "web/src/model/subscriptions.ts": {
+          "deletions": 4
+        },
+        "src/manage/transport.rs": {
+          "additions": 1,
+          "deletions": 4,
+          "accepted_lines": 1
+        },
+        "web/src/appearance/useAppearance.ts": {
+          "deletions": 9
+        },
+        "web/src/components/useAutoConfirm.ts": {
+          "deletions": 11
+        },
+        "web/src/pages/config/SettingsPage.tsx": {
+          "additions": 1,
+          "deletions": 12,
+          "accepted_lines": 1
+        },
+        "src/storage/database.rs": {
+          "deletions": 51
+        },
+        "src/policy/radix_tests.rs": {
+          "deletions": 4
+        },
+        "src/recursion/outbound.rs": {
+          "deletions": 21
+        },
+        "scripts/test-update-reboot-guest.py": {
+          "additions": 1,
+          "deletions": 17,
+          "accepted_lines": 1
+        },
+        "web/src/AuthPages.tsx": {
+          "deletions": 8
+        },
+        "src/upstream.rs": {
+          "additions": 1,
+          "deletions": 6,
+          "accepted_lines": 1
+        },
+        "web/src/features/account/password.ts": {
+          "deletions": 2
+        },
+        "src/cache.rs": {
+          "additions": 1,
+          "deletions": 100,
+          "accepted_lines": 1
+        },
+        "web/src/session/client.ts": {
+          "deletions": 1
+        },
+        "src/manage/update_checks.rs": {
+          "deletions": 5
+        },
+        "web/src/components/beui/Tabs.tsx": {
+          "additions": 2,
+          "deletions": 1,
+          "accepted_lines": 2
+        },
+        "src/manage/mod.rs": {
+          "additions": 1,
+          "deletions": 62,
+          "accepted_lines": 1
+        },
+        ".github/workflows/release.yml": {
+          "additions": 11,
+          "deletions": 17,
+          "accepted_lines": 11
+        },
+        "web/src/pages/observability/__tests__/diagnostics.test.tsx": {
+          "deletions": 5
+        },
+        "web/src/pages/observability/__tests__/live.test.tsx": {
+          "additions": 2,
+          "deletions": 11,
+          "accepted_lines": 2
+        },
+        "src/cache/persistence/tests.rs": {
+          "deletions": 24
+        },
+        "scripts/package.sh": {
+          "deletions": 3
+        },
+        "src/runtime_lifecycle.rs": {
+          "deletions": 19
+        },
+        "src/tls.rs": {
+          "deletions": 24
+        },
+        "tests/ecs.rs": {
+          "additions": 5,
+          "deletions": 13,
+          "accepted_lines": 5
+        },
+        "src/policy/canonical_tests.rs": {
+          "additions": 1,
+          "deletions": 6,
+          "accepted_lines": 1
+        },
+        "src/filter_subscriptions/store_tests.rs": {
+          "deletions": 4
+        },
+        ".github/workflows/filter-lifecycle.yml": {
+          "additions": 3,
+          "deletions": 4,
+          "accepted_lines": 3
+        },
+        "tests/recursion.rs": {
+          "deletions": 4
+        },
+        "src/manage/certificates.rs": {
+          "additions": 1,
+          "deletions": 12,
+          "accepted_lines": 1
+        },
+        "tests/cancelled_fill.rs": {
+          "additions": 2,
+          "deletions": 7,
+          "accepted_lines": 2
+        },
+        "web/src/i18n/turnstile.ts": {
+          "deletions": 1
+        },
+        "scripts/bench-dns.mjs": {
+          "deletions": 1
+        },
+        "tests/manage/live.rs": {
+          "deletions": 6
+        },
+        "tests/cache_encrypted.rs": {
+          "additions": 2,
+          "deletions": 3,
+          "accepted_lines": 2
+        },
+        "src/manage/auth_budget.rs": {
+          "additions": 2,
+          "deletions": 17,
+          "accepted_lines": 2
+        },
+        "web/src/features/updates/reload.ts": {
+          "deletions": 1
+        },
+        "src/manage/filters.rs": {
+          "deletions": 18
+        },
+        "web/src/pages/observability/observability.css": {
+          "deletions": 5
+        },
+        "src/policy/radix_disk.rs": {
+          "additions": 1,
+          "deletions": 10,
+          "accepted_lines": 1
+        },
+        "src/cache/tests.rs": {
+          "additions": 1,
+          "deletions": 5,
+          "accepted_lines": 1
+        },
+        "scripts/test-public-dns.py": {
+          "deletions": 5
+        },
+        "web/src/components/ExpandRow.tsx": {
+          "deletions": 1
+        },
+        "guide/operations.md": {
+          "additions": 5,
+          "deletions": 1,
+          "accepted_lines": 5
+        },
+        "web/src/pages/config/SecurityRuntime.tsx": {
+          "deletions": 2
+        },
+        "tests/manage.rs": {
+          "deletions": 35
+        },
+        "src/cache/sharing.rs": {
+          "additions": 1,
+          "deletions": 52,
+          "accepted_lines": 1
+        },
+        "src/update/executor/journal.rs": {
+          "deletions": 25
+        },
+        "tests/resolver.rs": {
+          "deletions": 1
+        },
+        "web/src/pages/observability/live.ts": {
+          "deletions": 22
+        },
+        "scripts/test-filter-subscriptions-systemd.mjs": {
+          "additions": 1,
+          "deletions": 15,
+          "accepted_lines": 1
+        },
+        "web/src/features/updates/context.tsx": {
+          "deletions": 1
+        },
+        "src/filter_subscriptions/download.rs": {
+          "additions": 1,
+          "deletions": 9,
+          "accepted_lines": 1
+        },
+        "web/src/model/listener.ts": {
+          "deletions": 2
+        },
+        "scripts/test-systemd-readiness.sh": {
+          "deletions": 3
+        },
+        "src/update/contract.rs": {
+          "additions": 1,
+          "deletions": 5,
+          "accepted_lines": 1
+        },
+        "src/bin/parins-updater.rs": {
+          "deletions": 2
+        },
+        "src/cache/persistence.rs": {
+          "additions": 1,
+          "deletions": 41,
+          "accepted_lines": 1
+        },
+        "src/update/executor/fs.rs": {
+          "additions": 1,
+          "deletions": 5,
+          "accepted_lines": 1
+        },
+        "src/manage/runtime_tests.rs": {
+          "deletions": 15
+        },
+        "web/src/model/settings.ts": {
+          "deletions": 7
+        },
+        "examples/bench_dot.rs": {
+          "additions": 5,
+          "deletions": 8,
+          "accepted_lines": 1
+        },
+        "tests/listener_shutdown.rs": {
+          "additions": 3,
+          "deletions": 38,
+          "accepted_lines": 3
+        },
+        "src/update/executor/fs_tests.rs": {
+          "deletions": 6
+        },
+        "web/src/appearance/image.ts": {
+          "additions": 1,
+          "deletions": 17,
+          "accepted_lines": 1
+        },
+        "web/src/components/beui/Drawer.tsx": {
+          "additions": 2,
+          "deletions": 7,
+          "accepted_lines": 2
+        },
+        "src/manage/settings.rs": {
+          "additions": 1,
+          "deletions": 12,
+          "accepted_lines": 1
+        },
+        "src/manage/account_tests.rs": {
+          "deletions": 14
+        },
+        "scripts/lib/managed-wire.mjs": {
+          "deletions": 5
+        },
+        "web/src/components/Banner.tsx": {
+          "deletions": 4
+        },
+        "src/tls/certificates.rs": {
+          "deletions": 17
+        },
+        "src/ingress.rs": {
+          "deletions": 15
+        },
+        ".github/workflows/filter-acceptance.yml": {
+          "additions": 3,
+          "deletions": 5,
+          "accepted_lines": 3
+        },
+        "web/src/features/subscriptions/useSubscriptions.ts": {
+          "deletions": 3
+        },
+        "src/admin.rs": {
+          "deletions": 11
+        },
+        "src/manage/turnstile.rs": {
+          "additions": 1,
+          "deletions": 51,
+          "accepted_lines": 1
+        },
+        "web/src/components/beui/style.css": {
+          "deletions": 4
+        },
+        "src/upstreams/h3.rs": {
+          "deletions": 54
+        }
+      }
+    }
+  }
+}

@@ -8,13 +8,6 @@ use sha2::{Digest, Sha256};
 use std::{fs::File, io::BufReader};
 
 const IO_BYTES: usize = 16 * 1024;
-// Conservative allocation reserve, not RSS: at most eight simultaneously held
-// catalog/record views (Store, cached status, worker captures, candidate, source
-// inputs and publication snapshots), each bounded to 2 * the 256 KiB catalog
-// limit including Vec/String capacity and descriptors; two encoded catalog
-// buffers; four <=64 KiB source-settings/identity sets; 256 KiB fixed IO/scratch.
-// This deliberately reserves more than a normal operation holds and is checked
-// before reading source descriptors or allocating parser/index buffers.
 pub(super) const COORDINATOR_BYTES: usize =
     8 * (2 * 256 * 1024) + 2 * (256 * 1024) + 4 * (64 * 1024) + 256 * 1024;
 const TOTAL_TEXT: u64 = 32 * 1024 * 1024;
@@ -33,10 +26,6 @@ struct Input {
     file: File,
 }
 
-/// Names the derived index: the rules, their slots with sources in their
-/// configured order, and which slots answer alike (the index keeps covered
-/// rules that answer differently). Method changes that keep those classes
-/// reuse the index.
 fn index_digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"parins-filter-input-v2\0");
@@ -55,8 +44,6 @@ fn index_digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
     }
     hash.finalize().into()
 }
-/// Identifies the published policy: the derived index plus every block method,
-/// so a method change publishes a new generation from the same index.
 fn digest(local: &Policy, inputs: &[Input]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"parins-filter-material-v1\0");
@@ -252,9 +239,6 @@ pub(super) fn compile(
     })
 }
 
-/// What the selected sources read, as persisted: each enabled source's ID and
-/// stored content SHA-256, and the catalog content revision. Unlike material
-/// digests, nothing here depends on how this version encodes policy.
 pub fn selected_content(path: &Path, settings: &Settings) -> Result<(Vec<(String, String)>, u64)> {
     if settings.effective().next().is_none() {
         return Ok((Vec::new(), 0));
@@ -270,7 +254,6 @@ pub fn selected_content(path: &Path, settings: &Settings) -> Result<(Vec<(String
     Ok((sources, view.revision()))
 }
 
-/// Full material preflight, without acquiring a writer or writing any derived data.
 pub fn read_only(path: &Path, settings: &Settings, local: &Policy) -> Result<Material> {
     if settings.effective().next().is_none() {
         return local_material(local, settings);

@@ -42,7 +42,7 @@ fn source_and_aggregate_counts_preserve_pre_dedup_inputs() {
     assert!(builder.budget.peak >= live);
     let canonical = builder.prepare().unwrap();
     assert_eq!((canonical.input_rules, canonical.records.len()), (6, 1));
-    assert_eq!(canonical.budget.live, live); // truncate does not release capacity
+    assert_eq!(canonical.budget.live, live);
     let mut one = Builder::new(Limits::default()).unwrap();
     one.parse_source(b".example.test\n".as_slice(), Format::DomainList, 9)
         .unwrap();
@@ -163,7 +163,6 @@ fn line_boundary_utf8_and_read_failure_poison_the_whole_candidate() {
     assert_eq!(builder.prepare().err(), Some(failure));
 }
 
-/// Generates bounded comments without retaining a large input allocation.
 struct Comments {
     remaining: usize,
     offset: usize,
@@ -222,8 +221,6 @@ fn decoded_source_and_aggregate_limits_are_measured_while_streaming() {
     );
 }
 
-// Parser and builder contracts below were previously exercised through the
-// deleted compact index; they now build the production radix index.
 fn parse_radix(text: &[u8], format: Format) -> Result<super::super::radix::Index, Error> {
     let mut builder = Builder::new(Limits::default()).unwrap();
     builder.parse_source(BufReader::with_capacity(3, Cursor::new(text)), format, 0)?;
@@ -317,8 +314,6 @@ fn growth_rejects_transient_peak_before_allocating_new_record_buffer() {
     })
     .unwrap();
     builder.add("a", Group::BlockExact, 0).unwrap();
-    // Record growth needs the old 16 B and new 32 B simultaneously, in addition
-    // to 4 arena bytes, although the final two-entry data would fit.
     let failure = builder.add("b", Group::BlockExact, 0).unwrap_err();
     assert_eq!(failure.kind, ErrorKind::MemoryLimit);
     assert_eq!(builder.records.capacity(), 1);

@@ -1,6 +1,4 @@
-//! One-use clean-cache file lifecycle. All methods do synchronous filesystem IO
-//! and belong on a blocking worker. The process runtime owns the directory lock;
-//! the top-level terminal shutdown owner alone may call `save_terminal`.
+//! One-use clean-cache file lifecycle.
 
 use std::{
     fs::{self, File},
@@ -25,8 +23,6 @@ pub struct CachePersistence {
     consumed: AtomicBool,
 }
 
-/// An open but already unlinked file cannot become a future startup candidate.
-/// Keeping only the descriptor avoids allocating the entire snapshot in memory.
 pub struct ConsumedSnapshot {
     file: Option<File>,
     max_bytes: usize,
@@ -38,7 +34,6 @@ impl ConsumedSnapshot {
         &self.report
     }
 
-    /// Admits records until `deadline`; see `Cache::restore_clean_snapshot`.
     pub fn restore_into(
         mut self,
         cache: &Cache,
@@ -71,8 +66,6 @@ impl ConsumedSnapshot {
 }
 
 impl CachePersistence {
-    /// The caller has already established private permissions and exclusive
-    /// runtime-directory ownership. This constructor performs no IO.
     pub fn new(directory: &Path) -> Self {
         Self {
             directory: directory.into(),
@@ -80,11 +73,6 @@ impl CachePersistence {
         }
     }
 
-    /// Must finish successfully before any DNS listener starts accepting. Even a
-    /// disabled or oversized snapshot is durably consumed; the restore reports
-    /// any other defect.
-    /// A failed unlink/directory fsync is a hard startup error, never a cold-start
-    /// success with an old recoverable file remaining beside a running cache.
     pub fn consume_startup(&self, settings: &CachePersistenceConfig) -> Result<ConsumedSnapshot> {
         ensure!(
             !self.consumed.load(Ordering::Acquire),
@@ -101,7 +89,6 @@ impl CachePersistence {
             });
         };
         let length = file.metadata()?.len();
-        // The restore reads and verifies the complete file within the same budget.
         let rejected = if !settings.enabled {
             Some("persistence_disabled")
         } else if length > settings.max_bytes as u64 {
@@ -109,7 +96,6 @@ impl CachePersistence {
         } else {
             None
         };
-        // This step is unconditional after identifying an owned regular file.
         fs::remove_file(&path).context("consume clean cache snapshot before DNS startup")?;
         sync_directory(&self.directory)
             .context("durably consume clean cache snapshot before DNS startup")?;
@@ -125,11 +111,6 @@ impl CachePersistence {
         })
     }
 
-    /// The caller must have stopped every foreground/flight/adapter/refresh
-    /// writer, frozen management mutations, and selected the current generation.
-    /// An aborted task is not proof of that condition. Never call on ordinary
-    /// Manager.stop, apply, rollback, or periodic timers. Writing stops at
-    /// `deadline`; the published snapshot is then complete but partial.
     #[allow(clippy::too_many_arguments)]
     pub fn save_terminal(
         &self,
@@ -166,7 +147,6 @@ impl CachePersistence {
         let file =
             create_private(&temporary).context("create clean cache snapshot temporary file")?;
         let prepared = (|| -> Result<SnapshotReport> {
-            // One write per record would dominate the save time of a large cache.
             let mut writer = BufWriter::with_capacity(1 << 20, file);
             let report = cache.write_clean_snapshot(
                 &mut writer,
@@ -187,8 +167,6 @@ impl CachePersistence {
             Ok(report)
         })();
         if prepared.is_err() {
-            // Only our unique temporary file belongs to this attempt. Never
-            // delete the published file or an unrelated stale temporary file.
             match fs::remove_file(&temporary) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -223,8 +201,6 @@ fn publish_clean(
         "cache snapshot cancelled"
     );
     fs::rename(temporary, clean).context("publish clean cache snapshot")?;
-    // The rename has succeeded; a directory-sync failure cannot be described as
-    // a rollback, even though the power-loss durability is still uncertain.
     sync_parent()
         .context("clean cache snapshot published but directory sync failed; durability uncertain")
 }

@@ -1,5 +1,4 @@
-//! Disposable derived data, never source authority. Explicit portable bytes;
-//! decoding fills the final buffers directly, without mmap or a whole-file copy.
+//! Disposable derived data, never source authority.
 use super::super::canonical::{Builder, Limits, grow};
 use super::{DERIVED_PREFIX, Index, NONE, Node};
 use anyhow::{Context, Result, ensure};
@@ -13,13 +12,11 @@ struct WalkFrame {
     prefix_len: usize,
     next_child: u16,
     ancestor_suffixes: u8,
-    /// Slot of the nearest ancestor block suffix, or NONE.
     block_suffix: u16,
     entered: bool,
 }
 const SCRATCH_BYTES: usize = MAX_DEPTH * std::mem::size_of::<WalkFrame>() + 254;
 
-/// Local slots (empty IDs, at least one) then at most 16 distinct sources.
 fn source_ids_valid(ids: &[String]) -> bool {
     let local = ids.iter().take_while(|id| id.is_empty()).count();
     let sources = &ids[local..];
@@ -128,8 +125,6 @@ impl Index {
         )
     }
 
-    /// The owner may enforce cancellation/deadline without relinquishing the
-    /// worker's memory lease before these buffers and validation scratch die.
     pub(crate) fn read_from_with_check(
         mut reader: impl Read,
         expected_input_digest: [u8; 32],
@@ -274,8 +269,6 @@ impl Index {
         Ok(result)
     }
 
-    /// Iterative lexicographic walk also verifies canonical allocation order:
-    /// every node/edge occurs once, with no cycles, aliases, gaps or dead leaves.
     fn walk(
         &self,
         source_count: usize,
@@ -369,8 +362,6 @@ impl Index {
                             "derived index redundant exact"
                         );
                     } else {
-                        // A covered block rule is kept only to answer differently
-                        // from its nearest cover, so it has another slot.
                         ensure!(
                             frame.block_suffix != *source,
                             "derived index redundant suffix child"

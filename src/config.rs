@@ -1,4 +1,4 @@
-//! Startup configuration. Invalid values fail before any listeners are bound.
+//! Startup configuration.
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -36,7 +36,6 @@ pub struct Config {
     pub ecs: EcsConfig,
     #[serde(default)]
     pub cache: CacheConfig,
-    // Local source syntax only. Runtime owners compile under their worker lease.
     #[serde(default, skip_serializing)]
     pub filter: crate::policy::LocalRules,
     #[serde(default)]
@@ -59,7 +58,6 @@ pub struct Config {
     pub admin_listen: Option<SocketAddr>,
 }
 
-/// Where answers come from. `[upstreams]` stays configured in both modes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResolutionConfig {
@@ -69,10 +67,8 @@ pub struct ResolutionConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ResolutionMode {
-    /// Forward queries to `[upstreams]`.
     #[default]
     Forward,
-    /// Resolve from the root servers with DNSSEC validation (`[recursion]`).
     Recursive,
 }
 
@@ -108,8 +104,6 @@ pub struct DohConfig {
     pub http3: bool,
 }
 
-/// A concrete browser host, never an authority or URL. The returned value is
-/// suitable for a certificate name check and for constructing an origin.
 pub fn public_host(value: &str) -> Result<String> {
     ensure!(
         !value.is_empty() && value == value.trim(),
@@ -146,7 +140,6 @@ pub fn public_host(value: &str) -> Result<String> {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
-    /// Zero disables aggregate stderr output; collection remains available in-process.
     pub interval_secs: u64,
 }
 
@@ -168,12 +161,8 @@ impl Default for CoalescingConfig {
     }
 }
 
-/// Largest cache entry count; a clean snapshot can hold every entry of a full cache.
 pub(crate) const MAX_CACHE_ENTRIES: usize = 16 * 1024 * 1024;
-/// Largest cache and cache snapshot byte budget (64 GiB). Budgets are `usize`, and
-/// release builds are 64-bit.
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024 * 1024;
-/// Longest cache TTL cap, globally and per rule (7 days).
 const MAX_CACHE_TTL_SECS: u32 = 604_800;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -186,7 +175,6 @@ pub struct CacheConfig {
     pub max_variants: usize,
     pub max_ttl_secs: u32,
     pub negative_ttl_cap_secs: u32,
-    /// How long an upstream SERVFAIL is cached (RFC 9520); 0 disables it.
     pub servfail_ttl_secs: u32,
     pub shards: usize,
     pub negative_percent: u8,
@@ -254,7 +242,6 @@ impl Default for StaleConfig {
     }
 }
 
-/// Learned sharing of answers that upstreams return without ECS. See `crate::cache`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EcsSharingConfig {
@@ -333,7 +320,6 @@ impl Config {
         Self::parse_in(&text, base)
     }
 
-    /// Parse a managed configuration with paths relative to its private state directory.
     pub fn parse_in(text: &str, base: &Path) -> Result<Self> {
         let mut config = Self::parse(text)?;
         if let Some(file) = &mut config.filter_file
@@ -363,7 +349,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Load all cryptographic material without opening a listener.
     pub fn check_files(&self) -> Result<()> {
         crate::tls::CertificateSet::prepare(self.certificate_sources())?;
         self.check_non_identity_files()
@@ -473,9 +458,6 @@ impl Config {
                 && (1..=3600).contains(&self.cache.stale.reply_ttl_secs),
             "invalid cache.stale limits"
         );
-        // The cooldown floor equals the longest query deadline (60 s), so work
-        // started before a revocation has normally finished before the name can
-        // be relearned; at worst one late answer counts as one observation.
         ensure!(
             (2..=64).contains(&self.cache.ecs_sharing.min_networks)
                 && (60..=2_592_000).contains(&self.cache.ecs_sharing.revoke_cooldown_secs),
@@ -771,7 +753,6 @@ mod tests {
             change(&mut config);
             assert!(config.validate().is_err());
         }
-        // A full largest cache still splits into nonzero partitions without overflow.
         let cache = crate::cache::Cache::new(largest.cache.clone());
         assert_eq!(cache.snapshot()["shards"], 256);
     }

@@ -126,15 +126,13 @@ async fn refresh_reclaims_young_unreferenced_preparation_when_staging_needs_spac
     };
     let mut settings = service.state.lock().unwrap().settings.clone();
     settings.max_disk_bytes = 32 * 1024 * 1024;
-    settings.sources.pop(); // The removed source remains a previous-Config root.
+    settings.sources.pop();
     let candidate = service
         .prepare_config(settings, Policy::default(), 1)
         .await
         .unwrap();
     service.publish_config(candidate, 2);
 
-    // Almost 16 MiB, but only one rule: the remaining 32 MiB quota cannot
-    // accommodate a full download reservation plus the catalog transaction.
     let mut comment = vec![b'#'; 4095];
     comment.push(b'\n');
     let mut body = comment.repeat(4095);
@@ -169,7 +167,6 @@ async fn refresh_reclaims_young_unreferenced_preparation_when_staging_needs_spac
             .record(&fingerprint)
             .is_some()
     );
-    // Admission with enough space does not evict another young preparation.
     assert!(
         service
             .store
@@ -181,8 +178,6 @@ async fn refresh_reclaims_young_unreferenced_preparation_when_staging_needs_spac
             .is_some()
     );
 
-    // Neither reuse nor an automatic refresh with no selected sources needs a
-    // download reservation. Both must keep the young preparation intact.
     respond(&service, &[]);
     for request in [
         WorkRequest::Prepare {
@@ -529,8 +524,6 @@ async fn bootstrap_reclaims_young_removed_source_for_manual_only_download() {
     )
     .await
     .unwrap();
-    // A recent, almost 16 MiB download leaves insufficient room for another
-    // full download reservation plus the catalog transaction under 32 MiB.
     let mut comment = vec![b'#'; 4095];
     comment.push(b'\n');
     let mut body = comment.repeat(4095);
@@ -547,8 +540,6 @@ async fn bootstrap_reclaims_young_removed_source_for_manual_only_download() {
     let mut new = source("new");
     new.auto_update = false;
     settings.sources = vec![new];
-    // File startup has only the new Config roots, not the removed source's
-    // previous-Config root. Normal GC still retains its recent preparation.
     let service = Service::open(path, Policy::default(), settings, 1, vec![], false)
         .await
         .unwrap();
@@ -649,7 +640,6 @@ async fn frozen_start_opens_the_store_once_thawed() {
     )
     .await
     .unwrap();
-    // Frozen: the published policy comes from read-only material and the Store stays closed.
     assert!(service.ready());
     assert!(service.next_due(u64::MAX).is_none());
     assert_eq!(
@@ -683,7 +673,6 @@ async fn frozen_start_opens_the_store_once_thawed() {
     let begin = service.begin(refresh(&service)).await.unwrap();
     let candidate = service.execute(begin.work.unwrap()).await.unwrap();
     service.commit(candidate).await.unwrap();
-    // Thawing again is a no-op.
     service.thaw().await;
     assert!(service.ready());
 }
@@ -949,8 +938,6 @@ async fn local_source_budget_counts_old_policy_and_preserves_generation() {
     );
     let mut settings = service.state.lock().unwrap().settings.clone();
     settings.max_memory_bytes = material::COORDINATOR_BYTES + generation.policy.owned_bytes();
-    // The new source fits by itself; only coexistence with the live old policy
-    // makes this budget insufficient.
     source
         .compile(
             crate::policy::canonical::Limits {
@@ -1006,7 +993,6 @@ async fn source_block_method_publishes_from_stored_content_without_downloading()
         response: response.into(),
     };
     assert_eq!(answer(&service), trace("nodata"));
-    // No download response is queued: a refetch would fail the candidate.
     let mut settings = service.state.lock().unwrap().settings.clone();
     settings.sources[0].block_response = Some(BlockMode::Refused);
     let generation = service.snapshot().generation;
@@ -1017,7 +1003,6 @@ async fn source_block_method_publishes_from_stored_content_without_downloading()
     service.publish_config(candidate, 2);
     assert_eq!(answer(&service), trace("refused"));
     assert!(service.snapshot().generation > generation);
-    // The global method giving the same answers keeps the generation.
     settings.sources[0].block_response = None;
     let local: Policy = toml::from_str("block_response = 'refused'").unwrap();
     let generation = service.snapshot().generation;

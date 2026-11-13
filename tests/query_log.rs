@@ -22,7 +22,6 @@ use std::{
 };
 use tokio::net::UdpSocket;
 
-/// Tests hold the runtime services; the resolver only owns the query-log writer.
 fn with_log(config: &Config) -> (Resolver, Arc<RuntimeServices>) {
     let services = RuntimeServices::ephemeral(RuntimeSettings::from_config(config));
     (
@@ -263,7 +262,6 @@ async fn response_detail_is_bounded_and_inflight_clear_does_not_refill() {
             .total,
         0
     );
-    // Cache hit after clearing is a genuinely new request, and details stay bounded.
     resolver
         .resolve(&q, "127.0.0.1".parse().unwrap())
         .await
@@ -358,7 +356,6 @@ async fn servfail_and_timeout_keep_trace_factual() {
     config.query_log.enabled = true;
     config.ecs.enabled = true;
     config.query_timeout_ms = 30;
-    // The second query must reach the upstream again.
     config.cache.servfail_ttl_secs = 0;
     let (resolver, services) = with_log(&config);
     let q = query("error.test.").to_vec().unwrap();
@@ -377,7 +374,6 @@ async fn servfail_and_timeout_keep_trace_factual() {
             .unwrap();
     };
     tokio::join!(resolver.resolve(&q, "192.0.2.10".parse().unwrap()), serve);
-    // Keep the UDP socket open without replying: no endpoint won this exchange.
     resolver
         .resolve(&q, "192.0.2.10".parse().unwrap())
         .await
@@ -512,8 +508,6 @@ async fn cancelled_foreground_is_logged_once_unless_cleared_while_pending() {
     let (resolver, services) = with_log(&config);
     let resolver = std::sync::Arc::new(resolver);
     for clear in [false, true] {
-        // The first query's sent work goes on in the background; a second
-        // query of the same name would join it instead of sending.
         let name = if clear {
             "cleared.test."
         } else {
@@ -559,7 +553,6 @@ async fn cancelled_foreground_is_logged_once_unless_cleared_while_pending() {
             assert_eq!(entry.name, "pending.test.");
             assert_eq!(entry.transport, "doh");
             assert!(entry.upstream.is_none() && entry.rcode.is_none() && entry.answer.is_empty());
-            // The cache lookup made before the cancellation stays visible.
             assert_eq!(
                 entry.cache_lookup.map(|lookup| lookup.outcome),
                 Some(parins::cache::LookupOutcome::Miss)

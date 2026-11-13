@@ -76,8 +76,6 @@ async fn reads_during_blocked_preparation() {
         .replace("query_timeout_ms=200", "query_timeout_ms=201");
     let preparation = manager.preparation(next).unwrap();
     drop(manager);
-    // Occupy this test runtime's only blocking thread before real preparation
-    // queues its file work. Dropping the sender also releases it after a panic.
     let (release, wait) = std::sync::mpsc::channel();
     let (started, waiting) = tokio::sync::oneshot::channel();
     let blocker = tokio::task::spawn_blocking(move || {
@@ -86,8 +84,6 @@ async fn reads_during_blocked_preparation() {
     });
     waiting.await.unwrap();
     let mut applying = Box::pin(preparation.run());
-    // The queued worker cannot finish before the reads; no scheduler race or
-    // timed sleep decides whether the preparation future is still pending.
     assert!(futures_util::poll!(&mut applying).is_pending());
     let reads = tokio::time::timeout(std::time::Duration::from_millis(500), async {
         let status = request(&shared, &headers, "GET", "/api/status", json!(null))
@@ -154,7 +150,6 @@ async fn status_marks_an_in_progress_stop_without_reporting_an_exit_or_readiness
     let (_temp, shared, headers) = fixture().await;
     let mut manager = shared.manager.lock().await;
     let mut stopping = Box::pin(manager.stop());
-    // Keep the stop owner at its first drain await, before DNS processes it.
     assert!(futures_util::poll!(&mut stopping).is_pending());
     let status = request(&shared, &headers, "GET", "/api/status", json!(null))
         .await
@@ -400,8 +395,6 @@ async fn credential_rotation_rejects_invalid_input_and_preserves_failed_save_and
         .unwrap_err();
     assert_eq!(error.0, StatusCode::FORBIDDEN);
     assert_eq!(error.1, "CURRENT_PASSWORD_INCORRECT");
-    // A directory at Store's destination reliably fails before rename, also
-    // when tests run with elevated privileges; retain the original private file.
     let original = state_path.with_extension("original");
     std::fs::rename(&state_path, &original).unwrap();
     std::fs::create_dir(&state_path).unwrap();
@@ -833,9 +826,6 @@ async fn credential_rotation_keeps_admitted_filter_work_and_manual_update_reques
     shared.manager.lock().await.terminal_shutdown().await;
 }
 
-/// Only configuration saves carry a client revision. Other operations act on
-/// the server's current saved state and reject an obsolete `revision` field;
-/// epochs still guard data the administrator saw.
 #[tokio::test]
 async fn operations_other_than_configuration_saves_need_no_client_revision() {
     let (_temp, shared, headers) = fixture().await;
@@ -876,8 +866,6 @@ async fn operations_other_than_configuration_saves_need_no_client_revision() {
         post("/api/certificates/reload", json!({})).await.unwrap()["outcome"],
         "unchanged"
     );
-    // Import is a private store write that fills the draft; bad PEM is the
-    // only rejection, never a configuration conflict.
     let import = post(
         "/api/certificates/import",
         json!({"certificate_pem":"x","private_key_pem":"y"}),
@@ -914,7 +902,6 @@ async fn operations_other_than_configuration_saves_need_no_client_revision() {
         let cleared = post(path, json!({ field: storage[field] })).await.unwrap();
         assert!(cleared.get("revision").is_none(), "{path}");
     }
-    // Apply reaches the update coordinator instead of a revision check.
     let apply = post(
         "/api/updates/apply",
         json!({"plan_id":"p","expected_version":"9.0.0"}),
@@ -924,7 +911,6 @@ async fn operations_other_than_configuration_saves_need_no_client_revision() {
     assert_ne!(apply.1, "BAD_JSON");
     assert_ne!(apply.1, "REVISION");
 
-    // Configuration saves keep the optimistic revision check.
     let saved = request(&shared, &headers, "GET", "/api/config", json!(null))
         .await
         .unwrap();

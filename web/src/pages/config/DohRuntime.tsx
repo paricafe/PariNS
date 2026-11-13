@@ -5,10 +5,8 @@ import type { StatusView } from '../observability/metrics';
 
 export type DohStatus = Pick<StatusView, 'running' | 'doh_listen' | 'doh_http3'>;
 
-/** The security page's one status read, shared with the DoH group's in-service row. */
 export const DohStatusContext = createContext<{ status: DohStatus | null; failed: boolean } | null>(null);
 
-/** One row in the DoH group; the bound address comes only from status, including the port chosen for :0. */
 export function DohRuntime({ status, failed, language }: { status: DohStatus | null; failed: boolean; language: Language }) {
   const address = status?.running ? status.doh_listen : null;
   return <div className="row" data-layout="wide">
@@ -21,7 +19,6 @@ export function DohRuntime({ status, failed, language }: { status: DohStatus | n
   </div>;
 }
 
-/** Renders the in-service row where the security page provides status; elsewhere nothing. */
 export function DohRuntimeRow({ language }: { language: Language }) {
   const context = useContext(DohStatusContext);
   return context ? <DohRuntime status={context.status} failed={context.failed} language={language} /> : null;

@@ -1,11 +1,4 @@
-//! Authenticated management plane. DNS forwarding remains in Server/Resolver.
-//! Connections serve one request each; only a live query log WebSocket (`live`)
-//! outlives its request, under that module's own limits and shutdown drain. The
-//! listener rides out per-connection accept errors like the DNS listeners.
-//! The caller transfers a bound management socket; startup never releases and
-//! rebinds its address while private state and DNS are being prepared.
-//! Cross-site entry is limited to top-level GET navigation of the console
-//! document; API, asset and embedded requests retain their origin checks.
+//! Authenticated management plane.
 mod account;
 mod assets;
 mod auth_budget;
@@ -59,8 +52,6 @@ struct Session {
     token: String,
     binding: String,
     created: Instant,
-    /// Dropped with the last stored copy: logout, credential change, realm
-    /// change, capacity eviction or expiry closes this session's live sockets.
     revoked: Arc<tokio::sync::watch::Sender<()>>,
     live: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -108,9 +99,6 @@ fn host_allowed(address: SocketAddr, host: &str, transport: &Snapshot) -> bool {
     if name == "localhost" {
         return true;
     }
-    // Literal IPs support both directly assigned addresses and public-IP NAT.
-    // Arbitrary domain names remain rejected to prevent DNS rebinding. The Host
-    // header is not an identity: setup tokens and Cookie auth are still required.
     name.parse::<IpAddr>().is_ok_and(|ip| {
         !ip.is_unspecified()
             && !ip.is_multicast()
@@ -118,9 +106,6 @@ fn host_allowed(address: SocketAddr, host: &str, transport: &Snapshot) -> bool {
     })
 }
 
-// Origin and Host must name the same actual transport origin, including effective port.
-// Keeping localhost distinct from an IP literal also rejects same-site requests
-// sent from another management port or host.
 fn origin_identity(authority: &str, default_port: u16) -> Option<(String, u16)> {
     if let Ok(address) = authority.parse::<SocketAddr>() {
         return Some((address.ip().to_string(), address.port()));
@@ -283,13 +268,10 @@ impl Shared {
         transport: &Snapshot,
     ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
         let permit = self.mutation_permit().await?;
-        // Initial HTTP authentication may precede another account transaction.
-        // Recheck after the await; this permit excludes rotation until completion.
         self.authorized(headers, transport)?;
         Ok(permit)
     }
 
-    /// Keep the freeze check inside the same permit used for the mutation.
     async fn mutation_permit(
         &self,
     ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
@@ -391,7 +373,6 @@ impl Shared {
     }
 }
 
-/// A request admitted under a replaced management transport must reconnect.
 fn current_realm(active: &Active, transport: &Snapshot) -> std::result::Result<(), ApiError> {
     if active.snapshot.realm != transport.realm {
         return Err(error(
@@ -403,8 +384,6 @@ fn current_realm(active: &Active, transport: &Snapshot) -> std::result::Result<(
     Ok(())
 }
 
-/// Compares a supplied secret (a setup or session token, a session binding or
-/// a username) in constant time. Only a length difference returns early.
 fn secret_matches(supplied: &str, expected: &str) -> bool {
     supplied.len() == expected.len()
         && supplied
@@ -524,8 +503,6 @@ struct CertificateImport {
     private_key_pem: String,
 }
 
-// Storage clears act on the server's current data. Their epochs protect
-// against clearing records newer than the ones the administrator saw.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LogClear {
@@ -582,7 +559,6 @@ async fn api(
             return Ok(json!({"toml":include_str!("../../parins.example.toml")}));
         }
         ("POST", "/api/setup/preview") => {
-            // A token guess here costs the same attempt budget as setup itself.
             shared.auth.attempt(peer.ip())?;
             let document: Document = decode(body)?;
             let store = {
@@ -599,7 +575,6 @@ async fn api(
             let expected = tokio::task::spawn_blocking(move || store.setup_token())
                 .await
                 .map_err(|_| internal())?;
-            // Setup may have completed after the check above.
             let Ok(expected) = expected else {
                 return Err(if shared.manager.lock().await.saved.is_some() {
                     already_setup()
@@ -650,7 +625,6 @@ async fn api(
                         "Complete setup first",
                     )
                 })?;
-            // Turnstile precedes the password check; its failure keeps the attempt.
             let admission = turnstile::admission(&shared).await;
             admission
                 .check(
@@ -677,7 +651,6 @@ async fn api(
                 ));
             }
             let manager = shared.manager.lock().await;
-            // A Turnstile change meanwhile ended every session; so does this attempt.
             if !verified.matches(manager.saved.as_ref())
                 || manager.turnstile.generation != admission.generation
             {
@@ -687,8 +660,6 @@ async fn api(
                     "Invalid credentials",
                 ));
             }
-            // Keep Manager -> Active ordering through issuance. A completed
-            // verification of a replaced hash cannot establish a new session.
             let session = shared.session(&transport)?;
             *cookie = Some(session.token.clone());
             return Ok(with_transport(
@@ -795,8 +766,6 @@ async fn api(
         ("GET", "/api/updates") => Ok(shared.manager.lock().await.updates.view()),
         ("POST", "/api/updates/apply") => {
             let input: updates::operation::Apply = decode(body)?;
-            // A repeated consumed plan must still return its existing operation,
-            // including while frozen; Coordinator rejects every different plan.
             let permit =
                 shared.mutation.clone().try_acquire_owned().map_err(|_| {
                     error(StatusCode::CONFLICT, "BUSY", "Another change is running")
@@ -817,8 +786,6 @@ async fn api(
             #[serde(deny_unknown_fields)]
             struct Check {}
             let _: Check = decode(body)?;
-            // Checks retain their existing freeze semantics, but their durable
-            // manual request shares mutation admission and detached ownership.
             let permit =
                 shared.mutation.clone().try_acquire_owned().map_err(|_| {
                     error(StatusCode::CONFLICT, "BUSY", "Another change is running")
@@ -884,7 +851,6 @@ async fn api(
             .map_err(|_| internal())?
         }
         ("POST", "/api/certificates/reload") => {
-            // Reloads the files named by the saved configuration.
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Reload {}
@@ -907,8 +873,6 @@ async fn api(
                 .await?;
             tokio::spawn(async move {
                 let _permit = permit;
-                // Import only stores the identity privately; the caller's draft
-                // references it, and saving that draft is checked as usual.
                 let store = shared.manager.lock().await.store.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     certificates::import(&store.dir, &input.certificate_pem, &input.private_key_pem)
@@ -998,7 +962,6 @@ async fn api(
                     manager.validation(&document.toml).map_err(invalid)?,
                 )
             };
-            // Certificates and rules are read without the Manager lock.
             validation.run(document.toml).await.map_err(invalid)?;
             Ok(json!({"valid":true,"restart_required":restart_required,"transport_change":change}))
         }
@@ -1082,12 +1045,9 @@ async fn api(
     }
 }
 
-// blob: images are only the browser-local custom background, created by the
-// console's own script from a file the administrator chose.
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const TURNSTILE_CSP: &str = "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
-/// Marks a console document served to a sign-in page with Turnstile enabled.
 #[derive(Clone, Copy)]
 struct TurnstileDocument;
 
@@ -1100,22 +1060,17 @@ async fn handle(
     let mut response = handle_inner(shared, transport, peer, request)
         .await
         .unwrap_or_else(IntoResponse::into_response);
-    // One request per connection. hyper's own keep-alive switch would also
-    // replace `Connection: upgrade` on a live query log 101 with `close`.
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         response
             .headers_mut()
             .insert(header::CONNECTION, HeaderValue::from_static("close"));
     }
-    // Only a sign-in document that shows the Turnstile widget may load its script
-    // and frame; the console reloads after signing in to drop them again.
     let policy = if response.extensions().get::<TurnstileDocument>().is_some() {
         TURNSTILE_CSP
     } else {
         CSP
     };
     let headers = response.headers_mut();
-    // Versioned console files set their own long-lived Cache-Control.
     if !headers.contains_key(header::CACHE_CONTROL) {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
@@ -1144,8 +1099,6 @@ async fn handle_inner(
     let mut hosts = hosts.iter();
     let host = hosts.next().and_then(|h| h.to_str().ok()).unwrap_or("");
     let unsafe_method = parts.method != "GET" && parts.method != "HEAD";
-    // A confirmed address change navigates from the old console origin. Only
-    // its public document may be entered cross-site, never an API or embed.
     let document_navigation = parts.method == "GET"
         && parts.uri.path() == "/"
         && [
@@ -1285,7 +1238,6 @@ async fn handle_inner(
     Ok(response)
 }
 
-/// Own the bound management listener before starting any saved DNS configuration.
 pub async fn serve(
     directory: &Path,
     listener: TcpListener,
@@ -1395,26 +1347,16 @@ pub async fn serve(
         }
     };
     drop(listener);
-    // Live sockets close with 1001 in parallel with the remaining drain.
     let mut live_tasks = shared.live.close();
     let _ = update_stop.send(true);
     filter_service.request_close();
-    // Every accepted transaction owns this permit before detaching. Wait for it
-    // before stopping DNS, including transactions not yet holding manager.lock.
-    // A blocked filesystem must not keep the process alive indefinitely. On
-    // timeout, leave no clean snapshot and let the process runtime terminate.
     let _transaction = timeout(Duration::from_secs(65), async {
-        // Closing serializes with catalog publication, which may be in fsync.
-        // Keep both waits inside the shutdown budget and off the executor.
         let _ = tokio::task::spawn_blocking(move || filter_service.close()).await;
-        // A submitted mutation owns its transaction independently of HTTP.
         tasks.shutdown().await;
         while live_tasks.join_next().await.is_some() {}
         let _ = update_task.await;
         let _ = filter_task.await;
         let _ = retry_task.await;
-        // A disconnected HTTP admission may still own the mutation permit and
-        // register its rule task. Cross that barrier before draining the owner.
         {
             let _admission = shared.mutation.acquire().await?;
         }
@@ -1454,8 +1396,6 @@ fn update_apply_error(err: anyhow::Error) -> ApiError {
         .into_iter()
         .find(|code| *code == message)
         .unwrap_or("update_state_unavailable");
-    // A renamed acceptance followed by fsync failure has an unknown outcome.
-    // 5xx keeps the UI reconciling with GET instead of claiming rejection.
     error(
         if code == "update_state_unavailable" {
             StatusCode::SERVICE_UNAVAILABLE
@@ -1572,7 +1512,6 @@ mod tests {
         assert_eq!(view["check"]["state"], "unchecked");
         assert!(!temp.path().join("state/update-state.json").exists());
         assert!(cookie.is_none());
-        // Shutdown's original permit is not prohibited by the update freeze.
         let _shutdown = shared.mutation.acquire().await.unwrap();
         manager.lock().await.terminal_shutdown().await;
     }

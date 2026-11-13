@@ -9,16 +9,10 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     let result = runtime.block_on(run());
-    // A cancelled blocking filesystem syscall cannot be interrupted. Do not let
-    // Tokio's default unbounded destructor defeat the terminal IO budget.
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     result
 }
 
-/// Every TCP, DoT, DoH or QUIC client connection and upstream socket holds a
-/// descriptor, and the usual soft limit (1024) is far below the configurable
-/// connection bounds. Raise the soft limit to the hard limit the administrator or
-/// systemd set; a platform that refuses keeps its soft limit.
 fn raise_open_file_limit() {
     use rustix::process::{Resource, getrlimit, setrlimit};
     let mut limit = getrlimit(Resource::Nofile);
@@ -149,8 +143,6 @@ async fn run() -> Result<()> {
         false,
     )
     .await?;
-    // Only a never-selected fingerprint may perform first preparation. Existing
-    // selected corruption is an explicit failure, never an implicit repair.
     filters.bootstrap_new().await?;
     anyhow::ensure!(
         filters.ready(),
@@ -174,8 +166,6 @@ async fn run() -> Result<()> {
     let report =
         parins::runtime_lifecycle::restore(snapshot, resolver.cache(), fingerprint).await?;
     eprintln!("PariNS cache restore: {}", serde_json::to_string(&report)?);
-    // The server publishes ready/degraded health (generation 1) as it runs.
-    // Listeners that could not bind were already logged and are being retried.
     if server
         .listeners()
         .serving(parins::server::ListenerKind::Dns)
@@ -236,8 +226,6 @@ async fn run() -> Result<()> {
         .await;
     services.set_dns_state(false, 1);
     filters.request_close();
-    // A commit already past rename may finish, but slow filesystem IO must not
-    // block the runtime before its bounded shutdown timer is even installed.
     let close_filters = filters.clone();
     let barrier = tokio::task::spawn_blocking(move || close_filters.close());
     let filters_drained = matches!(
@@ -249,8 +237,6 @@ async fn run() -> Result<()> {
         .await,
         Ok(Ok(()))
     );
-    // Server has closed publication before returning: a late blocking read can
-    // never change the policy fingerprint or active identities after this cut.
     let reload_drained = if let Some(task) = reload_task {
         tokio::time::timeout(std::time::Duration::from_secs(5), task)
             .await

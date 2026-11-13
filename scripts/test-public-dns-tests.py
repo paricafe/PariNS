@@ -201,7 +201,6 @@ class LoopbackTransportTests(unittest.IsolatedAsyncioTestCase):
                     headers.append((b"content-length", str(len(wire) + 1).encode("ascii")))
                 self.http.send_headers(stream_id, headers)
                 self.transmit()
-                # Exercise separate response-header and body deliveries.
                 await asyncio.sleep(0.05)
                 self.http.send_data(stream_id, wire, end_stream=response_variant == "normal")
                 if response_variant != "normal":

@@ -5,9 +5,6 @@ use std::os::unix::fs::symlink;
 fn lock_duplicate_is_not_inherited_by_spawned_child() {
     const ISOLATED: &str = "PARINS_LOCK_HANDOFF_ISOLATED_TEST";
     if std::env::var_os(ISOLATED).is_none() {
-        // This process runs other tests concurrently. Their forks can briefly
-        // retain even CLOEXEC descriptors until exec, so own the lock only in
-        // a child test runner with this one selected test.
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -76,8 +73,6 @@ fn lock_duplicate_is_not_inherited_by_spawned_child() {
         .spawn()
         .unwrap();
     let result = (|| -> anyhow::Result<()> {
-        // posix_spawn can return before the child's exec closes CLOEXEC FDs.
-        // A byte from the new program is the required post-exec barrier.
         let mut byte = [0];
         ready.read_exact(&mut byte)?;
         ensure!(byte == *b"R", "child did not report post-exec readiness");
@@ -89,7 +84,6 @@ fn lock_duplicate_is_not_inherited_by_spawned_child() {
         rustix::fs::flock(&next, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
         Ok(())
     })();
-    // Reap the child even when readiness or the nonblocking lock assertion fails.
     let killed = child.kill();
     let waited = child.wait();
     result.unwrap();

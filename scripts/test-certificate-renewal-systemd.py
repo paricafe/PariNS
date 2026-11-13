@@ -39,7 +39,6 @@ def require(condition, message):
 def command(*args, root=False, timeout=15, input=None):
     argv = (["sudo", "-n"] if root else []) + [str(arg) for arg in args]
     result = subprocess.run(argv, input=input, capture_output=True, timeout=timeout, check=False)
-    # Never expose command output: credentials and generated key material stay private.
     require(result.returncode == 0, f"{Path(str(args[0])).name} failed ({result.returncode})")
     return result.stdout
 
@@ -109,7 +108,6 @@ class Api:
                 require(response.status == 200, "unexpected API status")
                 return json.load(response)
         except urllib.error.HTTPError as error:
-            # No body/headers: login responses carry a session binding.
             raise RuntimeError(f"{method} {path}: HTTP {error.code}") from None
 
 
@@ -135,7 +133,6 @@ def fresh_tls(port, ca, expected):
             require(client.selected_alpn_protocol() == "dot", "wrong DoT ALPN")
             require(hashlib.sha256(client.getpeercert(binary_form=True)).hexdigest() == expected,
                     "fresh verified TLS fingerprint mismatch")
-            # The fixture's existing local rule blocks this name without upstream IO.
             question = b"\x02ci\x07invalid\x00\x00\x01\x00\x01"
             query = struct.pack("!6H", 0x504E, 0x100, 1, 0, 0, 0) + question
             deadline = time.monotonic() + 3
@@ -171,7 +168,6 @@ def stable(before, after):
 
 def exercise(fixture, installer, binary, helper, build_info):
     guarded_fixture(fixture)
-    # Each mutation has one owner; no repeated API apply or reload on unknown outcomes.
     require(not EXTERNAL.exists() and not EXTERNAL.is_symlink(), "external fixture path exists")
     require(not DROP_IN.exists() and not DROP_IN.is_symlink(), "fixture drop-in exists")
     try:
@@ -303,8 +299,6 @@ def exercise(fixture, installer, binary, helper, build_info):
         replace("b", key_only=True)
         reload_expect("unchanged", second, generation + 1)
 
-        # Reuse this verified private CA and external identity for an initialized
-        # HTTPS reinstall. No host trust or DNS changes, and no TLS bypass.
         require("[web]" not in saved["toml"], "expected no existing web section")
         https_candidate = saved["toml"] + (
             '\n[doh]\nlisten = "127.0.0.1:0"\n'
@@ -339,8 +333,6 @@ def exercise(fixture, installer, binary, helper, build_info):
         state_path = "/var/lib/parins-managed/state.json"
         database_path = "/var/lib/parins-managed/runtime/observability.sqlite3"
         state_hash = command("sha256sum", state_path, root=True)
-        # DynamicUser may legitimately receive a different numeric UID/GID on
-        # restart. Preserve the database identity/mode and verify runtime access.
         database_identity = command("stat", "-c", "%d:%i:%a", database_path, root=True)
         install_arguments = ["sh", installer, "--binary", binary, "--helper", helper, "--build-info", build_info]
         output = command(*install_arguments, root=True, timeout=240).decode()
@@ -366,8 +358,6 @@ def exercise(fixture, installer, binary, helper, build_info):
                     f"HTTPS reinstall changed {epoch}")
         fresh_tls(port, local / "ca.pem", second)
 
-        # Corrupt only this generated fixture state, then restore its exact bytes
-        # in finally. Rejection must precede service stop or executable replacement.
         identity_after_install = service_identity()
         state_bytes = command("cat", state_path, root=True)
         try:
@@ -397,8 +387,6 @@ def exercise(fixture, installer, binary, helper, build_info):
             require(actual == f"0:{group_gid}:640", "external certificate ownership changed")
         print("Linux DynamicUser external-group certificate rotation and failed-reload preservation passed.")
     finally:
-        # Stop before removing any loaded identity, group or drop-in. Existing FS7
-        # cleanup runs outside this fixture and remains unchanged.
         if made_group or made_external or made_dropin:
             command("systemctl", "stop", UNIT, root=True, timeout=160)
             require(property_value("MainPID") == "0", "refusing cleanup while service remains alive")

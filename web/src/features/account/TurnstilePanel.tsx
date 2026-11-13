@@ -5,14 +5,11 @@ import { presentIssue, translate, type Language } from '../../i18n';
 import { StaleRequest } from '../../session/client';
 import { useSession } from '../../session/context';
 
-/** What GET /api/account/turnstile reports; never the secret key. */
 export interface TurnstileView {
-  /** `test_keys`: Cloudflare test keys decide every sign-in alike. */
   turnstile: { site_key: string; secret_set: boolean; test_keys: 'pass' | 'fail' | null } | null;
   loopback: boolean;
 }
 
-/** Turnstile keys. Setting or clearing them signs everyone out. */
 export function TurnstilePanel({ view, language, setBusy }: { view: TurnstileView; language: Language; setBusy: (busy: boolean) => void }) {
   const { changeTurnstile } = useSession();
   const config = useConfig();
@@ -38,7 +35,6 @@ export function TurnstilePanel({ view, language, setBusy }: { view: TurnstileVie
     if (!action || locked) return;
     const trigger = event.currentTarget instanceof HTMLFormElement ? event.currentTarget.querySelector<HTMLElement>('button[type="submit"]') ?? undefined : undefined;
     setError(null);
-    // Like signing out: the change ends every session, so an unsaved draft is lost.
     if (config.dirty && !await confirmAction(t('draftConfirm'), 'account.continue', trigger)) return;
     setSubmitting(true); setBusy(true);
     try {

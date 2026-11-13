@@ -1,5 +1,4 @@
-//! Resolver scenarios (warm cache, cold upstreams) against synthetic loopback upstreams.
-//! cargo run --release --example bench -- [queries=1000] [concurrency=32]
+//! Resolver benchmark with warm-cache and cold-upstream scenarios.
 use std::{
     net::SocketAddr,
     sync::{
@@ -99,7 +98,6 @@ async fn resolve(resolver: &Resolver, query: Message) -> Result<()> {
         .resolve(&wire, "127.0.0.1".parse()?)
         .await
         .context("resolver dropped request")?;
-    // Exercise both DNS wire directions, including the per-caller transaction ID.
     let response = protocol::decode(&reply.message.to_vec()?)?;
     ensure!(
         response.id == query.id
@@ -115,8 +113,6 @@ async fn resolve(resolver: &Resolver, query: Message) -> Result<()> {
 async fn scenario(name: &str, queries: usize, concurrency: usize) -> Result<()> {
     let warm = name == "warm-cache";
     let parallel = name == "cold-parallel";
-    // Identical artificial primary latency makes cold-single vs cold-parallel a
-    // scheduler comparison. The warm scenario times cache reads after priming.
     let delay_ms = if warm { 0 } else { 20 };
     let primary = Mock::start(delay_ms, concurrency).await?;
     let secondary = match Mock::start(2, concurrency).await {
@@ -201,7 +197,6 @@ async fn scenario(name: &str, queries: usize, concurrency: usize) -> Result<()> 
         Ok(())
     }
     .await;
-    // Always stop and join both mocks, including if a benchmark assertion fails.
     let (first, second) = tokio::join!(primary.close(), secondary.close());
     outcome?;
     first?;

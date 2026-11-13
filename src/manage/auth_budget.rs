@@ -1,12 +1,5 @@
-//! Authentication attempts are charged to socket peers, independently of the
-//! global CPU budget for password hashing. No forwarding headers are identities.
-//! An IPv6 peer is charged to its /64, which one host or site usually holds
-//! whole, so rotating addresses within it buys no extra attempts; IPv4-mapped
-//! peers count as their IPv4 address.
-//!
-//! Source state is bounded and reclaimed separately from the global hash
-//! concurrency. Blocking hash work owns its permit until it finishes, even after
-//! the caller is cancelled.
+//! Authentication attempts are charged to socket peers, independently of the global CPU
+//! budget for password hashing.
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
@@ -68,8 +61,6 @@ impl Budget {
             _ => peer,
         };
         let mut sources = self.sources.lock().unwrap();
-        // Sweep a bounded batch even below capacity so unused identities are
-        // reclaimed during ordinary traffic. Never evict an unexpired debt.
         for _ in 0..RECLAIM_SCAN.min(sources.sweep.len()) {
             let source = sources.sweep.pop_front().unwrap();
             let attempts = sources.entries.get_mut(&source).unwrap();
@@ -92,8 +83,6 @@ impl Budget {
         if attempts.len() == ATTEMPTS {
             return Err(limited());
         }
-        // Timestamp capture precedes locking: keep the queue ordered when
-        // contending callers acquire the lock in a different order.
         attempts.push_back(attempts.back().copied().map_or(now, |last| last.max(now)));
         Ok(())
     }
@@ -121,8 +110,6 @@ impl Budget {
             result
         };
         tokio::task::spawn_blocking(move || {
-            // Dropping the HTTP future cannot cancel running blocking work.
-            // Its CPU permit must live here, until hashing actually finishes.
             let _permit = permit;
             work()
         })
@@ -189,7 +176,6 @@ mod tests {
         budget
             .attempt_at("192.0.2.2".parse().unwrap(), now + Duration::from_secs(5))
             .unwrap();
-        // Addresses within one IPv6 /64 share a budget; another /64 does not.
         for i in 0..ATTEMPTS {
             budget
                 .attempt_at(format!("2001:db8:0:1::{:x}", i + 1).parse().unwrap(), now)
@@ -257,7 +243,6 @@ mod tests {
             budget.password_work(|| ()).await.unwrap_err().1,
             "AUTH_BUSY"
         );
-        // The global CPU budget does not consume other sources' attempt quota.
         budget.attempt("192.0.2.1".parse().unwrap()).unwrap();
         for worker in workers {
             worker.abort();

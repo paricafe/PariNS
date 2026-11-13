@@ -37,7 +37,6 @@ async fn resolve(resolver: &Resolver, q: &Message) -> Message {
         .message
 }
 
-/// The default method: NOERROR, no records, the blocking rule's SOA and EDE 15.
 fn assert_blocked(q: &Message, reply: &Message) {
     assert_eq!(reply.response_code, ResponseCode::NoError);
     assert_eq!(reply.id, q.id);
@@ -167,7 +166,6 @@ async fn cname_blocking_applies_to_cold_and_warm_independent_subnet_answers() {
                 .await
                 .unwrap();
         }
-        // Closing the mock proves any further cache miss cannot get a valid answer.
     });
     for (id, peer) in [
         (1, "192.0.2.10"),
@@ -297,7 +295,6 @@ async fn reload_changes_cached_cname_filter_but_inflight_keeps_starting_snapshot
         .unwrap()
         .unwrap();
     let outbound = protocol::decode(&buffer[..length]).unwrap();
-    // The active request has snapshotted the blocking generation before upstream IO.
     resolver.replace_policy(Policy::default()).unwrap();
     assert!(resolver.replace_policy(Policy::default()).is_err());
     let mut answer = protocol::error_response(&outbound, ResponseCode::NoError);
@@ -323,7 +320,6 @@ async fn reload_changes_cached_cname_filter_but_inflight_keeps_starting_snapshot
             .unwrap(),
     );
 
-    // Cache contains the original response, not the old generation's synthesized block.
     assert_eq!(resolve(&resolver, &q).await.answers.len(), 2);
     resolver
         .replace_policy(toml::from_str("enabled = true\nblock_exact = ['ads.test']").unwrap())

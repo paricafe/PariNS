@@ -17,8 +17,6 @@ use hickory_proto::{
 use parins::{config::Config, ecs, ecs::Scope, protocol, resolver::Resolver};
 use tokio::{net::UdpSocket, task::JoinHandle};
 
-/// An upstream that answers every query with `code`, or not at all, and
-/// echoes ECS with scope /0 (a claim that the answer suits every network).
 fn upstream(socket: UdpSocket, code: Option<ResponseCode>) -> (Arc<AtomicUsize>, JoinHandle<()>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = calls.clone();
@@ -109,7 +107,6 @@ async fn a_cached_failure_stays_in_the_sent_network() {
     resolve(&resolver, "failing.test.", "192.0.2.10").await;
     resolve(&resolver, "failing.test.", "192.0.2.20").await;
     assert_eq!(calls.load(Ordering::SeqCst), 1, "same /24");
-    // The upstream's scope /0 does not spread the failure to other networks.
     resolve(&resolver, "failing.test.", "198.51.100.10").await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     task.abort();
@@ -151,8 +148,6 @@ async fn a_cached_failure_prefers_a_usable_stale_answer() {
         Instant::now() - Duration::from_secs(5),
         cache.epoch(),
     );
-    // The first query fails upstream and falls back; the second is answered
-    // from the cached failure, which falls back the same way.
     for expected_calls in [1, 1] {
         let reply = resolve(&resolver, "stale.test.", "192.0.2.10").await;
         assert_eq!(reply.response_code, ResponseCode::NoError);

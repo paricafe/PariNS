@@ -5,7 +5,6 @@ import type { ConfigIssue } from './context';
 
 export const cacheRuleFields: readonly [keyof CacheRuleDraft, string][] = [['name', 'name'], ['suffix', 'match'], ['qtype', 'qtype'], ['bypass', 'behavior'], ['max_ttl_secs', 'positiveTtl'], ['negative_ttl_cap_secs', 'negativeTtl'], ['prefetch', 'prefetch'], ['stale', 'stale']];
 
-/** Presentation metadata for errors on the current draft; validation remains with its existing owners. */
 export function fieldErrorTarget(path: string): { page: SettingPageId; id?: string; labelKey: string; index?: number; kind?: 'rule' | 'source' } | null {
   const rule = /^cache\.rules\.(\d+)\.([a-z_]+)$/.exec(path);
   const ruleField = rule && cacheRuleFields.find(([key]) => key === rule[2]);

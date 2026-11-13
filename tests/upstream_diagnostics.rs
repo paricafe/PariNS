@@ -186,12 +186,10 @@ async fn shutdown_abort_is_terminal_once_and_disabled_trace_keeps_aggregates() {
     assert_eq!(rows[0]["outcome"], "cancelled");
     assert_eq!(rows[0]["reason"], "shutdown");
     assert_eq!(rows[0]["count"], 1);
-    // Management diagnostics name each slot's endpoint and where it was reached.
     let address = socket_address.to_string();
     assert_eq!(counts["endpoints"][0]["slot"], 0);
     assert_eq!(counts["endpoints"][0]["label"], address);
     assert_eq!(counts["endpoints"][0]["address"], address);
-    // An HTTPS endpoint is shown by its URL host.
     let https = crate::pool(
         vec!["https://127.0.0.1/dns-query".into()],
         Mode::Weighted,

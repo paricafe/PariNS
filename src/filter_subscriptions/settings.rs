@@ -1,4 +1,4 @@
-//! Authoritative subscription settings. Validation is pure and never resolves a host.
+//! Authoritative subscription settings.
 use super::Source;
 use crate::policy::{BlockMode, BlockResponse};
 use anyhow::{Context, Result, ensure};
@@ -45,8 +45,6 @@ pub struct SourceSettings {
     pub auto_update: bool,
     #[serde(default = "daily")]
     pub update_interval_hours: u16,
-    /// Absent follows the global `[filter]` method. Changing it recompiles the
-    /// policy from stored content; it is not part of the source identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_response: Option<BlockMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,7 +63,6 @@ impl SourceSettings {
     pub(crate) fn identity(&self) -> Result<Source> {
         Source::new(&self.url, self.format)
     }
-    /// This source's block method; None follows the global one.
     pub(crate) fn response(&self) -> Result<Option<BlockResponse>> {
         match self.block_response {
             None => {

@@ -1,7 +1,4 @@
-//! Bounded background refresh for one cache generation. Work over the in-flight
-//! or rate limit is rejected at once, and cancelling or shutting down the
-//! generation aborts its tasks. Prefetch rejections are counted by reason; a
-//! rejected cache fill is counted on its own, because its query was already sent.
+//! Bounded background refresh for one cache generation.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -31,12 +28,9 @@ pub(super) struct Refresh {
     cancelled_fill_rejected: AtomicU64,
 }
 
-/// Why work enters the refresh owner.
 #[derive(Clone, Copy)]
 pub(super) enum Purpose {
-    /// A fresh hit near expiry renews its entry.
     Prefetch,
-    /// A caller left after its query was sent; the work only fills the cache.
     Fill,
 }
 
@@ -55,13 +49,9 @@ pub struct Snapshot {
     pub scheduled: u64,
     pub success: u64,
     pub failure: u64,
-    /// Prefetches refused because the same key is already refreshing.
     pub rejected_duplicate: u64,
-    /// Prefetches refused because the key failed within `backoff_secs`.
     pub rejected_cooldown: u64,
-    /// Prefetches refused by `max_inflight` or `rate_per_sec`.
     pub rejected_budget: u64,
-    /// Sent queries of departed callers that the owner refused to finish.
     pub cancelled_fill_rejected: u64,
 }
 
@@ -105,7 +95,6 @@ impl Refresh {
         {
             state.starts.pop_front();
         }
-        // A stopping generation is not a refresh decision and is not counted.
         if state.closed {
             return;
         }
@@ -135,12 +124,9 @@ impl Refresh {
             owner: Arc::downgrade(self),
             key,
             backoff: Duration::from_secs(config.backoff_secs),
-            // A bounded failure table cannot grow with random names or ECS prefixes.
             capacity: config.max_inflight.saturating_mul(8).clamp(64, 4096),
             result: None,
         };
-        // Register the shared upstream work synchronously after admission. Delaying
-        // registration until this task is polled permits an expiry-boundary race.
         let work = work();
         state.tasks.spawn(async move {
             let mut done = done;
@@ -201,7 +187,7 @@ impl Drop for Completion {
                         .insert(self.key.clone(), Instant::now() + self.backoff);
                 }
             }
-            None => {} // Cancellation is not an upstream failure.
+            None => {}
         }
     }
 }
@@ -262,11 +248,9 @@ mod tests {
         .expect("failed refresh completes");
         refresh.schedule(&query("b.test."), 0, &config, Purpose::Prefetch, refused);
         assert_eq!(counts(&refresh), [1, 1, 0, 0]);
-        // Another epoch is another key; it takes the second slot.
         refresh.schedule(&query("b.test."), 1, &config, Purpose::Prefetch, pending);
         refresh.schedule(&query("c.test."), 0, &config, Purpose::Prefetch, refused);
         assert_eq!(counts(&refresh), [1, 1, 1, 0]);
-        // Every refused fill discards a sent query, whatever the reason.
         refresh.schedule(&query("c.test."), 0, &config, Purpose::Fill, refused);
         refresh.schedule(&query("a.test."), 0, &config, Purpose::Fill, refused);
         assert_eq!(counts(&refresh), [1, 1, 1, 2]);

@@ -76,7 +76,6 @@ fn a_failure_is_cached_for_its_ttl_in_its_own_network_only() {
     assert_eq!(hit.failure, Some(Failure::StaleFallback));
     assert_eq!(hit.message.response_code, ResponseCode::ServFail);
     assert!(!hit.refresh);
-    // Other networks, the other family and no-ECS traffic still miss.
     for outgoing in [ecs("198.51.100.0/24"), ecs("2001:db8::/56"), None] {
         assert!(lookup(&cache, &q, outgoing, now).is_none());
     }
@@ -110,7 +109,6 @@ fn a_failure_never_replaces_an_answer_and_an_answer_replaces_it() {
     let cache = Cache::new(config);
     let q = query("kept.test.");
     let now = Instant::now();
-    // A fresh positive or negative answer refuses the failure.
     for response in [answer(&q, 1, 60), negative_answer(&q)] {
         insert(&cache, &q, &response, Scope::NoEcs, now);
         assert!(!fail(&cache, &q, Scope::NoEcs, now, Failure::StaleFallback).admitted());
@@ -118,7 +116,6 @@ fn a_failure_never_replaces_an_answer_and_an_answer_replaces_it() {
         assert!(hit.failure.is_none());
         cache.invalidate(None, None, None);
     }
-    // A stale answer stays next to the failure for fallback.
     insert(&cache, &q, &answer(&q, 2, 10), Scope::NoEcs, now);
     let later = now + Duration::from_secs(20);
     assert!(fail(&cache, &q, Scope::NoEcs, later, Failure::StaleFallback).admitted());
@@ -132,7 +129,6 @@ fn a_failure_never_replaces_an_answer_and_an_answer_replaces_it() {
         stale.message.answers[0].data,
         RData::A(A::new(192, 0, 2, 2))
     );
-    // A new answer supersedes the failure at once.
     insert(&cache, &q, &answer(&q, 3, 60), Scope::NoEcs, later);
     let hit = lookup(&cache, &q, None, later).unwrap();
     assert!(hit.failure.is_none());
@@ -150,7 +146,6 @@ fn a_disabled_or_bypassed_failure_cache_stores_nothing() {
     let now = Instant::now();
     assert!(!fail(&cache, &q, Scope::NoEcs, now, Failure::StaleFallback).admitted());
     assert!(lookup(&cache, &q, None, now).is_none());
-    // Only a SERVFAIL is stored as a failure.
     let cache = Cache::new(CacheConfig::default());
     let refused = protocol::error_response(&q, ResponseCode::Refused);
     assert!(
@@ -165,7 +160,6 @@ fn a_disabled_or_bypassed_failure_cache_stores_nothing() {
             )
             .admitted()
     );
-    // Work older than an invalidation does not store a failure either.
     let epoch = cache.epoch();
     cache.invalidate(None, None, None);
     assert!(

@@ -1,16 +1,9 @@
-//! Restarts a saved DNS configuration whose generation failed to start for a
-//! reason other than a listener bind (Server rebinds those listeners itself), such
-//! as unreadable certificate material, or whose running generation ended without
-//! a stop request. One task belongs to the management process; Manager decides
-//! when a retry is due (bounded backoff) and the task stops with management
-//! shutdown.
+//! Process-owned retry of stopped or failed managed DNS generations.
 use super::Shared;
 use std::{sync::Arc, time::Duration};
 
 pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Receiver<bool>) {
     loop {
-        // Poll once a second: retries are due at most every 5 to 60 seconds, and
-        // a skipped round must not spin while it stays due.
         tokio::select! {
             _ = stop.changed() => return,
             () = tokio::time::sleep(Duration::from_secs(1)) => {},
@@ -24,15 +17,9 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
                 .startup_retry_at()
                 .is_some_and(|at| at <= std::time::Instant::now())
         };
-        // Take the mutation permit only when a retry is due, so idle polling
-        // never makes an administrator's change see BUSY.
         if !due(&mut *shared.manager.lock().await) {
             continue;
         }
-        // A configuration change in progress owns DNS startup itself; try again
-        // on the next round rather than queueing behind it. An update freeze does
-        // not block this: restarting the saved revision changes no configuration,
-        // and a freshly updated process needs DNS to pass launch readiness.
         let Ok(_permit) = shared.mutation.clone().try_acquire_owned() else {
             continue;
         };
@@ -70,8 +57,6 @@ mod tests {
         let mut manager = Manager::open(state, address, active.clone()).await.unwrap();
         manager.simulate_startup_failure().await;
         assert!(manager.resolver().is_none());
-        // An update freeze (e.g. a freshly updated process awaiting launch
-        // readiness) must not block restarting the saved revision.
         manager
             .updates
             .frozen
@@ -88,8 +73,6 @@ mod tests {
         });
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(run(shared.clone(), stopping));
-        // A configuration change holds the permit past the first due time:
-        // the retry waits for it instead of starting DNS underneath it.
         let change = shared.mutation.clone().acquire_owned().await.unwrap();
         tokio::time::sleep(Duration::from_millis(6000)).await;
         assert!(shared.manager.lock().await.resolver().is_none());
@@ -101,7 +84,6 @@ mod tests {
         })
         .await;
         assert!(started.is_ok(), "DNS restarted once the permit was free");
-        // A generation that ends without a stop request is restarted too.
         let generation = shared.manager.lock().await.status()["generation"].clone();
         shared.manager.lock().await.simulate_exit();
         let restarted = tokio::time::timeout(Duration::from_secs(8), async {

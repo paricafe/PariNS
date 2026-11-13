@@ -45,7 +45,6 @@ describe('resolution mode settings', () => {
     expect(screen.getByText('递归模式下，发往权威服务器的查询不加密，开启 ECS 时还会带上客户端网段；过滤只使用本地规则和在线订阅。切换解析模式会重启 DNS 并清空缓存。').className).toContain('notice-footer');
     expect(screen.getByText(/不使用上游/)).toBeTruthy();
     expect((screen.getByLabelText('出站速率上限（次/秒）') as HTMLInputElement).value).toBe('12');
-    // Upstream settings stay editable for a later switch back to forward.
     expect((screen.getByLabelText('地址（每行一个）') as HTMLTextAreaElement).disabled).toBe(false);
   });
 

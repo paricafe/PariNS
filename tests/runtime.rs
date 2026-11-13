@@ -1,4 +1,5 @@
-//! Integration between listener ownership, one resolver, startup files and reload publication.
+//! Integration between listener ownership, one resolver, startup files and reload
+//! publication.
 mod common;
 #[path = "support/runtime.rs"]
 mod runtime_support;
@@ -46,7 +47,6 @@ async fn source_budget_is_shared_by_udp_tcp_dot_and_charges_cache_hits() {
     assert_eq!(udp(address, 71).await.answers.len(), 1);
     write(&mut tcp, &query(72)).await;
     assert_eq!(read(&mut tcp).await.answers.len(), 1);
-    // Same peer, different connection and protocol: no fresh token bucket.
     write(&mut tls, &query(73)).await;
     let denied = read(&mut tls).await;
     assert_eq!(
@@ -107,7 +107,6 @@ async fn source_inflight_rejection_does_not_cancel_admitted_udp_query() {
         .unwrap()
         .unwrap();
     assert_eq!(protocol::decode(&buffer[..length]).unwrap().id, 81);
-    // The completed query releases source concurrency, and a cache hit is admitted.
     write(&mut tcp, &query(83)).await;
     assert_eq!(read(&mut tcp).await.answers.len(), 1);
     assert_eq!(metrics.snapshot().counters["upstream_operations"], 1);
@@ -178,7 +177,6 @@ async fn failed_certificate_startup_releases_previously_bound_sockets() {
     for _ in 0..16 {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = probe.local_addr().unwrap();
-        // Hold both reservations until they are chosen so they are distinct.
         let dot_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dot_address = dot_probe.local_addr().unwrap();
         drop(probe);
@@ -285,7 +283,6 @@ async fn reload_prepares_all_rule_and_certificate_candidates_before_publication(
     assert!(udp(address, 1).await.answers.is_empty());
     std::fs::write(&rules, "enabled = false").unwrap();
     std::fs::copy(&replacement.files.cert_file, &cert.files.cert_file).unwrap();
-    // New certificate plus old private key must not publish the unblocking policy.
     assert!(reload.reload().is_err());
     assert!(udp(address, 2).await.answers.is_empty());
     let client = connect(&cert, dot).await;
@@ -349,8 +346,6 @@ async fn client_auth_only_reload_keeps_old_tls_fingerprint_and_dns_policy() {
     let blocked = udp(dns, 101).await;
     assert_eq!(blocked.response_code, ResponseCode::NoError);
     assert!(blocked.answers.is_empty());
-    // This is a new connection through the live DoT listener using the normal
-    // rustls server-auth verifier, not a prepared-key or mock handshake.
     let client = connect(&cert, dot).await;
     let presented = &client.get_ref().1.peer_certificates().unwrap()[0];
     assert_eq!(presented, &cert.der);
@@ -613,7 +608,6 @@ async fn resolver_profiles_keep_same_question_answers_and_warm_caches_isolated()
                 .send_to(&response.to_vec().unwrap(), peer)
                 .await
                 .unwrap();
-            // One response per profile; warm lookups cannot consult these closed mocks.
         }));
     }
     for (id, profile) in [(11, 0), (12, 1), (13, 1), (14, 0)] {
@@ -648,7 +642,6 @@ async fn binary_rejects_special_rule_file_on_reload_and_shuts_down_cleanly() {
 
 #[cfg(unix)]
 async fn sighup_process_case(reject_reload: bool) {
-    // Always reap the owned child, including when an assertion or deadline fails.
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {

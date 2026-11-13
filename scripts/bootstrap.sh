@@ -1,7 +1,5 @@
 #!/bin/sh
 # Download a verified release and delegate installation to its bundled installer.
-#   curl -fsSL https://github.com/paricafe/PariNS/releases/latest/download/bootstrap.sh | sudo sh
-# Keep the entry point last so a truncated piped download cannot start installing.
 set -eu
 umask 077
 
@@ -26,7 +24,6 @@ digest() {
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
-    # The only recursive deletion is our mktemp-created, privately owned leaf.
     if [ -n "${download_dir:-}" ] && [ -d "$download_dir" ] && [ ! -L "$download_dir" ]; then
         case "$download_dir" in "$temporary_parent"/parins-bootstrap.??????)
             if [ "$(owner "$download_dir")" = "$(id -u)" ] &&
@@ -93,7 +90,6 @@ main() {
     ' "$download_dir/$asset.sha256") || fail 'invalid archive checksum file'
     [ "$(digest "$download_dir/$asset")" = "$expected" ] || fail 'archive checksum mismatch'
     files='parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/parins-managed.service deploy/parins.service deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service'
-    # Reject links, special files, extra paths, duplicate entries and traversal.
     tar -tzf "$download_dir/$asset" > "$download_dir/members" || fail 'cannot list archive'
     awk -v prefix="$archive/" -v files="SHA256SUMS $files" '
         BEGIN { n = split(files, list, " "); for (i = 1; i <= n; i++) allowed[list[i]] = 1 }
@@ -111,7 +107,6 @@ main() {
     ' "$download_dir/types" || fail 'archive links and special files are forbidden'
     package="$download_dir/$archive"
     mkdir -m 0700 "$package" "$package/deploy"
-    # Extract exact regular-file contents, never archive paths or permissions.
     for name in SHA256SUMS $files; do
         grep -Fxq "$archive/$name" "$download_dir/members" || fail "missing package member: $name"
         tar -xOzf "$download_dir/$asset" "$archive/$name" > "$package/$name" || fail "cannot read package member: $name"
@@ -126,13 +121,10 @@ main() {
         expected=$(awk -v name="$name" '$2 == name {print tolower($1)}' "$package/SHA256SUMS")
         [ -n "$expected" ] && [ "$(digest "$package/$name")" = "$expected" ] || fail "package checksum mismatch: $name"
     done
-    # The installer invokes the verified helper during live preflight.
     chmod 0700 "$package/parins" "$package/parins-updater"
     set --
     if [ -n "$root" ]; then set -- "$@" --root "$root"; fi
     if "$dry_run"; then set -- "$@" --dry-run; fi
-    # The installer owns platform validation, atomic replacement and rollback.
-    # When piped, stdin is the rest of this script; the installer never reads it.
     sh "$package/install.sh" "$@" </dev/null
 }
 

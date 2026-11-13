@@ -1,5 +1,4 @@
-//! Bounded, private certificate imports. Configuration stores paths, never PEM.
-//! The manager's mutation semaphore serializes import and configuration writes.
+//! Bounded, private certificate imports.
 
 use std::{
     fs,
@@ -26,9 +25,6 @@ pub(super) struct ImportedCertificate {
     pub key_file: PathBuf,
 }
 
-/// `state_dir` is the resolved, private directory owned by the locked Store.
-/// Call only while holding the manager mutation permit. Newly created paths
-/// become observable to configuration only after the complete file is synced.
 pub(super) fn import(
     state_dir: &Path,
     certificate_pem: &str,
@@ -45,8 +41,6 @@ pub(super) fn import(
     let identity =
         crate::tls::validate_pem_identity(certificate_pem.as_bytes(), private_key_pem.as_bytes())
             .context("certificate and private key must be valid and match")?;
-    // Re-encode only parsed certificates and the validated key. In particular,
-    // a hidden key in the certificate input cannot become the stored identity.
     let mut combined = String::new();
     for cert in &identity.cert {
         append_pem(&mut combined, "CERTIFICATE", cert.as_ref());
@@ -85,8 +79,6 @@ pub(super) fn import(
             count <= MAX_IMPORTS,
             "certificate import storage limit exceeded"
         );
-        // Only a file of this length can already hold this identity; others
-        // are not read, so they cannot block an unrelated import.
         if entry.metadata()?.len() != combined.len() as u64 {
             continue;
         }
@@ -107,7 +99,6 @@ pub(super) fn import(
 
     let path = directory.join(format!("{}.pem", secret()));
     let mut file = create_private(&path).context("create private imported identity")?;
-    // Cleanup is limited to the exact file that this call created exclusively.
     if let Err(error) = file
         .write_all(combined.as_bytes())
         .and_then(|()| file.sync_all())
@@ -131,7 +122,6 @@ fn append_pem(target: &mut String, label: &str, der: &[u8]) {
     target.push_str(&format!("-----BEGIN {label}-----\n"));
     let encoded = STANDARD.encode(der);
     for line in encoded.as_bytes().chunks(64) {
-        // Base64 is ASCII by construction.
         target.push_str(std::str::from_utf8(line).expect("base64 ASCII"));
         target.push('\n');
     }
@@ -289,7 +279,6 @@ mod tests {
         fs::set_permissions(&other, fs::Permissions::from_mode(0o644)).unwrap();
         let (next_cert, next_key) = pair();
         import(&store.dir, &next_cert, &next_key).unwrap();
-        // A non-compliant file that could hold the identity is named.
         fs::set_permissions(&existing.key_file, fs::Permissions::from_mode(0o644)).unwrap();
         let error = format!("{:#}", import(&store.dir, &cert, &key).err().unwrap());
         let name = existing.key_file.file_name().unwrap().to_string_lossy();

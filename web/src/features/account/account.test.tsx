@@ -49,7 +49,6 @@ describe('administrator credential controls', () => {
     const fetcher = requests();
     render(tree()); await open();
     expect(screen.getByText('At least 12 characters.')).toBeTruthy();
-    // The console counts UTF-8 bytes, as the server does: 11 ASCII bytes are too short, 258 bytes too long.
     passwords('current-password', 'elevenbytes');
     fireEvent.click(screen.getByRole('button', { name: 'Change and sign in again' }));
     expect(screen.getByRole('alert').textContent).toBe('The password needs at least 12 characters.');
@@ -65,7 +64,6 @@ describe('administrator credential controls', () => {
     expect(screen.getByRole('alert').textContent).toContain('English letters');
     expect(fetcher.mock.calls.filter(([url]) => url === '/api/account/credentials')).toHaveLength(0);
     fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'new_admin' } });
-    // Four Chinese characters are 12 bytes, which the server accepts.
     passwords('current-password', '一二三四');
     fireEvent.click(screen.getByRole('button', { name: 'Change and sign in again' }));
     await screen.findByRole('heading', { name: 'Sign in to PariNS' });

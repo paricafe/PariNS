@@ -4,8 +4,6 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Button, Drawer, Switch, Tabs } from "./index";
 
 beforeAll(() => {
-  // jsdom does not implement native modal dialogs; browser acceptance checks
-  // actual top-layer focus containment and background inertness.
   HTMLDialogElement.prototype.showModal = function showModal() { this.setAttribute("open", ""); };
   HTMLDialogElement.prototype.close = function close() { this.removeAttribute("open"); };
 });

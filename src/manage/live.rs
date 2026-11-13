@@ -1,31 +1,4 @@
-//! Live query log WebSocket: `GET /api/query-log/live`.
-//!
-//! - Admission: `handle_inner` has already applied the usual Host/Origin and
-//!   fetch-metadata checks. This endpoint also requires one Origin header, a
-//!   valid session Cookie and a version 13 upgrade, and reserves one of
-//!   [`GLOBAL`] process slots and one of [`PER_SESSION`] slots of that session
-//!   before answering 101. Failures are ordinary JSON errors without an upgrade
-//!   (403, 401, 400, 429, or 503 while stopping).
-//! - Authentication: the first client message, within [`AUTH_TIMEOUT`], must be
-//!   `{"type":"auth","binding":…}` equal to the session's in-memory binding,
-//!   else close 4401. The binding never travels in the URL and is never logged.
-//! - Ownership: [`Hub`] owns every socket task in one JoinSet. An upgraded
-//!   socket leaves its HTTP connection permit and the 90 s HTTP lifetime; it is
-//!   bounded instead by the slots above, [`MESSAGE_LIMIT`] inbound messages,
-//!   [`OUTBOUND_LIMIT`] per push, [`IDLE`] without client messages and
-//!   [`SEND_TIMEOUT`] per write.
-//! - Closing: 4403 when the session leaves Active (logout, credential change,
-//!   realm change, eviction) or expires; 4408 idle; 4400 protocol error; 1003
-//!   binary data; 1009 oversized message; 1001 on management shutdown, which
-//!   awaits the tasks inside its existing drain bound.
-//! - Polling runs on the storage worker through at most [`QUERIES`] concurrent
-//!   requests, leaving its bounded control queue to other operations. State
-//!   comes from the cached storage status. RuntimeServices is captured through
-//!   the process observation handle, without Manager or socket IO under its lock.
-//! - Each accepted subscription receives one `subscribed` acknowledgement
-//!   before its entries. Independent `state` updates never acknowledge a
-//!   subscription; clients discard prior batches until every queued change is
-//!   acknowledged in WebSocket order.
+//! Management WebSocket for live query logs.
 use super::{ApiError, SESSION_LIFETIME, Shared, Snapshot, error, secret_matches};
 use crate::{query_log::ListOptions, runtime_services::RuntimeServices};
 use axum::{
@@ -71,7 +44,6 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 type Socket = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
 
 pub(super) struct Hub {
-    /// `None` once management stops: no socket is admitted after the drain starts.
     tasks: Mutex<Option<JoinSet<()>>>,
     stop: watch::Sender<bool>,
     connections: Arc<Semaphore>,
@@ -90,8 +62,6 @@ impl Default for Hub {
 }
 
 impl Hub {
-    /// Stop admission and ask every socket to close with 1001. The caller
-    /// awaits the returned tasks within its shutdown bound.
     pub(super) fn close(&self) -> JoinSet<()> {
         let tasks = self.tasks.lock().unwrap().take().unwrap_or_default();
         self.stop.send_replace(true);
@@ -99,7 +69,6 @@ impl Hub {
     }
 }
 
-/// One of a session's live slots, released when its socket task ends.
 struct Slot(Arc<AtomicUsize>);
 impl Slot {
     fn reserve(count: &Arc<AtomicUsize>) -> Option<Self> {
@@ -155,8 +124,6 @@ pub(super) async fn upgrade(
     if *shared.live.stop.borrow() {
         return Err(stopping());
     }
-    // Browsers always send Origin with WebSocket requests; handle_inner has
-    // compared its value. Requiring it here rejects non-browser hijacking.
     if parts.headers.get_all(header::ORIGIN).iter().count() != 1 {
         return Err(error(
             StatusCode::FORBIDDEN,
@@ -195,8 +162,6 @@ pub(super) async fn upgrade(
         .ok_or_else(upgrade_required)?;
     let services = shared.observation.services.clone();
     let live = Live {
-        // Only a receiver: the Session copy below drops at return, so removal
-        // from Active closes this channel.
         revoked: session.revoked.subscribe(),
         binding: session.binding.clone(),
         expires: Instant::from_std(session.created + SESSION_LIFETIME),
@@ -309,7 +274,6 @@ impl State {
     }
 }
 
-/// Close code to send, or `None` when the peer is gone or already closed.
 type End = Option<u16>;
 
 fn read_end(error: WsError) -> End {
@@ -384,7 +348,6 @@ impl Live {
                         Some(Err(error)) => return read_end(error),
                         Some(Ok(Message::Text(text))) => text,
                         Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
-                            // Flush the automatic Pong reply.
                             match timeout(SEND_TIMEOUT, socket.flush()).await {
                                 Ok(Ok(())) => continue,
                                 _ => return None,
@@ -418,7 +381,6 @@ impl Live {
                             }
                             sent = Some(state);
                             if next_subscription.interval.is_none() {
-                                // Manual mode reports state now and entries only on refresh.
                                 next = None;
                                 subscription = Some(next_subscription);
                                 continue;
@@ -462,8 +424,6 @@ impl Live {
         Ok(())
     }
 
-    /// Report a changed state, then entries newer than the cursor: only when
-    /// there are some, or always for an explicit refresh.
     async fn poll(
         &self,
         socket: &mut Socket,
@@ -492,7 +452,6 @@ impl Live {
                     state.log_epoch = result.log_epoch;
                     newer = Some(result);
                 }
-                // A full control queue only delays this poll.
                 Err(crate::storage::Error::Busy) => {}
                 Err(_) => state = State::current(&self.services),
             }
@@ -501,16 +460,12 @@ impl Live {
         let (entries, mut more, scanned_to) = newer.map_or((Vec::new(), false, None), |n| {
             (n.entries, n.more, Some(n.scanned_to))
         });
-        // Rows up to scanned_to were checked against the filter; unless the batch
-        // was capped (the client then reloads over HTTP), skip past them.
         if !more && let Some(scanned_to) = scanned_to {
             subscription.cursor = Some(subscription.cursor.unwrap_or(0).max(scanned_to));
         }
         if entries.is_empty() && !refresh {
             return Ok(());
         }
-        // Newest first: past the byte budget, older entries are left out and
-        // reported through `more`, exactly like the count cap.
         let mut body = String::new();
         for entry in &entries {
             let json = serde_json::to_string(entry).map_err(|_| Some(1011))?;
@@ -577,7 +532,6 @@ mod tests {
             header::SEC_WEBSOCKET_KEY,
             "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap(),
         );
-        // RFC 6455 section 1.3 example.
         assert_eq!(
             accept_key(&headers).as_deref(),
             Some("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
@@ -630,7 +584,6 @@ mod tests {
             request.into_parts().0
         };
         let status = |result: Result<Response, ApiError>| result.unwrap_err().0;
-        // Without limits the only missing piece is hyper's upgrade handle.
         assert_eq!(
             status(upgrade(&shared, &transport, parts()).await),
             StatusCode::BAD_REQUEST

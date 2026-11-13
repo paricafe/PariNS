@@ -1,19 +1,4 @@
-//! Concurrent bounded DNS cache. Shards own variant-level LRU partitions; immutable
-//! wire entries are decoded after releasing locks. No network IO belongs here.
-//! When `[cache.ecs_sharing]` is enabled, each shard also owns the bounded
-//! classification records that may store a missing-ECS answer once per family
-//! (`Scope::Learned`); see `sharing` for the learning and revocation rules.
-//! An entry written by a prefetch refresh is settled once: `refresh_useful`
-//! when an observed lookup first returns it fresh, `refresh_unused` when an
-//! observed lookup first returns it stale or it leaves the cache unseen
-//! (retention expiry, eviction, invalidation or replacement). Entries still
-//! waiting when a generation ends are not counted.
-//! Capacity diagnostics copy bounded per-shard partition occupancy and admission
-//! eviction counters. Victims are classified at eviction as fresh, retained past
-//! fresh lifetime, or expired past retention. Reading diagnostics never scans,
-//! expires or touches entries; resident occupancy is not a fresh working-set size.
-//! Management invalidation tokens bind this cache instance and its current epoch;
-//! the epoch alone only fences admission within this instance.
+//! Bounded DNS cache for upstream answers, failure responses, and cache diagnostics.
 
 use std::{
     collections::{HashMap, hash_map::RandomState},
@@ -61,7 +46,6 @@ struct Key {
 }
 
 impl Key {
-    /// `query` has passed `protocol::request`, so it has exactly one question.
     fn of(query: &Message) -> Option<Self> {
         let question = &query.queries[0];
         if question.query_class() != DNSClass::IN || !plain_edns(query) {
@@ -94,9 +78,6 @@ fn query_rejection(query: &Message) -> DecisionReason {
     }
 }
 
-/// EDE (RFC 8914) is diagnostic information, not a transaction-specific
-/// option. It can supersede old knowledge without being admitted for later
-/// replay by plain_edns / prepare_response.
 fn superseding_edns(message: &Message) -> bool {
     protocol::edns_within(
         message,
@@ -113,12 +94,8 @@ struct Entry {
     lifetime: Duration,
     retention: Duration,
     negative: bool,
-    /// An upstream SERVFAIL (RFC 9520), kept in the negative partition. Never
-    /// a stale source, never prefetched and never written to a snapshot.
     failure: Option<Failure>,
     prefetch: bool,
-    /// Written by a prefetch refresh and not yet settled as useful or unused.
-    /// Read and cleared only under the shard lock.
     refreshed: AtomicBool,
     hits: AtomicU64,
     accessed: AtomicU64,
@@ -127,7 +104,6 @@ struct Entry {
 }
 
 impl Entry {
-    /// True once for a refreshed entry; the caller holds the shard lock.
     fn settle_refresh(&self) -> bool {
         let refreshed = self.refreshed.load(Ordering::Relaxed);
         if refreshed {
@@ -154,8 +130,6 @@ struct Partition {
 impl Partition {
     fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
-            // Admission below enforces both caps. Avoid eagerly allocating a hash
-            // table from max_entries when the byte budget only fits a few entries.
             lru: LruCache::unbounded(),
             charged: Arc::new(AtomicUsize::new(0)),
             max_entries,
@@ -193,9 +167,7 @@ struct Shard {
     clock: u64,
     counts: Counts,
     sharing: sharing::Table,
-    /// Current `Scope::Learned` entries; every removal goes through `remove`.
     learned: usize,
-    /// Current failure entries, maintained like `learned`.
     failures: usize,
 }
 
@@ -213,8 +185,6 @@ impl Shard {
             .filter_map(|entry| {
                 let age = now.saturating_duration_since(entry.inserted);
                 let fresh = age < entry.lifetime;
-                // Only a stale fallback allows stale data, and a cached failure
-                // is never an answer to fall back on.
                 (entry.scope.matches(outgoing)
                     && age < entry.retention
                     && (fresh || allow_stale)
@@ -245,12 +215,9 @@ struct Policy {
     stale: bool,
 }
 
-/// What a cached upstream SERVFAIL allows when it is hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// A usable stale answer replies instead, as it would for the failure.
     StaleFallback,
-    /// Always answered as the cached SERVFAIL (DNSSEC Bogus).
     Final,
 }
 
@@ -259,11 +226,7 @@ pub struct Hit {
     pub scope: Scope,
     pub stale: bool,
     pub refresh: bool,
-    /// The source's AD bit when the answer was stored, and false for stale
-    /// data; never replayed in `message`. Only a validating source makes it
-    /// meaningful.
     pub authentic: bool,
-    /// A cached upstream SERVFAIL.
     pub failure: Option<Failure>,
 }
 
@@ -281,7 +244,6 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Config values are validated by Config before the server is bound.
     pub fn new(config: CacheConfig) -> Self {
         let negative_entries = config.max_entries * usize::from(config.negative_percent) / 100;
         let positive_entries = config.max_entries - negative_entries;
@@ -367,8 +329,6 @@ impl Cache {
         self.epoch.load(Ordering::Acquire)
     }
 
-    /// Opaque management precondition; never restored from a snapshot or reused
-    /// by a replacement cache. Internal admission continues to use `epoch`.
     pub fn invalidation_token(&self) -> String {
         self.token_at_epoch(self.epoch())
     }
@@ -487,7 +447,6 @@ impl Cache {
         object.insert("ecs_shared_hits".into(), json!(hits));
         object.insert("ecs_shared_entries".into(), json!(entries));
         object.insert("ecs_sharing_revocations".into(), json!(revocations));
-        // Copy fixed-size state under each lock; serialize only after releasing it.
         let capacity: Vec<_> = self
             .shards
             .iter()
@@ -505,7 +464,6 @@ impl Cache {
         value
     }
 
-    /// Refreshed entries settled as useful and as unused.
     pub fn refresh_outcomes(&self) -> (u64, u64) {
         (
             self.refresh_useful.load(Ordering::Relaxed),
@@ -526,15 +484,12 @@ impl Cache {
             })
     }
 
-    /// The ECS owner could not identify a safe storage namespace for this
-    /// response. Record that candidate without classifying it as budget failure.
     pub fn record_unusable_scope(&self) -> StoreDecision {
         let decision = StoreDecision::skipped(DecisionReason::EcsUnusable);
         self.diagnostics.store(decision);
         decision
     }
 
-    /// Race-closing checks do not represent another client request or refresh demand.
     pub fn peek(
         &self,
         query: &Message,
@@ -644,11 +599,9 @@ impl Cache {
             };
         }
         message.metadata.id = query.id;
-        // Stale data is past the lifetime its validation covered.
         let authentic = std::mem::take(&mut message.metadata.authentic_data) && !stale;
         message.queries = query.queries.clone();
         if let Some(mut response_edns) = protocol::reply_edns(query) {
-            // A cached failure replays the source's Extended DNS Errors.
             if entry.failure.is_some() {
                 for option in protocol::extended_errors(&message) {
                     response_edns.options_mut().insert(option);
@@ -702,8 +655,6 @@ impl Cache {
         decision
     }
 
-    /// Stores an answer like `insert_decision_if_epoch`, marked as written by a
-    /// prefetch refresh for the `refresh_useful` and `refresh_unused` counts.
     pub fn insert_refresh_if_epoch(
         &self,
         query: &Message,
@@ -738,8 +689,6 @@ impl Cache {
         if policy.bypass {
             return StoreDecision::skipped(DecisionReason::PolicyDisabled);
         }
-        // Only a complete, transaction-independent successful answer supersedes
-        // earlier knowledge. Transient errors and client-specific extensions do not.
         if !superseding_edns(response) {
             return StoreDecision::skipped(DecisionReason::UnsupportedEdns);
         }
@@ -752,8 +701,6 @@ impl Cache {
         {
             return StoreDecision::skipped(DecisionReason::UncacheableResponse);
         }
-        // Expensive response preparation remains outside the shard lock. Admission
-        // failure is distinct from supersession: TTL=0 is still newer knowledge.
         let prepared =
             prepare_response(query, response, &policy).and_then(|(stored, lifetime, negative)| {
                 let lifetime = restore.map_or(lifetime, |restore| lifetime.min(restore.remaining));
@@ -777,8 +724,6 @@ impl Cache {
             return StoreDecision::skipped(DecisionReason::EpochChanged);
         }
         self.prune(&mut shard, &key, now);
-        // Classification follows the epoch check under the same lock, so work
-        // older than an invalidation never teaches or refills shared state.
         let scope = if learning {
             let lifetime = prepared
                 .as_ref()
@@ -797,10 +742,6 @@ impl Cache {
         } else {
             scope
         };
-        // Snapshot records arrive most recently used first (see
-        // `write_clean_snapshot`). A restore cannot evict an already admitted
-        // record, supersede live knowledge, or change counters; each restored
-        // entry goes to the least recently used end.
         if restoring {
             let Ok((wire, _, negative)) = &prepared else {
                 return StoreDecision::skipped(*prepared.as_ref().unwrap_err());
@@ -819,9 +760,6 @@ impl Cache {
                 return StoreDecision::skipped(DecisionReason::Capacity);
             }
         }
-        // A narrower new scope can invalidate part of an older broad answer.
-        // Removing the whole overlapping entry is conservative; retaining it could
-        // resurrect known obsolete data after this answer expires or is uncacheable.
         let replaced: Vec<_> = shard
             .buckets
             .get(&key)
@@ -863,10 +801,6 @@ impl Cache {
         )
     }
 
-    /// Stores an upstream SERVFAIL for `servfail_ttl_secs` in the namespace of
-    /// exactly the sent query (RFC 9520). It never replaces or removes an
-    /// answer: a fresh overlapping answer refuses it, and stale answers stay
-    /// for fallback. A later answer supersedes it like any older knowledge.
     pub fn insert_failure_if_epoch(
         &self,
         query: &Message,
@@ -973,8 +907,6 @@ impl Cache {
         )
     }
 
-    /// Publishes one prepared entry under its shard lock, within the variant
-    /// ceiling and the partition budget.
     fn place(
         &self,
         shard: &mut Shard,
@@ -1008,7 +940,6 @@ impl Cache {
                 .filter(|e| e.negative == negative)
                 .min_by_key(|e| e.accessed.load(Ordering::Relaxed))
             else {
-                // A variant ceiling must not let negative churn consume positive slots.
                 shard.counts.rejections += 1;
                 return StoreDecision::rejected(DecisionReason::VariantLimit, superseded);
             };
@@ -1077,8 +1008,6 @@ impl Cache {
         }
     }
 
-    /// Acquiring every shard before advancing the epoch linearizes invalidation
-    /// with admission, including work whose encoding started before this call.
     pub fn invalidate(
         &self,
         name: Option<&Name>,
@@ -1118,10 +1047,7 @@ impl Cache {
         removed
     }
 
-    /// Charge includes entry allocations still held by readers; it is not RSS.
     pub fn snapshot(&self) -> Value {
-        // Capture the precondition before reading shards: an invalidation
-        // concurrent with observation must make this token obsolete.
         let epoch = self.epoch();
         let cache_token = self.token_at_epoch(epoch);
         let mut counts = Counts::default();
@@ -1160,14 +1086,12 @@ impl Cache {
 
     pub fn inspect(&self, name: &Name, kind: Option<RecordType>, now: Instant) -> Value {
         let name = key_name(name);
-        // Copy at most 256 Arc entries under locks, then build JSON outside them.
         let mut entries = Vec::new();
         let mut truncated = false;
         let mut sharing = None;
         for shard in &self.shards {
             let shard = shard.lock().expect("cache shard poisoned");
             if self.config.ecs_sharing.enabled {
-                // The most cautious state wins when flags or families differ.
                 sharing = shard.sharing.states(&name, kind, now).chain(sharing).max();
             }
             for p in &shard.partitions {
@@ -1239,13 +1163,10 @@ impl Cache {
     }
 }
 
-/// Conservative per-variant estimate: it includes duplicated indices, Arc controls,
-/// HashMap slack and LRU allocation. Live Arc readers retain this charge after eviction.
 fn charge(wire: &[u8], key: &Key) -> usize {
     wire.len() + key.name.len() + size_of::<Entry>() + size_of::<Key>() + 192
 }
 
-/// Cache keys hold lowercase FQDNs, so `Name` equality is exact label-wise byte equality.
 fn key_name(name: &Name) -> Name {
     let mut name = name.to_lowercase();
     name.set_fqdn(true);
@@ -1257,8 +1178,6 @@ fn scopes_overlap(a: Scope, b: Scope) -> bool {
         (Scope::Network(a) | Scope::ExactSource(a), Scope::Network(b) | Scope::ExactSource(b)) => {
             a.contains(&b.addr()) || b.contains(&a.addr())
         }
-        // A learned answer covers every network of its family, so it replaces and
-        // is replaced by any subnet answer of that family (including revocation).
         (Scope::Learned { ipv4 }, Scope::Network(n) | Scope::ExactSource(n))
         | (Scope::Network(n) | Scope::ExactSource(n), Scope::Learned { ipv4 }) => {
             n.addr().is_ipv4() == ipv4
@@ -1267,7 +1186,6 @@ fn scopes_overlap(a: Scope, b: Scope) -> bool {
     }
 }
 
-/// One entry prepared for `Cache::place`.
 struct Stored {
     wire: Vec<u8>,
     scope: Scope,
@@ -1277,28 +1195,22 @@ struct Stored {
     failure: Option<Failure>,
     prefetch: bool,
     refreshed: bool,
-    /// A restored entry's use stamp; the entry starts least recently used.
     accessed: Option<u64>,
 }
 
-/// Who supplies an answer to `Cache::admit`.
 #[derive(Clone, Copy)]
 enum Origin {
     Answer,
-    /// A prefetch refresh; the entry waits to be settled as useful or unused.
     Refresh,
     Restore(Restore),
 }
 
-/// A snapshot record's admission: its remaining fresh lifetime in seconds and
-/// its use stamp, which falls with its position in the file.
 #[derive(Clone, Copy)]
 struct Restore {
     remaining: u32,
     accessed: u64,
 }
 
-/// The single positive/negative classification used by admission and sharing.
 fn is_negative(question: &Query, response: &Message) -> bool {
     response.response_code == ResponseCode::NXDomain
         || !response
@@ -1312,8 +1224,6 @@ fn prepare_response(
     response: &Message,
     config: &Policy,
 ) -> Result<(Message, u32, bool), DecisionReason> {
-    // `admit` has established a complete NOERROR/NXDOMAIN answer. EDE may
-    // supersede older knowledge but is never admitted for replay.
     if !plain_edns(response) {
         return Err(DecisionReason::UnsupportedEdns);
     }
@@ -1338,8 +1248,6 @@ fn prepare_response(
                 .min()
                 .ok_or(DecisionReason::NegativeWithoutSoa)?
         } else {
-            // A direct NOERROR CNAME is positive; NXDOMAIN with CNAME answers
-            // cannot establish a negative result for a CNAME question itself.
             if question.query_type() == RecordType::CNAME {
                 return Err(DecisionReason::UncacheableResponse);
             }
@@ -1356,7 +1264,6 @@ fn prepare_response(
         if matches!(rr.record_type(), RecordType::SIG | RecordType::TSIG) {
             return Err(DecisionReason::UncacheableResponse);
         }
-        // RFC 2181 TTL high-bit values must be treated as zero, not multi-year TTLs.
         if rr.ttl > i32::MAX as u32 {
             return Err(DecisionReason::TtlZero);
         }
@@ -1369,7 +1276,6 @@ fn prepare_response(
     if lifetime == 0 {
         return Err(DecisionReason::TtlZero);
     }
-    // AD stays in the stored header; lookup reports it as Hit::authentic.
     stored.metadata.id = 0;
     stored.edns = None;
     Ok((stored, lifetime, negative))
@@ -1393,9 +1299,6 @@ fn cname_negative_ttl(
             return Err(DecisionReason::UncacheableResponse);
         }
     }
-    // A terminating path with exactly one hop per unique owner proves that all
-    // CNAMEs belong to this chain. Short paths leave unrelated owners; cycles
-    // still have a next hop. Duplicate identical links do not add a hop.
     let mut terminal = name;
     for _ in 0..targets.len() {
         terminal = targets
@@ -1431,8 +1334,6 @@ fn cname_negative_ttl(
 #[cfg(test)]
 mod tests;
 
-/// Whether a learned entry answers requests from the network named by an
-/// invalidation filter (same family, nonzero network).
 fn learned_serves(entry: crate::ecs::Scope, filter: crate::ecs::Scope) -> bool {
     use crate::ecs::Scope;
     match (entry, filter) {

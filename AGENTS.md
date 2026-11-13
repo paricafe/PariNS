@@ -279,8 +279,9 @@ until preview/validation.
   the runtime lock) only after the save.
 - Refresh rejection reasons and useful/unused refresh counts belong to the cache
   generation, outside persisted statistics and snapshots. A refreshed entry settles
-  once: a fresh foreground hit is useful; expiration or removal without one is
-  unused. Inspection, snapshotting and internal peeks never settle an entry.
+  once. A first foreground hit while fresh is useful. A first foreground hit
+  served stale, or eviction, expiration or other removal before a foreground
+  hit, is unused. Inspection, snapshotting and internal peeks never settle an entry.
 - Management uses HTTP on its one listener until inbound DoH is enabled, which
   selects the validated DoH identity for HTTPS; `[doh].http3` shares the DoH address
   and actual port over UDP. Management and DNS keep separate ports, ALPN and routes.

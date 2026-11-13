@@ -23,15 +23,12 @@
   border-radius: 999px;
 }
 
-/* Trend chart hover: reference line, snapped markers and a glass tooltip kept inside the chart. */
-/* The four ranges wrap on narrow screens instead of scrolling, so every range and its focus ring stay visible. */
 .beui-tabs.trend-range { flex-wrap: wrap; overflow: visible; border-radius: 18px; }
 .trend-chart { position: relative; border-radius: var(--radius-sm); }
 .trend-chart:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .trend-cursor line { stroke: currentColor; stroke-opacity: .35; stroke-dasharray: 3 3; }
 .trend-cursor circle { stroke: var(--surface-strong); stroke-width: 2; }
 .trend-gap[data-active] { fill: var(--hover); }
-/* Out of the document flow: the chart-scoped selector outranks the shared .glass position. */
 .trend-chart > .trend-tip {
   position: absolute; top: 0; left: 0; z-index: 2; pointer-events: none;
   min-width: 10rem; max-width: 100%; padding: 8px 12px;
@@ -48,7 +45,6 @@
 .trend-tip [data-series="2"] dt::before { border-top: 2.5px dotted var(--danger); }
 .trend-tip dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
 
-/* Query log: refresh interval, new-entry pill, batch insertion and inline details. */
 .log-live-controls { align-items: center; }
 .log-live-note { margin: 0; }
 .log-list-top { scroll-margin-top: 80px; }
@@ -68,7 +64,6 @@
 .log-detail-button { width: 34px; min-height: 34px; padding: 0; color: var(--link); }
 .log-detail-button[aria-expanded="true"] { background: var(--hover); }
 .log-row[data-open] > td { background: var(--hover); }
-/* The card is fixed in a body portal; the inner body scrolls so the rim stays on the outer edge. */
 .popover.log-popover { position: fixed; top: auto; left: auto; display: flex; flex-direction: column; max-width: none; padding: 0; }
 .log-popover-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 14px 16px; border-radius: inherit; outline: none; }
 .log-popover .log-detail { gap: 16px; }

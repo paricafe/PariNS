@@ -67,8 +67,6 @@ export function ioStat(text) {
   }));
 }
 
-// Fixed-rate UDP measurement. Callers own resource interpretation and acceptance;
-// finish runs before socket cleanup, preserving the lifecycle suites' boundary.
 export async function runWireLoad({ name, port, duration, slo: SLO, warmup, readMetrics, observeResources, itemFor, onAction, actionKey, expectCacheHit = true, resourceIntervalMs = 100 }, finish) {
   await warmup();
   const warmBefore = await readMetrics();
@@ -129,7 +127,6 @@ export async function runWireLoad({ name, port, duration, slo: SLO, warmup, read
         if (sent - plannedAt >= SLO.client_deadline_ms) {
           result.never_sent++; result.timeouts++; group.timeouts++; latencies.push(sent - plannedAt); continue;
         }
-        // No live ID is reused; the name/question additionally binds reused IDs.
         while (pending.has(nextId)) nextId = (nextId + 1) & 65535;
         const id = nextId; nextId = (nextId + 1) & 65535; expired.delete(id);
         const packet = query(id, item.name); const entry = { packet, blocked: item.blocked, group, due: plannedAt, sent };
@@ -139,7 +136,6 @@ export async function runWireLoad({ name, port, duration, slo: SLO, warmup, read
       }
       if (sentCount < result.planned) await delay(1);
     }
-    // Fixed duration, not last-response time, is the QPS denominator.
     await delay(Math.max(0, started + duration - performance.now()));
     while (pending.size) await delay(5);
     if (action) await action;
@@ -164,7 +160,6 @@ export async function runWireLoad({ name, port, duration, slo: SLO, warmup, read
   }
 }
 
-// The managed lifecycle suites keep their strict Linux cgroup and SLO contract.
 export async function runWirePhase(options) {
   const { name, output, slo: SLO, onAction, actionKey, safeCode, errorDiagnostic } = options;
   return runWireLoad(options, async (result, { before, after, samplingError, actionError }) => {

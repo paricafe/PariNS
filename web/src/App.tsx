@@ -60,7 +60,6 @@ export function SaveBar({ language }: { language: Language }) {
   const confirmAction = useConfirm();
   const banner = useBanner();
   const t = (key: string) => translate(key, language);
-  // A save or undo whose response was lost is confirmed by reading the configuration, never by sending it again.
   const rollbackPending = Boolean(draft?.pendingRollback);
   const [changedElsewhere, setChangedElsewhere] = useState(false);
   useEffect(() => { if (!draft?.unknownApply) setChangedElsewhere(false); }, [draft?.unknownApply]);
@@ -72,10 +71,7 @@ export function SaveBar({ language }: { language: Language }) {
     else setChangedElsewhere(true);
   });
   if (!draft || (!dirty && !draft.unknownApply && !draft.conflict)) return null;
-  // The bar unmounts once the draft is settled; keep keyboard focus inside the page rather than on <body>.
   const settleFocus = () => requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) document.getElementById('main-content')?.focus({ preventScroll: true }); });
-  // Saving applies at once. Only a change of the console's own address or protocol asks first,
-  // because it ends this session (and an HTTPS to HTTP switch also removes encryption).
   const runSave = async (trigger: HTMLElement) => {
     try {
       const prepared = await prepareSave();
@@ -120,11 +116,8 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
   const reduced = useReducedMotion();
   const [navigationHint, setNavigationHint] = useState<{ label: string; left: number; top: number; anchor: HTMLElement } | null>(null);
   const hintTimer = useRef<number | undefined>(undefined);
-  // Page transitions use the Web Animations API: time-based, no inline styles left behind, and already
-  // finished if the tab was hidden. Phones push the new page in from the right (iOS); wider screens fade it up.
   const routeContent = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
-    // Browser history restores its own scroll position on POP navigation.
     if (navigationType === 'POP') return;
     window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     document.getElementById('main-content')?.focus({ preventScroll: true });
@@ -139,7 +132,6 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
     const animation = element.animate(frames, { duration: reduced ? 150 : phone ? 420 : DURATION.enter * 1000, easing: 'cubic-bezier(.2, .9, .25, 1)' });
     return () => animation.cancel();
   }, [location.pathname, reduced]);
-  // iOS large title: the bar title and material fade in as the page title scrolls away.
   const { scrollY } = useScroll();
   const titleOpacity = useTransform(scrollY, [28, 64], [0, 1]);
   const barMaterial = useTransform(scrollY, [0, 48], [0, 1]);
@@ -229,7 +221,6 @@ function RootView() {
   const appearance = useAppearance();
   const { state, recheck, retryLogout, confirmLogout, api } = useSession();
   const t = (key: string) => translate(key, appearance.language);
-  // An unconfirmed sign-out is settled by reading the session; only a session known to remain offers Sign out again.
   const logoutCheck = useAutoConfirm(state.phase === 'logout-unknown' && state.logout === 'unconfirmed', confirmLogout, () => {});
   const stateText = state.phase === 'logout-unknown'
     ? state.logout === 'signed-in' ? 'app.stillSignedIn' : state.logout === 'unconfirmed' && logoutCheck.state === 'failed' ? 'app.logoutUnknown'

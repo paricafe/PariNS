@@ -1,6 +1,4 @@
 //! Shared query semantics and one deadline for the complete upstream operation.
-//! Request logging uses the decoded query. Transports retain its Delivery until
-//! their response write succeeds; an abandoned delivery records cancellation.
 
 use std::{
     net::IpAddr,
@@ -50,7 +48,6 @@ impl Generation {
             return current.1.clone();
         }
         let flights = Arc::new(Flights::new(config.clone()));
-        // A request captured before invalidation must not move the registry backwards.
         if epoch > current.0 {
             *current = (epoch, flights.clone());
         }
@@ -58,8 +55,6 @@ impl Generation {
     }
 }
 
-/// A response until its transport hands it over. Dropping it undelivered records
-/// cancellation; admitted requests also update the completion counters.
 pub(crate) struct Delivery<'a> {
     metrics: Option<&'a Metrics>,
     log: Option<crate::query_log::Pending<'a>>,
@@ -93,8 +88,6 @@ pub struct Reply {
     pub padding: protocol::Padding,
 }
 
-/// Why a shutdown stopped waiting for resolver work. Finite and free of
-/// client data so that terminal diagnostics can name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ForcedShutdown {
@@ -136,7 +129,6 @@ impl ForcedShutdown {
     }
 }
 
-/// Where cache misses are resolved; fixed for the life of a Resolver.
 pub(crate) enum Source {
     Forward(Box<crate::upstreams::Pool>),
     Recursive(Box<crate::recursion::Recursion>),
@@ -165,7 +157,6 @@ impl Source {
             Self::Forward(pool) => pool.exchange_observed(query, deadline, operation).await,
             Self::Recursive(recursion) => Ok(crate::upstreams::Exchange {
                 message: {
-                    // A started recursion has its queries in flight at once.
                     operation.mark_sent();
                     tokio::time::timeout_at(deadline, recursion.exchange(query)).await??
                 },
@@ -181,13 +172,10 @@ impl Source {
         }
     }
 
-    /// A DNSSEC validation failure is not an unreachable source: it is answered
-    /// as SERVFAIL with EDE 6, never replaced by stale data.
     fn validation_failed(&self, response: &Message) -> bool {
         matches!(self, Self::Recursive(_)) && crate::recursion::is_bogus(response)
     }
 
-    /// Only the validating recursor vouches for data; a forwarder's AD bit is not ours.
     fn authenticates(&self) -> bool {
         matches!(self, Self::Recursive(_))
     }
@@ -261,8 +249,6 @@ impl Resolver {
         self.query_log.clone()
     }
 
-    /// Admission failures do not enter the resolver pipeline, but remain visible
-    /// in opt-in history. Transport adapters pass the actual response or drop.
     pub(crate) fn log_rejected(
         &self,
         bytes: &[u8],
@@ -274,8 +260,6 @@ impl Resolver {
             .delivered();
     }
 
-    /// Admission failures have history but never entered the request counters.
-    /// Keep their history pending until a reply is written, or a silent drop is final.
     pub(crate) fn rejected_for_delivery(
         &self,
         bytes: &[u8],
@@ -305,9 +289,6 @@ impl Resolver {
         reply
     }
 
-    /// Resolves a query whose answer the caller writes afterwards. The request
-    /// counts as completed, and its history entry as answered, only after
-    /// `Delivery::delivered`.
     pub(crate) async fn resolve_for_delivery(
         &self,
         bytes: &[u8],
@@ -351,7 +332,6 @@ impl Resolver {
     pub fn policy_digest(&self) -> [u8; 32] {
         self.policy.snapshot().policy.semantic_digest()
     }
-    /// Keeps the first cause; later forces only repeat upstream cancellation.
     pub(crate) fn force_shutdown(&self, cause: ForcedShutdown) {
         let _ = self.shutdown_forced.compare_exchange(
             0,
@@ -382,7 +362,6 @@ impl Resolver {
             Source::Forward(_) => Vec::new(),
         }
     }
-    /// Prefetch counters of the current cache generation, for `/metrics`.
     pub fn refresh_metrics(&self) -> Vec<(&'static str, &'static str, u64, bool)> {
         let generation = self
             .generation
@@ -489,7 +468,6 @@ impl Resolver {
             .clone()
     }
 
-    /// Cache configuration changes publish a new namespace, without restarting listeners.
     pub fn replace_cache(&self, config: CacheConfig) {
         let next = Arc::new(Generation::new(config, &self.coalescing));
         let mut current = self.generation.write().expect("cache generation poisoned");
@@ -529,8 +507,6 @@ impl Resolver {
         peer: IpAddr,
         trace: &mut Trace,
     ) -> Option<Reply> {
-        // One immutable generation governs this request, including across awaits.
-        // Keep the generation owner, not just its index, across every await.
         let policy_generation = self.policy.snapshot();
         let policy = &policy_generation.policy;
         let generation = self
@@ -607,8 +583,6 @@ impl Resolver {
                     &cache.config().prefetch,
                     refresh::Purpose::Prefetch,
                     || {
-                        // Explicitly disabling coalescing also disables sharing with
-                        // foreground misses; the refresh owner's own limits still apply.
                         let joined = flights.join(&outbound, work.run(true).boxed(), sent);
                         metrics.inc(match &joined {
                             Ok((_, role, _)) => flight_counter(role),
@@ -623,8 +597,6 @@ impl Resolver {
                     },
                 );
             }
-            // A cached failure replies with a usable stale answer, as the
-            // failure it records would have; it sends no upstream query.
             if hit.failure == Some(Failure::StaleFallback)
                 && let crate::cache::LookupResult {
                     hit: Some(stale),
@@ -714,7 +686,6 @@ impl Resolver {
             }
         };
         trace.cache = Some(if result.cached {
-            // The cache stores SERVFAIL only as a cached failure.
             if matches!(&result.response, Ok((m, _)) if m.response_code == ResponseCode::ServFail) {
                 "servfail"
             } else {
@@ -732,9 +703,6 @@ impl Resolver {
         trace.upstream_trace = result.upstream_trace;
         trace.failure_stage = result.failure_stage;
         trace.failure_reason = result.failure_reason;
-        // Fallback belongs to each foreground consumer, never to the shared work:
-        // background refresh reports only actual admissions, and stale-hit counts
-        // describe replies even when many callers shared one failed exchange.
         let fallback = result
             .stale_eligible
             .then(|| cache.lookup_with_decision(&query, context.outgoing, Instant::now(), true));
@@ -758,11 +726,7 @@ impl Resolver {
                 None,
             )
         });
-        // A source answer and a fresh cached answer carry their AD bit; stale
-        // answers never do.
         let mut authentic = self.authentic(&query, message.metadata.authentic_data);
-        // Cache retains the original upstream response; policy applies equally
-        // on misses and hits and never inserts its synthesized answer.
         if let Some(block) = policy.apply_response(&query, &mut message) {
             trace.cache = Some("blocked");
             trace.block = Some(block);
@@ -780,7 +744,6 @@ impl Resolver {
 }
 
 impl Resolver {
-    /// AD is answered only to clients that signal DNSSEC awareness (RFC 6840 §5.7).
     fn authentic(&self, query: &Message, validated: bool) -> bool {
         self.upstream.authenticates()
             && validated
@@ -797,8 +760,6 @@ fn flight_counter(role: &Role) -> Counter {
     }
 }
 
-/// Network work is shared by the foreground and refresh paths; only foreground
-/// failures may consult stale data. A privacy retry never uses the original scope.
 struct Exchange {
     upstream: Arc<Source>,
     timeout: Duration,
@@ -809,14 +770,9 @@ struct Exchange {
     epoch: u64,
     metrics: Arc<Metrics>,
     trace_enabled: bool,
-    /// Set once a query of this operation reached a source.
     sent: Arc<AtomicBool>,
 }
 
-/// A foreground caller's share of upstream work. A caller that leaves last,
-/// after the query was sent, hands the work to the generation's bounded refresh
-/// owner, which lets it finish only to fill the cache. Unsent work, work over
-/// that budget and work of a stopped generation are cancelled with the caller.
 struct Waiting<'a> {
     hold: Option<Hold>,
     sent: Arc<AtomicBool>,
@@ -845,7 +801,6 @@ impl Waiting<'_> {
 
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        // Other holders keep shared work running without a refresh slot.
         if let (Some(hold), Some(fill)) = (self.hold.take(), self.fill.take())
             && self.sent.load(Ordering::Acquire)
             && let Some(mut hold) = hold.leave()
@@ -863,19 +818,15 @@ impl Drop for Waiting<'_> {
 
 impl Exchange {
     async fn run(mut self, refreshing: bool) -> Answer {
-        // Close miss/admission and scheduled-refresh/replacement races without
-        // counting a second lookup or re-fetching an already renewed entry.
         if let Some(hit) =
             self.cache
                 .peek(&self.query, self.context.outgoing, Instant::now(), false)
             && (!refreshing || !hit.refresh)
         {
-            // Carry the stored AD bit like a fresh answer's; reply rules still decide it.
             let mut message = hit.message;
             message.metadata.authentic_data = hit.authentic;
             return Answer {
                 response: Ok((message, hit.scope.reply_scope(self.context.outgoing))),
-                // A cached failure lets each caller fall back like the failure would.
                 stale_eligible: hit.failure == Some(Failure::StaleFallback),
                 admitted: false,
                 upstream: None,
@@ -901,7 +852,6 @@ impl Exchange {
         let mut retried = false;
         let mut endpoint = None;
         let deadline = tokio::time::Instant::now() + self.timeout;
-        // Each pool exchange enforces this deadline; Elapsed identifies a timeout.
         let result = async {
             let exchange = self
                 .upstream
@@ -952,8 +902,6 @@ impl Exchange {
             self.metrics.inc(Counter::UpstreamFailures);
         }
         let upstream_trace = operation.trace();
-        // A valid DNS SERVFAIL is not a fabricated transport failure. Retain
-        // actual operation failures even when a foreground caller serves stale.
         let failure =
             result
                 .is_err()
@@ -973,7 +921,6 @@ impl Exchange {
                 let decision = self.context.response_scope(&response);
                 let servfail = response.response_code == ResponseCode::ServFail;
                 let store = (!retried).then(|| {
-                    // A failure is cached only for the exact sent network.
                     let scope = if servfail {
                         self.context.source_scope()
                     } else {
@@ -1017,8 +964,6 @@ impl Exchange {
                     self.metrics.record_cache_store(store);
                     store
                 });
-                // Refresh and cache fill succeed only with an answer; a cached
-                // failure is still a failure for their accounting.
                 let admitted = !servfail && store.is_some_and(|store| store.admitted());
                 let scope = if retried { None } else { decision.reply };
                 Answer {

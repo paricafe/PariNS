@@ -7,7 +7,6 @@ import { AppearanceSheet } from './AppearanceSheet';
 import { Backdrop } from './Backdrop';
 
 beforeAll(() => {
-  // Reduced motion (and a light system theme) for this file; motion reads matchMedia once per module.
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduced-motion'), media: query, addEventListener() {}, removeEventListener() {} }));
   HTMLDialogElement.prototype.showModal = function showModal() { this.setAttribute('open', ''); };
   HTMLDialogElement.prototype.close = function close() { this.removeAttribute('open'); };

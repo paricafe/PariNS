@@ -1,5 +1,4 @@
-//! Process-owned update coordination. GitHub checks never run in an API GET or
-//! a DNS generation; accepted operations outlive their initiating HTTP request.
+//! Process-owned update coordination.
 pub(super) mod operation;
 mod state;
 use super::store;
@@ -67,8 +66,6 @@ fn failed_check(state: &mut AppState, error: &ReaderError) {
     state.check.manual = false;
 }
 
-/// A cached candidate that is not newer than the running build: an online update
-/// installed it, or the program was upgraded by other means.
 fn not_newer(candidate: &Candidate, current: &BuildInfo) -> bool {
     Version::parse(&candidate.version)
         .ok()
@@ -110,8 +107,6 @@ fn revalidate_cached_candidate(
                 .map(|error| error.to_string())
         }
     };
-    // A cached release may still be readable after helper replacement, but a
-    // complete binding to this architecture is mandatory for a new apply plan.
     if candidate.manual_reason.is_none() {
         let artifact = candidate
             .manifest
@@ -136,8 +131,6 @@ impl Coordinator {
             Ok(value) => (value.unwrap_or_default(), None),
             Err(_) => (AppState::default(), Some("update_state_unavailable")),
         };
-        // After an online update the cached candidate is the running version. Drop
-        // it (and its plan) once and persist, so it is never offered again.
         if state
             .candidate
             .as_ref()
@@ -156,9 +149,6 @@ impl Coordinator {
         let invocation = std::env::var("INVOCATION_ID")
             .ok()
             .filter(|v| ipc::valid_id(v));
-        // Store has already canonicalized its directory. Respect DynamicUser's
-        // legitimate /var/lib/private mapping, but never bind another managed
-        // instance to this machine's global installation transaction.
         let helper_scoped = cfg!(target_os = "linux")
             && invocation.is_some()
             && Path::new("/var/lib/parins-managed")
@@ -171,9 +161,6 @@ impl Coordinator {
             .and_then(Result::ok);
         let frozen = state.commit_intent.is_some()
             || root.as_ref().is_some_and(|s| s.pending_launch.is_some());
-        // Only the fixed managed installation participates in root identity
-        // reconciliation. Independent consoles cannot use the helper and must
-        // not delay startup by hashing their entire executable.
         let identity = helper_scoped.then(state::own_identity).and_then(Result::ok);
         Self {
             dir: dir.into(),
@@ -192,8 +179,6 @@ impl Coordinator {
     }
 
     pub fn skip_restore(&self) -> bool {
-        // Never hold root and app-state locks together. Runtime reconciliation
-        // can replace either snapshot independently of read-only API callers.
         let launch = self
             .root
             .lock()
@@ -259,8 +244,6 @@ impl Coordinator {
                     "reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
         }).or_else(||root.as_ref().and_then(|r|r.active_operation.as_ref()).map(|o|json!(o)));
         let last = state.operation.as_ref().filter(|o| o.finished).map(|op| {
-            // Root records a generic reason for an Abort and no version for an
-            // operation it never began; the application keeps both.
             root.as_ref().and_then(|r| r.terminal_for(&op.operation_id, &op.phase_nonce))
                 .map(|r| {
                     let mut view = json!(r);
@@ -278,9 +261,6 @@ impl Coordinator {
             "frozen":self.frozen.load(Ordering::Acquire)})
     }
 
-    // Caller holds `writing` through persistence and publication. No state/root
-    // MutexGuard crosses an await. Shutdown must await this bounded write rather
-    // than aborting its uninterruptible filesystem worker.
     async fn save_locked(&self, next: AppState) -> anyhow::Result<()> {
         let dir = self.dir.clone();
         let save = next.clone();
@@ -289,8 +269,6 @@ impl Coordinator {
             .map_err(anyhow::Error::from)
             .and_then(|result| result);
         if let Err(error) = committed {
-            // rename may already be visible: retain the durable intent in memory,
-            // fail closed and reconcile rather than replaying an uncertain write.
             if let Ok(Some(observed)) = state::read(&self.dir) {
                 if observed.commit_intent.is_some() {
                     self.frozen.store(true, Ordering::Release);
@@ -306,8 +284,6 @@ impl Coordinator {
     }
 
     fn persistence_failed_locked(&self) {
-        // Disk failure cannot make a stale due time spin. Keep old validated
-        // results, expose the error, and back off in memory even if disk is full.
         failed_check(
             &mut self.state.lock().unwrap(),
             &ReaderError {
@@ -514,8 +490,6 @@ impl Coordinator {
     }
 }
 
-/// Keeps the root's bounded recovery states distinct from missing components;
-/// each needs a different administrator action.
 fn unavailable_reason(root: Option<&str>) -> &'static str {
     match root {
         Some("manual_recovery_required") => "manual_recovery_required",
@@ -647,7 +621,6 @@ mod tests {
         let view = coordinator.view();
         assert!(view["candidate"].is_null());
         assert_eq!(view["check"]["state"], "up_to_date");
-        // Persisted once, so a restart does not bring it back.
         assert!(
             state::read(dir.path())
                 .unwrap()
@@ -655,7 +628,6 @@ mod tests {
                 .candidate
                 .is_none()
         );
-        // A same-version candidate that reaches the state later is not shown either.
         coordinator.state.lock().unwrap().candidate = Some(installed);
         assert!(coordinator.view()["candidate"].is_null());
     }
@@ -756,8 +728,6 @@ mod tests {
         coordinator.state.lock().unwrap().check.validated = true;
         coordinator
             .perform_check_with(1, &UpdatesConfig::default(), |_| async {
-                // Atomic rename onto a directory fails without using permission
-                // tricks that accidentally succeed in root-run test environments.
                 std::fs::remove_file(dir.path().join("update-state.json")).unwrap();
                 std::fs::create_dir(dir.path().join("update-state.json")).unwrap();
                 Ok((None, None))

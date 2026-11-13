@@ -1,4 +1,4 @@
-// Shared wire and Linux cgroup fixture helpers; parse also exposes owner/TTL.
+// Shared DNS wire and Linux cgroup fixture helpers.
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -15,7 +15,6 @@ export function cpuList(value) {
   return cpus.sort((a, b) => a - b);
 }
 
-// Evidence for the dedicated hosted-runner fixture, not a portable launcher.
 export async function linuxConstraints(pid) {
   const status = await readFile(`/proc/${pid}/status`, 'utf8');
   const cgroup = await readFile(`/proc/${pid}/cgroup`, 'utf8');
@@ -88,7 +87,6 @@ export function nameEnd(wire, at) {
   }
   throw new Error('missing DNS name terminator');
 }
-// Fixture assertion helper; bounded compression traversal for answer ownership.
 export function nameLabels(wire, at) {
   const labels = []; let decodedBytes = 1;
   for (let hops = 0; hops < wire.length; hops++) {

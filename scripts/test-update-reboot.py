@@ -38,7 +38,6 @@ def command(args, **kwargs):
 
 
 def probe_failure(error):
-    """Classify captured stderr without returning any captured text or arguments."""
     if isinstance(error, subprocess.TimeoutExpired):
         return {'error': 'timeout'}
     detail = {'error': 'command_failed', 'returncode': error.returncode}
@@ -56,7 +55,6 @@ def probe_failure(error):
 
 
 def cloud_init_summary(payload):
-    """Only fixed status/category names and counts may leave cloud-init output."""
     if len(payload) > 1048576:
         return {'format': 'oversized'}
     try:
@@ -84,7 +82,6 @@ def cloud_init_summary(payload):
                 if isinstance(items, list) and items:
                     counts[level] = len(items)
                     messages.extend(items)
-        # No dynamic module names, schema paths, messages or keys are echoed.
         text = '\n'.join(item[:4096].lower() for item in messages[:32] if isinstance(item, str))
         categories = [category for marker, category in (
             ('schema', 'schema'), ('ssh_genkeytypes', 'ssh_genkeytypes'),
@@ -101,16 +98,13 @@ def wait_cloud_init(ssh, observation):
         command(ssh + ['sudo', '-n', 'cloud-init', 'status', '--wait', '--format=json'], timeout=120)
     except subprocess.CalledProcessError as error:
         if error.returncode not in (1, 2):
-            raise  # SSH transport failures remain bounded readiness probes.
+            raise
         observation['last_failure'] = probe_failure(error)
         observation['cloud_init'] = cloud_init_summary(error.output)
-        # --wait has completed with an error. Repeating cannot repair this boot.
         raise RuntimeError('cloud-init terminal failure') from None
 
 
 def serial_markers(path):
-    # Only fixed booleans leave the private log. Never publish raw serial text:
-    # cloud-init can print identities and user data when its own setup fails.
     if not path.exists():
         return {'present': False}
     size = path.stat().st_size
@@ -170,8 +164,6 @@ def main():
     vm = None
     stage = 'prepare'
     os.umask(0o077)
-    # All disks, private keys, cloud-init seed and raw logs belong to this exact
-    # temporary directory. It is removed only after our Popen child has exited.
     with tempfile.TemporaryDirectory(prefix='parins-up6-') as directory:
         root = Path(directory)
         try:
@@ -204,8 +196,6 @@ def main():
             with socket.socket() as reserve:
                 reserve.bind(('127.0.0.1', 0))
                 port = reserve.getsockname()[1]
-            # The only TCP listener forwarded by QEMU is SSH on loopback. DNS
-            # and the console are checked from inside the guest over loopback.
             hostkey = ' '.join((root / 'host.pub').read_text().split()[:2])
             (root / 'known_hosts').write_text(f'[127.0.0.1]:{port} {hostkey}\n')
             options = ['-i', str(root / 'client'), '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
@@ -243,7 +233,6 @@ def main():
                             return boot
                     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                         observation['last_failure'] = probe_failure(error)
-                        # Read-only readiness probes only, never replay mutations.
                     time.sleep(2)
                 raise TimeoutError('guest boot readiness')
 
@@ -252,8 +241,6 @@ def main():
                     payload = command(ssh + ['sudo', '-n', 'python3', '-', action, marker],
                                       input=guest_script, timeout=300)
                 except subprocess.CalledProcessError as error:
-                    # Preserve only fixed diagnostic fields, never subprocess
-                    # stderr or response bodies that might carry credentials.
                     try:
                         detail = json.loads(error.output)
                         if detail.get('stage') == action and isinstance(detail.get('line'), int):
@@ -276,8 +263,6 @@ def main():
                 return observation
 
             def reboot(previous):
-                # One request; even a disconnected SSH result is resolved only
-                # by a changed boot_id, never by issuing a second reboot.
                 attempt = subprocess.run(ssh + ['sudo', '-n', 'systemctl', 'reboot'],
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
                 assert attempt.returncode in (0, 255)
@@ -300,7 +285,6 @@ def main():
             else:
                 stage = 'precommit-' + ('hard-reset' if scenario == 'hard-reset' else 'reboot')
                 if scenario == 'hard-reset':
-                    # A virtual hardware reset, not a claim of physical power loss.
                     qmp(root / 'qmp.sock', 'system_reset')
                     wait_boot(normal['boot_id'])
                 else:
@@ -345,6 +329,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        # Never echo subprocess stderr, cloud-init data, auth or private paths.
         print(json.dumps({'result': 'failed', 'error_type': type(error).__name__}))
         sys.exit(1)

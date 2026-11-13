@@ -1,24 +1,4 @@
-//! Bounded DoQ and HTTP/3 adapters. DNS semantics stay in the shared ingress.
-//!
-//! QUIC listener ownership includes Quinn's drivers and the final socket release
-//! (see `quic::lifecycle`). Server retains this cleanup across adapter cancellation,
-//! and a completed shutdown permits immediate rebinding of the same address.
-//!
-//! Admission: an Initial from an address Quinn has not validated is answered with a
-//! stateless Retry and takes no connection slot or source budget, so spoofed
-//! sources cannot hold handshakes open. Only a validated Incoming (its Retry or
-//! NEW_TOKEN token proved the address) takes the global slot and the per-source
-//! budget before the handshake starts.
-//!
-//! Shutdown: only request streams with a complete query (a DoQ stream whose FIN
-//! arrived, an HTTP/3 request whose body ended) can force a stop. Unfinished
-//! handshakes and streams still receiving their query are cancelled at once and
-//! recorded as `handshake_shutdown` or `stream_shutdown`. Peer close notification (QUIC close, like the
-//! HTTP/2 GOAWAY acknowledgement in `doh`) uses at most half the shutdown grace, then
-//! the connection is dropped. Any force records its first bounded cause, and a
-//! terminal stop that cannot publish a clean cache snapshot logs that cause. An
-//! error exit outside a stop drains within the same grace without forcing, so the
-//! shared upstream pool keeps serving while the listener is restarted.
+//! Bounded DoQ and HTTP/3 adapters.
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Result, ensure};
@@ -31,7 +11,6 @@ use tokio::{
 
 use crate::{ingress::Ingress, resolver::ForcedShutdown};
 pub mod diagnostics;
-/// RFC 9250 transaction cancellation code.
 const DOQ_REQUEST_CANCELLED: VarInt = VarInt::from_u32(3);
 mod lifecycle;
 use diagnostics::{Event, Guard};
@@ -58,7 +37,6 @@ pub enum Protocol {
     H3,
 }
 
-/// `max_streams` is the validated `max_inflight`, capped at 1024.
 pub fn bind(
     address: SocketAddr,
     tls: Arc<rustls::ServerConfig>,
@@ -69,10 +47,7 @@ pub fn bind(
     tls.max_early_data_size = 0;
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-    // No rebinding to a new peer identity after ECS provenance is established.
     config.migration(false);
-    // Before the shared connection semaphore can admit handshakes, Quinn's
-    // incoming queue and its buffered packets also need finite budgets.
     config.max_incoming(64);
     config.incoming_buffer_size(16 * 1024);
     config.incoming_buffer_size_total(1024 * 1024);
@@ -80,15 +55,13 @@ pub fn bind(
     transport.max_concurrent_bidi_streams(VarInt::from_u32(max_streams as u32));
     transport.max_concurrent_uni_streams(VarInt::from_u32(match protocol {
         Protocol::Doq => 0,
-        Protocol::H3 => 3, // HTTP control + QPACK encoder/decoder
+        Protocol::H3 => 3,
     }));
     transport.stream_receive_window(VarInt::from_u32(128 * 1024));
     transport.receive_window(VarInt::from_u32(1024 * 1024));
     transport.send_window(1024 * 1024);
     transport.datagram_receive_buffer_size(None);
     transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
-    // Defer background drivers until serve: failed or unused bind candidates
-    // then release their sockets synchronously on drop.
     Ok(Listener {
         socket: std::net::UdpSocket::bind(address)?,
         config,
@@ -124,9 +97,6 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
                 if !incoming.remote_address_validated() {
-                    // Quinn guarantees may_retry() for an unvalidated address. A
-                    // Retry is not counted: `incoming` stays one per client
-                    // connection, and the persisted counter set stays fixed.
                     if let Err(error) = incoming.retry() {
                         error.into_incoming().refuse();
                     }
@@ -150,8 +120,6 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
                 connections.spawn(async move {
                     let _permit = permit;
                     let _source = source;
-                    // An unfinished handshake owns no resolver work: stopping drops it
-                    // (recorded as HandshakeShutdown) and endpoint close finishes it.
                     let mut stop = context.stop.clone();
                     let handshake = tokio::select! {
                         _ = stop.changed() => return,
@@ -171,15 +139,11 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
             }
         }
     }
-    // Close notification ends at most half a grace after the stop (less if the
-    // drain took longer): an unresponsive peer must not hold the listener until
-    // the server-wide grace forces the stop.
     let close_by = Instant::now() + ingress.shutdown_grace / 2;
     ingress
         .drain(&mut connections, ForcedShutdown::QuicDrain)
         .await;
     endpoint.close(VarInt::from_u32(0), b"shutdown");
-    // Owned drivers are joined afterwards by the endpoint owner.
     let _ = timeout_at(close_by, endpoint.wait_idle()).await;
     Ok(())
 }
@@ -201,8 +165,6 @@ async fn doq_connection(connection: Connection, ingress: Ingress) {
                     let mut stage = 0;
                     match timeout(context.io_timeout, doq_request(send, recv, &context, peer, &mut guard, &mut stage)).await {
                         Ok(Ok(())) => {},
-                        // A client can cancel its own stream without terminating
-                        // unrelated transactions on this connection.
                         Ok(Err(error)) if error.is::<quinn::WriteError>() || error.is::<quinn::ClosedStream>() => {guard.finish(diagnostics::write_error(&error));},
                         failure => {
                             guard.finish(if failure.is_err() {match stage {0=>Event::StreamReadDeadline,1=>Event::StreamRequestDeadline,_=>Event::StreamWriteDeadline}} else {Event::StreamProtocolInvalid});
@@ -217,9 +179,6 @@ async fn doq_connection(connection: Connection, ingress: Ingress) {
     connection.close(VarInt::from_u32(0), b"closed");
 }
 
-/// During a stop only the listener drain counts the grace: it forces the stop
-/// and aborts this connection on expiry. A connection that ends outside a stop
-/// drains its streams within the grace without forcing.
 async fn drain_streams(ingress: &Ingress, streams: &mut JoinSet<()>) {
     if *ingress.stop.borrow() {
         while streams.join_next().await.is_some() {}
@@ -236,15 +195,10 @@ async fn doq_request(
     guard: &mut Guard,
     stage: &mut u8,
 ) -> Result<()> {
-    // read_to_end waits for FIN and rejects a second frame or oversized body.
-    // Biased: a frame whose FIN arrived before the stop is still answered.
     let read = tokio::select! {
         biased;
         read = recv.read_to_end(65537) => read,
         () = ingress.stopped() => {
-            // No resolver work yet. Reset explicitly: dropping a SendStream would
-            // finish it, which a client reads as an empty response. The guard
-            // records StreamShutdown on drop.
             let _ = recv.stop(DOQ_REQUEST_CANCELLED);
             let _ = send.reset(DOQ_REQUEST_CANCELLED);
             return Ok(());
@@ -276,8 +230,6 @@ async fn doq_request(
         _ = send.stopped() => {guard.finish(Event::StreamPeerCancelled);return Ok(());},
     };
     *stage = 2;
-    // The shared ingress never answers with EDNS TCP keepalive: requests drop it
-    // (`protocol::request`) and the upstream pool strips it from answers.
     if let Some(mut response) = response {
         response[..2].copy_from_slice(&[0, 0]);
         send.write_all(&(response.len() as u16).to_be_bytes())
@@ -339,7 +291,6 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
                             guard.finish(Event::StreamResponseHandedToTransport);
                         }
                         Ok(Ok(H3Outcome::ConnectionLost)) => guard.finish(Event::StreamConnectionLost),
-                        // The guard records StreamShutdown on drop.
                         Ok(Ok(H3Outcome::Shutdown)) => {},
                         Ok(Err(error)) => guard.finish(diagnostics::h3_error(&error)),
                         Err(_) => guard.finish(Event::HttpRequestDeadline),
@@ -355,7 +306,6 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
 enum H3Outcome {
     Status(u16),
     ConnectionLost,
-    /// Cancelled at shutdown before the request (headers and body) was complete.
     Shutdown,
 }
 
@@ -368,8 +318,6 @@ async fn h3_request(
     connection: &Connection,
     local_port: u16,
 ) -> Result<H3Outcome> {
-    // Biased: a request received in full before the stop is still answered.
-    // Dropping an unresolved request leaves its stream to the connection close.
     let (request, mut stream) = tokio::select! {
         biased;
         resolved = resolver.resolve_request() => resolved?,
@@ -379,7 +327,6 @@ async fn h3_request(
         biased;
         body = h3_body(&mut stream) => body?,
         () = ingress.stopped() => {
-            // No resolver work yet: the peer may retry this request elsewhere.
             stream.stop_sending(h3::error::Code::H3_REQUEST_REJECTED);
             stream.stop_stream(h3::error::Code::H3_REQUEST_REJECTED);
             return Ok(H3Outcome::Shutdown);
@@ -408,10 +355,6 @@ async fn h3_request(
         &body,
     );
     let (status, response, delivery) = match parsed {
-        // h3 0.0.8 does not expose response STOP_SENDING through RequestStream.
-        // Whole-connection loss cancels immediately; a reset of only this H3
-        // stream is observed at response write or the enclosing I/O deadline,
-        // and the undelivered request then counts as cancelled.
         Ok(query) => match tokio::select! {
             handled = ingress.handle_for_delivery(&query, peer, "doh3") => handled,
             _ = connection.closed() => return Ok(H3Outcome::ConnectionLost),
@@ -439,7 +382,6 @@ async fn h3_request(
     Ok(H3Outcome::Status(status))
 }
 
-/// Reads the body until FIN; `None` stops reading at the DNS message size limit.
 async fn h3_body(stream: &mut H3Stream) -> Result<Option<Vec<u8>>> {
     let mut body = Vec::new();
     while let Some(mut data) = stream.recv_data().await? {

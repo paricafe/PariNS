@@ -24,14 +24,12 @@ export interface ListenerStatus {
   error: string | null;
 }
 
-/** Cache usage and counters of the running generation. */
 export interface CacheUsage {
   cache_token: string; epoch: number; entries: number; max_entries: number; bytes: number; max_bytes: number;
   positive_entries: number; negative_entries: number; hits: number; stale_hits: number; misses: number; bypasses: number;
   evictions: number; rejections: number; ecs_shared_hits: number; ecs_shared_entries: number; ecs_sharing_revocations: number;
 }
 
-/** `GET /api/status`, the fields the console reads. */
 export interface StatusView {
   running: boolean;
   lifecycle_phase: 'stable' | 'starting' | 'stopping';
@@ -43,13 +41,9 @@ export interface StatusView {
   storage: StorageStatus;
   cache_persistence: SnapshotReport;
   dns_health: DnsHealth;
-  /** Resolution mode of the running generation; null while DNS is not running. */
   resolution_mode: 'forward' | 'recursive' | null;
-  /** Per-listener state of the running generation; null while DNS is stopped. */
   listeners: ListenerStatus[] | null;
-  /** `upstreams` is null in recursive mode; `recursion` is null in forward mode. Both are null while DNS is not running. */
   diagnostics: { cache: CacheDiagnostics | null; upstreams: UpstreamDiagnostics | null; recursion: RecursionDiagnostics | null; quic: QuicDiagnostics };
-  /** Null while DNS is not running. */
   cache: CacheUsage | null;
   doh_listen: string | null;
   doh_http3: boolean;
@@ -122,11 +116,6 @@ export function histogramRows(buckets: readonly HistogramBucket[]): { lowerMilli
   });
 }
 
-/**
- * Cache lookups by how they were answered. `misses` are the lookups that needed
- * their own upstream request; the others were answered from the cache, from a
- * stale entry, or by joining an identical query already in flight.
- */
 export interface CacheBreakdown { lookups: number; hits: number; stale: number; joined: number; misses: number }
 
 export function cacheBreakdown(counters: Record<string, number> | null | undefined): CacheBreakdown | null {
@@ -136,11 +125,9 @@ export function cacheBreakdown(counters: Record<string, number> | null | undefin
   if (lookups <= 0) return null;
   const stale = counters.cache_lookup_stale ?? 0;
   const joined = counters.flight_joined ?? 0;
-  // A joined query whose shared exchange failed can also be answered stale; never count past the lookups.
   return { lookups, hits, stale, joined, misses: Math.max(0, lookups - hits - stale - joined) };
 }
 
-/** Hit rate: share of cache lookups that needed no separate upstream request. */
 export function cacheHitRate(counters: Record<string, number> | null | undefined): number | null {
   const breakdown = cacheBreakdown(counters);
   return breakdown ? (breakdown.lookups - breakdown.misses) / breakdown.lookups * 100 : null;

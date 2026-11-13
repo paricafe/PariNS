@@ -117,7 +117,6 @@ fn full_table_preserves_token_debt_and_active_permits() {
         Some(Denied::TableFull)
     );
     drop(active);
-    // Use a separate table to check debt independently of the full refill above.
     let limiter = Arc::new(Limiter::new(&Settings {
         max_sources: 1,
         burst: 1,
@@ -253,7 +252,6 @@ fn bounded_sweep_eventually_finds_inactive_entries_without_evicting_active_ones(
         .collect();
     drop(query_at(&limiter, peer(17), now).unwrap());
     let refilled = now + Duration::from_secs(1);
-    // First pass checks only the sixteen active entries, then advances its cursor.
     assert_eq!(
         query_at(&limiter, peer(18), refilled).err(),
         Some(Denied::TableFull)

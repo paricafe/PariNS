@@ -1,5 +1,4 @@
-//! One monotonic launch budget around verified process observations. Storage
-//! checking can outlast DNS startup; it never substitutes for full readiness.
+//! One monotonic launch budget around verified process observations.
 use super::journal::Readiness;
 use crate::update::ipc::{Health, PendingLaunch};
 use anyhow::{Context, Result, bail};
@@ -93,7 +92,6 @@ mod tests {
             }
             let start = Instant::now();
             wait(&pending, 7, async || {
-                // DNS is ready throughout the production failure scenario.
                 let ready = start.elapsed() >= Duration::from_secs(109);
                 health.storage_healthy = ready;
                 health.storage_settings_applied = ready;

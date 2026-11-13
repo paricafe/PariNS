@@ -1,5 +1,4 @@
 //! DNS over TCP framing, shared by downstream and upstream connections.
-//! The caller owns the deadline for the entire frame, not each partial read.
 
 use std::io;
 

@@ -1,5 +1,4 @@
-//! Candidate preflight is read-only: no Store::open, runtime, database, lock,
-//! cache consumption, listener, or background task is constructed here.
+//! Read-only preflight for managed configuration and candidate updates.
 use super::{store, transport::Snapshot};
 use crate::private_files::read_regular;
 use crate::{config::Config, tls::CertificateRole};
@@ -21,16 +20,11 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     ensure!(metadata.is_dir(), "management path must be a directory");
     crate::private_files::private_permissions(&metadata, 0o700)?;
     let saved = store::read_stored(&dir)?.context("management is not initialized")?;
-    // Startup reads the Turnstile keys as well; reject a file this version cannot.
     super::turnstile::read(&dir)?;
     let config = Config::parse_in(&saved.toml, &dir)?;
-    // Startup reads the rollback copy too; a copy this version rejects would
-    // keep the candidate's management from opening.
     super::runtime::previous_fingerprints(&saved, &dir)?;
     let snapshot = Snapshot::prepare(&config, address)?;
     config.check_non_identity_files()?;
-    // A candidate that completes these steps accepts this configuration; the
-    // report then only shows that both versions read the same inputs.
     crate::filter_subscriptions::service::read_only(
         &dir.join("filter-subscriptions"),
         &config.filter_subscriptions,
@@ -73,8 +67,6 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
         }
     }
     let certificates: Vec<&[u8]> = certificates.iter().map(Vec::as_slice).collect();
-    // External regular symlinks are allowed as with the existing TLS loader,
-    // but not devices or unbounded IO.
     let upstream_ca = match &config.upstreams.ca_file {
         Some(path) => read_regular(path, 1024 * 1024, "upstream CA")?,
         None => Vec::new(),
@@ -171,8 +163,6 @@ mod tests {
         );
     }
 
-    /// Each input category changes only its own digest; the same inputs give the
-    /// same report however this version compiles them.
     #[test]
     fn report_digests_each_version_independent_input_on_its_own() {
         let temp = tempfile::tempdir().unwrap();
@@ -186,7 +176,6 @@ mod tests {
         };
         std::fs::write(&rules, "enabled = true\nblock_exact = ['one.test']\n").unwrap();
         write_ca("ca-one.test");
-        // Top-level keys go first, before any table.
         let toml = |extra: &str| {
             format!(
                 "filter_file = {:?}{extra}\n{}",

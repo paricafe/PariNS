@@ -1,3 +1,5 @@
+// Adapted from beUI Tabs. See README.md in this directory.
+
 import clsx from "clsx";
 import { motion, useReducedMotion } from "motion/react";
 import { useId, useRef, type KeyboardEvent, type ReactNode } from "react";
@@ -17,7 +19,6 @@ export interface TabsProps {
   className?: string;
 }
 
-// Based on beUI Tabs' moving underline; the adapted API is fully controlled.
 export function Tabs({ items, value, onChange, label, className }: TabsProps) {
   const indicatorId = useId();
   const buttons = useRef<Array<HTMLButtonElement | null>>([]);

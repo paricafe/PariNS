@@ -19,7 +19,6 @@ describe('cache rules', () => {
     const third = screen.getByDisplayValue('c.test');
     fireEvent.click(screen.getAllByRole('button', { name: 'Remove rule' })[1]);
     await waitFor(() => expect(screen.queryByDisplayValue('b.test')).toBeNull());
-    // The third row keeps its element: only the removed row left the list.
     expect(screen.getByDisplayValue('c.test')).toBe(third);
     expect(screen.getByRole('button', { name: 'Move rule 2 up' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Move rule 3 up' })).toBeNull();
@@ -39,7 +38,6 @@ describe('cache rules', () => {
     expect(ttl.id).toBe(originalId);
     expect(document.querySelectorAll(`[id="${originalId}"]`)).toHaveLength(1);
     await waitFor(() => {
-      // The removed row is still animating out when focus is resolved.
       expect(screen.getByDisplayValue('a.test')).toBeTruthy();
       expect(document.activeElement).toBe(ttl);
     });

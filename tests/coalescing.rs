@@ -156,7 +156,6 @@ async fn budgets_reject_without_extra_io_and_capacity_returns_when_the_work_ends
         resolver.metrics().snapshot().counters["upstream_operations"],
         1
     );
-    // The sent query goes on to fill the cache and keeps its group until it ends.
     drop((first, second));
     assert_eq!(resolver.refresh_snapshot().active, 1);
     respond(&socket, &sent, upstream).await;
@@ -228,8 +227,6 @@ async fn late_joiner_does_not_restart_the_upstream_deadline() {
     let started = tokio::time::Instant::now();
     let mut first = Box::pin(resolver.resolve(&wire, "192.0.2.10".parse().unwrap()));
     assert!(poll!(&mut first).is_pending());
-    // Real UDP readiness must not let paused time auto-advance to the deadline.
-    // Keep a task runnable until receipt, with a wall-clock watchdog for IO.
     tokio::select! {
         _ = receive_while(&socket, &mut first) => {},
         _ = async {

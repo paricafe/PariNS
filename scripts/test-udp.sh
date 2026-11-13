@@ -19,7 +19,6 @@ done
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
-# Build as the invoking user, outside sudo and before disconnecting networking.
 build_output=$(mktemp "${TMPDIR:-/tmp}/parins-udp-build.XXXXXX")
 trap 'rm -f "$build_output"' EXIT
 trap 'exit 1' HUP INT TERM
@@ -37,8 +36,6 @@ print(paths[0])
 parent_namespace=$(readlink /proc/self/ns/net)
 
 sudo unshare --net -- sh -eu -c '
-    # Verify isolation before the first networking mutation. No host address,
-    # firewall, DNS, trust or service is changed; namespace exit removes aliases.
     [ "$(readlink /proc/self/ns/net)" != "$1" ] || exit 2
     ip link set lo up
     ip address add 192.0.2.1/24 dev lo

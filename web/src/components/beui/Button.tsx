@@ -1,3 +1,5 @@
+// Adapted from beUI Button. See README.md in this directory.
+
 import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 import clsx from "clsx";
 import { forwardRef, type ReactNode } from "react";
@@ -9,7 +11,6 @@ export interface ButtonProps extends Omit<HTMLMotionProps<"button">, "children">
   children?: ReactNode;
 }
 
-// Based on beUI Button/base.tsx. Demo ripple and magnetic effects are omitted.
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
   { variant = "primary", className, children, disabled, ...props },
   ref,

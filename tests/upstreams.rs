@@ -53,7 +53,6 @@ fn client(config: &Config) -> anyhow::Result<Arc<Pool>> {
     Pool::new(&config.upstreams, config).map(Arc::new)
 }
 
-/// The resolver's call with the example configuration's 2-second query timeout.
 async fn exchange(pool: &Pool, query: &Message) -> anyhow::Result<parins::upstreams::Exchange> {
     pool.exchange_observed(
         query,
@@ -197,8 +196,6 @@ fn identity(
     (identity.directory, identity.files.cert_file, tls)
 }
 
-/// A single-exchange DoT peer for `tls::Upstream`; `invalid_id` answers with
-/// an unrelated transaction ID.
 async fn dot_peer(
     tls: Arc<rustls::ServerConfig>,
     invalid_id: bool,
@@ -207,7 +204,6 @@ async fn dot_peer(
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        // Certificate rejection is an expected outcome in authentication tests.
         let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(tls).accept(stream).await else {
             return;
         };
@@ -654,7 +650,6 @@ async fn doh_rejects_redirect_wrong_content_type_and_oversize_body() {
     }
 }
 
-/// RFC 8484 GET: the query travels base64url-encoded (unpadded) in `dns`.
 fn doh_get_query(uri: &http::Uri) -> Message {
     use base64::Engine;
     let value = uri
@@ -804,7 +799,6 @@ async fn dual_endpoint(tls: &rustls::ServerConfig) -> (quinn::Endpoint, TcpListe
 }
 
 async fn silent_udp_and_tcp() -> (TcpListener, UdpSocket) {
-    // TCP and UDP allocate ephemeral ports independently; reserve both before use.
     for _ in 0..32 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         match UdpSocket::bind(listener.local_addr().unwrap()).await {
@@ -874,10 +868,6 @@ async fn serve_h3(endpoint: quinn::Endpoint, case: usize) -> usize {
     count
 }
 
-/// Serves `requests` DoH GETs, handling concurrent streams on each connection.
-/// After `per_connection` requests the connection is closed gracefully (GOAWAY).
-/// With `stall_first`, the very first request is held open and never answered.
-/// Returns the number of TCP connections the client opened.
 async fn serve_h2_with(
     listener: TcpListener,
     tls: Arc<rustls::ServerConfig>,
@@ -989,7 +979,6 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
     let (_dir, ca, tls) = identity(b"h2");
     let (listener, silent) = silent_udp_and_tcp().await;
     let address = listener.local_addr().unwrap();
-    // A bound silent UDP port simulates a firewall dropping QUIC packets.
     let peers = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let received = peers.clone();
     let blackhole = tokio::spawn(async move {
@@ -999,10 +988,6 @@ async fn h3_unavailable_falls_back_to_authenticated_h2_and_cools_down() {
         }
     });
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
-    // This is a real-socket fallback/cooldown test, not a sub-100ms latency
-    // benchmark: leave room for Linux TCP ACK timers and CI scheduling after
-    // the bounded 250ms QUIC probe. The test below separately checks that
-    // short caller deadlines include both connection waiting and fallback.
     config.query_timeout_ms = 1000;
     let settings = &mut config.upstreams;
     settings.ca_file = Some(ca);
@@ -1199,7 +1184,6 @@ async fn h3_untrusted_certificate_and_h2_fallback_both_fail_closed() {
     tcp_server.await.unwrap();
 }
 
-/// A failure of a sent stream does not resend the query or retire its connection.
 #[tokio::test]
 async fn h3_stream_failures_are_not_resent_and_do_not_cool_down() {
     use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome, Reason};
@@ -1353,7 +1337,6 @@ async fn h3_failed_handshake_after_bootstrap_rotation_cools_down() {
     };
     use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome};
     use std::sync::atomic::{AtomicBool, Ordering};
-    // Cover both a live old connection and one removed by the cache lookup.
     for close_old in [false, true] {
         let (_dir, ca, tls) = identity(b"h3");
         let old_endpoint = h3_endpoint(&tls);
@@ -1399,7 +1382,6 @@ async fn h3_failed_handshake_after_bootstrap_rotation_cools_down() {
         assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
         if close_old {
             old_endpoint.close(0u32.into(), b"test old connection closed");
-            // Let the peer close arrive before the new-address lookup.
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         rotated.store(true, Ordering::SeqCst);
@@ -1435,7 +1417,6 @@ async fn h3_failed_handshake_after_bootstrap_rotation_cools_down() {
                 Some(ActualProtocol::Doh2)
             );
         }
-        // The first failed handshake sent a QUIC probe to the new address.
         assert!(
             timeout(
                 Duration::from_millis(100),
@@ -1587,7 +1568,6 @@ async fn h3_caller_cancellation_preserves_other_streams_and_reuses_connection() 
         };
         tokio::pin!(handler);
         tokio::select! { _ = &mut handler => {}, _ = server.accept() => panic!("unexpected connection close") }
-        // STOP_SENDING propagated for the cancelled request, without closing the connection.
         assert!(
             stalled
                 .send_response(http::Response::builder().body(()).unwrap())
@@ -1729,7 +1709,6 @@ async fn age_upstream(
                     .await
                     .unwrap();
                 let mut connection = h2::server::handshake(stream).await.unwrap();
-                // The client reuses one HTTP/2 connection; answer each request on it.
                 while let Some(Ok((request, mut respond))) = connection.accept().await {
                     let count = count.clone();
                     tokio::spawn(async move {
@@ -1873,7 +1852,6 @@ async fn doq_rotation(cancel_old: bool) {
                 _ => None,
             };
             if let Some(data) = data {
-                // Zero is a short bootstrap TTL: the very next query must resolve again.
                 response.add_answer(Record::from_rdata(query.name().clone(), 0, data));
             }
             bootstrap
@@ -1928,8 +1906,6 @@ async fn doq_rotation(cancel_old: bool) {
     } else {
         assert_eq!(old_request.await.unwrap().unwrap().message.id, 123);
     }
-    // The retired owner closes as soon as its last request ends, even while
-    // the client (and the new owner) remain alive.
     timeout(Duration::from_secs(2), old_server)
         .await
         .unwrap()
@@ -2035,12 +2011,10 @@ async fn h2_goaway_moves_new_queries_to_a_new_connection_without_replay() {
         Mode::Weighted,
     );
     config.upstreams.ca_file = Some(ca);
-    // The server sends GOAWAY after each answered request.
     let server = tokio::spawn(serve_h2_with(listener, tls, 3, 1, false));
     let client = client(&config).unwrap();
     for _ in 0..3 {
         assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
-        // Let the GOAWAY arrive before the next query, as it would between queries in production.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(
@@ -2061,7 +2035,6 @@ async fn h2_caller_cancellation_resets_one_stream_and_keeps_the_connection() {
         Mode::Weighted,
     );
     config.upstreams.ca_file = Some(ca);
-    // The first request is held unanswered; the caller gives up on it.
     let server = tokio::spawn(serve_h2_with(listener, tls, 2, usize::MAX, true));
     let client = client(&config).unwrap();
     let stalled = timeout(Duration::from_millis(200), exchange(&client, &query())).await;
@@ -2096,7 +2069,6 @@ async fn h3_definite_refusal_stops_h3_for_the_pool_generation() {
     let tcp_server = tokio::spawn(serve_h2(listener, Arc::new(h2_tls), 1));
     let client = client(&config).unwrap();
     let deadline = || tokio::time::Instant::now() + Duration::from_secs(2);
-    // The refused request was sent: it fails without an H2 resend.
     let first = Operation::new(true, None);
     assert!(
         client
@@ -2123,7 +2095,6 @@ async fn h3_definite_refusal_stops_h3_for_the_pool_generation() {
         123
     );
     let trace = second.trace().unwrap();
-    // Unlike a cooldown skip (no reason), a refusal skip names the status.
     assert_eq!(trace.attempts[0].outcome, Outcome::Skipped);
     assert_eq!(
         (trace.attempts[0].reason, trace.attempts[0].code),
@@ -2196,8 +2167,6 @@ async fn h2_silently_dead_connection_is_retired_by_keepalive() {
             });
         }
     });
-    // A relay that can silently drop everything on existing connections while
-    // keeping their sockets open, like a dead network path.
     let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(
         vec![format!("https://{}", relay.local_addr().unwrap())],
@@ -2234,15 +2203,12 @@ async fn h2_silently_dead_connection_is_retired_by_keepalive() {
     let client = client(&config).unwrap();
     assert_eq!(exchange(&client, &query()).await.unwrap().message.id, 123);
     dead.store(true, std::sync::atomic::Ordering::SeqCst);
-    // The next query rides the dead connection and is lost to its caller's deadline.
     assert!(
         timeout(Duration::from_millis(300), exchange(&client, &query()))
             .await
             .is_err()
     );
-    // The PING that follows goes unanswered and the connection is retired.
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    // Restore the path: had the old connection survived, it would be reused here.
     dead.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         timeout(Duration::from_secs(2), exchange(&client, &query()))
@@ -2268,7 +2234,6 @@ async fn h3_slow_answer_completes_on_h3_without_cooldown_or_h2() {
     let (_dir, ca, tls) = identity(b"h3");
     let (endpoint, listener) = dual_endpoint(&tls).await;
     let address = endpoint.local_addr().unwrap();
-    // Case 8 answers after 350 ms: beyond the 250 ms H3 budget, inside the deadline.
     let quic_server = tokio::spawn(serve_h3(endpoint, 8));
     let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
     config.upstreams.ca_file = Some(ca);
@@ -2287,8 +2252,6 @@ async fn h3_slow_answer_completes_on_h3_without_cooldown_or_h2() {
         assert_eq!(trace.attempts.len(), 1, "no H2 resend of a sent H3 query");
         assert_eq!(trace.attempts[0].outcome, Outcome::Succeeded);
     }
-    // An answer slower than the whole deadline ends while waiting for it,
-    // distinguishable from a connect timeout by stage, with no H2 attempt.
     let operation = Operation::new(true, None);
     let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
     assert!(
@@ -2304,7 +2267,6 @@ async fn h3_slow_answer_completes_on_h3_without_cooldown_or_h2() {
     assert_eq!(trace.attempts.len(), 1);
     assert_eq!(trace.attempts[0].stage, Stage::ResponseHeaders);
     assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
-    // Every query used H3, so slow answers set no cooldown.
     drop(client);
     assert_eq!(
         timeout(Duration::from_secs(2), quic_server)
@@ -2328,10 +2290,8 @@ async fn h3_silently_dead_path_closes_within_the_idle_timeout() {
     let (_dir, ca, tls) = identity(b"h3");
     let endpoint = h3_endpoint(&tls);
     let upstream = endpoint.local_addr().unwrap();
-    // Each task serves one QUIC connection; the second proves a reconnect.
     let first = tokio::spawn(serve_h3(endpoint.clone(), 0));
     let second = tokio::spawn(serve_h3(endpoint.clone(), 0));
-    // A UDP relay that can silently drop both directions, like a dead path.
     let relay = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let relay_address = relay.local_addr().unwrap();
     let dead = Arc::new(AtomicBool::new(false));
@@ -2379,22 +2339,18 @@ async fn h3_silently_dead_path_closes_within_the_idle_timeout() {
     let (result, _) = exchange(Duration::from_secs(2)).await;
     assert_eq!(result.unwrap().message.id, 123);
     dead.store(true, SeqCst);
-    // The request is sent on the dead connection and waits until the deadline.
     let (result, trace) = exchange(Duration::from_millis(600)).await;
     assert!(result.is_err());
     assert_eq!(trace.attempts.len(), 1);
     assert_eq!(trace.attempts[0].stage, Stage::ResponseHeaders);
     assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
-    // Unanswered keep-alives close it within the 3-second idle timeout.
     tokio::time::sleep(Duration::from_millis(3500)).await;
-    // Restore the path: had the old connection survived, it would be reused here.
     dead.store(false, SeqCst);
     let (result, trace) = exchange(Duration::from_secs(2)).await;
     assert_eq!(result.unwrap().message.id, 123);
     assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
     assert_eq!(trace.attempts.len(), 1, "{trace:?}");
     drop(client);
-    // The blackholed request never reached the server.
     assert_eq!(
         timeout(Duration::from_secs(2), first)
             .await
@@ -2412,9 +2368,6 @@ async fn h3_silently_dead_path_closes_within_the_idle_timeout() {
     relay_task.abort();
 }
 
-/// A hostname endpoint moves to its next bootstrap address only when nothing
-/// was sent to the previous one; a query that reached an address is never
-/// resent to another.
 #[tokio::test]
 async fn hostname_upstream_tries_next_address_only_when_nothing_was_sent() {
     use hickory_proto::rr::{
@@ -2450,7 +2403,6 @@ async fn hostname_upstream_tries_next_address_only_when_nothing_was_sent() {
         client(&config).unwrap()
     };
 
-    // 127.0.0.1 refuses the connection, so ::1 carries the query.
     let second = TcpListener::bind("[::1]:0").await.unwrap();
     let port = second.local_addr().unwrap().port();
     let answered = tokio::spawn(async move {
@@ -2467,7 +2419,6 @@ async fn hostname_upstream_tries_next_address_only_when_nothing_was_sent() {
     );
     answered.await.unwrap();
 
-    // 127.0.0.1 receives the query and closes unanswered: ::1 never sees it.
     let (first, second) = loop {
         let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = first.local_addr().unwrap().port();

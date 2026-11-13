@@ -248,6 +248,10 @@ exported. Up to 32 imported identities are kept; delete unused ones by hand only
 after checking the current and rollback configurations. Clients still check expiry,
 host name and trust.
 
+Inbound identity validation accepts a leaf without an Extended Key Usage
+extension. A leaf that includes the extension must permit server authentication.
+This check also applies when loading or reloading a referenced identity.
+
 **External files.** You can reference certificate files elsewhere instead. The
 service runs as a dynamic user, so grant read access through a group: the only
 drop-in the installer accepts is one that sets `SupplementaryGroups=` under
@@ -391,7 +395,7 @@ For DNS readiness, use `dns_health` in the console's authenticated `GET /api/sta
 | `parins_refresh_active` | gauge | Background refreshes and cache fills in progress in the current cache generation. |
 | `parins_refresh_{scheduled,success,failure}_total` | counter | Background work started; work that stored an answer; work that stored none. |
 | `parins_refresh_rejected_{duplicate,cooldown,budget}_total`, `parins_refresh_cancelled_fill_rejected_total` | counter | Prefetch refusals by reason; sent queries whose departed caller could not hand them to the background budget. |
-| `parins_refresh_{useful,unused}_total` | counter | Refreshed entries used by a fresh foreground lookup, or expired/removed without one. Each entry settles once. |
+| `parins_refresh_{useful,unused}_total` | counter | Each refreshed entry settles once. Its first foreground hit counts as useful when fresh and unused when served stale. An entry that expires and is reaped or is otherwise removed before a foreground hit counts as unused. |
 | `parins_upstream_operations_total`, `parins_upstream_failures_total`, `parins_upstream_timeouts_total`, `parins_ecs_retries_total` | counter | Upstream operations (TCP fallback and ECS retry stay inside one), failed exchanges (transport failures and SERVFAIL answers from the upstream), timeouts, ECS `/0` retries. |
 | `parins_upstream_attempt_{succeeded,failed,cancelled,skipped}_total` | counter | Individual upstream attempts by outcome. |
 | `parins_upstream_attempt_reason_*_total` | counter | Attempt end reasons: `deadline`, `connect_io`, `tls`, `http_status`, `protocol_invalid`, `peer_closed`, `caller_cancelled`, `shutdown`, `internal`. |

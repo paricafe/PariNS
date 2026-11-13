@@ -52,7 +52,6 @@ pub enum Outcome {
     Skipped,
 }
 
-/// Whether an attempt reused a pooled connection (H2, DoT) or opened a new one.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionUse {
@@ -70,8 +69,6 @@ pub struct AttemptRecord {
     pub reason: Option<Reason>,
     pub code: Option<u64>,
     pub elapsed_ms: u64,
-    /// Whether the attempt opened a new connection or reused one, for
-    /// transports that keep connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionUse>,
 }
@@ -85,7 +82,6 @@ pub type Observer = Arc<dyn Fn(&AttemptRecord) + Send + Sync>;
 #[derive(Clone)]
 pub struct Operation(Arc<OperationInner>);
 struct OperationInner {
-    // No request detail vector or mutex is allocated when logging is off.
     trace: Option<Mutex<Trace>>,
     observer: Option<Observer>,
     sent: Option<Arc<AtomicBool>>,
@@ -98,7 +94,6 @@ impl Operation {
             sent: None,
         }))
     }
-    /// Sets `sent` once a query of this operation has reached a source.
     pub(crate) fn reporting_sent(mut self, sent: Arc<AtomicBool>) -> Self {
         Arc::get_mut(&mut self.0).expect("unshared operation").sent = Some(sent);
         self
@@ -124,8 +119,6 @@ impl Operation {
                 trace.attempts.push(record);
             } else {
                 trace.omitted += 1;
-                // Keep representative early attempts and the last substantive
-                // terminal. Dropped race losers cannot evict its winner.
                 if record.outcome == Outcome::Succeeded {
                     trace.attempts[7] = record;
                 } else if record.outcome == Outcome::Failed {
@@ -375,7 +368,6 @@ impl Attempt {
             self.terminal(Outcome::Succeeded, None);
         }
     }
-    /// A skip keeps a reason already set (an HTTP/3 endpoint disabled by a 4xx).
     pub(crate) fn skipped(&mut self) {
         self.terminal(Outcome::Skipped, self.reason);
     }

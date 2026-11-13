@@ -1,13 +1,4 @@
 //! TCP accept shared by the DNS TCP, DoT, DoH, admin and management listeners.
-//!
-//! An accept error usually concerns one pending connection (the peer aborted
-//! it, or the network failed for it) or a passing resource shortage, so the
-//! listener keeps serving. Descriptor and buffer exhaustion first pause briefly,
-//! because accepting again at once would fail the same way in a busy loop; the
-//! pending connections wait in the kernel backlog meanwhile. Only an error that
-//! concerns the listening socket itself ends the listener, which its supervisor
-//! then rebinds. Exhaustion is logged at most once a minute across listeners
-//! (per-connection errors are not logged), so an operator sees it without a flood.
 
 use std::{
     io,
@@ -18,7 +9,6 @@ use std::{
 
 use tokio::net::{TcpListener, TcpStream};
 
-/// Pause after descriptor or buffer exhaustion before accepting again.
 const EXHAUSTED_PAUSE: Duration = Duration::from_millis(250);
 const EXHAUSTED_LOG_INTERVAL: Duration = Duration::from_secs(60);
 static EXHAUSTED_LOGGED: Mutex<Option<Instant>> = Mutex::new(None);
@@ -36,18 +26,13 @@ fn log_exhausted(error: &io::Error) {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Recovery {
-    /// One connection failed; accept the next one at once.
     Retry,
-    /// Process or system resources ran out; accept again after a pause.
     Pause,
-    /// The listening socket failed.
     Fatal,
 }
 
 fn recovery(error: &io::Error) -> Recovery {
     use io::ErrorKind::*;
-    // accept(2): network errors pending on the new socket are reported by accept
-    // and should be treated like EAGAIN.
     if matches!(
         error.kind(),
         ConnectionAborted
@@ -72,7 +57,6 @@ fn recovery(error: &io::Error) -> Recovery {
             Errno::EMFILE | Errno::ENFILE | Errno::ENOBUFS => {
                 return Recovery::Pause;
             }
-            // EPERM: a firewall rule refused this connection (Linux).
             Errno::EPROTO
             | Errno::ENOPROTOOPT
             | Errno::EHOSTDOWN
@@ -86,9 +70,6 @@ fn recovery(error: &io::Error) -> Recovery {
     Recovery::Fatal
 }
 
-/// Accepts the next connection, riding out errors that do not concern the
-/// listening socket. Cancel-safe like [`TcpListener::accept`]: the caller may
-/// race it against shutdown, including during an exhaustion pause.
 pub(crate) async fn accept(listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
     accept_with(|| listener.accept()).await
 }
@@ -148,8 +129,6 @@ mod tests {
         }
     }
 
-    /// Aborted connections are skipped at once, exhaustion pauses before the
-    /// next accept, and only a listening-socket error is returned.
     #[tokio::test(start_paused = true)]
     async fn accept_errors_are_skipped_or_paused_until_a_connection_or_fatal_error() {
         fn errors(kinds: &[io::ErrorKind]) -> std::collections::VecDeque<io::Result<u8>> {

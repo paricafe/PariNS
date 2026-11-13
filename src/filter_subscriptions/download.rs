@@ -1,5 +1,4 @@
-//! Low-privilege subscription download. A result is not an accepted source until
-//! the caller has completely parsed it and durably committed its content binding.
+//! Low-privilege subscription download.
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -74,9 +73,6 @@ impl SubscriptionReader {
         }
     }
 
-    /// The caller supplies a safe empty staging descriptor and owns disk quota,
-    /// cleanup, complete parsing and commit. `previous` comes from a record the
-    /// source store validated, so its validators bind the verified content.
     pub async fn download<W: AsyncWrite + Unpin>(
         &self,
         url: &str,
@@ -304,8 +300,6 @@ async fn stream_text<W: AsyncWrite + Unpin>(
     if length.is_some_and(|n| n > limit) {
         return Err(DownloadError::new("transfer_too_large"));
     }
-    // zlib validates the complete gzip framing, including optional header CRC and
-    // trailer CRC/length. Only fixed-size output is exposed before the next await.
     let mut decoder = encoding
         .eq_ignore_ascii_case("gzip")
         .then(|| flate2::Decompress::new_gzip(15));
@@ -327,8 +321,6 @@ async fn stream_text<W: AsyncWrite + Unpin>(
             let mut offset = 0;
             loop {
                 if member_finished {
-                    // RFC gzip members may concatenate, but any trailing bytes
-                    // must form another complete, validated member.
                     *decoder = flate2::Decompress::new_gzip(15);
                     member_finished = false;
                 }

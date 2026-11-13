@@ -1,7 +1,8 @@
-//! An isolated listener-shutdown assertion without parallel runtime tests or subprocess fixtures.
+//! An isolated listener-shutdown assertion without parallel runtime tests or subprocess
+//! fixtures.
 mod common;
 #[path = "support/runtime.rs"]
-#[allow(dead_code)] // The shared fixture also serves the broader runtime suite.
+#[allow(dead_code)]
 mod runtime_support;
 
 use common::Identity;
@@ -18,7 +19,6 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(upstream.local_addr().unwrap());
-    // Global query capacity can exceed the QUIC per-connection stream cap.
     config.max_inflight = 2048;
     config.ecs.enabled = true;
     config.dot = Some(cert.listener());
@@ -53,7 +53,6 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
             .send_to(&reply.to_vec().unwrap(), peer)
             .await
             .unwrap();
-        // The mock exits: further answers must come from the shared resolver cache.
     });
     let (stop, task) = run(server);
     let first = udp(address, 11).await;
@@ -93,7 +92,6 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     TcpListener::bind(admin).await.unwrap();
 }
 
-/// Stops a DoH server while a peer that completed TLS/h2 no longer reads.
 async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration) {
     let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -126,7 +124,6 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
         )
         .await
         .unwrap();
-    // Drive the handshake once, then keep the connection open without polling it.
     let (mut sender, mut connection) = h2::client::handshake(tls).await.unwrap();
     assert!(
         timeout(std::time::Duration::from_millis(200), &mut connection)
@@ -135,7 +132,6 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
     );
     let mut received = None;
     if mode != PeerMode::Idle {
-        // The upstream has not answered: this request is still resolving at stop.
         let request = http::Request::builder()
             .uri(format!(
                 "https://localhost/dns-query?dns={}",
@@ -148,7 +144,6 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
             .unwrap();
         let _response = sender.send_request(request, true).unwrap();
         let mut buffer = [0; 512];
-        // Polling the client connection sends the request until the upstream sees it.
         let (length, peer) = timeout(WAIT, async {
             tokio::select! {
                 received = upstream.recv_from(&mut buffer) => received.unwrap(),
@@ -161,8 +156,6 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
     }
     let started = std::time::Instant::now();
     if mode == PeerMode::ClosesAfterStop {
-        // The upstream answers 150ms after receiving the query, well within the
-        // grace. The peer closes once the server has begun its graceful stop.
         let (query, peer) = received.unwrap();
         let answering = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -186,45 +179,29 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PeerMode {
-    /// Completes TLS/h2, then never reads or writes again.
     Idle,
-    /// Leaves a request resolving (the upstream never answers) at stop.
     Resolving,
-    /// Leaves a request resolving, then closes after the stop has begun.
     ClosesAfterStop,
 }
 
-/// An h2 peer that completed its handshake but no longer reads cannot answer
-/// the graceful-shutdown PING. It owns no resolver work, so stopping must stay
-/// quiescent and within the shutdown grace instead of waiting for the peer.
 #[tokio::test]
 async fn silent_idle_doh_peer_keeps_shutdown_quiescent() {
     let (quiescent, elapsed) = stop_with_silent_doh_peer(PeerMode::Idle).await;
-    // Reaching the grace deadline would force the stop, so quiescence alone
-    // proves that the silent peer did not hold shutdown.
     assert!(quiescent, "idle DoH peer forced shutdown after {elapsed:?}");
 }
 
-/// A peer closing during the stop must not turn a request that finishes within
-/// the grace into a forced shutdown.
 #[tokio::test]
 async fn doh_peer_closing_during_stop_lets_admitted_request_finish() {
     let (quiescent, elapsed) = stop_with_silent_doh_peer(PeerMode::ClosesAfterStop).await;
     assert!(quiescent, "closed peer forced shutdown after {elapsed:?}");
 }
 
-/// Resolution still running past the grace keeps the existing contract: the
-/// stop is forced and the cache is not publishable.
 #[tokio::test]
 async fn unfinished_doh_resolution_still_forces_shutdown() {
     let (quiescent, _) = stop_with_silent_doh_peer(PeerMode::Resolving).await;
     assert!(!quiescent);
 }
 
-/// A QUIC peer whose handshake never completes (here: it completes address
-/// validation, but no later server packet reaches it) owns no resolver work.
-/// Stopping must not wait for the handshake timeout, so the stop stays quiescent
-/// and the clean snapshot remains possible.
 #[tokio::test]
 async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     let cert = Identity::new(&["localhost"]);
@@ -238,8 +215,6 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     let metrics = server.metrics().clone();
     let doq = server.encrypted_addrs()[0].1;
     let (stop, task) = run(server);
-    // Relay every client datagram but only the server's first reply (its Retry):
-    // the client's validated Initial starts a handshake that never completes.
     let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let relay_address = relay.local_addr().unwrap();
     let forward = tokio::spawn(async move {
@@ -290,8 +265,6 @@ async fn unfinished_quic_handshake_keeps_shutdown_quiescent() {
     client.close(0u32.into(), b"done");
 }
 
-/// A server whose grace is long enough that waiting on it would be visible:
-/// the stop must finish well before it, and without forcing.
 async fn incomplete_query_server(
     cert: &Identity,
     upstream: &UdpSocket,
@@ -350,12 +323,9 @@ async fn wait_for_stream(server_metrics: &parins::metrics::Metrics, protocol: &s
     })
     .await
     .unwrap();
-    // Let the adapter reach its query read before the stop.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
-/// A DoH POST whose body has not fully arrived owns no resolver work: the stop
-/// refuses it at once instead of waiting for the grace and forcing.
 #[tokio::test]
 async fn doh_post_with_partial_body_is_cancelled_at_stop() {
     let cert = Identity::new(&["localhost"]);
@@ -407,7 +377,6 @@ async fn doh_post_with_partial_body_is_cancelled_at_stop() {
     let _ = timeout(WAIT, driver).await.unwrap();
 }
 
-/// A DoQ stream without FIN has no complete query and is cancelled at the stop.
 #[tokio::test]
 async fn doq_stream_without_fin_is_cancelled_at_stop() {
     let cert = Identity::new(&["localhost"]);
@@ -441,7 +410,6 @@ async fn doq_stream_without_fin_is_cancelled_at_stop() {
     client.close(0u32.into(), b"done");
 }
 
-/// An HTTP/3 POST whose body has not ended is cancelled at the stop.
 #[tokio::test]
 async fn h3_post_with_partial_body_is_cancelled_at_stop() {
     let cert = Identity::new(&["localhost"]);
@@ -490,8 +458,6 @@ async fn h3_post_with_partial_body_is_cancelled_at_stop() {
     client.close(0u32.into(), b"done");
 }
 
-/// A DoQ query received in full before the stop still completes within the
-/// grace, and the stop stays quiescent.
 #[tokio::test]
 async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
     let cert = Identity::new(&["localhost"]);
@@ -514,7 +480,6 @@ async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
         .unwrap()
         .unwrap();
     let forwarded = protocol::decode(&buffer[..length]).unwrap();
-    // The query is resolving at the stop; the upstream answers within the grace.
     let answering = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         upstream

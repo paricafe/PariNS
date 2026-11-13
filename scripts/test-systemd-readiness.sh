@@ -1,6 +1,5 @@
 #!/bin/sh
 # Unprivileged checks of the real service fixture's read-only readiness gate.
-# No systemd, service, network or ephemeral-runner guard is invoked here.
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 command -v jq >/dev/null 2>&1 || { printf '%s\n' 'Missing: jq' >&2; exit 1; }
@@ -63,8 +62,6 @@ for readiness_case in transition wrong-revision transport invalid-json starting 
     }
     ! grep -q 'private-.*-sentinel' "$readiness_fixture/$readiness_case/output"
 done
-# The real cleanup removes the private wait snapshots, but an unexpected file
-# must still fail the fixture instead of broadening removal to the directory.
 sed -n '/^cleanup() {/,/^}$/p' "$repo/scripts/test-systemd.sh" > "$readiness_fixture/cleanup.sh"
 for cleanup_case in known unknown; do
     cleanup_dir="$readiness_fixture/cleanup-$cleanup_case"

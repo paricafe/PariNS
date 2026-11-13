@@ -22,7 +22,6 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
-// Independent framing in the client fixture; transport helpers remain private.
 mod tcp {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     pub async fn read_frame(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Vec<u8>> {
@@ -102,7 +101,6 @@ async fn dot_listener_reuses_connection_rejects_short_frame_and_shuts_down() {
         .connect(ServerName::try_from("localhost").unwrap(), stream)
         .await
         .unwrap();
-    // Unsupported opcodes are handled locally, proving the shared resolver path without Internet IO.
     for id in [42, 43] {
         let mut query = query();
         query.metadata.id = id;
@@ -123,7 +121,6 @@ async fn dot_listener_reuses_connection_rejects_short_frame_and_shuts_down() {
     }
     client.write_all(&[0, 1, 0]).await.unwrap();
     client.flush().await.unwrap();
-    // TLS close without close_notify may surface EOF as an error; either outcome closes this connection.
     let read = timeout(Duration::from_secs(1), client.read_u8())
         .await
         .unwrap();

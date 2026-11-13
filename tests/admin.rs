@@ -32,7 +32,6 @@ fn exposition_has_fixed_counters_gauges_and_cumulative_histograms() {
     assert!(output.contains("parins_request_duration_seconds_bucket{le=\"+Inf\"} 1\n"));
     assert!(output.contains("parins_request_duration_seconds_count 1\n"));
     assert!(output.contains("parins_request_duration_seconds_sum "));
-    // Histogram boundaries are the only labels; DNS names and peer addresses never become series.
     for line in output.lines().filter(|line| line.contains('{')) {
         assert!(line.contains("_bucket{le=\""));
     }
@@ -153,21 +152,18 @@ async fn oversized_headers_and_idle_clients_cannot_hold_shutdown() {
             .unwrap(),
         0
     );
-    // A new partial header is cooperatively interrupted by shutdown, not left detached.
     let mut partial = TcpStream::connect(server.address).await.unwrap();
     partial.write_all(b"GET ").await.unwrap();
     server.finish().await;
     let closed = timeout(Duration::from_secs(2), partial.read(&mut byte))
         .await
         .unwrap();
-    // The kernel can reset a socket closed with unread request bytes during shutdown.
     assert!(
         matches!(closed, Ok(0))
             || closed.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
     );
 }
 
-/// Health probes keep answering while DNS connections hold the shared limit.
 #[tokio::test]
 async fn health_has_its_own_budget_when_dns_connections_are_exhausted() {
     let server = Server::start().await;

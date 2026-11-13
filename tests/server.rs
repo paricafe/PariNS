@@ -46,7 +46,6 @@ fn config(upstream: SocketAddr) -> Config {
     config
 }
 
-// Encode/decode TCP frames independently of the production framing helpers.
 async fn write(stream: &mut TcpStream, query: &Message) {
     let bytes = query.to_vec().unwrap();
     stream
@@ -106,8 +105,6 @@ async fn finish(stop: oneshot::Sender<()>, task: JoinHandle<anyhow::Result<()>>)
         .unwrap();
 }
 
-// CI may supply secondary addresses created only in its disposable network
-// namespace. Ordinary tests never add addresses or change host networking.
 fn udp_test_addresses(variable: &str, defaults: &str) -> Vec<SocketAddr> {
     std::env::var(variable)
         .unwrap_or_else(|_| defaults.into())
@@ -194,7 +191,6 @@ async fn udp_truncation_tcp_fallback_and_connection_reuse() {
     let upstream = listener.local_addr().unwrap();
     let udp = UdpSocket::bind(upstream).await.unwrap();
     let mock = tokio::spawn(async move {
-        // The two downstream TCP requests reuse the full response cached by UDP.
         {
             let mut buffer = [0; 4096];
             let (length, peer) = udp.recv_from(&mut buffer).await.unwrap();
@@ -229,7 +225,6 @@ async fn udp_truncation_tcp_fallback_and_connection_reuse() {
     }
     finish(stop, task).await;
     mock.await.unwrap();
-    // Listeners and an idle reusable TCP client are closed on shutdown.
     let mut byte = [0];
     assert_eq!(
         timeout(Duration::from_secs(1), client.read(&mut byte))
@@ -247,7 +242,6 @@ async fn both_listeners_derive_ecs_from_the_socket_peer() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = config(upstream.local_addr().unwrap());
     cfg.ecs.enabled = true;
-    // Exercise the peer handoff from each listener independently.
     cfg.cache.enabled = false;
     let mock = tokio::spawn(async move {
         for _ in 0..2 {
@@ -289,9 +283,6 @@ async fn both_listeners_enforce_query_and_cached_cname_policy() {
     let direct = udp_query(address, &query()).await.0;
     assert_eq!(direct.response_code, ResponseCode::NoError);
     assert!(direct.answers.is_empty());
-    // This checks policy across transports, not TCP survival while UDP work
-    // runs. Connect at each TCP phase so unrelated work cannot exhaust its
-    // deliberately short idle timeout; connection reuse is covered separately.
     let mut tcp = TcpStream::connect(address).await.unwrap();
     write(&mut tcp, &query()).await;
     let direct = read(&mut tcp).await;
@@ -442,7 +433,6 @@ async fn partial_frame_and_connection_budget_are_bounded() {
     cfg.tcp_io_timeout_ms = 200;
     let (address, stop, task) = start(cfg).await;
     let mut first = TcpStream::connect(address).await.unwrap();
-    // Get a local response to prove this connection has been admitted.
     let mut q = query();
     q.queries[0].set_query_type(RecordType::AXFR);
     write(&mut first, &q).await;
@@ -453,7 +443,6 @@ async fn partial_frame_and_connection_budget_are_bounded() {
         .await
         .unwrap();
     assert!(matches!(closed, Ok(0) | Err(_)));
-    // A partial length prefix must not keep the admitted connection alive forever.
     first.write_all(&[0]).await.unwrap();
     let closed = timeout(Duration::from_secs(1), first.read(&mut byte))
         .await
@@ -515,7 +504,6 @@ async fn tcp_fallback_shares_the_udp_deadline() {
             .unwrap();
         let (mut stream, _) = listener.accept().await.unwrap();
         let _ = read(&mut stream).await;
-        // After the original 200 ms deadline, but within a reset 200 ms timer.
         tokio::time::sleep(Duration::from_millis(130)).await;
         response.metadata.truncation = false;
         let bytes = response.to_vec().unwrap();

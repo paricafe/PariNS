@@ -1,5 +1,4 @@
-//! DoT connection pool: a fixed number of slots per endpoint, each leased to one
-//! request at a time. Idle connections expire when a request checks them out.
+//! Per-endpoint DNS-over-TLS connection pooling.
 use std::{
     net::SocketAddr,
     ops::{Deref, DerefMut},
@@ -17,9 +16,7 @@ use super::ClientStream;
 #[serde(default, deny_unknown_fields)]
 pub struct PoolSettings {
     pub enabled: bool,
-    /// Per TLS endpoint, shared across its resolved addresses and client clones.
     pub max_connections: usize,
-    /// Checked on checkout, without an idle reaper task.
     pub idle_timeout_ms: u64,
 }
 
@@ -68,7 +65,6 @@ pub(super) struct Lease<'a> {
     pool: &'a Pool,
     index: usize,
     idle: Option<Idle>,
-    // Released after Drop has published the free slot.
     _permit: SemaphorePermit<'a>,
 }
 
@@ -111,8 +107,6 @@ impl Pool {
     }
 
     pub async fn checkout(&self, address: SocketAddr) -> Lease<'_> {
-        // Queue for any available slot, not a particular busy connection. The
-        // semaphore is never closed; cancellation while waiting consumes nothing.
         let permit = self.available.acquire().await.unwrap();
         let mut slots = self.slots.lock().unwrap();
         let index = slots

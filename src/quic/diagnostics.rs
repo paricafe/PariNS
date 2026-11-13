@@ -45,7 +45,6 @@ const NAMES: &[&str] = &[
 
 #[derive(Clone, Copy)]
 pub enum Event {
-    /// A client connection whose address is validated (after a Retry if needed).
     Incoming,
     AdmissionGlobalRejected,
     AdmissionSourceRejected,
@@ -215,8 +214,6 @@ pub(super) fn write_error(error: &anyhow::Error) -> Event {
     }
 }
 
-/// h3 reports a peer's STOP_SENDING or RESET_STREAM as `RemoteTerminate` at
-/// the next read or write of the request stream.
 pub(super) fn h3_error(error: &anyhow::Error) -> Event {
     use h3::error::StreamError;
     match error.downcast_ref::<StreamError>() {

@@ -1,5 +1,4 @@
 //! Read-only loopback liveness and fixed-cardinality Prometheus exposition.
-//! Its connections have their own small budget, separate from DNS.
 use std::{fmt::Write, sync::Arc};
 
 use anyhow::{Result, ensure};
@@ -13,8 +12,6 @@ use tokio::{
 
 use crate::{ingress::Ingress, metrics::Metrics};
 
-/// Renders one metrics snapshot. Counters are read one at a time, so a scrape
-/// taken under load can be slightly out of step across counters.
 pub fn render(metrics: &Metrics) -> String {
     let snapshot = metrics.snapshot();
     let mut output = String::new();
@@ -63,9 +60,6 @@ pub fn render(metrics: &Metrics) -> String {
     output + &render_extra(&diagnostics)
 }
 
-/// Counters and gauges outside the persisted snapshot: listener diagnostics,
-/// the counters of the recursive resolution source and the prefetch counters
-/// of the current cache generation.
 fn render_extra(metrics: &[(&str, &str, u64, bool)]) -> String {
     let mut output = String::new();
     for (name, help, value, gauge) in metrics {
@@ -82,9 +76,6 @@ fn render_extra(metrics: &[(&str, &str, u64, bool)]) -> String {
     output
 }
 
-/// Concurrent loopback health and metrics connections. A budget of its own keeps
-/// probes answering while DNS connections fill the shared limit, and keeps
-/// probes from taking DNS connection slots.
 const MAX_CONNECTIONS: usize = 8;
 
 pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
@@ -107,7 +98,6 @@ pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error.into()),
                 };
-                // Excess probes are closed at once; DNS rejection counters stay DNS-only.
                 let Ok(permit) = connections.clone().try_acquire_owned() else {
                     continue
                 };
@@ -212,7 +202,6 @@ async fn read_request(stream: &mut TcpStream) -> Result<String, u16> {
             return Err(400);
         }
     }
-    // One request per connection, never accept a body or HTTP pipelining.
     if used != end + 4 {
         return Err(400);
     }

@@ -1,25 +1,4 @@
-//! Optional Cloudflare Turnstile for console sign-in. Off by default.
-//!
-//! - The keys live only in the private Store file `turnstile.json`, never in the
-//!   configuration TOML, which is returned to the browser, exported and rolled
-//!   back. The secret key is write-only: never logged or returned; the console
-//!   sees only the site key and whether Cloudflare test keys are set.
-//! - A sign-in passes Turnstile before the password is checked, charged to the
-//!   socket peer's attempt budget. Cloudflare siteverify is asked through the
-//!   pinned HTTPS reader, with one deadline and a response size limit, and must
-//!   report success for this console's host name and the `login` action.
-//!   Failure, or an unreachable Cloudflare, refuses the sign-in.
-//! - A loopback socket peer (an SSH tunnel) skips Turnstile, so the administrator
-//!   can always sign in from the server. Only the accepted socket counts; there
-//!   is no forwarding header to trust. A same-host proxy or tunnel therefore makes
-//!   every client loopback; the guide and the console warn about it.
-//! - Cloudflare's published test secret keys answer for any token, host and
-//!   action, so they are accepted only with a test site key.
-//! - Only a signed-out console document that shows the widget relaxes the CSP for
-//!   its script and frame.
-//! - Setting or clearing the keys is a credential change, as in `account`: the
-//!   current password, one Store write, then every session is revoked. The
-//!   generation it advances rejects a sign-in that passed the old setting.
+//! Optional Cloudflare Turnstile for console sign-in.
 use std::{
     net::{IpAddr, SocketAddr},
     path::Path,
@@ -53,7 +32,6 @@ const DEADLINE: Duration = Duration::from_secs(8);
 const DEADLINE: Duration = Duration::from_secs(1);
 const RESPONSE_LIMIT: usize = 16 * 1024;
 const ACTION: &str = "login";
-/// Cloudflare documents tokens of at most 2048 characters.
 const TOKEN_LIMIT: usize = 2048;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -63,11 +41,9 @@ pub(super) struct Keys {
     secret_key: String,
 }
 
-/// The saved keys and the generation that every change advances.
 pub(super) struct State {
     pub keys: Option<Keys>,
     pub generation: u64,
-    /// A local stand-in for siteverify, reached over plain HTTP.
     #[cfg(test)]
     pub siteverify: Option<SocketAddr>,
 }
@@ -83,7 +59,6 @@ impl State {
     }
 }
 
-/// Absent means off. Shared by startup and the read-only managed check.
 pub(super) fn read(dir: &Path) -> Result<Option<Keys>> {
     let Some(bytes) = store::read_bounded(&dir.join(FILE), MAX_FILE)? else {
         return Ok(None);
@@ -103,8 +78,6 @@ fn valid(keys: &Keys) -> bool {
         && test_secret(&keys.secret_key).is_some() == test_site_key(&keys.site_key)
 }
 
-/// Cloudflare's published test secret keys: `Some(true)` always passes,
-/// `Some(false)` always fails (or reports the token as already spent).
 fn test_secret(key: &str) -> Option<bool> {
     match key {
         "1x0000000000000000000000000000000AA" => Some(true),
@@ -115,8 +88,6 @@ fn test_secret(key: &str) -> Option<bool> {
     }
 }
 
-/// Cloudflare's published test site keys, such as `1x00000000000000000000AA`
-/// or `3x00000000000000000000FF`: `1x`/`2x`/`3x`, 20 zeros, two letters.
 fn test_site_key(key: &str) -> bool {
     key.len() == 24
         && key.is_ascii()
@@ -125,7 +96,6 @@ fn test_site_key(key: &str) -> bool {
         && key[22..].bytes().all(|b| b.is_ascii_uppercase())
 }
 
-/// A loopback socket peer, such as an SSH tunnel.
 pub(super) fn loopback(peer: SocketAddr) -> bool {
     match peer.ip() {
         IpAddr::V4(ip) => ip.is_loopback(),
@@ -135,8 +105,6 @@ pub(super) fn loopback(peer: SocketAddr) -> bool {
     }
 }
 
-/// The host name Cloudflare must report: the configured public host over HTTPS,
-/// otherwise the console address that `host_allowed` already admitted.
 fn expected_hostname(transport: &Snapshot, host: &str) -> String {
     transport.public_host.clone().unwrap_or_else(|| {
         super::origin_identity(host, transport.scheme.default_port())
@@ -145,8 +113,6 @@ fn expected_hostname(transport: &Snapshot, host: &str) -> String {
     })
 }
 
-/// The keys and generation read together: a sign-in that passes Turnstile is
-/// valid only while that generation is current.
 pub(super) struct Admission {
     keys: Option<Keys>,
     pub generation: u64,
@@ -165,7 +131,6 @@ pub(super) async fn admission(shared: &Shared) -> Admission {
 }
 
 impl Admission {
-    /// Callers charge the attempt budget first, so failures count.
     pub async fn check(
         &self,
         transport: &Snapshot,
@@ -191,8 +156,6 @@ impl Admission {
         let outcome = tokio::time::timeout(DEADLINE, self.siteverify(&keys.secret_key, token))
             .await
             .map_err(|_| unavailable())??;
-        // Test secrets answer for any token, host and action; a real secret
-        // never relaxes the checks, whatever the answer claims.
         let testing = test_secret(&keys.secret_key).is_some()
             && outcome
                 .metadata
@@ -237,10 +200,8 @@ impl Admission {
                 )
                 .await
             }
-            // Tests never reach Cloudflare.
             None => Err(crate::https_reader::ReaderError::new("network_error")),
         };
-        // One reader keeps one root certificate store for every sign-in.
         #[cfg(not(test))]
         static READER: std::sync::LazyLock<crate::https_reader::HttpsReader> =
             std::sync::LazyLock::new(crate::https_reader::HttpsReader::new);
@@ -290,8 +251,6 @@ fn unavailable() -> ApiError {
     )
 }
 
-/// Whether the console document served to this request must allow the widget:
-/// only a sign-in page that will show it.
 pub(super) async fn document_needs_widget(
     shared: &Shared,
     transport: &Snapshot,
@@ -307,7 +266,6 @@ pub(super) async fn document_needs_widget(
             .is_none()
 }
 
-/// What the sign-in page shows. Public before sign-in: the site key is public.
 pub(super) async fn options(shared: &Shared, peer: SocketAddr) -> Value {
     let manager = shared.manager.lock().await;
     let keys = manager.turnstile.keys.as_ref();
@@ -321,14 +279,12 @@ pub(super) async fn options(shared: &Shared, peer: SocketAddr) -> Value {
     })
 }
 
-/// The settings view. Never includes the secret key.
 pub(super) async fn view(shared: &Shared, peer: SocketAddr) -> Value {
     let manager = shared.manager.lock().await;
     json!({
         "turnstile": manager.turnstile.keys.as_ref().map(|keys| json!({
             "site_key": keys.site_key,
             "secret_set": true,
-            // "pass" or "fail": Cloudflare test keys decide every sign-in alike.
             "test_keys": test_secret(&keys.secret_key)
                 .map(|passes| if passes { "pass" } else { "fail" }),
         })),
@@ -340,7 +296,6 @@ pub(super) async fn view(shared: &Shared, peer: SocketAddr) -> Value {
 #[serde(deny_unknown_fields)]
 struct Setting {
     site_key: String,
-    /// Omitted keeps the saved secret key; it is never sent back.
     #[serde(default)]
     secret_key: Option<String>,
 }
@@ -349,7 +304,6 @@ struct Setting {
 #[serde(deny_unknown_fields)]
 struct Change {
     current_password: String,
-    /// `null` turns Turnstile off.
     turnstile: Option<Setting>,
 }
 
@@ -426,8 +380,6 @@ pub(super) async fn change(
                         site_key,
                         secret_key,
                     };
-                    // A test secret passes (or fails) every token whatever the
-                    // widget, so it is accepted only with a test site key.
                     if !valid(&keys) {
                         return Err(test_keys_unpaired());
                     }
@@ -435,8 +387,6 @@ pub(super) async fn change(
                 }
             };
             persist(manager.store.clone(), next.clone()).await?;
-            // The Store commit is done. No await separates publication from
-            // revocation; retain the Manager -> Active lock order.
             manager.turnstile.keys = next;
             manager.turnstile.generation += 1;
             shared.active.lock().unwrap().sessions.clear();

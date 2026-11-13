@@ -128,11 +128,11 @@ fn downstream_echoes_original_source_and_never_leaks_inserted_ecs() {
 #[test]
 fn malformed_ecs_lengths_padding_scope_and_duplicates_are_rejected() {
     for raw in [
-        vec![0, 1, 0, 0, 1], // too many address bytes (ignored by typed decoder alone)
-        vec![0, 1, 24, 0, 192, 0], // too few
-        vec![0, 1, 25, 0, 192, 0, 2, 1], // nonzero padding bits
-        vec![0, 1, 24, 33, 192, 0, 2], // invalid scope
-        vec![0, 3, 0, 0],    // unknown family
+        vec![0, 1, 0, 0, 1],
+        vec![0, 1, 24, 0, 192, 0],
+        vec![0, 1, 25, 0, 192, 0, 2, 1],
+        vec![0, 1, 24, 33, 192, 0, 2],
+        vec![0, 3, 0, 0],
     ] {
         let mut q = query(None);
         let mut edns = Edns::new();
@@ -150,8 +150,6 @@ fn malformed_ecs_lengths_padding_scope_and_duplicates_are_rejected() {
         .insert(EdnsOption::Subnet("192.0.2.0/24".parse().unwrap()));
     assert!(protocol::decode(&q.to_vec().unwrap()).is_err());
 
-    // A valid privacy /0 followed by an incomplete EDNS option must not become
-    // an option-free query that causes the resolver to disclose its peer IP.
     let opt_start = query(None).to_vec().unwrap().len();
     let mut q = query(Some("0.0.0.0/0"));
     q.edns
@@ -244,8 +242,6 @@ fn padding_wire_allows_empty_and_nonzero_bytes_but_rejects_duplicates_and_bad_le
         let wire = input.to_vec().unwrap();
         assert!(protocol::decode(&wire).is_ok());
         let mut duplicated = wire.clone();
-        // This fixture has one trailing OPT RR, with its RDLENGTH immediately
-        // before the only option envelope.
         let length_offset = wire.len() - data.len() - 6;
         let length = u16::from_be_bytes([wire[length_offset], wire[length_offset + 1]]);
         duplicated[length_offset..length_offset + 2].copy_from_slice(&(length + 4).to_be_bytes());
@@ -301,9 +297,6 @@ async fn refused_nonzero_ecs_retries_anonymously_once() {
     mock.await.unwrap();
 }
 
-/// EDNS TCP keepalive is consumed at ingress: never forwarded upstream, never
-/// answered, and a query carrying it uses the normal cache. The upstream query
-/// advertises at most 1232 bytes whatever the client's UDP size.
 #[tokio::test]
 async fn tcp_keepalive_is_hop_local_and_upstream_udp_size_is_capped() {
     use hickory_proto::rr::{
@@ -365,7 +358,6 @@ async fn tcp_keepalive_is_hop_local_and_upstream_udp_size_is_capped() {
                 .is_none()
         );
     }
-    // The repeated query was a cache hit: the upstream saw only the first one.
     let mut bytes = [0; 512];
     assert!(
         tokio::time::timeout(Duration::from_millis(50), upstream.recv_from(&mut bytes))

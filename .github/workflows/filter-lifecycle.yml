@@ -3,7 +3,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# One mutable, synthetic HTTPS source is shared by these manual measurements.
 concurrency:
   group: filter-lifecycle-source
   cancel-in-progress: false
@@ -16,10 +15,10 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CC_x86_64_unknown_linux_musl: musl-gcc
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
@@ -44,7 +43,7 @@ jobs:
           sh scripts/test-systemd.sh --ephemeral-ci --package "$PWD/target/filter-lifecycle-package/parins-$version-linux-x86_64" --filter-lifecycle
       - name: Preserve sanitized measurement evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: filter-lifecycle-${{ github.sha }}
           if-no-files-found: warn

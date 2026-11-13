@@ -1,5 +1,4 @@
-//! Management transport is an immutable per-connection view. Manager prepares a
-//! candidate before persistence and publishes it only after the store commit.
+//! Management transport is an immutable per-connection view.
 use std::{fmt, net::SocketAddr, sync::Arc};
 
 use anyhow::{Result, ensure};
@@ -111,8 +110,6 @@ impl Snapshot {
             return Value::Null;
         }
         let next_origin = next.origin.clone().or_else(|| {
-            // An HTTP address seen on this request is usable only if the next
-            // allowlist still admits it. Never derive a public NAT address.
             if next.scheme == Scheme::Http && super::host_allowed(address, request_host, next) {
                 Some(format!("http://{request_host}"))
             } else {

@@ -1,4 +1,4 @@
-//! Management half of the fixed updater transaction. Root owns installation.
+//! Management half of the fixed updater transaction.
 use super::state::Operation;
 use super::{Coordinator, id, state};
 use crate::{
@@ -30,7 +30,6 @@ impl Coordinator {
         Ok(result)
     }
 
-    /// The caller owns the existing mutation permit while accepting this plan.
     pub(in crate::manage) async fn accept(
         &self,
         input: Apply,
@@ -68,9 +67,6 @@ impl Coordinator {
                     plan.plan_id == input.plan_id && plan.expires_at_ms > unix_ms(),
                     "plan_expired"
                 );
-                // A save after the check does not invalidate the plan: commit
-                // preflight validates the configuration saved at that moment, and
-                // the operation pins the revision it was accepted under.
                 ensure!(plan.current_sha256 == identity.sha256, "plan_expired");
                 let candidate = s
                     .candidate
@@ -150,7 +146,6 @@ impl Coordinator {
     }
 
     async fn abort_before_commit(&self, op: &Operation, reason: &'static str) {
-        // Do not clear a durable intent without root's irreversible abort fence.
         let _ = self.set_phase(op, "aborting", Some(reason)).await;
         let _ = self.inbox(op, ipc::Request::Abort {}).await;
     }
@@ -175,8 +170,6 @@ pub(in crate::manage) async fn accept(shared: &Shared, input: Apply) -> Result<S
         .await
 }
 
-/// Root status polling is separate from network checks, so a slow GitHub check
-/// cannot stall the one-second launch health receipt.
 pub(in crate::manage) async fn run(
     shared: Arc<Shared>,
     mut stop: tokio::sync::watch::Receiver<bool>,
@@ -204,8 +197,6 @@ pub(in crate::manage) async fn run(
         if let Ok(_permit) = shared.mutation.clone().try_acquire_owned() {
             let result = reconcile(&coordinator, status.as_ref()).await;
             log_change("reconcile", &mut reconcile_error, result);
-            // Reconcile is the only thaw. Subscriptions opened during a frozen
-            // start keep their Store closed until now; this is a no-op otherwise.
             if !coordinator.frozen.load(Ordering::Acquire) {
                 let filters = shared.manager.lock().await.filters.clone();
                 filters.thaw().await;
@@ -248,9 +239,6 @@ pub(in crate::manage) async fn run(
             } else if op.invocation_id != coordinator.invocation.as_deref().unwrap_or("")
                 || !coordinator.frozen.load(Ordering::Acquire)
             {
-                // A prior invocation may have persisted intent before writing
-                // Commit. Ask root to fence precommit work; Abort leaves an
-                // already committed operation alone. Only reconcile may thaw.
                 coordinator.abort_before_commit(&op, "interrupted").await;
             }
         }
@@ -260,15 +248,11 @@ pub(in crate::manage) async fn run(
             _ = tokio::time::sleep(Duration::from_secs(1)) => {},
         }
     }
-    // The worker observes stop before final commit. Do not abort a blocking
-    // persistence call and release its transaction permit prematurely.
     if let Some(job) = job {
         let _ = job.await;
     }
 }
 
-/// The loop runs every second, so a failure is logged when it first appears or
-/// changes, not on every repeat.
 fn log_change(step: &str, last: &mut Option<String>, result: Result<()>) {
     let current = result.err().map(|error| format!("{error:#}"));
     if let Some(error) = &current
@@ -287,8 +271,6 @@ async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) 
     if op.as_ref().is_none_or(|op| op.finished)
         && coordinator.state.lock().unwrap().commit_intent.is_none()
     {
-        // Initial trusted installation has no app-side operation mapping.
-        // Only the root anchor can complete that pending-launch freeze.
         if root.pending_launch.is_none()
             && root.active_operation.is_none()
             && (root.capability.available
@@ -302,9 +284,6 @@ async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) 
     let Some(op) = op else {
         return Ok(());
     };
-    // A manually installed process can supersede a plan accepted by the old
-    // invocation before root ever staged it. Root rejects that old invocation;
-    // without a commit intent there is no installation outcome to recover.
     if coordinator
         .invocation
         .as_ref()
@@ -352,8 +331,6 @@ async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) 
                 .as_mut()
                 .filter(|o| o.operation_id == op.operation_id)
             {
-                // Root records a generic reason for an Abort; the reason this
-                // application persisted with "aborting" is the specific one.
                 let own_abort = terminal.phase == ipc::Phase::Aborted
                     && current.phase == "aborting"
                     && current.reason.is_some();
@@ -438,10 +415,8 @@ async fn heartbeat(
         };
         let bytes = serde_json::to_vec(&inbox)?;
         let dir = coordinator.dir.clone();
-        // Do not overwrite a request already awaiting root consumption.
         tokio::task::spawn_blocking(move || {
             if crate::private_files::checked_open(&dir.join(ipc::INBOX_NAME), false)?.is_none() {
-                // The operation's own requests use the other temporary name.
                 state::atomic(
                     &dir,
                     ipc::INBOX_NAME,
@@ -512,8 +487,6 @@ async fn stage_and_commit(
                 .terminal_for(&op.operation_id, &op.phase_nonce)
                 .is_some()
             {
-                // Root already fenced this request. Reconcile owns completion;
-                // do not replace its reason or send a redundant Abort.
                 return Ok(());
             }
         }
@@ -551,9 +524,6 @@ async fn stage_and_commit(
     if *stop.borrow() {
         return Err("interrupted");
     }
-    // The permit excludes configuration changes, so the revision cannot move
-    // while the Manager lock is released for the root read and the preflight
-    // subprocess (up to 30 s); readiness is checked again before commit.
     let current = |manager: &crate::manage::runtime::Manager| {
         manager.saved.as_ref().map(|s| s.revision) == Some(op.config_revision) && readiness(manager)
     };
@@ -611,11 +581,9 @@ async fn stage_and_commit(
         )
         .await
         .map_err(|_| "helper_unavailable")?;
-    // Return drops Manager and original permit before helper waits for SIGTERM.
     Ok(())
 }
 
-/// Logs which input categories made the preflight fail, never their contents.
 fn preflight_failed(cause: &str) -> &'static str {
     eprintln!("PariNS update preflight failed: {cause}");
     "preflight_failed"
@@ -739,9 +707,6 @@ mod tests {
         (coordinator, operation, root)
     }
 
-    /// After ManualRequired the application keeps its commit intent and stays
-    /// frozen. Only a reinstallation that proved readiness closes that same
-    /// operation (ID and phase nonce) with a reconcilable terminal.
     #[tokio::test]
     async fn verified_reinstall_closes_manual_recovery_and_thaws() {
         for verified in [false, true] {
@@ -779,7 +744,6 @@ mod tests {
                 during.capability.reason.as_deref(),
                 Some("installation_pending")
             );
-            // Registration keeps the old terminal instead of discarding it.
             assert_eq!(
                 during
                     .terminal_for(&op.operation_id, &op.phase_nonce)
@@ -814,9 +778,6 @@ mod tests {
         }
     }
 
-    /// The installer's rollback re-anchors and verifies the restored previous
-    /// program. That proves the rollback only: ManualRequired stays and the
-    /// application stays frozen.
     #[test]
     fn verified_rollback_of_a_failed_reinstall_keeps_manual_recovery() {
         let root_dir = tempfile::tempdir().unwrap();
@@ -989,8 +950,6 @@ mod tests {
                 Ok((Some(candidate.clone()), None))
             })
             .await;
-        // The check happened two minutes before the user applied A. Keep its
-        // real persisted plan; advance only the fixture's elapsed check clock.
         coordinator
             .change(|state| {
                 let checked = state.check.last_check_at_ms.unwrap();
@@ -1094,7 +1053,6 @@ mod tests {
         assert!(!coordinator.frozen.load(Ordering::Acquire));
         assert!(coordinator.request_check().await.is_err());
 
-        // Advance both independent cooldowns without waiting or restarting.
         coordinator
             .change(|state| {
                 state.check.retry_at_ms = unix_ms() - 1;
@@ -1237,8 +1195,6 @@ mod tests {
         assert_eq!(done.reason.as_deref(), Some("interrupted"));
         assert!(!coordinator.frozen.load(Ordering::Acquire));
         assert!(!dir.path().join(ipc::INBOX_NAME).exists());
-        // A root result from an earlier attempt must not hide this local
-        // precommit interruption, or a waiting UI could never reconcile it.
         let (_, _, mut old_root) = fixture(dir.path());
         old_root.last_operation.as_mut().unwrap().operation_id = "0".repeat(32);
         *coordinator.root.lock().unwrap() = Some(old_root);
@@ -1389,14 +1345,11 @@ mod tests {
                 let operation = saved.operation.unwrap();
                 assert!(operation.finished);
                 assert_eq!(operation.phase, "aborted");
-                // The application's own abort reason survives root's fence.
                 assert_eq!(operation.reason.as_deref(), Some("interrupted"));
             }
         }
     }
 
-    /// Root never saw the Stage (or failed it without a record), so it has no
-    /// operation that matches the Abort. Its fence still ends the operation.
     #[tokio::test]
     async fn unmatched_abort_ends_the_operation_with_its_own_reason() {
         let dir = tempfile::tempdir().unwrap();
@@ -1436,7 +1389,6 @@ mod tests {
     async fn restart_can_resolve_old_intent_only_with_matching_root_fence_and_current_elf() {
         let dir = tempfile::tempdir().unwrap();
         let (coordinator, op, mut root) = fixture(dir.path());
-        // The original invocation has disappeared; that is not a permanent lock.
         assert_ne!(
             coordinator.invocation.as_deref(),
             Some(op.invocation_id.as_str())

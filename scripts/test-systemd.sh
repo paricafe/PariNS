@@ -1,6 +1,5 @@
 #!/bin/sh
 # Real service acceptance ONLY on a disposable GitHub-hosted Linux runner.
-# Never run this on a development machine or an existing PariNS installation.
 set -eu
 umask 077
 [ "${1:-}" = --ephemeral-ci ] && [ "${GITHUB_ACTIONS:-}" = true ] && \
@@ -65,8 +64,6 @@ sudo -n true
 ! sudo test -L /var/lib/parins-managed
 ! sudo test -e /var/lib/private/parins-managed
 ! sudo test -e /opt/parins-managed/parins
-# Hosted runners make /opt group-writable for their tool cache. Only this
-# disposable-runner fixture tightens it temporarily; the installer stays strict.
 [ -d /opt ] && [ ! -L /opt ] && [ "$(sudo stat -c %u /opt)" = 0 ] || {
     printf '%s\n' 'Refusing: runner /opt must be a root-owned, non-symlink directory.' >&2
     exit 1
@@ -88,14 +85,11 @@ fs_trace_stop() {
         sudo kill -INT "$fs_tracer_pid" || return 1
         fs_trace_interrupted=true
     elif [ -z "$fs_tracer_pid" ]; then
-        # sudo/timeout forwards termination to its child if attachment failed.
         sudo kill -TERM "$fs_trace_job" 2>/dev/null || true
     fi
     fs_trace_status=0
     wait "$fs_trace_job" || fs_trace_status=$?
     fs_trace_job= fs_tracer_pid=
-    # timeout preserves the child's SIGINT exit status for our explicit stop.
-    # Its own deadline returns 124 and must still fail acceptance.
     [ "$fs_trace_status" -eq 0 ] || { "$fs_trace_interrupted" && [ "$fs_trace_status" -eq 130 ]; } || {
         printf 'FS7 tracer exited unexpectedly: status=%s\n' "$fs_trace_status" >&2; return 1;
     }
@@ -116,8 +110,6 @@ PY
 fs_tmpfs_remove() {
     "$fs_tmpfs_active" || return 0
     if ! sudo test -e "/proc/$fs_fault_pid/ns/mnt"; then
-        # No other fixture process stays in this namespace. Its disappearance
-        # destroys the private mount; never unmount through a different PID.
         printf '%s\n' 'FS7 tmpfs cleanup: original service namespace has exited.'
         fs_tmpfs_active=false
         return 0
@@ -154,8 +146,6 @@ cleanup() {
     if [ "$status" -ne 0 ]; then
         printf 'Service acceptance failed during %s (exit %s).\n' "$acceptance_stage" "$status" >&2
         if [ -s "$fixture/status.json" ]; then
-            # Fixed diagnostic fields only; never dump accounts, bindings,
-            # configuration, endpoint addresses or arbitrary error text.
             jq '{running, lifecycle_phase, revision, generation,
                  dns_health: (.dns_health | {state, ready, generation, code})}' \
                 "$fixture/status.json" >&2 || true
@@ -172,8 +162,6 @@ cleanup() {
         sudo systemctl disable --now parins-managed.service || status=1
     fi
     sudo chmod "$opt_mode" /opt || status=1
-    # Only our known private fixture files; installed state remains on the
-    # disposable runner until it is destroyed, with the service disabled.
     for name in token-copy state-copy credentials.json candidate.toml setup.json setup-header response.json cookies.txt status.json refusal.log preflight-reject home-error.log install.log tls-before tls-after install-build-info.json filter-evidence.json enospc.trace enospc-tracer.log server-cpus driver-cpus wait-journal.json wait-status.json; do
         rm -f "$fixture/$name"
     done
@@ -183,8 +171,6 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 if [ -z "$build_info" ]; then
-    # Source CI has no package manifest. Query the selected build as the runner,
-    # before sudo; the root installer must never execute a candidate for metadata.
     build_info="$fixture/install-build-info.json"
     "$binary" --build-info=json > "$build_info"
 fi
@@ -192,13 +178,9 @@ sudo chmod go-w /opt
 install_service() {
     acceptance_stage=installation
     if sudo sh "$installer" --binary "$binary" --helper "$helper" --build-info "$build_info" > "$fixture/install.log" 2>&1; then
-        # Keep the one-time setup token out of CI logs.
         sed -E 's/^( +)[0-9a-f]{64}$/\1<setup token>/' "$fixture/install.log"
     else
         install_status=$?
-        # This disposable fixture contains only generated test configuration.
-        # Preserve the bounded preflight error before runner cleanup; do not
-        # print state.json, credentials, setup responses or session cookies.
         if sudo test -f /var/lib/parins-updater/private/install-preflight-error.txt; then
             printf '%s\n' 'Candidate preflight stderr:' >&2
             sudo head -c 32768 /var/lib/parins-updater/private/install-preflight-error.txt >&2 || true
@@ -209,8 +191,6 @@ install_service() {
     sudo systemctl is-active --quiet parins-managed.service
     acceptance_stage=installed-binary-identity
     sudo cmp "$binary" /opt/parins-managed/parins
-    # A committed install keeps no preflight copy and at most two backups. The
-    # official-A updater suite runs the immutable v0.1.5 installer.
     if ! "$official_updater_check"; then
         acceptance_stage=installed-private-preflight-cleanup
         sudo test ! -e /opt/parins-managed/.update/install-preflight
@@ -219,19 +199,14 @@ install_service() {
     fi
 }
 expect_fresh_install_message() {
-    # The official-A updater suite runs the immutable v0.1.5 installer, whose
-    # first-setup wording predates the three-step guidance.
     "$official_updater_check" && return 0
     grep -Fq 'Fresh setup, three steps:' "$fixture/install.log"
     grep -Fq '       ssh -N -L 3000:127.0.0.1:3000 ' "$fixture/install.log"
     grep -Fxq '  2. Open http://127.0.0.1:3000 in your browser.' "$fixture/install.log"
-    # The service created the token before install-verify accepted readiness.
     grep -Fxq "       $(sudo cat /var/lib/parins-managed/setup-token)" "$fixture/install.log"
     ! grep -Fq 'Existing configuration preserved.' "$fixture/install.log" || return 1
 }
 expect_initialized_install_message() {
-    # The official-A updater suite intentionally runs the immutable v0.1.5
-    # installer, which predates this messaging fix; it is not this regression gate.
     "$official_updater_check" && return 0
     grep -Fq 'Existing configuration preserved. Continue using your existing management address and administrator account.' "$fixture/install.log"
     grep -Fq 'Check service: sudo systemctl status' "$fixture/install.log"
@@ -243,8 +218,6 @@ http() {
         --cookie "$fixture/cookies.txt" --cookie-jar "$fixture/cookies.txt" "$@"
 }
 session() { http --max-time 5 http://127.0.0.1:3000/api/session; }
-# Unknown and legacy layout refusals are covered by test-install.sh staged roots.
-# External TLS files under the old shared path can coexist unchanged.
 sudo install -d -m 0700 /var/lib/parins
 sudo install -d -m 0750 /var/lib/parins/tls
 printf 'external certificate sentinel\n' | sudo tee /var/lib/parins/tls/external.pem >/dev/null
@@ -272,8 +245,6 @@ systemctl show --property=After,Before,Requires parins-managed.service | grep -F
 sudo jq -e '.schema == 1 and .operation == null and .installed.build.install_contract == "linux-managed-updater-v1"' /var/lib/parins-updater/private/journal.json >/dev/null
 test "$(sudo stat -c %a /var/lib/parins-updater/private)" = 700
 test "$(sudo stat -c %a /var/lib/parins-updater/status.json)" = 644
-# Invalid untrusted inbox is consumed without repeating activations or touching
-# business files. This runs only in this disposable, real-systemd environment.
 printf '{"schema":1,"command":"/bin/false"}\n' | sudo tee /var/lib/parins-managed/update-request.json >/dev/null
 sleep 2
 ! sudo test -e /var/lib/parins-managed/update-request.json
@@ -288,15 +259,12 @@ session | jq -e '.setup_required == true and .transport.scheme == "http"' >/dev/
 for asset in / /theme-init.js /assets/app.js /assets/app.css; do
     http --max-time 5 "http://127.0.0.1:3000$asset" >/dev/null
 done
-# Exercise the real non-loopback interface without requiring public Internet routing.
 ss -H -ltn4 'sport = :3000' | awk '{print $4}' | grep -Fx '0.0.0.0:3000' >/dev/null
 interface_ip=$(ip -4 -o address show scope global | awk 'NR == 1 {split($4, address, "/"); print address[1]}')
 [ -n "$interface_ip" ]
 http --max-time 5 --connect-to "127.0.0.1:3000:$interface_ip:3000" \
     -H 'Host: 198.51.100.42:3000' -H 'Origin: http://198.51.100.42:3000' \
     http://127.0.0.1:3000/api/session | jq -e '.setup_required == true' >/dev/null
-# Negative protocol probe only: ignore trust so a stray self-signed HTTPS
-# listener cannot make this check pass merely because its certificate is unknown.
 if curl --fail --silent --insecure --noproxy '*' --max-time 5 https://127.0.0.1:3000/api/session >/dev/null 2>&1; then
     printf '%s\n' 'Unexpected HTTPS response without inbound DoH.' >&2
     exit 1
@@ -311,8 +279,6 @@ sudo cmp "$fixture/token-copy" /var/lib/parins-managed/setup-token
 session | jq -e '.setup_required == true and .transport.scheme == "http"' >/dev/null
 ! sudo test -e /var/lib/parins-managed/state.json
 
-# No public DNS, certificate authorities or external APIs: blocked .invalid queries are
-# answered locally on a kernel-assigned high port, with a loopback-only upstream.
 printf '%s\n' 'listen = "127.0.0.1:0"' \
     'query_timeout_ms = 100' 'tcp_io_timeout_ms = 1000' 'shutdown_grace_ms = 1000' \
     'max_inflight = 16' 'max_tcp_connections = 8' \
@@ -322,9 +288,6 @@ openssl rand -hex 24 | jq -Rs '{username:"ci-admin",password:rtrimstr("\n")}' > 
 jq --rawfile toml "$fixture/candidate.toml" '. + {toml:$toml}' "$fixture/credentials.json" > "$fixture/setup.json"
 sed 's/^/X-PariNS-Setup: /' "$fixture/token-copy" > "$fixture/setup-header"
 setup_service() {
-    # Root installation readiness precedes the managed process's next frozen
-    # state reconciliation. Only this explicit rejection proves no setup was
-    # accepted; unknown outcomes and every other failure must not be replayed.
     setup_attempt=1
     while :; do
         if setup_status=$(curl --silent --show-error --noproxy '*' --max-time 15 \
@@ -339,7 +302,6 @@ setup_service() {
             printf 'Setup transport failed (curl %s); outcome unknown, not retried.\n' "$setup_curl_status" >&2
             return "$setup_curl_status"
         fi
-        # Never print response bodies: a successful body carries a session binding.
         setup_code=$(jq -er '.error.code | select(type == "string" and test("^[A-Za-z0-9_]{1,64}$"))' "$fixture/response.json" 2>/dev/null) || setup_code=invalid_response
         if [ "$setup_status" = 409 ] && [ "$setup_code" = update_in_progress ] && [ "$setup_attempt" -lt 3 ]; then
             setup_attempt=$((setup_attempt + 1))
@@ -368,9 +330,6 @@ wait_dns_ready() {
             printf '%s\n' 'DNS readiness observed an unexpected saved revision.' >&2
             return 1
         }
-        # The explicit official-A control uses immutable v0.1.5, whose status
-        # predates lifecycle health. Keep that named suite's original contract;
-        # current builds must supply every readiness field, never infer it.
         if jq -e --argjson official_a "$official_updater_check" \
             '.running == true and .last_error == null and
              ($official_a or (.lifecycle_phase == "stable" and
@@ -396,8 +355,6 @@ wait_dns_ready() {
     done
 }
 make_rejecting_candidate() {
-    # Host utilities can be provider symlinks or multicall executables. This
-    # private native file must reach app-user preflight with a fixed exit code.
     printf '%s\n' 'int main(void) { return 1; }' | cc -x c -o "$1" -
     [ -f "$1" ] && [ ! -L "$1" ] && [ -x "$1" ]
 }
@@ -456,8 +413,6 @@ acceptance_stage=initialized-install-authenticated-session
 session | jq -e '.setup_required == false and .authenticated == true' >/dev/null
 check_dns
 acceptance_stage=candidate-preflight-rejection
-# A valid native executable that exits immediately fails read-only preflight
-# before replacement or stopping the previously active service.
 make_rejecting_candidate "$fixture/preflight-reject"
 if sudo sh "$installer" --binary "$fixture/preflight-reject" --helper "$helper" --build-info "$build_info" > "$fixture/refusal.log" 2>&1; then
     printf '%s\n' 'Expected read-only preflight failure without replacing the running service.' >&2
@@ -513,10 +468,8 @@ JS
     sha256sum "$binary" > "$fs_output/binary-sha256.txt"
     sudo systemctl set-property --runtime parins-managed.service \
         "AllowedCPUs=$PARINS_FS_SERVER_CPUS" CPUQuota=200% MemoryMax=2147483648 MemorySwapMax=0 IOAccounting=yes
-    # Restart inside the declared CPU set before measuring; no production host.
     sudo systemctl restart parins-managed.service
     taskset --cpu-list "$PARINS_FS_DRIVER_CPUS" node "$measurement_driver" "$fixture" "$fs_output"
-    # The common trap disables the owned service and removes private credentials.
     exit 0
 fi
 
@@ -553,8 +506,6 @@ if "$filter_subscriptions"; then
         if [ "$fs_actual" != "$fs_uid:$fs_mode" ]; then
             printf 'FS7 permissions FAILED: %s expected uid:mode=%s:%s actual=%s\n' \
                 "$relative" "$fs_uid" "$fs_mode" "$fs_actual" >&2
-            # Failure-only numeric metadata. Distinguish id-mapped backing from
-            # the process root without following leaf symlinks or dumping env.
             fs_host=$(sudo "$fs_stat" -c '%u:%g:%a:%d:%i' "$fs_path") || fs_host=stat_failed
             fs_proc=$(sudo "$fs_stat" -c '%u:%g:%a:%d:%i' "/proc/$fs_pid/root$fs_path") || fs_proc=stat_failed
             fs_root=$(sudo "$fs_nsenter" --target "$fs_pid" --mount --root --wd=/ -- "$fs_stat" -c '%u:%g:%a:%d:%i' "$fs_path") || fs_root=stat_failed
@@ -564,9 +515,6 @@ if "$filter_subscriptions"; then
         fi
     done
     [ "$fs_permission_errors" -eq 0 ] || exit 1
-    # Reject only this DynamicUser's external HTTPS. Both families are covered;
-    # the already-present rules precede restart. A changed UID fails this fixture
-    # instead of incorrectly claiming that the new process started offline.
     fs_chain="PARINS_FS_$$"
     for table in iptables ip6tables; do
         sudo "$table" -w -N "$fs_chain"
@@ -580,9 +528,6 @@ if "$filter_subscriptions"; then
     fs_pid=$(systemctl show --property=MainPID --value parins-managed.service)
     fs_early_uid=$(sudo awk '/^Uid:/ {print $2}' "/proc/$fs_pid/status" 2>/dev/null) || fs_early_uid=unavailable
     printf 'FS7 restart returned: early MainPID=%s UID=%s (diagnostic only; waiting for API readiness)\n' "$fs_pid" "$fs_early_uid"
-    # Type=simple reports start before child credentials/exec are complete.
-    # Only the actual application's read-only response establishes readiness
-    # for the strict identity checks below; the firewall is already in place.
     attempt=0
     until session >/dev/null 2>&1; do
         attempt=$((attempt + 1))
@@ -615,9 +560,6 @@ if "$filter_subscriptions"; then
     fs_offline_remove
 fi
 
-# Reproduce a crash after durable app intent, before Commit reaches the inbox.
-# Only this disposable fixture injects journal state; no candidate is executed
-# or downloaded, and the root installed identity remains the actual binary.
 old_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
 recovery_invocation=$(systemctl show --property=InvocationID --value parins-update-recovery.service)
 sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
@@ -641,8 +583,6 @@ operation_id, nonce = 'b' * 32, 'c' * 32
 stamp = int(time.time() * 1000)
 size = Path('/opt/parins-managed/parins').stat().st_size
 tag = 'v' + build['version']
-# Export the installed schema/contract values rather than guessing a release
-# identity. Both artifact descriptors are inert: this fixture only sends Abort.
 manifest = {key: build[key] for key in (
     'version', 'source_commit', 'update_protocol', 'install_contract',
     'durable_contract_epoch', 'runtime_database_format',
@@ -665,8 +605,6 @@ journal['operation'] = dict(status=status, old=installed, candidate=installed,
                             started_at_ms=stamp, rollback_attempted=False,
                             rollback_started=False, pending_launch=None)
 state_path = app / 'update-state.json'
-# These are AppState/CheckState's current serialized defaults. A prior checker
-# envelope is retained if present; no release lookup is needed for this fixture.
 state = json.loads(state_path.read_text()) if state_path.exists() else dict(
     schema=1, check=dict(validated=False, etag=None, last_check_at_ms=None,
                         last_success_at_ms=None, next_check_at_ms=0, retry_at_ms=0,
@@ -743,9 +681,6 @@ sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 check_dns
 if "$filter_subscriptions"; then
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" unfrozen "$fixture"
-    # Mount only an idle, empty staging child inside this running service's
-    # namespace. Isolate its exact state mount first when it has shared peers.
-    # Catalog, objects and lock stay in place.
     fs_fault_pid=$(systemctl show --property=MainPID --value parins-managed.service)
     fs_fault_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
     fs_fault_ns=$(sudo readlink "/proc/$fs_fault_pid/ns/mnt")
@@ -769,9 +704,6 @@ if "$filter_subscriptions"; then
     fs_host_mount=$(sudo "$fs_findmnt" -rn -T "$fs_staging" -o ID,TARGET,PROPAGATION)
     fs_propagation=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -T "$fs_staging" -o PROPAGATION)
     case "$fs_propagation" in shared|shared,slave)
-        # shared+slave still forwards mounts to its own peers. --make-private
-        # changes this one existing mount, not descendants or the host's mount.
-        # Its namespace is destroyed by fixture cleanup; do not rejoin peers.
         fs_state_mount=$(sudo "$fs_nsenter" --target "$fs_fault_pid" --mount -- "$fs_findmnt" -rn -T "$fs_staging" -o TARGET)
         case "$fs_state_mount" in /var/lib/parins-managed|/var/lib/private/parins-managed) ;; *)
             printf 'FS7 ENOSPC refused: containing mount=%s is not the exact service state mount.\n' "$fs_state_mount" >&2; exit 1 ;;
@@ -820,7 +752,6 @@ with open(p + '/fs7-fill', 'xb') as fill:
     fill.write(b'0' * 4096)
     fill.flush()
 assert os.statvfs(p).f_bavail == 0
-# Plenty of inodes: file creation works; actual data allocation must fail.
 fd = os.open(p + '/fs7-probe', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 try:
     try:
@@ -838,15 +769,11 @@ PY
     [ "$(sudo awk '/^TracerPid:/ {print $2}' "/proc/$fs_fault_pid/status")" = 0 ] || {
         printf '%s\n' 'FS7 ENOSPC refused: service already has a tracer.' >&2; exit 1;
     }
-    # Failed write calls only; zero string bytes. Raw trace stays private and is
-    # removed by cleanup, never placed in the uploaded artifact directory.
     sudo -n "$fs_timeout" -s INT -k 5 330 "$fs_strace" -f -yy -s 0 -e trace=write -e status=failed \
         -o "$fixture/enospc.trace" -p "$fs_fault_pid" 2>"$fixture/enospc-tracer.log" &
     fs_trace_job=$!
     attempt=0
     while :; do
-        # -f attaches existing Tokio threads as well as future children. Do not
-        # start the download while only the main thread is attached.
         fs_tracer_pid=$(sudo "$fs_python" - "$fs_fault_pid" <<'PY'
 import pathlib, sys
 tracers = set()
@@ -870,8 +797,6 @@ PY
     }
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" enospc "$fixture"
     fs_trace_stop
-    # The operation is terminal and its writer drained. No lazy unmount; remove
-    # the cross-filesystem staging overlay before the single recovery prepare.
     fs_tmpfs_remove
     fs_fault_identity() {
         [ "$(systemctl show --property=MainPID --value parins-managed.service)" = "$fs_fault_pid" ] && \
@@ -893,11 +818,6 @@ PY
     fs_fault_identity
     printf '%s\n' 'FS7 download, activation, DNS, DynamicUser, offline LKG, UP freeze and actual staging-write ENOSPC/recovery passed. Performance remains a separate gate.'
 fi
-# Online Commit -> readiness on the real Type=simple unit. systemctl start
-# returns before the target's execve, so readiness must not trust the first
-# /proc/PID/exe image. The candidate is the installed binary itself: an inert
-# copy of the actual identity, never a manufactured official release. Root runs
-# the real stop, swap, start and readiness path; nothing is downloaded.
 online_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
 sudo systemctl stop parins-updater.path
 sudo python3 - "$online_invocation" "$revision" <<'PY'
@@ -968,14 +888,11 @@ test "$(systemctl show --property=InvocationID --value parins-managed.service)" 
 [ "$(sudo readlink "/proc/$(systemctl show --property=MainPID --value parins-managed.service)/exe")" = /opt/parins-managed/parins ]
 sudo cmp "$binary" /opt/parins-managed/parins
 ! sudo test -e /var/lib/parins-managed/update-request.json
-# The restart revoked in-memory sessions; sign in again for the DNS check.
 http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' \
     --data-binary "@$fixture/credentials.json" http://127.0.0.1:3000/api/login > "$fixture/response.json"
 binding=$(jq -er '.session.binding' "$fixture/response.json")
 check_dns
 printf '%s\n' 'Online Commit, swap, Type=simple start and readiness passed.'
-# Prove the observation-only installer handoff against the real root executable,
-# process identity and storage health. The journal remains pending until verify.
 sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
 restore_nonce=33333333333333333333333333333333
 sudo python3 - "$restore_nonce" "$revision" <<'PY'
@@ -1019,11 +936,6 @@ sudo /usr/libexec/parins-updater install-verify "$restore_nonce"
 sudo jq -e '.installation_pending == null and .operation.status.phase == "succeeded"' /var/lib/parins-updater/private/journal.json >/dev/null
 sudo systemctl start parins-updater.path
 printf '%s\n' 'Installer wait preserved the pending journal/status; verified completion passed.'
-# ManualRequired recovery by reinstallation, with the update request path left
-# active as in production. The restarted service holds an older invocation's
-# commit intent and writes an Abort request on its own, including inside the
-# installer window. The installer must own the path for that window, finish
-# with "Installed.", and leave the request to an idle helper afterwards.
 manual_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
 sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
 sudo python3 - "$manual_invocation" "$revision" <<'PY'
@@ -1048,8 +960,6 @@ journal['operation'] = dict(status=status, old=installed, candidate=installed,
                             started_at_ms=stamp, rollback_attempted=True,
                             rollback_started=True, pending_launch=None)
 state_path = app / 'update-state.json'
-# The earlier Abort scenario left a complete operation envelope; only its
-# identity, phase and intent change here.
 state = json.loads(state_path.read_text())
 state['operation'].update(operation_id=operation_id, phase_nonce=nonce,
                           invocation_id=sys.argv[1], config_revision=int(sys.argv[2]),
@@ -1075,12 +985,8 @@ def replace(path, value, owner):
 replace(journal_path, journal, journal_path.stat())
 replace(state_path, state, (app / 'state.json').stat())
 PY
-# A terminal operation only republishes status here.
 sudo /usr/libexec/parins-updater recover
 sudo systemctl start parins-managed.service
-# The new invocation asks root to abort the older operation. Wait for that
-# request before enabling the path, then for root to consume it: root
-# republishes the ManualRequired terminal and the application stays frozen.
 attempt=0
 until sudo jq -e '.operation_id == "11111111111111111111111111111111" and .phase_nonce == "22222222222222222222222222222222" and .request.kind == "abort"' /var/lib/parins-managed/update-request.json >/dev/null 2>&1; do
     attempt=$((attempt + 1))
@@ -1109,7 +1015,6 @@ until sudo jq -e '.installation_pending == null and .operation.status.operation_
     [ "$attempt" -lt 30 ] || { printf '%s\n' 'Reinstallation did not close ManualRequired and thaw the application.' >&2; exit 1; }
     sleep 1
 done
-# Development builds report unsupported_installation; only the recovery state must be gone.
 sudo jq -e '.capability.reason != "manual_recovery_required" and .capability.available == .installed.build.official_release' /var/lib/parins-updater/status.json >/dev/null
 if sudo journalctl --no-pager -o cat -u parins-updater.path --since "@$manual_since" | grep -Fq 'Trigger limit hit'; then
     printf '%s\n' 'The update request path hit its trigger limit during installation.' >&2; exit 1

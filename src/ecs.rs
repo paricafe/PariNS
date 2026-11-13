@@ -18,17 +18,10 @@ use crate::{config::EcsConfig, protocol::MAX_UDP_PAYLOAD};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     NoEcs,
-    Privacy {
-        ipv4: bool,
-    },
+    Privacy { ipv4: bool },
     Network(IpNet),
-    /// Missing upstream ECS is reusable only for this exact sent source prefix.
     ExactSource(IpNet),
-    /// A missing-ECS answer the cache learned is identical across networks of
-    /// one family. Only the cache assigns it; responses never imply it.
-    Learned {
-        ipv4: bool,
-    },
+    Learned { ipv4: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,7 +68,6 @@ impl Context {
             return Err(ResponseCode::FormErr);
         }
         let mut outgoing_query = query.clone();
-        // A client's larger UDP size does not apply to the upstream hop (DNS Flag Day 2020).
         if let Some(edns) = &mut outgoing_query.edns {
             edns.set_max_payload(edns.max_payload().min(MAX_UDP_PAYLOAD));
         }
@@ -89,7 +81,6 @@ impl Context {
                 },
             ));
         }
-        // IPv4-mapped IPv6 socket peers carry IPv4 client identity.
         let peer = match peer {
             IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(peer, IpAddr::V4),
             _ => peer,
@@ -130,8 +121,6 @@ impl Context {
         ))
     }
 
-    /// The namespace of exactly the sent query: a cached upstream failure
-    /// never takes a response scope, so it never spans other networks.
     pub fn source_scope(&self) -> Option<Scope> {
         match self.outgoing {
             None => Some(Scope::NoEcs),
@@ -144,8 +133,6 @@ impl Context {
         }
     }
 
-    /// Storage and downstream scopes come from the same response decision.
-    /// The caller still excludes the original namespace after a privacy retry.
     pub fn response_scope(&self, response: &Message) -> ResponseScope {
         let received = subnet(response);
         let cache = match (self.outgoing, received) {
@@ -173,7 +160,6 @@ impl Context {
         ResponseScope { cache, reply }
     }
 
-    /// Rebuild ECS for the original caller, not the cache-filling client.
     pub fn finish(&self, query: &Message, response: &mut Message, scope: Option<u8>) {
         response.metadata.id = query.id;
         response.metadata.recursion_desired = query.recursion_desired;
@@ -185,8 +171,6 @@ impl Context {
             let edns = response.edns.get_or_insert_with(Edns::new);
             edns.set_max_payload(MAX_UDP_PAYLOAD)
                 .set_dnssec_ok(client_edns.flags().dnssec_ok);
-            // An unsolicited upstream COOKIE belongs to its transaction, not
-            // to any of the downstream clients sharing the answer (RFC 7873).
             let cookie = EdnsCode::from(10);
             if client_edns.option(cookie).is_none() {
                 edns.options_mut().remove(cookie);
@@ -247,8 +231,6 @@ impl Scope {
         }
     }
 
-    /// Learned answers echo the requester's own outgoing source prefix, exactly
-    /// as an ExactSource answer for that network would, never a broader scope.
     pub fn reply_scope(self, outgoing: Option<ClientSubnet>) -> Option<u8> {
         match self {
             Self::NoEcs => None,
@@ -294,8 +276,6 @@ impl Scope {
     }
 }
 
-/// Hickory decodes ECS into typed fields but does not reject extra ADDRESS bytes.
-/// Walk RR envelopes with Hickory's decoder to validate the original OPT lengths.
 pub fn validate_wire(bytes: &[u8]) -> Result<()> {
     let mut decoder = BinDecoder::new(bytes);
     let header = Header::read(&mut decoder)?;

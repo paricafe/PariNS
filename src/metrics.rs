@@ -1,4 +1,4 @@
-//! Fixed-cardinality process metrics. Concurrent snapshots are approximate, not transactional.
+//! Fixed-cardinality process metrics.
 
 use std::{
     collections::BTreeMap,
@@ -118,8 +118,6 @@ pub enum Counter {
     CacheReasonEpochChanged,
 }
 
-/// Process-local listener diagnostics, exposed only on `/metrics`. They stay out
-/// of `Snapshot`, so the persisted statistics keep their fixed counter set.
 #[derive(Clone, Copy, Debug)]
 pub enum Diagnostic {
     QueryTaskPanics,
@@ -152,7 +150,6 @@ pub enum Timer {
 
 #[derive(Default)]
 struct Histogram {
-    // Exclusive buckets permit a snapshot to derive consistent cumulative bucket counts.
     buckets: [AtomicU64; 9],
     sum_micros: AtomicU64,
 }
@@ -305,7 +302,6 @@ impl Metrics {
         self.diagnostics[diagnostic as usize].fetch_add(1, Relaxed);
     }
 
-    /// Name, help text and value of each `/metrics`-only counter.
     pub fn diagnostics(&self) -> impl Iterator<Item = (&'static str, &'static str, u64)> + '_ {
         DIAGNOSTICS
             .into_iter()
@@ -358,13 +354,10 @@ enum End {
 }
 
 impl Guard<'_> {
-    /// Mark a request as resolved (including DNS error responses), rather than cancelled.
     pub fn complete(&mut self) {
         self.end = End::Completed;
     }
 
-    /// Mark a request as resolved, but leave the completed or cancelled count
-    /// to the caller, which records it after the transport delivers the answer.
     pub fn defer(&mut self) {
         self.end = End::Deferred;
     }
@@ -403,14 +396,11 @@ pub struct HistogramSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bucket {
-    /// Inclusive upper bound; `None` represents positive infinity.
     pub upper_bound_micros: Option<u64>,
     pub count: u64,
 }
 
 impl Snapshot {
-    /// Durable counters exclude process-local gauges. Saturation makes overflow
-    /// explicit to the sampler without ever manufacturing negative traffic.
     pub fn delta(&self, previous: &Self) -> Self {
         let mut result = self.clone();
         for (name, value) in &mut result.counters {

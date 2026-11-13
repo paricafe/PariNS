@@ -8,7 +8,6 @@ interface TurnstileApi {
 }
 declare global { interface Window { turnstile?: TurnstileApi } }
 
-// The server allows this script and its frame only on a sign-in document that shows the widget.
 const SCRIPT = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
 let loading: Promise<TurnstileApi> | null = null;
 
@@ -25,7 +24,6 @@ function load(): Promise<TurnstileApi> {
   return loading;
 }
 
-/** The Cloudflare Turnstile widget. Tokens are single-use: bump `resetSignal` after each attempt. */
 export function TurnstileWidget({ siteKey, action, language, resetSignal, onToken }: {
   siteKey: string; action: string; language: Language; resetSignal: number; onToken: (token: string | null) => void;
 }) {

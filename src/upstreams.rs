@@ -1,4 +1,4 @@
-//! Validated equivalent upstream pool. The resolver owns the total deadline.
+//! Validated equivalent upstream pool.
 use std::{
     net::{IpAddr, SocketAddr},
     path::PathBuf,
@@ -55,8 +55,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// `config` is the configuration that owns these settings; numeric
-    /// endpoints and bootstrap addresses must not target its own listeners.
     pub fn validate(&self, config: &crate::config::Config) -> Result<()> {
         self.dot_pool.validate()?;
         ensure!(
@@ -243,10 +241,6 @@ fn valid_address(address: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// Marks a failure that happened before any byte of the query left PariNS
-/// (connect, handshake, stream open, or a request not yet handed to the
-/// transport). Only such a failure may move the query to another address or
-/// transport; a query that may have been sent is never resent.
 #[derive(Debug)]
 pub(crate) struct NotSent;
 impl std::fmt::Display for NotSent {
@@ -256,8 +250,6 @@ impl std::fmt::Display for NotSent {
 }
 impl std::error::Error for NotSent {}
 
-/// Adds the [`NotSent`] marker as context. The original error stays reachable
-/// for attempt classification (`downcast_ref` still finds it).
 pub(crate) fn not_sent(error: impl Into<anyhow::Error>) -> anyhow::Error {
     error.into().context(NotSent)
 }
@@ -278,9 +270,7 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// `config` has passed `Config::validate`, which owns upstream and listener checks.
     pub fn new(settings: &Settings, config: &crate::config::Config) -> Result<Self> {
-        // A configured CA must load even when only plaintext endpoints use it.
         if let Some(path) = &settings.ca_file {
             crate::tls::client_config(Some(path), b"dot")?;
         }
@@ -303,9 +293,6 @@ impl Pool {
         })
     }
 
-    /// Attempt counts per endpoint slot, each with the endpoint's label and the
-    /// address it is reached at. Management-only: never logged or used as a
-    /// metric label.
     pub fn diagnostics_snapshot(&self) -> serde_json::Value {
         let mut snapshot = self.diagnostics.snapshot();
         snapshot["endpoints"] = self
@@ -347,7 +334,6 @@ impl Pool {
             "upstream deadline exhausted"
         );
         if self.settings.mode == Mode::Weighted {
-            // Smooth weighted round-robin: no long runs from large weights.
             let index = {
                 let mut scores = self.scores.lock().unwrap_or_else(|e| e.into_inner());
                 let mut selected = 0;

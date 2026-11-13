@@ -9,11 +9,6 @@ const LABELS = { system: 'ui.themeAuto', light: 'ui.themeLight', dark: 'ui.theme
 
 const themeName = (theme: Theme, language: Language) => translate(LABELS[theme], language);
 
-/**
- * One top-bar button cycling system → light → dark; its name always states the current theme.
- * The old and new icons share one grid cell while they animate: AnimatePresence's
- * popLayout mode would insert a <style> element, which the console CSP blocks.
- */
 export function ThemeButton({ theme, language, onChange }: { theme: Theme; language: Language; onChange(theme: Theme): void }) {
   const reduced = useReducedMotion();
   const Icon = ICONS[theme];

@@ -22,8 +22,6 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
         };
         if let Some((current, changed)) = saved {
             if let Some(toml) = changed {
-                // The saved document was already validated by Config. Read only
-                // management settings; do not recompile policy or touch TLS files.
                 #[derive(serde::Deserialize)]
                 struct SavedSettings {
                     #[serde(default)]
@@ -38,9 +36,6 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
                 revision = Some(current);
             }
             if !*stop.borrow() && updates.due(settings.auto_check) {
-                // Do not abort an atomic persistence worker during shutdown.
-                // Network work already has a finite timeout; serve owns the
-                // overall transaction drain deadline.
                 updates.perform_check(current, &settings).await;
             }
         }

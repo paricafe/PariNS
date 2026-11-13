@@ -58,8 +58,6 @@ impl PolicyHandle {
         })
     }
 
-    /// The single compilation/publication owner checked availability before commit.
-    /// Readers can only keep an old generation alive, never resurrect a released one.
     pub(crate) fn publish(&self, policy: Policy) {
         self.try_publish(policy)
             .expect("single filter publication owner");

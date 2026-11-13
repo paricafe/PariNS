@@ -1,10 +1,4 @@
 //! Read-only management observation, independent of the configuration mutex.
-//! Manager publishes committed metadata and weak runtime references at lifecycle
-//! boundaries. Counters, health, cache and storage remain live observations of
-//! their existing owners; no configuration, credentials or mutation authority is
-//! copied here. Readers release this short lock before consulting those owners.
-//! Management readiness also requires a stable, matching published generation;
-//! transition phases never turn an expected handover into a runtime failure.
 use super::Active;
 use crate::{
     cache::persistence::SnapshotReport,
@@ -93,8 +87,6 @@ impl Observation {
         });
         let resolver = resolver.filter(|_| running.is_some());
         let cache = resolver.as_ref().map(|r| r.cache());
-        // This is management readiness, not a second health publisher. The
-        // runtime's health and history continue to observe the original fact.
         health.ready &= phase == Phase::Stable;
         let transport = self.active.lock().unwrap().snapshot.clone();
         let mut certificates = transport

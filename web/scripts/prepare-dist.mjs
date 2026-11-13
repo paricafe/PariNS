@@ -1,5 +1,4 @@
-// Precompresses the large console files and versions every resource address in
-// index.html, so the management server can send them encoded and cacheable.
+// Precompresses and versions the embedded console assets.
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

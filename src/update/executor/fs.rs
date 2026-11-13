@@ -1,4 +1,4 @@
-//! Root files use held directory descriptors. No app-owned path is a write target.
+//! Root files use held directory descriptors.
 use anyhow::{Result, ensure};
 use rustix::fs::{self, AtFlags, Mode, OFlags};
 use sha2::{Digest, Sha256};
@@ -13,8 +13,6 @@ pub struct Dir {
     pub fd: OwnedFd,
 }
 
-/// Adopt the trusted installer's held lock without creating an inheritable
-/// duplicate. The caller has already validated the expected lock file.
 pub(super) fn adopt_installer_lock(handoff: impl AsFd, expected: &fs::Stat) -> Result<OwnedFd> {
     rustix::io::fcntl_setfd(handoff.as_fd(), rustix::io::FdFlags::CLOEXEC)?;
     let inherited = rustix::io::fcntl_dupfd_cloexec(handoff.as_fd(), 0)?;
@@ -129,8 +127,6 @@ impl Dir {
         self.sync()
     }
     pub fn replace(&self, name: &str, bytes: &[u8], mode: u32) -> Result<()> {
-        // One reserved temporary per destination, protected by the root lock.
-        // A crash cannot accumulate random orphan files across operations.
         let temp = format!(".{name}.tmp");
         self.remove(&temp)?;
         let mut file = self.create(&temp, mode)?;

@@ -1,6 +1,4 @@
 //! Low-privilege source objects and their sole selection authority.
-//! Object installation and catalog selection are separate transactions. The
-//! service owns aggregate validation and policy publication around these calls.
 use super::download::Validators;
 use crate::private_files::{checked_open, create_private, lock_private_dir, private_permissions};
 use anyhow::{Context, Result, ensure};
@@ -85,9 +83,6 @@ pub(crate) struct Staging {
 }
 impl Drop for Staging {
     fn drop(&mut self) {
-        // Cancellation can leave a staging writer's blocking write alive. Only an
-        // explicit completion after the caller drained that writer releases
-        // the reservation. An abandoned operation keeps this Store busy.
         if self.completed {
             let _ = fs::remove_file(&self.path);
             *self.active.lock().unwrap() = false;
@@ -112,7 +107,6 @@ impl Drop for WorkPin {
     }
 }
 
-/// The single writer. Its read accessors are the selected snapshot's.
 pub(crate) struct Store {
     selected: ReadOnlyStore,
     _lock: Arc<File>,
@@ -124,9 +118,6 @@ pub(crate) struct Store {
     fault: Option<&'static str>,
 }
 
-/// The selected catalog and its directory: the preflight snapshot, and the
-/// writer's view of its current selection. Opened on its own, it never creates
-/// directories, acquires the writer lock, performs GC, or writes derived files.
 pub(crate) struct ReadOnlyStore {
     dir: PathBuf,
     catalog: Catalog,
@@ -182,7 +173,6 @@ impl Store {
         let catalog = read_catalog(
             checked_open(&path.join(CATALOG), false)?.context("subscription_material_missing")?,
         )?;
-        // Do not inspect unrelated objects: the selected records are authority.
         check_private_dir(&path.join("objects"))?;
         Ok(ReadOnlyStore {
             dir: path.to_owned(),
@@ -191,14 +181,11 @@ impl Store {
     }
 
     pub(crate) fn open(path: &Path, max_disk: u64) -> Result<Self> {
-        // Unlike the runtime roots, the subscription directory itself must not
-        // be a symlink, and its creation is made durable in the parent.
         private_dir(path)?;
         let (dir, lock) = lock_private_dir(path, "subscription")?;
         let catalog = if let Some(file) = checked_open(&dir.join(CATALOG), false)? {
             read_catalog(file)?
         } else {
-            // Absence is safe only before any other feature state existed.
             ensure!(
                 fs::read_dir(&dir)?
                     .all(|entry| entry.is_ok_and(|entry| entry.file_name() == "lock")),
@@ -230,9 +217,6 @@ impl Store {
             "subscription storage exceeds hard disk limit; manual recovery required"
         );
         store.cleanup_staging()?;
-        // Config is the authority for current/previous references. A crash may
-        // follow its commit but precede reference maintenance. Never collect
-        // here before the service has synchronized those authoritative roots.
         ensure!(
             store.disk_bytes()? <= store.quota,
             "subscription disk budget exceeded"
@@ -244,8 +228,6 @@ impl Store {
         self.begin_reserved(reserve_bytes, MAX_OBJECT, "download")
     }
 
-    // Admission holds the publication/UP-freeze gate and has synchronized the
-    // Config roots. Only here may staging pressure evict selected preparations.
     pub(crate) fn collect_for_download(&mut self, now: u64, needs_download: bool) -> Result<()> {
         self.collect(now, false)?;
         if needs_download && !self.has_staging_space(MAX_OBJECT)? {
@@ -278,8 +260,6 @@ impl Store {
             (1..=max).contains(&reserve_bytes),
             "invalid staging reservation"
         );
-        // Download/compile can run outside the publication/UP-freeze gate.
-        // Reclaim only unselected objects here, never mutate catalog authority.
         self.collect_orphans()?;
         ensure!(
             !self.uncertain,
@@ -316,8 +296,6 @@ impl Store {
         self.commit_records(vec![record], self.revision())
     }
 
-    /// Install verified bytes without changing the selected version. The caller
-    /// pins the result before any subsequent operation that can collect orphans.
     pub(crate) fn install_object(
         &mut self,
         mut stage: Staging,
@@ -329,8 +307,6 @@ impl Store {
                 && Arc::ptr_eq(&stage.active, &self.staging),
             "foreign staging file"
         );
-        // The coordinator must first drain StagingWriter::finish().await.
-        // The same requirement applies to discard().
         stage.completed = true;
         ensure!(
             !self.uncertain,
@@ -354,7 +330,6 @@ impl Store {
             "staging reservation exceeded"
         );
         verify_file(&mut stage.file, &metadata)?;
-        // Check the path again before publication; a substituted link is never followed.
         let mut path_file = checked_open(&stage.path, false)?.context("staging object missing")?;
         verify_file(&mut path_file, &metadata)?;
         stage.file.sync_all()?;
@@ -368,8 +343,6 @@ impl Store {
                         .any(|r| r.sha256 == metadata.sha256),
                     "unowned corrupt object; manual recovery required"
                 );
-                // Only an authority-selected, regular private corrupt object
-                // can be repaired, with fully verified identical hash bytes.
                 fs::rename(&stage.path, &object)?;
                 sync_dir(&self.dir.join("objects"))?;
                 sync_dir(&self.dir.join("staging"))?;
@@ -383,8 +356,6 @@ impl Store {
         Ok(metadata)
     }
 
-    /// Replace accepted source selections atomically, after aggregate compilation
-    /// and the service's config/local-basis/freeze checks have passed.
     #[cfg(test)]
     pub(crate) fn commit_records(
         &mut self,
@@ -438,8 +409,6 @@ impl Store {
         self.commit_selection_with_check(candidate, check)
     }
 
-    /// Config owns these GC roots, including disabled fingerprints that may have
-    /// no content yet. Updating roots does not itself create a content revision.
     pub(crate) fn set_references(
         &mut self,
         current: Vec<String>,
@@ -458,8 +427,6 @@ impl Store {
         self.commit_selection(candidate)
     }
 
-    /// Attempt/backoff metadata can be persisted even when the selected object
-    /// needs repair. It cannot alter its hash, validators, or success timestamp.
     pub(crate) fn update_status(
         &mut self,
         fingerprint: &str,
@@ -513,7 +480,6 @@ impl Store {
                 .checked_add(1)
                 .context("catalog revision overflow")?;
         }
-        // No fallible maintenance after the rename commit point.
         self.commit_catalog_with_check(candidate, check)
     }
 
@@ -577,8 +543,6 @@ impl Store {
         })
     }
 
-    /// The policy codec owns the single versioned format. Storage only bounds
-    /// its stream and recognizes the fixed ownership prefix for GC.
     pub(crate) fn write_index(
         &mut self,
         input_digest: &str,
@@ -587,7 +551,6 @@ impl Store {
     ) -> Result<CommitOutcome> {
         ensure!(valid_hash(input_digest), "invalid index digest");
         let mut stage = self.begin_reserved(max_bytes, MAX_INDEX, "index")?;
-        // This callback is synchronous; no blocking task can outlive the lease.
         stage.completed = true;
         let mut bounded = LimitedWriter {
             file: &mut stage.file,
@@ -601,8 +564,6 @@ impl Store {
         );
         stage.file.sync_all()?;
         let path = self.dir.join("indexes").join(format!("{input_digest}.bin"));
-        // A corrupt derived file is replaceable, but links and external files
-        // are not. No policy or source selection depends on this replacement.
         checked_open(&path, false)?;
         fs::rename(&stage.path, path)?;
         let sync =
@@ -615,7 +576,6 @@ impl Store {
     }
 
     pub(crate) fn reconcile_sync(&mut self) -> Result<()> {
-        // No replay: inspect the actual authority and synchronize its directory.
         let actual = read_catalog(
             checked_open(&self.dir.join(CATALOG), false)?.context("catalog missing")?,
         )?;
@@ -654,8 +614,6 @@ impl Store {
             ensure!(self.fault != Some("write"), "injected disk full");
             file.write_all(&bytes)?;
             file.sync_all()?;
-            // Deadline/close is rechecked after the potentially blocking fsync,
-            // immediately before the single authority commit point.
             check()?;
             #[cfg(test)]
             ensure!(self.fault != Some("rename"), "injected rename failure");
@@ -736,14 +694,11 @@ impl Store {
             let Some(mut file) = checked_open(&path, false)? else {
                 continue;
             };
-            // Valid content-addressing establishes exact ownership for an orphan.
             if file.metadata()?.len() <= MAX_OBJECT && hash_file(&mut file)? == hash {
                 fs::remove_file(path)?;
             }
         }
         sync_dir(&self.dir.join("objects"))?;
-        // Disposable indexes retain only active work pins. Byte pressure alone
-        // cannot bound many tiny generations before the directory entry limit.
         {
             for entry in fs::read_dir(self.dir.join("indexes"))? {
                 let path = entry?.path();

@@ -5,7 +5,6 @@ import { UNITS, exactUnit, unitFamily, type UnitFamily } from '../model/units';
 
 export { unitFamily, type UnitFamily };
 
-/** Largest unit that represents the stored base value exactly. */
 function initial(family: UnitFamily, raw: string): { factor: number; text: string } {
   const base = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : null;
   if (base === null || base === 0) return { factor: 1, text: raw };
@@ -13,10 +12,6 @@ function initial(family: UnitFamily, raw: string): { factor: number; text: strin
   return { factor, text: String(base / factor) };
 }
 
-/**
- * Converts a clean decimal to an exact integer base value; anything else stays a raw draft for validation.
- * Decimal arithmetic avoids float error, so 0.035 hours is exactly 126 seconds.
- */
 function toBase(text: string, factor: number): string {
   const match = /^(\d+)(?:\.(\d+))?$/.exec(text.trim());
   if (!match) return text;
@@ -28,7 +23,6 @@ function toBase(text: string, factor: number): string {
   return base <= BigInt(Number.MAX_SAFE_INTEGER) ? String(base) : text;
 }
 
-/** Units with one unit at most `max`, so a unit cannot invite a value over the limit; the one in use always stays. */
 function offeredUnits(family: UnitFamily, max: number | undefined, current: number) {
   return UNITS[family].filter(([, factor]) => max === undefined || factor <= max || factor === current);
 }
@@ -38,7 +32,6 @@ export function UnitInput({ id, label, family, max, value, disabled, language, o
 }) {
   const [state, setState] = useState(() => initial(family, value));
   const emitted = useRef(value);
-  // External changes (load, discard, preview) re-derive the display; our own edits do not.
   useEffect(() => { if (value !== emitted.current) { emitted.current = value; setState(initial(family, value)); } }, [family, value]);
   const emit = (text: string, factor: number) => {
     setState({ text, factor });

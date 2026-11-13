@@ -1,5 +1,5 @@
-//! DNS message admission, error responses, and per-hop encoding (padding and
-//! UDP truncation).
+//! DNS message admission, error responses, and per-hop encoding (padding and UDP
+//! truncation).
 
 use anyhow::{Result, ensure};
 use hickory_proto::{
@@ -27,8 +27,6 @@ pub fn strip_padding(message: &mut Message) {
     }
 }
 
-/// Whether `message` has no OPT record, or EDNS version 0 with only `allowed`
-/// options.
 pub fn edns_within(message: &Message, allowed: &[EdnsCode]) -> bool {
     message.edns.as_ref().is_none_or(|edns| {
         edns.version() == 0
@@ -40,8 +38,6 @@ pub fn edns_within(message: &Message, allowed: &[EdnsCode]) -> bool {
     })
 }
 
-/// The OPT record of a reply to `query`: this server's UDP payload size and
-/// the client's DO bit, or none when the query has no EDNS.
 pub fn reply_edns(query: &Message) -> Option<Edns> {
     query.edns.as_ref().map(|client| {
         let mut edns = Edns::new();
@@ -51,7 +47,6 @@ pub fn reply_edns(query: &Message) -> Option<Edns> {
     })
 }
 
-/// The Extended DNS Error options (RFC 8914) of `message`.
 pub fn extended_errors(message: &Message) -> Vec<EdnsOption> {
     message
         .edns
@@ -62,17 +57,12 @@ pub fn extended_errors(message: &Message) -> Vec<EdnsOption> {
         .collect()
 }
 
-/// EDNS TCP keepalive (RFC 7828) describes one TCP connection. PariNS never
-/// negotiates it: client queries lose it at ingress and upstream answers at the
-/// upstream pool, so it is never forwarded, cached or answered.
 pub fn strip_tcp_keepalive(message: &mut Message) {
     if let Some(edns) = &mut message.edns {
         edns.options_mut().remove(EdnsCode::Keepalive);
     }
 }
 
-/// Per-hop final encoding, after ID, ECS, policy and framing decisions.
-/// The unpadded hot path encodes exactly once. Padding never truncates answers.
 pub fn encode_hop(
     message: &Message,
     encrypted: bool,
@@ -101,9 +91,6 @@ pub fn encode_hop(
     Ok(normalized.to_vec()?)
 }
 
-/// Padding intent of a query. Every encrypted transport (DoT, DoH, DoQ, DoH3)
-/// carries a whole message on a stream, so the padded size is bounded by the
-/// maximum DNS message size, never by an EDNS UDP payload size.
 #[derive(Clone, Copy, Default)]
 pub struct Padding {
     pub requested: bool,
@@ -124,8 +111,6 @@ pub fn encode_upstream(message: &Message, encrypted: bool) -> Result<Vec<u8>> {
     encode_hop(message, encrypted, has_padding(message), 128, MAX_MESSAGE)
 }
 
-/// Flight and refresh share one semantic key. Padding intent remains one bit;
-/// its arbitrary payload cannot create unbounded independent work groups.
 pub fn canonical_work_key(query: &Message) -> Option<Vec<u8>> {
     if query.queries.len() != 1
         || query.queries[0].query_class() != DNSClass::IN
@@ -150,7 +135,6 @@ pub fn canonical_work_key(query: &Message) -> Option<Vec<u8>> {
 
 pub enum Request {
     Forward(Message),
-    /// An error response, with the padding intent of the query it answers.
     Reply(Message, Padding),
     Drop,
 }
@@ -160,8 +144,6 @@ pub fn decode(bytes: &[u8]) -> Result<Message> {
     let mut decoder = BinDecoder::new(bytes);
     let message = Message::read(&mut decoder)?;
     ensure!(decoder.is_empty(), "trailing bytes after DNS message");
-    // Malformed OPT tails can make the library discard all typed options,
-    // including an ECS /0 privacy request. Validate the original envelope.
     if message.edns.is_some() {
         crate::ecs::validate_wire(bytes)?;
     }
@@ -172,8 +154,6 @@ pub fn request(bytes: &[u8]) -> Request {
     request_from_decoded(bytes, decode(bytes).ok())
 }
 
-/// Classifies a message already decoded for request logging. Invalid wire data
-/// still uses its header, when readable, to construct the protocol error.
 pub(crate) fn request_from_decoded(bytes: &[u8], query: Option<Message>) -> Request {
     let query = match query {
         Some(query) => query,
@@ -224,8 +204,6 @@ pub(crate) fn request_from_decoded(bytes: &[u8], query: Option<Message>) -> Requ
     match error {
         Some(code) => Request::Reply(error_response(&query, code), Padding::from_query(&query)),
         None => {
-            // Without the hop-specific option the query shares cache entries and
-            // upstream work with equivalent queries.
             let mut query = query;
             strip_tcp_keepalive(&mut query);
             Request::Forward(query)
@@ -235,7 +213,6 @@ pub(crate) fn request_from_decoded(bytes: &[u8], query: Option<Message>) -> Requ
 
 pub fn error_response(query: &Message, code: ResponseCode) -> Message {
     let mut response = Message::error_msg(query.id, query.op_code, code);
-    // Invalid multi-question messages do not need to be echoed in full.
     response
         .queries
         .extend(query.queries.iter().take(1).cloned());
@@ -267,11 +244,9 @@ pub fn encode_udp(response: &Message, limit: usize) -> Result<Vec<u8>> {
     if bytes.len() <= limit {
         return Ok(bytes);
     }
-    // Return a complete question-only TC response rather than a partial RRset.
     let mut truncated = error_response(response, response.response_code);
     crate::ecs::set_subnet(&mut truncated, crate::ecs::subnet(response));
     truncated.metadata.truncation = true;
-    // The answer's Extended DNS Errors stay when they fit.
     if let Some(edns) = &mut truncated.edns {
         for option in extended_errors(response) {
             edns.options_mut().insert(option);
@@ -354,8 +329,6 @@ mod tests {
         );
     }
 
-    /// A stream carries the whole padded answer even past the client's EDNS UDP
-    /// size: that size limits UDP datagrams, not encrypted streams.
     #[test]
     fn encrypted_padding_is_bounded_by_message_size_not_udp_payload() {
         use hickory_proto::rr::{RData, Record, rdata::A};
@@ -459,7 +432,6 @@ mod tests {
             panic!("expected BADVERS")
         };
         let decoded = decode(&r.to_vec().unwrap()).unwrap();
-        // BADVERS and TSIG BADSIG share wire code 16; this is an unsigned EDNS response.
         assert_eq!(u16::from(decoded.response_code), 16);
         assert_eq!(decoded.edns.unwrap().version(), 0);
     }
@@ -515,7 +487,6 @@ mod tests {
         let truncated = decode(&encode_udp(&detailed, 512).unwrap()).unwrap();
         assert!(truncated.truncation);
         assert_eq!(extended_errors(&truncated), vec![blocked]);
-        // An error whose text exceeds the budget is dropped, never the reply.
         let mut long = response;
         long.edns
             .as_mut()

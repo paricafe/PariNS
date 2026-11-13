@@ -1,3 +1,5 @@
+// Adapted from beUI Switch. See README.md in this directory.
+
 import clsx from "clsx";
 import { motion, useReducedMotion } from "motion/react";
 import { useId, useState } from "react";
@@ -15,8 +17,6 @@ export interface SwitchProps {
   className?: string;
 }
 
-// Based on beUI Switch. iOS-style: the thumb stretches toward the travel
-// direction while pressed and springs across on release.
 export function Switch({ checked, onCheckedChange, disabled, label, id, className, ...aria }: SwitchProps) {
   const generatedId = useId();
   const controlId = id ?? generatedId;

@@ -31,7 +31,6 @@ export function CertificateTools({ language, view, readFailure, read, hold, publ
   const { api } = useSession();
   const { draft, busy: configBusy, locked } = useConfig();
   const [busy, setBusy] = useState(false);
-  /** The last reload attempt seen before a reload whose response was lost. */
   const [unknown, setUnknown] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setError] = useState<ApiError | string | null>(null);
@@ -41,8 +40,6 @@ export function CertificateTools({ language, view, readFailure, read, hold, publ
   const t = (key: string) => translate(`reliability.${key}`, language);
   const date = (time: number) => formatDate(time, language, { dateStyle: 'medium', timeStyle: 'medium' });
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  // A reload holds the Manager lock, so a status read that follows a lost response shows a newer
-  // attempt if the reload ran; the reload itself is never sent again.
   const confirmation = useAutoConfirm(unknown !== null, async () => {
     const last = (await read()).certificates.last_reload;
     return last && last.attempt_id > (unknown ?? 0) ? last.outcome : 'notRun';
@@ -61,7 +58,6 @@ export function CertificateTools({ language, view, readFailure, read, hold, publ
       }
     } finally { mutation.current = false; hold(false); if (mounted.current) setBusy(false); }
   };
-  // Only edits to certificate paths are affected by reading the saved paths.
   const pathsEdited = Boolean(draft && CERTIFICATE_PATHS.some((path) => (draft.fields[path] ?? getPath(draft.settings, path) ?? '') !== (getPath(draft.base, path) ?? '')));
   const certificates = view?.certificates;
   const last = certificates?.last_reload;

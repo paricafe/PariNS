@@ -1,4 +1,4 @@
-//! A single upstream transaction. The caller owns the overall deadline.
+//! A single upstream transaction.
 
 use std::net::SocketAddr;
 
@@ -27,9 +27,6 @@ pub(crate) async fn exchange_tcp_observed(
     exchange_tcp_inner(query, address, scope, true).await
 }
 
-/// `first` is the query's first transmission: it gets a fresh ID, and a connect
-/// failure means nothing was sent. The TCP retry after a truncated UDP answer is
-/// not first: the upstream already received the query.
 async fn exchange_tcp_inner(
     query: &Message,
     address: SocketAddr,
@@ -96,8 +93,6 @@ pub(crate) async fn exchange_observed(
         outbound.metadata.id = rand::random();
         let wire = protocol::encode_hop(&outbound, false, false, 128, MAX_MESSAGE)?;
         stage(&mut attempt, Stage::RequestWrite);
-        // A failed send left nothing on the wire; a later failure may follow a
-        // datagram the upstream received.
         socket.send(&wire).await.map_err(not_sent)?;
         let mut buffer = vec![0; MAX_MESSAGE];
         loop {

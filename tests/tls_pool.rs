@@ -58,8 +58,6 @@ enum Action {
     Truncated,
     Partial(oneshot::Sender<()>),
     CloseAfterReply(oneshot::Sender<()>),
-    /// Reply, then keep the connection open but never read or answer again,
-    /// like a middlebox that silently forgot an idle connection.
     SilentAfterReply(oneshot::Sender<()>),
 }
 
@@ -77,7 +75,6 @@ struct Peer {
 
 impl Drop for Peer {
     fn drop(&mut self) {
-        // Dropping the accept loop also drops its JoinSet, aborting every connection.
         self.task.abort();
     }
 }
@@ -122,7 +119,6 @@ impl Peer {
                                     if stream.write_all(&wire[..5]).await.is_err() { return; }
                                     if stream.flush().await.is_err() { return; }
                                     let _ = sent.send(());
-                                    // Await closure instead of completing the response.
                                     let _ = stream.read_u8().await;
                                     return;
                                 }
@@ -237,7 +233,6 @@ async fn clone_concurrency_is_bounded_and_canceled_waiters_do_not_consume_slots(
             running.push(exchange(&upstream, peer.address, 30 + n as u16));
             blocked.push(peer.request().await);
         }
-        // A caller-owned deadline must encompass time waiting for a pooled slot.
         assert!(
             timeout(
                 Duration::from_millis(80),
@@ -277,8 +272,6 @@ async fn queued_query_uses_whichever_connection_becomes_available_first() {
 
     let waiting_query = query(43);
     let mut waiting = Box::pin(upstream.exchange(&waiting_query, peer.address));
-    // Actually register the waiter while both slots are occupied; no scheduler
-    // delay or sleep is used to guess whether checkout has already happened.
     assert!(futures_util::poll!(&mut waiting).is_pending());
     held_second
         .reply
@@ -349,7 +342,6 @@ async fn cancellation_discards_borrowed_connection_including_partial_response() 
                 .unwrap_or_else(|_| panic!("query canceled"));
             timeout(DEADLINE, received).await.unwrap().unwrap();
         } else {
-            // Keep the server alive until the client has abandoned the outstanding reply.
             canceled.abort();
             assert!(canceled.await.unwrap_err().is_cancelled());
             drop(request);
@@ -447,9 +439,6 @@ async fn resolver_query_deadline_includes_pool_wait_without_opening_an_extra_con
         request = peer.request() => request,
         _ = &mut held => panic!("first request completed without a response"),
     };
-    // Do not poll the holder while the second future runs: its borrowed stream
-    // stays busy even after its own deadline is ready. This tests the waiting
-    // caller's deadline independently of the holder's timeout/cancellation.
     let response = timeout(
         DEADLINE,
         resolver.resolve(&query(101).to_vec().unwrap(), client),
@@ -482,8 +471,6 @@ async fn resolver_query_deadline_includes_pool_wait_without_opening_an_extra_con
 
 #[tokio::test]
 async fn silently_dropped_idle_connection_costs_one_query_deadline_then_recovers() {
-    // Documents current behaviour: unlike a peer close (reconnected at once),
-    // a silent peer is only detected when the caller's deadline expires.
     let cert = certificate();
     let mut peer = Peer::new(&cert).await;
     let upstream = upstream(&cert, 1);

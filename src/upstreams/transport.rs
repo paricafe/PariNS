@@ -1,26 +1,4 @@
-//! Upstream protocol exchange for UDP/TCP, DoT, DoH (HTTP/2) and DoQ endpoints.
-//! Resolver owns the total deadline; hostname endpoints use only explicit bootstrap.
-//!
-//! Each HTTPS endpoint keeps one reusable H2 connection, opened serially, with a
-//! local stream cap under the peer's limit, a PING while busy or just used that
-//! retires a silently dead path, and a 10-second idle close owned by its driver.
-//! GOAWAY or I/O errors retire it; only a request not yet sent may move to a new
-//! connection, so a sent query is never replayed. Attempts record new or reused
-//! connections.
-//!
-//! A sent query is never resent. A hostname endpoint tries its bootstrap addresses
-//! in order, but moves to the next address only after a failure marked
-//! [`NotSent`] (connect, TLS or QUIC handshake, stream open, or a request never
-//! handed to the transport); any later failure is this endpoint's answer. With
-//! HTTP/3 preferred, only a not-sent H3 attempt falls back to H2 (see `h3`).
-//!
-//! DoH answers have HTTP Age normalized into RR TTLs here, before Resolver sees
-//! them; cache code has no HTTP policy. EDNS TCP keepalive in an answer belongs to
-//! the upstream connection and is removed here (DoQ rejects it, RFC 9250). DoQ
-//! in-flight requests retain their endpoint owner independently of the current
-//! bootstrap-address cache entry.
-//! DoH uses GET while its encoded URI fits, otherwise POST, choosing the method
-//! before the request is handed to H2 or H3.
+//! DNS wire exchange and authenticated connections to configured upstreams.
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -45,8 +23,6 @@ use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, ConnectionUse, S
 use super::{Endpoint, NotSent, Protocol, Settings, not_sent, valid_address};
 use crate::{protocol, transport::tcp};
 
-// RFC 9111 sections 5.1 and 1.2.2: use the first Age member, ignore
-// malformed values, and saturate a valid integer that exceeds our TTL range.
 fn http_age(headers: &http::HeaderMap) -> u32 {
     let Some(value) = headers.get(http::header::AGE).and_then(|v| v.to_str().ok()) else {
         return 0;
@@ -65,8 +41,6 @@ fn http_age(headers: &http::HeaderMap) -> u32 {
     })
 }
 
-// RFC 8484 section 5.1 applies to downstream answers as well as local DNS
-// caching. Change RR TTLs only, not EDNS metadata or SOA RDATA parameters.
 fn apply_http_age(response: &mut Message, age: u32) {
     for record in response
         .answers
@@ -78,8 +52,6 @@ fn apply_http_age(response: &mut Message, age: u32) {
     }
 }
 
-/// Validate an RFC 8484 response head shared by HTTP/2 and HTTP/3. Returns
-/// the HTTP Age that `doh_answer` applies once the body is accepted.
 pub(super) fn doh_head(
     status: http::StatusCode,
     headers: &http::HeaderMap,
@@ -107,7 +79,6 @@ pub(super) fn doh_head(
     Ok(age)
 }
 
-/// Append one body chunk within the DNS message size limit.
 pub(super) fn doh_chunk(bytes: &mut Vec<u8>, chunk: &[u8], attempt: &mut Attempt) -> Result<()> {
     if bytes.len() + chunk.len() > protocol::MAX_MESSAGE {
         attempt.reason(super::diagnostics::Reason::ProtocolInvalid);
@@ -117,8 +88,6 @@ pub(super) fn doh_chunk(bytes: &mut Vec<u8>, chunk: &[u8], attempt: &mut Attempt
     Ok(())
 }
 
-/// Decode and validate a complete DoH body against the sent `outbound`
-/// message, then normalize Age into TTLs and restore the client's ID.
 pub(super) fn doh_answer(
     bytes: &[u8],
     outbound: &Message,
@@ -138,8 +107,6 @@ pub(super) fn doh_answer(
     Ok(response)
 }
 
-/// Use GET for queries that fit in an HTTP URI, and POST for larger DNS messages.
-/// Both methods carry ID 0 and are selected before anything is sent.
 pub(super) fn doh_request(
     spec: &Endpoint,
     query: &Message,
@@ -155,8 +122,6 @@ pub(super) fn doh_request(
     let endpoint: http::Uri = format!("https://{host}:{}{}", spec.port, spec.path).parse()?;
     let wire = protocol::encode_upstream(&outbound, true)?;
     let separator = if spec.path.contains('?') { '&' } else { '?' };
-    // The endpoint was validated above and base64url adds no invalid URI bytes.
-    // A larger encoded URI may exceed the HTTP library's representable length.
     let get = format!(
         "{endpoint}{separator}dns={}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&wire)
@@ -174,13 +139,9 @@ pub(super) fn doh_request(
     Ok((request, outbound))
 }
 
-/// One reusable HTTP/2 connection per configured HTTPS endpoint (like H3).
-/// The driver task owns the socket; dropping the last handle aborts it.
 struct H2Connection {
     address: SocketAddr,
     sender: h2::client::SendRequest<Bytes>,
-    /// Local stream cap. h2 itself queues streams above the peer's SETTINGS
-    /// limit; both waits stay inside the caller's deadline.
     streams: Arc<tokio::sync::Semaphore>,
     usage: Arc<Usage>,
     driver: tokio::task::JoinHandle<()>,
@@ -193,20 +154,15 @@ impl Drop for H2Connection {
 
 const H2_MAX_STREAMS: usize = 64;
 const H2_IDLE: Duration = Duration::from_secs(10);
-/// While requests are in flight, a PING proves the path still works. A path
-/// that dies silently (NAT or middlebox state loss) is retired within about two
-/// seconds instead of stalling every query until TCP gives up.
 const H2_PING_INTERVAL: Duration = Duration::from_secs(1);
 const H2_PING_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// In-flight requests and last use of one reusable HTTP/2 or HTTP/3 connection.
 #[derive(Default)]
 pub(super) struct Usage {
     active: std::sync::atomic::AtomicUsize,
     last_used: std::sync::Mutex<Option<Instant>>,
 }
 
-/// Counts one in-flight request; the idle clock starts when the last one ends.
 pub(super) struct InFlight(Arc<Usage>);
 impl InFlight {
     pub(super) fn new(usage: &Arc<Usage>) -> Self {
@@ -225,7 +181,6 @@ impl Drop for InFlight {
     }
 }
 
-/// Completes once no request has used the connection for `after`.
 pub(super) async fn idle(usage: Arc<Usage>, after: Duration) {
     loop {
         let last = *usage.last_used.lock().unwrap_or_else(|e| e.into_inner());
@@ -244,7 +199,6 @@ pub(super) struct Client {
     pub spec: Endpoint,
     bootstrap: Vec<SocketAddr>,
     addresses: Mutex<Option<(Instant, Vec<SocketAddr>)>>,
-    /// HTTPS and QUIC endpoints only; DoT owns its connector in `dot`.
     tls: Option<Arc<ClientConfig>>,
     dot: Option<crate::tls::Upstream>,
     listeners: Vec<SocketAddr>,
@@ -252,7 +206,6 @@ pub(super) struct Client {
     h2: std::sync::Mutex<Option<Arc<H2Connection>>>,
     h2_connecting: Mutex<()>,
     h3: Option<super::h3::Client>,
-    /// The last address that answered (not HTTPS), for management diagnostics.
     answered_by: std::sync::Mutex<Option<SocketAddr>>,
 }
 
@@ -306,9 +259,6 @@ impl Client {
         })
     }
 
-    /// Where this endpoint is reached, for authenticated diagnostics only: the URL
-    /// host for HTTPS, otherwise the address that last answered (or the
-    /// configured host and port before any answer).
     pub fn display_address(&self) -> String {
         if self.spec.protocol == Protocol::Https {
             return self.spec.host.clone();
@@ -331,8 +281,6 @@ impl Client {
         {
             return Ok(addresses.clone());
         }
-        // Explicit bootstrap, never the host's system resolver. The caller's
-        // remaining overall deadline encloses lookup and every transport step.
         attempt.stage(Stage::Bootstrap);
         let name = Name::from_ascii(format!("{}.", self.spec.host))?;
         let mut addresses = Vec::new();
@@ -365,7 +313,6 @@ impl Client {
                         continue;
                     }
                 };
-                // Accept only the queried owner or a proven in-message CNAME chain.
                 let mut owner = name.clone();
                 for _ in 0..8 {
                     let alias = response.answers.iter().find_map(|rr| match &rr.data {
@@ -467,7 +414,6 @@ impl Client {
                     };
                     match h3 {
                         Some(Ok(response)) => Ok(response),
-                        // A request H3 may have sent is never repeated over H2.
                         Some(Err(error)) if !error.is::<NotSent>() => Err(error),
                         _ => {
                             ensure!(scope.remaining(), "upstream deadline exhausted before H2");
@@ -485,8 +431,6 @@ impl Client {
                     result
                 }
             };
-            // HTTPS is shown by its URL host; other protocols record the address
-            // that answered.
             if response.is_ok() && self.spec.protocol != Protocol::Https {
                 *self.answered_by.lock().unwrap_or_else(|e| e.into_inner()) = Some(address);
             }
@@ -498,7 +442,6 @@ impl Client {
                         upstream: self.spec.label.clone(),
                     });
                 }
-                // Nothing reached this address: the next one may carry the query.
                 Err(failure) if failure.is::<NotSent>() => error = failure,
                 Err(failure) => return Err(failure),
             }
@@ -521,8 +464,6 @@ impl Client {
         }
     }
 
-    /// Reuse the endpoint's connection when it serves this address; otherwise
-    /// connect once under the endpoint lock so concurrent misses share it.
     async fn h2_connection(
         &self,
         address: SocketAddr,
@@ -563,8 +504,6 @@ impl Client {
             async move {
                 loop {
                     tokio::time::sleep(H2_PING_INTERVAL).await;
-                    // Probe while busy or just after a request ended (a caller may
-                    // have given up on a dead path); an idle connection stays quiet.
                     let recent = usage
                         .last_used
                         .lock()
@@ -581,8 +520,6 @@ impl Client {
             }
         };
         let idle = idle(usage.clone(), H2_IDLE);
-        // GOAWAY, a connection error, a missed PING or idleness ends the driver;
-        // dropping the connection closes its socket without delaying shutdown.
         let driver = tokio::spawn(async move {
             tokio::select! { _ = connection => {}, () = idle => {}, () = keepalive => {} }
         });
@@ -609,8 +546,6 @@ impl Client {
             .map_err(not_sent)?;
         attempt.connection(used);
         match self.h2_request(&connection, query, attempt).await {
-            // A reused connection that closed before taking the request (idle
-            // close, GOAWAY): nothing was sent, so carry it on a new connection.
             Err(error) if used == ConnectionUse::Reused && error.is::<NotSent>() => {
                 self.h2_retire(&connection);
                 drop(connection);
@@ -622,8 +557,6 @@ impl Client {
                 self.h2_request(&connection, query, attempt).await
             }
             Err(error) => {
-                // A stream reset affects one request; GOAWAY or an I/O error ends
-                // the connection for new requests (accepted streams finish per h2).
                 let connection_failed = error.is::<NotSent>()
                     || error
                         .downcast_ref::<h2::Error>()
@@ -644,14 +577,12 @@ impl Client {
         attempt: &mut Attempt,
     ) -> Result<Message> {
         attempt.stage(Stage::Wait);
-        // Both waits count against the caller's deadline, which encloses this call.
         let _permit = connection.streams.acquire().await?;
         let _stream = InFlight::new(&connection.usage);
         let mut sender = connection.sender.clone().ready().await.map_err(not_sent)?;
         let (request, outbound) = doh_request(&self.spec, query)?;
         let (parts, body) = request.into_parts();
         attempt.stage(Stage::RequestWrite);
-        // Dropping this on cancellation resets only this stream (RST_STREAM).
         let (response, mut stream) = sender
             .send_request(http::Request::from_parts(parts, ()), body.is_empty())
             .map_err(not_sent)?;
@@ -724,8 +655,6 @@ impl Client {
             .quic_connection(address, attempt)
             .await
             .map_err(not_sent)?;
-        // Retain the endpoint owner for this entire request. Bootstrap rotation
-        // may replace the cached owner while this stream is still in flight.
         attempt.stage(Stage::Wait);
         let (mut send, mut recv) = connection.connection.open_bi().await.map_err(not_sent)?;
         let mut outbound = query.clone();

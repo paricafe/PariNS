@@ -19,7 +19,6 @@ use crate::common::Identity;
 
 pub(super) const WAIT: Duration = Duration::from_secs(3);
 
-/// A DoT client session to `address` that trusts only `identity`.
 pub(super) async fn connect(
     identity: &Identity,
     address: SocketAddr,

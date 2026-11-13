@@ -69,7 +69,6 @@ asset="$archive.tar.gz"
 if [ -n "$package_input" ]; then
     [ "$(basename -- "$package_input")" = "$asset" ]
     cp "$package_input" "$package_input.sha256" "$fixture/downloads/"
-    # No --version: the default entry point must select this actual release package.
     (cd / && sh -s -- --root "$fixture/stage" < "$repo/scripts/bootstrap.sh")
     for name in parins parins-updater install-build-info.json; do
         tar -xOzf "$package_input" "$archive/$name" > "$fixture/build/$name"
@@ -110,7 +109,6 @@ expect_failure() {
     fi
     [ ! -e "$fixture/refused/opt" ]
 }
-# Live installation invokes the verified helper from the extracted package.
 cp "$package/install.sh" "$fixture/installer"
 printf '%s\n' '#!/bin/sh
 set -eu
@@ -125,13 +123,10 @@ cp "$fixture/installer" "$package/install.sh"
 manifest
 pack
 sh "$repo/scripts/bootstrap.sh" --help | grep -Fq -- "[--version $version]"
-# A caller can start from any directory; dry-run stages nothing.
 (cd / && sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --dry-run)
 [ ! -e "$fixture/stage/opt" ]
-# A truncated download defines main but never calls it, so nothing is staged.
 sed '$d' "$repo/scripts/bootstrap.sh" | (cd / && sh -s -- --root "$fixture/stage")
 [ ! -e "$fixture/stage/opt" ]
-# Piped execution (curl ... | sudo sh) is independent of $0 and the working directory.
 cat "$repo/scripts/bootstrap.sh" | (cd / && sh -s -- --root "$fixture/stage")
 cmp "$package/parins" "$fixture/stage/opt/parins-managed/parins"
 mkdir -p "$fixture/stage/var/lib/parins-managed/certificates" "$fixture/stage/var/lib/parins/tls"
@@ -142,7 +137,6 @@ sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" --version "$version"
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json"
 grep -Fxq 'keep certificate identity' "$fixture/stage/var/lib/parins-managed/certificates/identity.pem"
 grep -Fxq 'keep external certificate' "$fixture/stage/var/lib/parins/tls/external.pem"
-# Older layouts are never adopted; the removed enrollment option is refused.
 printf '# PariNS managed installer unit v2\n[Service]\n' > "$fixture/stage/etc/systemd/system/parins-managed.service"
 cp "$fixture/stage/etc/systemd/system/parins-managed.service" "$fixture/old-unit"
 if sh "$repo/scripts/bootstrap.sh" --root "$fixture/stage" > "$fixture/old-layout.log" 2>&1; then
@@ -156,7 +150,6 @@ grep -Fq 'unknown option: --enable-updater' "$fixture/old-layout.log"
 cmp "$fixture/old-unit" "$fixture/stage/etc/systemd/system/parins-managed.service"
 grep -Fxq 'keep private state' "$fixture/stage/var/lib/parins-managed/state.json"
 cp "$repo/deploy/parins-managed.service" "$fixture/stage/etc/systemd/system/parins-managed.service"
-# Every install input is mandatory; no legacy package fallback.
 mv "$package/LICENSE.beui" "$fixture/notice-copy"
 manifest
 pack
@@ -167,7 +160,6 @@ expect_failure --version "$version"
 mv "$fixture/notice-copy" "$package/LICENSE.beui"
 manifest
 pack
-# Both architecture mappings select their exact release asset.
 arm_archive="parins-$version-linux-aarch64"
 cp -R "$package" "$fixture/build/$arm_archive"
 tar -czf "$fixture/downloads/$arm_archive.tar.gz" -C "$fixture/build" "$arm_archive"
@@ -202,13 +194,11 @@ checksum
 printf 'unexpected checksum entry\n' >> "$fixture/downloads/$asset.sha256"
 expect_failure
 checksum
-# Correct outer checksum must not conceal corrupt internal content.
 printf 'tampered\n' >> "$package/README.md"
 pack
 expect_failure
 cp "$repo/README.md" "$package/README.md"
 manifest
-# Every privileged install input must be present and authenticated before install.
 for name in parins-updater install-build-info.json deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service; do
     mv "$package/$name" "$fixture/missing-member"
     pack
@@ -229,7 +219,6 @@ printf '%s  parins-updater\n' "$(digest "$package/parins-updater")" >> "$package
 pack
 expect_failure
 mv "$fixture/original-manifest" "$package/SHA256SUMS"
-# Reject symlinks and hardlinks even when their names are allowlisted.
 mv "$package/parins" "$fixture/original-parins"
 ln -s "$fixture/original-parins" "$package/parins"
 pack
@@ -250,14 +239,12 @@ pack
 expect_failure
 rm "$package/README.md"
 mv "$fixture/original-readme" "$package/README.md"
-# Never extract ../ or absolute entries, even if the checksum agrees.
 tar -P -czf "$fixture/downloads/$asset" -C "$package" "../$archive/install.sh"
 checksum
 expect_failure
 tar -P -czf "$fixture/downloads/$asset" "$package/install.sh"
 checksum
 expect_failure
-# Duplicate archive entries cannot silently replace an earlier file.
 tar -czf "$fixture/downloads/$asset" -C "$fixture/build" "$archive" "$archive/install.sh"
 checksum
 expect_failure

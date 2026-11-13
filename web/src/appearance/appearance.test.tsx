@@ -11,7 +11,6 @@ import {
 import { clearImage, loadImage, saveImage } from './imageStore';
 import { ImageError, MAX_BYTES, fitWithin, headerSize, prepareImage } from './image';
 
-/** Minimal in-memory IndexedDB: one database, object stores with get/put/delete. */
 function installFakeIndexedDB() {
   const stores = new Map<string, Map<string, unknown>>();
   const later = (callback: () => void) => setTimeout(callback, 0);
@@ -180,8 +179,6 @@ describe('custom image storage', () => {
     render(<Harness />);
     await waitFor(() => expect(appearance.image?.url).toBe('blob:background'));
     expect(appearance.background).toBe('custom');
-    // The backdrop kind is published by an effect after the render that loads the
-    // image, so wait for it rather than asserting in the same tick.
     await waitFor(() => expect(document.documentElement.dataset.backdrop).toBe('image'));
     expect(document.querySelector('.backdrop .photo')).toBeTruthy();
     await act(() => appearance.removeImage());
@@ -200,7 +197,6 @@ describe('custom image storage', () => {
   });
 });
 
-/** A minimal PNG header declaring the given size; enough for the header-size check. */
 function png(width: number, height: number) {
   const bytes = new Uint8Array(33);
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
@@ -238,7 +234,6 @@ describe('image preparation', () => {
 
   it('re-encodes as JPEG without a WebP encoder', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 800, height: 600 })));
-    // A browser without WebP encoding returns PNG for any requested type.
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(8 * 8 * 4) }) } as never);
     vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback, type) => callback(new Blob(['x'], { type: type === 'image/jpeg' ? 'image/jpeg' : 'image/png' })));
     const prepared = await prepareImage(new File([png(800, 600)], 'a.png', { type: 'image/png' }));
@@ -253,10 +248,8 @@ describe('image preparation', () => {
     expect(headerSize(new Uint8Array([1, 2, 3]))).toBeNull();
     const decode = vi.fn(async () => ({ width: 1, height: 1 }));
     vi.stubGlobal('createImageBitmap', decode);
-    // 20000 x 20000 = 400 megapixels in a tiny file: refused without decoding.
     await expect(prepareImage(new File([png(20000, 20000)], 'bomb.png', { type: 'image/png' }))).rejects.toEqual(new ImageError('size'));
     expect(decode).not.toHaveBeenCalled();
-    // Content whose size cannot be read (here, not a PNG at all) is never decoded blind.
     await expect(prepareImage(new File(['GIF89a…'], 'renamed.png', { type: 'image/png' }))).rejects.toEqual(new ImageError('decode'));
     expect(decode).not.toHaveBeenCalled();
   });

@@ -5,7 +5,6 @@ export interface ListenerParts {
   port: string;
 }
 
-/** Decompose a server listen value without normalizing its displayed parts. */
 export function splitListener(value: string | null | undefined): ListenerParts {
   if (!value) return { address: "", port: "" };
   const separator = value.lastIndexOf(":");
@@ -17,7 +16,6 @@ export function splitListener(value: string | null | undefined): ListenerParts {
   };
 }
 
-/** Serialize only at preview/apply time; the caller retains raw draft parts. */
 export function joinListener(addressDraft: string, portDraft: string): string {
   let address = addressDraft.trim();
   const port = portDraft.trim();

@@ -1,7 +1,4 @@
 //! Bounded in-flight sharing, driven by callers rather than detached tasks.
-//! Weak registry references cannot keep IO alive after the last caller drops.
-//! Active-key joins do constant-size registry work. Dead groups are removed on
-//! same-key replacement or before capacity admission; retained records stay bounded.
 
 use crate::config::CoalescingConfig;
 use futures_util::future::{BoxFuture, FutureExt, Shared, WeakShared};
@@ -14,7 +11,6 @@ use std::{
     },
 };
 
-/// Raw shared work result. Per-client stale fallback is intentionally not shared.
 #[derive(Clone)]
 pub struct Answer {
     pub response: Result<(Message, Option<u8>), ()>,
@@ -31,12 +27,8 @@ pub struct Answer {
     pub prefetch: bool,
 }
 type Work = BoxFuture<'static, Answer>;
-/// Shared work, the flag it sets once its query reached a source, and the
-/// number of its holds.
 type Group = (WeakShared<Work>, Arc<AtomicBool>, Arc<AtomicUsize>);
 
-/// One holder's share of work. Holds are counted explicitly, so of several
-/// holders that leave at once exactly one is the last.
 pub struct Hold {
     work: Option<Shared<Work>>,
     holds: Arc<AtomicUsize>,
@@ -55,8 +47,6 @@ impl Hold {
         self.work.as_mut().expect("held work").await
     }
 
-    /// Leaves the work, or returns this hold when it is the last. The last
-    /// hold stays counted, so whoever takes it over keeps the work alive.
     pub fn leave(mut self) -> Option<Self> {
         let last = self
             .holds
@@ -65,7 +55,6 @@ impl Hold {
             })
             .is_err();
         if !last {
-            // Already uncounted above.
             self.work = None;
         }
         last.then_some(self)
@@ -99,9 +88,6 @@ impl Flights {
         }
     }
 
-    /// Noneligible requests bypass sharing; overload fails without extra IO.
-    /// `sent` is the flag that `work` sets once its query reached a source; a
-    /// joined caller gets the flag of the work it joins.
     pub fn join(
         &self,
         query: &Message,
@@ -120,14 +106,11 @@ impl Flights {
             let shared = weak.upgrade().filter(|work| work.peek().is_none())?;
             Some((shared, sent.clone(), holds.clone()))
         }) {
-            // All new holds are made under this lock. Other holders can only leave.
             if holds.load(Ordering::Acquire) >= self.config.max_waiters {
                 return Err(());
             }
             return Ok((Hold::new(shared, holds), Role::Joined, sent));
         }
-        // A finished result still held by a departing caller must not be joined.
-        // Remove only this key unless capacity admission needs a full collection.
         groups.remove(&key);
         if groups.len() >= self.config.max_groups {
             groups.retain(|_, (weak, ..)| weak.upgrade().is_some_and(|f| f.peek().is_none()));
@@ -194,7 +177,6 @@ mod tests {
             .flatten()
             .collect();
             assert_eq!(lasts.len(), 1);
-            // The last hold stays counted: a later holder is not the last.
             let (later, role, _) = flights.join(&q, work(), sent.clone()).unwrap();
             assert!(matches!(role, Role::Joined));
             assert!(later.leave().is_none());

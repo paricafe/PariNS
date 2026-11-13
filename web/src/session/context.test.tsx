@@ -184,7 +184,7 @@ describe('session transition', () => {
     await waitFor(() => expect(hook.result.current.state.phase).toBe('login'));
     await act(async () => { await hook.result.current.login('admin', 'password'); });
     expect(hook.result.current.state.phase).toBe('ready');
-    expect(checks).toBe(3); // bootstrap, preflight, Cookie confirmation
+    expect(checks).toBe(3);
     hook.unmount();
   });
 
@@ -202,7 +202,7 @@ describe('session transition', () => {
     await waitFor(() => expect(hook.result.current.state.phase).toBe('setup'));
     await act(async () => { await hook.result.current.setup('admin', 'password', 'toml', 'token'); });
     expect(hook.result.current.state.phase).toBe('transport-change');
-    expect(checks).toBe(2); // bootstrap and preflight, never old-HTTP confirmLogin
+    expect(checks).toBe(2);
     hook.unmount();
   });
 

@@ -1,5 +1,4 @@
 //! Management owns admission, mutation ordering and the lifetime of rule work.
-//! Downloads and compilation never hold the Manager or mutation lock.
 use super::{ApiError, Shared, Snapshot, decode, error};
 use crate::filter_subscriptions::service::{DraftSource, WorkRequest};
 use axum::http::{HeaderMap, StatusCode};
@@ -10,8 +9,6 @@ use std::{
     time::Duration,
 };
 
-// Manual work acts on the saved configuration current at admission; the
-// service still rejects a result whose configuration changed meanwhile.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepare {
@@ -76,8 +73,6 @@ pub(super) async fn api(
     }
 }
 
-/// `request` receives the saved configuration revision read under the
-/// mutation permit, which excludes configuration changes until admission.
 async fn start(
     shared: Arc<Shared>,
     request: impl FnOnce(u64) -> WorkRequest + Send + 'static,
@@ -87,8 +82,6 @@ async fn start(
         Some((headers, transport)) => shared.protected_mutation_permit(headers, transport).await?,
         None => shared.mutation_permit().await?,
     };
-    // Admission may fsync catalog maintenance. Its permit and registration must
-    // survive the initiating HTTP connection, just like configuration apply.
     tokio::spawn(async move {
         let _permit = permit;
         let filters = shared.manager.lock().await.filters.clone();
@@ -103,9 +96,6 @@ async fn start(
                 let result = async {
                     let candidate = filters.execute(work).await?;
                     let _permit = control.mutation.acquire().await?;
-                    // A software update commits its freeze under this permit.
-                    // Manager only reaches the flag; the commit (fsync and
-                    // rename) runs without its lock.
                     let frozen = control
                         .manager
                         .lock()
@@ -159,8 +149,6 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
             }
         };
         if let Some(request) = request {
-            // A configuration saved since `next_due` makes this a revision
-            // conflict; the next tick schedules against the new one.
             let _ = start(shared.clone(), move |_| request, None).await;
         }
         tokio::select! {
@@ -266,7 +254,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(checked["decision"], "unmatched");
-        // Manual work acts on the saved configuration; a client revision is rejected.
         let input = br#"{"config_revision":0,"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#;
         let obsolete = api(
             shared.clone(),
@@ -327,8 +314,6 @@ mod tests {
             .updates
             .frozen
             .store(false, Ordering::Release);
-        // Hold the registration owner, disconnect the caller after admission,
-        // and prove the detached transaction still owns the mutation permit.
         let registration = shared.filter_tasks.lock().await;
         let caller_shared = shared.clone();
         let caller = tokio::spawn(async move {
@@ -362,7 +347,6 @@ mod tests {
         .await
         .unwrap();
         assert!(shared.filter_tasks.lock().await.is_empty());
-        // A manual refresh needs no client revision: it uses the saved one.
         let accepted = api(
             shared.clone(),
             transport.clone(),
@@ -388,8 +372,6 @@ mod tests {
             .unwrap();
         assert_eq!(accepted["operation_id"], recent.id);
         assert_eq!(recent.status, "succeeded");
-        // Revocation blocks manual admission but leaves the process scheduler
-        // able to own and finish work without any administrator session.
         active.lock().unwrap().sessions.clear();
         let manual = start(
             shared.clone(),

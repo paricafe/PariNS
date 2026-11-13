@@ -52,14 +52,12 @@ export function presentIssue(issue: string | ModelError | ApiError, language: La
   }
   const key = issue instanceof ModelError ? issue.key : issue;
   const raw = issue instanceof ModelError ? issue.params : {};
-  // Unit fields report their bounds in readable units in the current language.
   const params = isUnitFamily(raw.family)
     ? { ...raw, min: formatUnitAmount(Number(raw.min), raw.family, language), max: formatUnitAmount(Number(raw.max), raw.family, language) }
     : raw;
   return hasTranslation(key) ? translate(key, language, params) : key;
 }
 
-/** A base-unit amount in its largest exact unit, such as 1048576 bytes as "1 MB" or 60 seconds as "1 minute". */
 export function formatUnitAmount(base: number, family: UnitFamily, language: Language): string {
   const [key, factor] = base === 0 ? UNITS[family][0] : exactUnit(family, base);
   const amount = base / factor;
@@ -81,7 +79,6 @@ export function formatNumber(value: number, language: Language, options?: Intl.N
   return new Intl.NumberFormat(language, options).format(value);
 }
 
-/** Byte counts in 1024-based human units (B, KB, MB, GB, TB), as file managers show them. */
 export function formatBytes(value: number, language: Language): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let amount = value; let unit = 0;

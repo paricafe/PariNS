@@ -1,14 +1,4 @@
 //! One prepared identity generation shared by every inbound TLS transport.
-//! Call preparation on a blocking worker; resolution and publication do no IO.
-//!
-//! Manager/Active owns the atomic CertificateSet even when DNS is stopped. The API
-//! and managed SIGHUP reload current certificates under the existing mutation permit;
-//! file-mode SIGHUP also reloads policy. Preparation cannot mutate active material,
-//! and reload does not alter the config revision, DNS/cache ownership or sessions.
-//! Management HTTPS shares the DoH slot, not DNS TLS routing/ALPN.
-//!
-//! Shared inbound identity preparation accepts an absent leaf EKU, but an explicit
-//! EKU must permit serverAuth before persistence or certificate publication.
 
 use std::{
     collections::HashMap,
@@ -30,7 +20,6 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 use super::{TlsFiles, validate_management_identity, validate_pem_identity};
 
-// Match imported identity bounds. At most six distinct files are read per set.
 pub(super) const MAX_PEM_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -100,7 +89,6 @@ pub struct CertificateSet {
 }
 
 impl CertificateSet {
-    /// Build an independent candidate for one configuration generation.
     pub fn prepare(sources: CertificateSources) -> Result<Arc<Self>> {
         let owner = Arc::new(());
         let mut prepared = prepare(&sources, owner.clone())?;
@@ -116,9 +104,6 @@ impl CertificateSet {
         prepare(&self.sources, self.owner.clone())
     }
 
-    /// Caller serializes reload with configuration apply and shutdown. A
-    /// candidate from another configuration's set can never be installed here.
-    /// The lock contains only comparisons and the single snapshot replacement.
     pub fn publish(&self, mut prepared: PreparedCertificateSet) -> Result<bool> {
         ensure!(
             Arc::ptr_eq(&self.owner, &prepared.owner),
@@ -261,8 +246,6 @@ fn prepare(sources: &CertificateSources, owner: Arc<()>) -> Result<PreparedCerti
 }
 
 pub(super) fn read_pem_file(path: &Path) -> Result<Vec<u8>> {
-    // NONBLOCK prevents FIFO opens from stalling before fstat rejects them.
-    // Symlinks are intentional: external renewers commonly rotate symlink targets.
     let file = File::from(
         rustix::fs::open(
             path,

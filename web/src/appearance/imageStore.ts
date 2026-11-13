@@ -1,5 +1,4 @@
-// The custom background image, kept only in this browser's IndexedDB (never uploaded).
-// Failures resolve to "nothing stored" / false so the console works without IndexedDB.
+// Stores the custom console background image in IndexedDB.
 
 const DATABASE = 'parins-appearance';
 const STORE = 'background';
@@ -43,5 +42,5 @@ export async function saveImage(image: StoredImage): Promise<boolean> {
 }
 
 export async function clearImage(): Promise<void> {
-  try { await run('readwrite', (store) => store.delete(KEY)); } catch { /* Browser storage may be unavailable. */ }
+  try { await run('readwrite', (store) => store.delete(KEY)); } catch { }
 }

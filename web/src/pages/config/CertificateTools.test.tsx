@@ -22,7 +22,6 @@ describe('security runtime status and certificate reload ownership', () => {
     await waitFor(() => expect(shown()).toBeTruthy());
     expect(screen.getByText('127.0.0.1:8443 · /dns-query')).toBeTruthy();
     expect(screen.getByText(/^Last reload: .* · System signal \(SIGHUP\) · Updated$/)).toBeTruthy();
-    // The fingerprint stays behind ⓘ.
     expect(screen.queryByText('a'.repeat(64), { exact: false })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Certificate fingerprint (SHA-256)' }));
     expect(screen.getByRole('note').textContent).toContain('a'.repeat(64));

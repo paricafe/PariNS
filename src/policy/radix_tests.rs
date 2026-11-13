@@ -137,8 +137,6 @@ fn derived_rejects_corruption_even_with_recomputed_checksum() {
     let nodes = 98 + ids.iter().map(|id| 1 + id.len()).sum::<usize>();
     let node_count = u32::from_be_bytes(bytes[80..84].try_into().unwrap()) as usize;
     let arena = nodes + node_count * 20;
-    // Bad version, semantic digest, count, graph cycle/alias, root terminal,
-    // impossible source reference, edge bounds and terminal label encoding.
     for (offset, value) in [
         (15, 2),
         (48, 99),
@@ -282,8 +280,6 @@ fn randomized_radix_and_four_table_witnesses_match_label_oracle() {
 
 #[test]
 fn node_growth_accounts_for_both_old_and_new_buffers() {
-    // Input key+record = 18 B and initial root = 20 B. One byte less than
-    // their sum plus the explicit Frame reserve must fail before that reserve.
     let mut no_scratch = Builder::new(Limits {
         max_memory_bytes: BUILD_SCRATCH_BYTES + 37,
         ..Limits::default()

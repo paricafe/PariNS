@@ -11,9 +11,7 @@ const minute = 60_000;
 const sample = (minutesAgo: number, requests: number, generation = 1, running = true): HistorySample => ({
   timestamp_ms: now - minutesAgo * minute, elapsed_seconds: 60, running, generation, requests, cache_hits: requests / 2, blocked: requests / 4,
 });
-// 1/s, 2/s, a stopped sample, then a new run at 3/s and 4/s.
 const samples = [sample(50, 60), sample(49, 120), sample(48, 0, 1, false), sample(30, 180, 2), sample(29, 240, 2)];
-// Default width 770 with no ResizeObserver: plot spans x = 58..754 over one hour.
 const xFor = (minutesAgo: number) => 58 + (60 - minutesAgo) / 60 * 696;
 
 function mount() {

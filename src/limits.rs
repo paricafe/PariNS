@@ -1,9 +1,4 @@
 //! Bounded admission budgets keyed only by the transport peer's subnet.
-//!
-//! Reclamation examines at most 16 entries on a new-source admission when the
-//! table is full. Only inactive, fully refilled entries can be removed: cycling
-//! source addresses cannot reset token debt. A full table can conservatively
-//! reject a new source even when a reclaimable entry lies beyond that scan.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -101,8 +96,6 @@ struct Entry {
 
 impl Entry {
     fn refill(&mut self, now: Instant, settings: &Settings) {
-        // Contending callers may capture their timestamps in a different order
-        // from locking; never move the accounting clock backward.
         if now > self.updated {
             let added =
                 now.duration_since(self.updated).as_nanos() * u128::from(settings.rate_per_sec);
@@ -123,12 +116,9 @@ struct State {
 #[derive(Debug)]
 pub struct Limiter {
     settings: Settings,
-    // Disabled mode allocates no table and takes no lock.
     state: Option<Mutex<State>>,
 }
 
-/// Owns a concurrent budget until dropped, including cancellation and errors.
-/// Dropping a query permit does not refund its rate token.
 #[derive(Debug)]
 pub struct Permit {
     owner: Option<(Arc<Limiter>, IpNet, Kind)>,
@@ -138,7 +128,6 @@ impl Drop for Permit {
     fn drop(&mut self) {
         if let Some((limiter, source, kind)) = self.owner.take() {
             let mut state = limiter.state.as_ref().unwrap().lock().unwrap();
-            // Active entries are never evicted, and each permit has one owner.
             let entry = state.entries.get_mut(&source).unwrap();
             match kind {
                 Kind::Query => entry.queries -= 1,
@@ -149,7 +138,6 @@ impl Drop for Permit {
 }
 
 impl Limiter {
-    /// `settings` has passed `Settings::validate`.
     pub fn new(settings: &Settings) -> Self {
         Self {
             settings: settings.clone(),

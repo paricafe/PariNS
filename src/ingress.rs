@@ -25,8 +25,6 @@ pub struct Ingress {
 }
 
 impl Ingress {
-    /// Settles a finished connection or query task. A panic ends that task
-    /// alone: it is logged and counted, and the listener keeps serving.
     pub fn settle<T>(&self, listener: &str, result: Result<T, JoinError>) {
         if let Err(error) = result
             && error.is_panic()
@@ -54,18 +52,11 @@ impl Ingress {
             .ok()
     }
 
-    /// Resolves once the generation starts stopping (or its stop owner is gone).
-    /// Adapters race it against receiving a query: a stream without a complete
-    /// query owns no resolver work and is cancelled instead of being drained.
     pub async fn stopped(&self) {
         let mut stop = self.stop.clone();
         let _ = stop.wait_for(|stopping| *stopping).await;
     }
 
-    /// Waits up to the shutdown grace for adapter tasks, then aborts the rest.
-    /// Only a stopping generation records `cause`: forcing also shuts down the
-    /// shared upstream pool, which must keep serving when one listener exits on
-    /// an error and is restarted.
     pub async fn drain(&self, tasks: &mut JoinSet<()>, cause: ForcedShutdown) {
         if timeout(self.shutdown_grace, async {
             while tasks.join_next().await.is_some() {}
@@ -101,9 +92,6 @@ impl Ingress {
         response
     }
 
-    /// For an adapter that learns only while writing whether the peer still
-    /// wants the answer: a resolved request completes once the adapter reports
-    /// the returned delivery as delivered. Rejected queries only record history.
     pub(crate) async fn handle_for_delivery(
         &self,
         bytes: &[u8],
@@ -153,8 +141,6 @@ impl Ingress {
     }
 }
 
-/// The SERVFAIL (or protocol error) answer to a query refused at admission,
-/// with the padding intent of that query.
 pub(crate) fn rejected_response(
     bytes: &[u8],
 ) -> Option<(hickory_proto::op::Message, protocol::Padding)> {
@@ -217,7 +203,6 @@ mod tests {
             tasks.spawn(std::future::pending());
             ingress.drain(&mut tasks, ForcedShutdown::QuicDrain).await;
             assert!(tasks.is_empty());
-            // An error exit outside a stop keeps the shared upstream pool serving.
             assert_eq!(
                 ingress.resolver.forced_shutdown(),
                 stopping.then_some(ForcedShutdown::QuicDrain)

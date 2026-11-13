@@ -6,7 +6,6 @@ use hickory_proto::rr::{
 };
 use std::io::Cursor;
 
-/// A deadline no test reaches.
 fn far() -> Instant {
     Instant::now() + Duration::from_secs(3600)
 }
@@ -228,7 +227,6 @@ fn cname_negative_restore_preserves_partition_lifetime_and_cold_state() {
             assert!(!cache.lookup(&q, outgoing, inserted, false).unwrap().refresh);
         }
         assert_eq!(cache.snapshot()["hits"], 3);
-        // Age 3.25s online (round up to 4s), then 2.1s offline (round up to 3s).
         let bytes = encode(&cache, inserted + Duration::from_millis(3250));
         let header: Header = serde_json::from_slice(&bytes[..HEADER_BYTES]).unwrap();
         assert_eq!(header.version, 3);
@@ -283,8 +281,6 @@ fn cname_negative_restore_preserves_partition_lifetime_and_cold_state() {
             1
         );
         assert_eq!(expired.snapshot()["negative_entries"], 0);
-        // Current negative capacity remains authoritative; positive capacity
-        // cannot absorb these entries during restore.
         let positive_only = Cache::new(CacheConfig {
             negative_percent: 0,
             ..config
@@ -363,8 +359,6 @@ fn checksum_policy_version_clock_and_wire_fail_before_any_import() {
         assert!(restore(&restored, invalid, 0, now).is_err(), "{change}");
         assert_eq!(restored.snapshot()["entries"], 0);
     }
-    // Even changing the timestamp backwards while retaining a syntactically
-    // valid header is covered by the digest and cannot extend TTLs.
     let mut invalid = bytes;
     let mut header: Header = serde_json::from_slice(&invalid[..HEADER_BYTES]).unwrap();
     header.saved_at_ns -= 1_000_000_000;
@@ -533,7 +527,6 @@ fn semantic_fingerprint_excludes_storage_and_includes_live_dns_policy() {
     config.ecs.enabled = !config.ecs.enabled;
     let ecs_changed = semantic_fingerprint(&config, b"filter-a").unwrap();
     assert_ne!(original, ecs_changed);
-    // Forwarded and recursive answers never share a snapshot.
     config.resolution.mode = crate::config::ResolutionMode::Recursive;
     assert_ne!(
         ecs_changed,
@@ -546,8 +539,6 @@ fn prior_cache_semantics_are_rejected_without_changing_snapshot_format() {
     let config =
         crate::config::Config::parse(include_str!("../../../parins.example.toml")).unwrap();
     let fingerprint = semantic_fingerprint(&config, b"filter-a").unwrap();
-    // Reconstruct the previous semantic contract, with otherwise identical
-    // effective configuration and a fully valid snapshot/checksum.
     let mut cache_policy = serde_json::to_value(&config.cache).unwrap();
     cache_policy.as_object_mut().unwrap().remove("persistence");
     let prior = serde_json::json!({"semantics": 3, "cache": cache_policy, "ecs": config.ecs,
@@ -603,7 +594,6 @@ fn names_without_presentation_round_trip_restore_with_positive_and_negative_entr
         vec![b"\xff\x00bin".to_vec(), b"test".to_vec()],
         vec![b"UPPER".to_vec(), b"Test".to_vec()],
         vec![long(63), b"test".to_vec()],
-        // 3 * 64 + 57 + 5 + 1 = 255 wire bytes, the maximum.
         vec![long(63), long(63), long(63), long(56), b"test".to_vec()],
     ]
     .into_iter()
@@ -756,7 +746,6 @@ fn a_record_that_does_not_decode_unloads_what_the_restore_admitted() {
         .split_inclusive(|byte| *byte == b'\n')
         .map(<[u8]>::to_vec)
         .collect();
-    // The second record names a scope this codec never writes.
     let mut record: Record = serde_json::from_slice(&lines[1]).unwrap();
     record.scope = SavedScope::Network("192.0.2.1/24".into());
     lines[1] = serde_json::to_vec(&record).unwrap();
@@ -944,8 +933,6 @@ fn learned_entries_round_trip_without_restoring_classification() {
     );
     assert!(restored.peek(&q, None, now, false).is_none());
     assert_eq!(restored.snapshot()["ecs_shared_entries"], 2);
-    // Classification is not persisted: the name starts unobserved, and the
-    // first per-network answer supersedes the restored learned copy.
     let inspection = restored.inspect(&Name::from_ascii("learned.test.").unwrap(), None, now);
     assert_eq!(inspection["ecs_sharing"], Value::Null);
     insert(
@@ -964,8 +951,6 @@ fn learned_entries_round_trip_without_restoring_classification() {
     assert_eq!(restored.snapshot()["ecs_shared_entries"], 1);
 }
 
-/// A restore keeps the first records that fit, and a new process hashes keys
-/// into other shards, so the file lists records by recency across all shards.
 #[test]
 fn snapshot_lists_records_most_recently_used_first_across_shards() {
     let cache = Cache::new(CacheConfig::default());
@@ -974,7 +959,6 @@ fn snapshot_lists_records_most_recently_used_first_across_shards() {
         let q = query(&format!("n{index}.test."));
         insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
     }
-    // Later shards hold the more recently used entries: shard order is wrong.
     let mut used = HashMap::new();
     let mut populated = 0;
     for shard in &cache.shards {
@@ -1003,7 +987,6 @@ fn snapshot_lists_records_most_recently_used_first_across_shards() {
     assert!(order.windows(2).all(|pair| pair[0] > pair[1]), "{order:?}");
 }
 
-/// Sleeps on every write, so a deadline stops the save part-way.
 struct SlowWriter(Cursor<Vec<u8>>);
 impl Write for SlowWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -1020,8 +1003,6 @@ impl Seek for SlowWriter {
     }
 }
 
-/// Fast while authenticating; once the restore seeks back to the first record
-/// to admit entries, reads return 64 bytes at a time and sleep.
 struct SlowAdmission {
     inner: Cursor<Vec<u8>>,
     slow: bool,
@@ -1043,8 +1024,6 @@ impl Seek for SlowAdmission {
     }
 }
 
-/// Twenty entries in one shard, where use order is exact; the last inserted is
-/// the most recently used.
 fn twenty(now: Instant) -> (Cache, Vec<Message>) {
     let cache = Cache::new(CacheConfig {
         shards: 1,
@@ -1074,9 +1053,7 @@ fn restored_entries_keep_their_use_order_for_eviction_and_the_next_save() {
         restore(&restored, bytes.clone(), 0, now).unwrap().restored,
         20
     );
-    // The next save lists the restored entries in the order they were saved.
     assert!(encode(&restored, now)[HEADER_BYTES..] == bytes[HEADER_BYTES..]);
-    // New answers evict the least recently used restored entries first.
     for i in 0..19 {
         let q = query(&format!("new{i}.test."));
         insert(&restored, &q, &answer(&q, 60), Scope::NoEcs, now);
@@ -1104,7 +1081,6 @@ fn a_save_that_reaches_its_deadline_publishes_the_most_recent_entries_completely
     assert_eq!(report.reason.as_deref(), Some("deadline"));
     assert!(report.saved < 20, "{report:?}");
     assert_eq!(report.saved + report.skipped, 20);
-    // The partial snapshot is complete: every written record restores.
     let restored = Cache::new(CacheConfig::default());
     let read = restore(&restored, writer.0.into_inner(), 0, now).unwrap();
     assert_eq!((read.restored, read.reason), (report.saved, None));

@@ -1,5 +1,4 @@
-//! Private, single-writer management state. Credentials and configuration share
-//! one commit point so interrupted setup cannot create an unauthenticated server.
+//! Private, single-writer management state.
 
 use std::{
     fs::{self, File},
@@ -33,11 +32,8 @@ pub(super) struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        // systemd DynamicUser StateDirectory may itself be a legitimate symlink.
-        // All later access is through its resolved, private directory.
         let (dir, lock) = lock_private_dir(path, "management")?;
         let store = Self { dir, _lock: lock };
-        // Invalid state is an error, never an invitation to run setup again.
         store.read()?;
         Ok(store)
     }
@@ -69,7 +65,6 @@ impl Store {
 
     pub(super) fn atomic_write(&self, name: &str, bytes: &[u8]) -> Result<()> {
         let destination = self.dir.join(name);
-        // Do not replace unexpected symlinks, devices or exposed secret files.
         checked_open(&destination, false)?;
         let temporary = Temporary(self.dir.join(format!(".{name}.{}.tmp", secret())));
         let mut file =
@@ -82,9 +77,6 @@ impl Store {
     }
 }
 
-/// What PariNS keeps in its state directory: this Store, Turnstile keys,
-/// certificate imports, runtime storage, subscriptions and update state. Hidden
-/// names are temporary files.
 const ENTRIES: [&str; 9] = [
     STATE,
     TOKEN,
@@ -97,9 +89,6 @@ const ENTRIES: [&str; 9] = [
     crate::update::ipc::INBOX_NAME,
 ];
 
-/// A managed rule file must not be PariNS's own state: rules and their errors
-/// are shown in the console. Checks the path as written and, when it exists,
-/// with links resolved.
 pub(super) fn check_rule_file(dir: &Path, config: &crate::config::Config) -> Result<()> {
     let Some(file) = &config.filter_file else {
         return Ok(());
@@ -130,17 +119,12 @@ pub(super) fn check_rule_file(dir: &Path, config: &crate::config::Config) -> Res
     Ok(())
 }
 
-/// Makes a rename or removal in `dir` durable. That change is the commit point,
-/// so a failed directory sync must not tell the caller to roll back what is
-/// already visible; it is logged because power-loss durability is uncertain.
 pub(super) fn sync_committed(dir: &Path, change: &str) {
     if File::open(dir).and_then(|dir| dir.sync_all()).is_err() {
         eprintln!("{change} committed; directory sync failed, power-loss durability is uncertain");
     }
 }
 
-/// Read the existing envelope without creating a Store, taking its writer lock,
-/// or touching runtime persistence. Shared by startup and candidate preflight.
 pub(super) fn read_stored(dir: &Path) -> Result<Option<Stored>> {
     let Some(bytes) = read_bounded(&dir.join(STATE), MAX_STATE)? else {
         return Ok(None);
@@ -240,8 +224,6 @@ fn valid_hash(hash: &str) -> Option<PasswordHash<'_>> {
         return None;
     }
     let parsed = PasswordHash::new(hash).ok()?;
-    // This store writes precisely this profile. Fail closed on corrupt or
-    // hostile PHC costs instead of accepting unbounded CPU/memory parameters.
     let params = argon2::Params::try_from(&parsed).ok()?;
     let defaults = argon2::Params::default();
     (parsed.algorithm.as_str() == "argon2id"

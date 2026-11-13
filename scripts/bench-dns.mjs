@@ -18,7 +18,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const kinds = ['direct', 'warm-cache', 'cold-unique', 'shared-miss', 'many-active'];
 export function cpuSeconds(value) {
   const match = /^(?:(\d+)-)?(\d+):(\d{2})(?::(\d{2}(?:\.\d+)?))?$/.exec(value);
-  // ps uses mm:ss[.xx] on macOS and [days-]hh:mm:ss on Linux.
   if (!match && /^\d+:\d{2}\.\d+$/.test(value)) {
     const [minutes, seconds] = value.split(':').map(Number); return minutes * 60 + seconds;
   }

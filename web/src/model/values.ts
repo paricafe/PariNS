@@ -12,7 +12,6 @@ export function fieldDisplayValue(value: unknown, field: SettingField): RawField
   return value === undefined || value === null ? "" : String(value);
 }
 
-/** Convert a touched field only. Untouched values should stay in the baseline verbatim. */
 export function convertFieldValue(field: SettingField, draft: RawFieldValue): unknown {
   if (field.type === "endpoint") {
     if (typeof draft !== "object") throw new ModelError("settings.listener.address.required", field.path);
@@ -35,7 +34,6 @@ export function convertFieldValue(field: SettingField, draft: RawFieldValue): un
     const value = Number(text);
     if ((field.min !== undefined && value < field.min) || (field.max !== undefined && value > field.max)) {
       const family = unitFamily(field.path);
-      // Unit fields accept exact decimals in any unit, so their bounds are shown in units, not as whole base numbers.
       if (family) throw new ModelError("settings.validation.rangeUnit", field.path, { min: field.min ?? 0, max: field.max ?? 0, family });
       throw new ModelError("settings.validation.range", field.path, { min: field.min ?? 0, max: field.max ?? 0 });
     }

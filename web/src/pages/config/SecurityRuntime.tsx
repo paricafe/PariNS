@@ -7,7 +7,6 @@ import { DohStatusContext } from './DohRuntime';
 import { CertificateTools, type CertificateView } from './CertificateTools';
 import type { StatusView } from '../observability/metrics';
 
-/** Owns the security page's single /status read and its one 5-second poll, shared by the certificate panel and the DoH group in `children`. */
 export function SecurityRuntime({ language, children }: { language: Language; children?: ReactNode }) {
   const { api } = useSession();
   const revision = useConfig().draft?.revision;
@@ -32,7 +31,6 @@ export function SecurityRuntime({ language, children }: { language: Language; ch
     tick(); const timer = window.setInterval(tick, 5000);
     return () => { mounted.current = false; request.current += 1; window.clearInterval(timer); };
   }, [read, revision]);
-  /** A certificate action pauses the poll and discards reads already in flight. */
   const hold = useCallback((active: boolean) => { held.current = active; if (active) request.current += 1; }, []);
   const publish = useCallback((view: CertificateView) => setStatus((current) => current && { ...current, ...view }), []);
   const doh = useMemo(() => ({ status, failed: failure !== null }), [status, failure]);

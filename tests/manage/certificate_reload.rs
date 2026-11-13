@@ -29,7 +29,6 @@ fn write_identity(cert: &Path, key: &Path, identity: &Identity) {
 }
 
 async fn assert_tcp_identity(address: SocketAddr, identity: &Identity, alpn: &[u8]) {
-    // Each helper call makes a fresh ClientConfig: no resumption state is shared.
     let stream = timeout(DEADLINE, trusted_tls(address, identity, "dns.test", alpn))
         .await
         .unwrap();
@@ -187,7 +186,6 @@ async fn updates_only_validate_and_apply_preserve_loaded_material_after_failed_r
 
     for revision in 1..=2 {
         if revision == 2 {
-            // Isolate the unchanged local-rule file from the certificate failure.
             write_identity(&cert, &key, &identity);
             std::fs::write(&rules, "invalid replacement rules").unwrap();
         }
@@ -390,7 +388,6 @@ async fn reload_is_atomic_across_transports_and_preserves_sessions_runtime_and_o
     assert_eq!(unchanged["outcome"], "unchanged");
     assert_eq!(unchanged["certificate_generation"], generation);
 
-    // One complete candidate and a later role's mismatched key must publish none.
     write_identity(&pairs[0].0, &pairs[0].1, &second);
     std::fs::write(&pairs[1].0, second.cert.pem()).unwrap();
     api(
@@ -490,7 +487,6 @@ impl ManagedChild {
 #[cfg(unix)]
 impl Drop for ManagedChild {
     fn drop(&mut self) {
-        // Failure cleanup affects only the exact child owned by this fixture.
         if self.0.try_wait().ok().flatten().is_none() {
             let _ = self.0.kill();
             let _ = self.0.wait();
@@ -505,8 +501,6 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
     let directory = temporary.path().join("state");
     let setup_server = Management::start(&directory).await;
     let address = setup_server.address;
-    // DNS binds TCP first and then UDP on the same port. Preselect a port
-    // available to both protocols; release it before the public setup API binds.
     let (dns_tcp, dns_udp) = {
         let mut pair = None;
         for _ in 0..16 {
@@ -569,7 +563,6 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
     })
     .await
     .unwrap();
-    // Reuse the API fixture's request helpers without owning this child's stop.
     let server = Management {
         address,
         stop: None,
@@ -615,8 +608,6 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
                 child.0.try_wait().unwrap().is_none(),
                 "managed child exited on HUP"
             );
-            // Trust only these two explicit fixture certificates while polling
-            // publication; each iteration has a new client and full handshake.
             let mut roots = RootCertStore::empty();
             roots.add(first.cert.der().clone()).unwrap();
             roots.add(second.cert.der().clone()).unwrap();
@@ -649,12 +640,9 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
         generation + 1
     );
     assert_stable_state(&before, &after);
-    // Only the original in-process login token is used after reload.
     api(&server, &second, &auth, "GET", "/api/status", None)
         .await
         .expect(200);
-    // One kill invocation emits the burst without per-signal process startup.
-    // Unix may coalesce HUP delivery; no exact reload count is assumed.
     child.signal("-HUP", 16);
     child.signal("-TERM", 1);
     let exited = timeout(DEADLINE, async {

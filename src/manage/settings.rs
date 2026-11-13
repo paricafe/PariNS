@@ -1,5 +1,4 @@
-//! Read-only form projection. Config remains the only semantic validator and
-//! Manager remains the only owner of file validation, revisions and application.
+//! Read-only form projection.
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -15,14 +14,11 @@ pub(super) struct Preview {
     pub changes: Map<String, Value>,
 }
 
-/// Preserve the source document, including comments and relative paths.
 pub(super) fn parse(text: &str) -> Result<Value> {
     ensure!(text.len() <= MAX_CONFIG, "configuration exceeds 256 KiB");
     let config = Config::parse(text)?;
     let source: toml::Value = toml::from_str(text)?;
     let mut settings = serde_json::to_value(&config)?;
-    // Policy is a compiled radix index, not a document. Project its already-validated
-    // source rules without keeping a second rule copy in the DNS runtime.
     let mut filter = json!({
         "enabled": false, "block_response": "nodata", "block_ipv4": null, "block_ipv6": null,
         "blocked_ttl_secs": 10, "block_exact": [], "block_suffix": [],
@@ -37,13 +33,8 @@ pub(super) fn parse(text: &str) -> Result<Value> {
     Ok(json!({"settings": settings, "toml": text}))
 }
 
-/// Preview is pure: no filesystem reads, listener binding or saved-state access.
-/// Null deletes an optional value, objects merge and arrays replace. Rendering
-/// normalizes TOML formatting/comments but preserves untouched configuration.
 pub(super) fn preview(request: Preview) -> Result<Value> {
     let mut projection = parse(&request.toml)?;
-    // Retain nulls for schema validation so even deleting an unknown key is an
-    // error. Optional fields accept null; required fields cannot be deleted.
     overlay(&mut projection["settings"], request.changes.clone(), false);
     serde_json::from_value::<Config>(projection["settings"].clone())?;
     let original: toml::Value = toml::from_str(&request.toml)?;
@@ -69,8 +60,6 @@ fn overlay(target: &mut Value, changes: Map<String, Value>, delete_null: bool) {
                 delete_null,
             ),
             Value::Array(mut values) if delete_null => {
-                // Config's schema has already accepted these optional nulls.
-                // TOML has no null representation, including within rule arrays.
                 for value in &mut values {
                     omit_null_fields(value);
                 }

@@ -145,7 +145,6 @@ async fn h2_counts_and_logs_delivery_after_response_flow_control() {
                 .unwrap();
             assert_eq!(protocol::decode(&bytes).unwrap().id, 123);
         } else {
-            // HEADERS fit, but a zero response window prevents sending DNS DATA.
             assert_eq!(resolver.metrics().snapshot().counters["completed"], 0);
             services.storage.flush().await.unwrap();
             assert!(
@@ -207,11 +206,9 @@ async fn real_h2_tls_get_post_errors_and_shutdown() {
             let mut buffer = [0; 4096];
             let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
             let query = protocol::decode(&buffer[..length]).unwrap();
-            // X-Forwarded-For cannot forge the ECS identity derived from the socket.
             let subnet = ecs::subnet(&query).unwrap();
             assert_eq!(subnet.addr().to_string(), "127.0.0.0");
             assert_eq!(subnet.source_prefix(), 24);
-            // Empty answer without SOA is deliberately not cached.
             let answer = protocol::error_response(&query, ResponseCode::NoError);
             upstream
                 .send_to(&answer.to_vec().unwrap(), peer)
@@ -328,7 +325,6 @@ async fn real_h2_tls_get_post_errors_and_shutdown() {
         .unwrap();
 }
 
-/// Alt-Svc names the HTTP/3 port only while that listener serves.
 #[tokio::test]
 async fn alt_svc_follows_the_http3_listener_state() {
     use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
@@ -408,15 +404,12 @@ async fn tls_handshake_failures_timeouts_and_alpn_mismatches_are_counted() {
     };
     let (server_tls, client_tls) = certificates();
     let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
-    // Plain HTTP is not a TLS handshake.
     let mut plain = TcpStream::connect(address).await.unwrap();
     plain
         .write_all(b"GET /dns-query HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
         .unwrap();
-    // A silent peer exceeds the I/O timeout.
     let _silent = TcpStream::connect(address).await.unwrap();
-    // Without ALPN the handshake completes but selects no h2.
     let mut without = (*client_tls).clone();
     without.alpn_protocols.clear();
     let _without = TlsConnector::from(Arc::new(without))
@@ -425,7 +418,6 @@ async fn tls_handshake_failures_timeouts_and_alpn_mismatches_are_counted() {
             TcpStream::connect(address).await.unwrap(),
         )
         .await;
-    // An offer without h2 ends the handshake.
     let mut other = (*client_tls).clone();
     other.alpn_protocols = vec![b"http/1.1".to_vec()];
     assert!(
@@ -510,7 +502,6 @@ async fn incomplete_body_expires_and_shutdown_releases_admission() {
             .unwrap()
             .is_err()
     );
-    // A raw client that never starts TLS must not keep shutdown or admission alive.
     let _stalled_handshake = TcpStream::connect(address).await.unwrap();
     stop.send(true).unwrap();
     timeout(Duration::from_secs(2), server)
@@ -577,7 +568,6 @@ async fn resetting_last_h2_waiter_releases_budget_and_its_sent_query_fills_the_c
         .unwrap();
     assert_eq!(queries.available_permits(), 0);
     sender.send_reset(h2::Reason::CANCEL);
-    // This deadline is deliberately shorter than either 10-second operation timeout.
     timeout(Duration::from_secs(1), async {
         while queries.available_permits() == 0 {
             tokio::task::yield_now().await;
@@ -589,7 +579,6 @@ async fn resetting_last_h2_waiter_releases_budget_and_its_sent_query_fills_the_c
     assert_eq!(snapshot.counters["cancelled"], 1);
     assert_eq!(snapshot.request_inflight, 0);
     assert!(source_limits.try_query(address.ip()).is_ok());
-    // The sent query goes on in the refresh budget, only to fill the cache.
     assert_eq!(snapshot.upstream_inflight, 1);
     assert_eq!(resolver.refresh_snapshot().active, 1);
     let sent = protocol::decode(&buffer[..length]).unwrap();
@@ -614,7 +603,6 @@ async fn resetting_last_h2_waiter_releases_budget_and_its_sent_query_fills_the_c
     assert_eq!(snapshot.upstream_inflight, 0);
     assert_eq!(snapshot.counters["cache_store_admitted"], 1);
     assert_eq!(resolver.refresh_snapshot().success, 1);
-    // The next query of the same key is a cache hit without upstream IO.
     let reply = resolver
         .resolve_with_transport(&query(), address.ip(), "doh")
         .await
@@ -650,8 +638,6 @@ async fn h2_source_limits_cover_pre_tls_admission_and_ignore_forwarded_identity(
             .send_to(&answer.to_vec().unwrap(), peer)
             .await
             .unwrap();
-        // Retain the socket: an incorrectly admitted second query cannot get a
-        // successful answer or be confused with the expected rate rejection.
         upstream
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -677,8 +663,6 @@ async fn h2_source_limits_cover_pre_tls_admission_and_ignore_forwarded_identity(
     };
     let (server_tls, client_tls) = certificates();
     let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
-    // One raw TCP client already consumes its source's connection budget even
-    // though it has sent no TLS ClientHello. Global capacity still has room.
     let stalled = TcpStream::connect(address).await.unwrap();
     timeout(Duration::from_secs(1), async {
         while connections.available_permits() != 2 {

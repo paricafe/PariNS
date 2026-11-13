@@ -1,6 +1,4 @@
 //! Process-owned metrics and runtime persistence shared across DNS generations.
-//! Storage operations go through [`RuntimeServices::storage`]; this type adds
-//! only the DNS health transition shared by health and the history sampler.
 use crate::{
     metrics::Metrics,
     query_log::QueryLog,
@@ -60,12 +58,8 @@ impl RuntimeServices {
         generation: u64,
         code: Option<&'static str>,
     ) {
-        // Health and the history sampler describe one transition. Holding this
-        // short, IO-free lock prevents an accepted older publisher from updating
-        // the sampler after a newer generation has already published its health.
         let _transition = self.dns_transition.lock().expect("DNS health transition");
         use crate::runtime_health::State;
-        // Statistics count a degraded generation as running: its other listeners serve.
         let running = matches!(state, State::Running | State::Degraded);
         if self.health.publish(state, generation, code) {
             self.storage.set_dns_state(running, generation);
@@ -104,8 +98,6 @@ mod tests {
         let health = services.health.snapshot();
         assert_eq!(health.generation, 800);
         assert!(health.ready);
-        // Remove the deliberate transition history so aggregation cannot mix
-        // generations; the next forced tail proves the sampler's current state.
         services
             .storage
             .clear_history(services.storage.status().history_epoch)

@@ -231,8 +231,6 @@ async fn missing_ecs_exact_source_does_not_share_contained_prefix_or_privacy_fam
     config.ecs.enabled = true;
     config.ecs.ipv4_prefix = 32;
     let resolver = Resolver::from_config(&config);
-    // /24 and /25 overlap for supersession, but they are never cache hits for
-    // each other. The last two entries are separate family privacy namespaces.
     for (source, peer, count) in [
         ("192.0.2.0/24", "192.0.2.10", 1),
         ("192.0.2.0/24", "192.0.2.20", 1),
@@ -343,8 +341,6 @@ async fn cname_negative_reuses_upstream_and_preserves_filtering(code: ResponseCo
             100,
             RData::A(A::new(192, 0, 2, 53)),
         ));
-        // No ECS echo: the resolver must retain ExactSource reuse and reconstruct
-        // the original client's ECS consistently on upstream and fresh replies.
         ecs::set_subnet(&mut reply, None);
         reply
     })
@@ -396,8 +392,6 @@ async fn cname_negative_reuses_upstream_and_preserves_filtering(code: ResponseCo
             toml::from_str("enabled = true\nblock_exact = ['missing.other.test']").unwrap(),
         )
         .unwrap();
-    // Filtering applies both to a fresh hit and a cold answer in another exact
-    // ECS source. Neither synthesized block may replace the upstream message.
     for (peer, source, id, expected_upstream) in [
         ("192.0.2.20", "192.0.2.20/32", 30, 1),
         ("192.0.3.10", "192.0.3.10/32", 40, 2),
@@ -409,7 +403,6 @@ async fn cname_negative_reuses_upstream_and_preserves_filtering(code: ResponseCo
         assert_eq!(blocked.response_code, ResponseCode::NoError);
         assert!(blocked.answers.is_empty());
         assert_eq!(blocked.authorities.len(), 1);
-        // The chain target's block names the question in its SOA.
         assert_eq!(&blocked.authorities[0].name, blocked.queries[0].name());
         assert!(blocked.additionals.is_empty());
         let echoed = ecs::subnet(&blocked).unwrap();
@@ -444,7 +437,6 @@ async fn learned_sharing_serves_a_new_network_and_a_different_refresh_revokes_it
     use std::sync::atomic::AtomicU8;
     let value = Arc::new(AtomicU8::new(1));
     let current = value.clone();
-    // The upstream answers without ECS, identically for every network, TTL 1.
     let upstream = Upstream::start(move |q| {
         let mut reply = answer(q, current.load(Ordering::SeqCst), 0);
         ecs::set_subnet(&mut reply, None);
@@ -465,8 +457,6 @@ async fn learned_sharing_serves_a_new_network_and_a_different_refresh_revokes_it
             .inspect(&name, Some(RecordType::A), std::time::Instant::now())
     };
     let value_of = |reply: &Message| reply.answers[0].data.clone();
-    // Three networks over three /16 prefixes teach the cache. Clients carry
-    // ECS (and so EDNS) throughout, which is part of the cache key.
     let client = |peer: &str| format!("{peer}/32");
     for (index, peer) in ["192.0.2.1", "198.51.100.1", "203.0.113.1"]
         .iter()
@@ -479,14 +469,11 @@ async fn learned_sharing_serves_a_new_network_and_a_different_refresh_revokes_it
     let inspection = inspect(&resolver);
     assert_eq!(inspection["ecs_sharing"], "shared");
     assert_eq!(inspection["variants"][0]["scope"], "learned_v4");
-    // A fourth network hits the learned entry without an upstream query, and
-    // its ECS echo keeps its own source prefix as scope.
     let reply = resolve(&resolver, Some("10.9.9.9/32"), "10.9.9.9", 2).await;
     assert_eq!(value_of(&reply), RData::A(A::new(192, 0, 2, 1)));
     let echoed = ecs::subnet(&reply).unwrap();
     assert_eq!((echoed.source_prefix(), echoed.scope_prefix()), (32, 24));
     assert_eq!(upstream.count(), 3);
-    // IPv6 clients and privacy /0 are never served from it.
     resolve(&resolver, Some("2001:db8::1/128"), "2001:db8::1", 3).await;
     resolve(&resolver, Some("0.0.0.0/0"), "10.9.9.9", 4).await;
     assert_eq!(upstream.count(), 5);
@@ -494,7 +481,6 @@ async fn learned_sharing_serves_a_new_network_and_a_different_refresh_revokes_it
     assert_eq!(stats["ecs_shared_hits"], 1);
     assert_eq!(stats["ecs_shared_entries"], 1);
 
-    // After expiry the refresh from another network returns a different answer.
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     value.store(2, Ordering::SeqCst);
     let reply = resolve(&resolver, Some(&client("172.16.0.1")), "172.16.0.1", 5).await;
@@ -504,7 +490,6 @@ async fn learned_sharing_serves_a_new_network_and_a_different_refresh_revokes_it
     assert_eq!(inspection["ecs_sharing"], "revoked");
     assert_eq!(resolver.cache().snapshot()["ecs_sharing_revocations"], 1);
     assert_eq!(resolver.cache().snapshot()["ecs_shared_entries"], 0);
-    // Every other network now goes upstream for its own answer, then reuses it.
     for (index, peer) in ["192.0.2.1", "198.51.100.1", "203.0.113.1"]
         .iter()
         .enumerate()

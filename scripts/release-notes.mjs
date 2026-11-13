@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-// CHANGELOG.md keeps history; a GitHub Release gets only its own section.
 export function releaseNotes(changelog, version) {
   if (!/^v\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected version vX.Y.Z');
   const sections = [...changelog.matchAll(/^## (.+)\r?$/gm)];

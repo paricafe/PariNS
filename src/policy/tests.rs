@@ -141,7 +141,6 @@ fn cname_chain_is_order_independent_and_allow_does_not_exempt_other_targets() {
         p.apply_response(&q, &mut reply).map(|block| block.rule),
         Some("test".into())
     );
-    // The default method answers NODATA with the blocking rule's SOA.
     assert!(reply.answers.is_empty() && reply.additionals.is_empty());
     assert_eq!(reply.authorities.len(), 1);
     assert_eq!(reply.authorities[0].record_type(), RecordType::SOA);
@@ -166,7 +165,6 @@ fn unrelated_names_wrong_class_and_cycles_do_not_cause_false_blocks() {
     let before = reply.to_vec().unwrap();
     p.apply_response(&q, &mut reply);
     assert_eq!(reply.to_vec().unwrap(), before);
-    // An additional branch to a blocked target must still be checked, even in a loop.
     reply.answers.push(cname("loop.test", "ads.test"));
     p.apply_response(&q, &mut reply);
     assert!(reply.answers.is_empty());
@@ -367,7 +365,6 @@ fn question(name: &str, kind: RecordType, edns: bool) -> Message {
     q
 }
 
-/// Code, answer data, SOA owner and whether EDE 15 is present.
 fn answer(
     p: &Policy,
     name: &str,
@@ -449,7 +446,6 @@ fn every_method_answers_a_aaaa_and_other_types() {
             RecordType::A,
             (NoError, vec!["192.0.2.10".into()], None),
         ),
-        // A custom IP without the asked family answers like nodata.
         (
             "a.v4.test",
             RecordType::AAAA,
@@ -470,7 +466,6 @@ fn every_method_answers_a_aaaa_and_other_types() {
         assert_eq!((code, data, owner), expected, "{name} {kind}");
         assert!(ede, "{name} {kind}");
     }
-    // Clients without EDNS get no OPT record.
     let (reply, trace) = p
         .block_query(&question("a.nx.test", RecordType::A, false))
         .unwrap();
@@ -521,7 +516,6 @@ fn a_blocked_chain_target_answers_with_its_rule_method() {
     );
     assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
     assert!(reply.answers.is_empty());
-    // The SOA owner is the question name, never the target's rule.
     assert_eq!(&reply.authorities[0].name, q.queries[0].name());
 }
 
@@ -572,8 +566,6 @@ fn rule_lines_and_block_settings_are_validated_with_their_position() {
     }
 }
 
-/// Local slots: 0 global, 1 nxdomain. Subscription slots 2 (refused) and 3
-/// (follows the global nodata), in configured order.
 fn layered(local: &str, sources: &[(&str, Group, u16)]) -> Policy {
     let marker = if local.contains("nxdomain") {
         ""
@@ -612,7 +604,6 @@ fn the_most_specific_rule_chooses_the_method() {
     let source = |rule: &str, id: &str, response: &str| {
         Some((rule.to_string(), Some(id.to_string()), response.to_string()))
     };
-    // Local exact beats local suffix, which beats subscription exact.
     let p = layered(
         "block_suffix = ['test']\nblock_exact = ['a.b.test nxdomain']",
         &[
@@ -622,12 +613,9 @@ fn the_most_specific_rule_chooses_the_method() {
     );
     assert_eq!(method(&p, "a.b.test"), local("a.b.test", "nxdomain"));
     assert_eq!(method(&p, "x.b.test"), local("test", "nodata"));
-    // The longest local suffix wins over a shorter one.
     let p = layered("block_suffix = ['test', 'b.test nxdomain']", &[]);
     assert_eq!(method(&p, "x.b.test"), local("b.test", "nxdomain"));
     assert_eq!(method(&p, "x.c.test"), local("test", "nodata"));
-    // Subscription exact beats subscription suffix; the longest suffix wins;
-    // the same rule in two sources answers with the first configured source.
     let p = layered(
         "",
         &[
@@ -644,10 +632,7 @@ fn the_most_specific_rule_chooses_the_method() {
     );
     assert_eq!(method(&p, "x.b.test"), source("b.test", "second", "nodata"));
     assert_eq!(method(&p, "x.test"), source("test", "first", "refused"));
-    // c.test in the first source answers like its covering `test` rule there,
-    // so the index keeps only `test`; the second source's copy never wins.
     assert_eq!(method(&p, "x.c.test"), source("test", "first", "refused"));
-    // A local allow still wins over every block rule.
     let p = layered(
         "allow_exact = ['a.b.test']",
         &[("b.test", Group::BlockSuffix, 2)],
@@ -673,7 +658,6 @@ fn method_changes_publish_and_rename_only_when_answers_change() {
     let explicit = make("nodata", Some(BlockResponse::Nodata));
     let refused = make("nodata", Some(BlockResponse::Refused));
     let global = make("refused", None);
-    // The same answers publish the same generation, whichever setting gives them.
     assert_eq!(follows.publication_digest(), explicit.publication_digest());
     assert_ne!(follows.publication_digest(), refused.publication_digest());
     assert_eq!(refused.publication_digest(), global.publication_digest());
@@ -689,7 +673,6 @@ fn derived_index_with_kept_covered_rules_round_trips() {
     builder.set_classes(local.aggregate_classes(responses));
     builder.add("a.b.test", Group::BlockExact, 3).unwrap();
     builder.add("c.test", Group::BlockSuffix, 2).unwrap();
-    // Configured order, not sorted by ID.
     let ids = local.aggregate_ids(["zeta".into(), "alpha".into()]);
     let policy = local.aggregate(
         builder.prepare().unwrap().finish_radix().unwrap(),
@@ -710,7 +693,6 @@ fn derived_index_with_kept_covered_rules_round_trips() {
             "{name}"
         );
     }
-    // Local suffixes outrank every subscription rule.
     let (_, trace) = restored
         .block_query(&question("x.c.test", RecordType::A, false))
         .unwrap();

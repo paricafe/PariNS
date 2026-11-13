@@ -1,3 +1,5 @@
+// Adapted from beUI Drawer. See README.md in this directory.
+
 import clsx from "clsx";
 import { X } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
@@ -11,14 +13,11 @@ export interface DrawerProps {
   title: ReactNode;
   children: ReactNode;
   side?: "left" | "right";
-  /** "sheet": centered card on desktop, bottom sheet on phones. */
   variant?: "drawer" | "sheet";
   closeLabel?: string;
   className?: string;
 }
 
-// Open modals scale and dim the page behind them (iOS card stacking); a
-// counter keeps nested modals from clearing the effect early.
 let openModals = 0;
 function stackBackground(delta: 1 | -1) {
   openModals = Math.max(0, openModals + delta);
@@ -28,8 +27,6 @@ function stackBackground(delta: 1 | -1) {
   else delete document.documentElement.dataset.modal;
 }
 
-// The native modal dialog supplies focus containment and background inertness.
-// Closing unmounts immediately, so authentication cleanup never waits for an exit animation.
 function OpenDrawer({ onClose, title, children, side = "right", variant = "drawer", closeLabel = "关闭", className }: Omit<DrawerProps, "open">) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -99,8 +96,6 @@ function OpenDrawer({ onClose, title, children, side = "right", variant = "drawe
   );
 }
 
-// Based on beUI Drawer. Native <dialog> replaces the upstream overlay's
-// incomplete focus handling while keeping its slide-in Motion treatment.
 export function Drawer({ open, ...props }: DrawerProps) {
   return open ? <OpenDrawer {...props} /> : null;
 }

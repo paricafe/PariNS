@@ -6,10 +6,6 @@ import { SPRING_IOS } from './beui/motion';
 type Show = (message: string) => void;
 const BannerContext = createContext<Show>(() => {});
 
-/**
- * Transient success feedback (iOS banner). The live region always exists so
- * screen readers announce each message; failures stay inline where they occurred.
- */
 export function BannerProvider({ children }: { children: ReactNode }) {
   const reduced = useReducedMotion();
   const [banner, setBanner] = useState<{ id: number; message: string } | null>(null);

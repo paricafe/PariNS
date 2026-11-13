@@ -1,18 +1,4 @@
 //! Listener ownership, admission limits, and task lifetime.
-//!
-//! Each configured listener has one supervisor owned by the generation. A listener
-//! that cannot bind, or whose adapter exits while the generation runs, is rebound
-//! alone after 5 s doubling to 60 s; the others, the Resolver, cache and upstream
-//! pool keep serving. Health is ready only while every listener runs, otherwise
-//! degraded. Identities are prepared once per generation, so a certificate error
-//! still fails the whole start. DoH over HTTP/3 binds the DoH TCP address and its
-//! actual port; HTTP/2 responses advertise it in Alt-Svc only while it runs. A new
-//! outage (the first failure after startup or after stable service) is logged at
-//! once, repeats within one outage at most every ten minutes. Stopping the
-//! generation cancels pending retries and releases every socket, including Quinn
-//! drivers; one listener's error during that drain does not cut the others short.
-//! A panic in one plain DNS query or connection task ends that task alone: it is
-//! logged and counted on `/metrics`, and the listener keeps serving.
 
 use std::{
     future::Future,
@@ -49,7 +35,6 @@ pub struct Server {
     reload: ReloadHandle,
 }
 
-/// Reloads only file-backed rules and listener certificates, never routing/cache ownership.
 #[derive(Clone)]
 pub struct ReloadHandle {
     resolver: Arc<Resolver>,
@@ -63,7 +48,6 @@ pub struct ReloadHandle {
 }
 
 impl ReloadHandle {
-    /// Call from a blocking worker: all candidates are validated before any publication.
     pub fn reload(&self) -> Result<()> {
         anyhow::ensure!(
             self.filters.is_none(),
@@ -94,8 +78,6 @@ impl ReloadHandle {
         Ok(())
     }
 
-    /// File-mode subscription reload never downloads. IO and compilation happen
-    /// outside publication; shutdown, certificates and the aggregate share one cut.
     pub async fn reload_async(&self) -> Result<()> {
         let Some(filters) = &self.filters else {
             let reload = self.clone();
@@ -115,8 +97,6 @@ impl ReloadHandle {
         let candidate = filters
             .prepare_config_from_source(self.filter_settings.clone(), local, revision)
             .await?;
-        // Lock order: file publication gate -> Service/PolicyHandle -> identities.
-        // The candidate holds the one worker lease, excluding refresh publication.
         let closed = self
             .publication_closed
             .lock()
@@ -139,8 +119,6 @@ impl ReloadHandle {
     }
 }
 
-/// One configured listener. A slot that failed to bind, or whose adapter exited
-/// while the generation keeps running, is rebound on its own with bounded backoff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListenerKind {
@@ -171,8 +149,6 @@ pub enum ListenerState {
     Retrying,
 }
 
-/// Listeners of a candidate that did not bind. `in_use` reports an address that
-/// another process already holds, such as a system resolver on port 53.
 #[derive(Debug)]
 pub struct Unbound {
     pub detail: String,
@@ -199,7 +175,6 @@ pub struct ListenerStatus {
     pub address: SocketAddr,
     pub state: ListenerState,
     pub error: Option<String>,
-    /// The last failure was an address already in use.
     #[serde(skip)]
     in_use: bool,
     #[serde(skip)]
@@ -210,21 +185,15 @@ pub struct ListenerStatus {
     recovery_logged: Option<std::time::Instant>,
 }
 
-/// Per-listener state of one generation, published to DNS health and status.
 pub struct Listeners {
     status: Mutex<Vec<ListenerStatus>>,
     changed: watch::Sender<()>,
 }
-/// How often the same failure, or a listener's recovery, is logged again.
 const LOG_INTERVAL: Duration = Duration::from_secs(600);
 
-/// Logs the first failure, a changed error, and the same error at most every
-/// ten minutes, so a long outage stays visible without flooding the journal.
-/// Shared by listener supervisors and managed DNS startup retries.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FailureLog(Option<(String, std::time::Instant)>);
 impl FailureLog {
-    /// Whether `error` is due to be logged now; records it when it is.
     pub(crate) fn due(&mut self, error: &str) -> bool {
         let now = std::time::Instant::now();
         let due = self
@@ -259,8 +228,6 @@ impl Listeners {
             .iter()
             .all(|l| l.state == ListenerState::Running)
     }
-    /// `failures` keeps counting until the supervisor sees the listener serve
-    /// stably, so one that binds and exits again keeps backing off.
     fn running(&self, index: usize, address: SocketAddr) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         let listener = &mut status[index];
@@ -284,7 +251,6 @@ impl Listeners {
         drop(status);
         self.changed.send_replace(());
     }
-    /// Marks the listener as retrying; logging is rate limited by [`FailureLog`].
     fn failed(&self, index: usize, error: &anyhow::Error, failures: u32) {
         let in_use = address_in_use(error);
         let error = format!("{error:#}");
@@ -307,10 +273,6 @@ impl Listeners {
 }
 
 impl ListenerStatus {
-    /// Whether this failure is due to be logged. The first failure of an outage
-    /// (after startup or after the listener served stably) starts a new log
-    /// history, so a recovered listener that fails the same way again is
-    /// reported at once, and so is its next recovery.
     fn record_failure(&mut self, error: &str, failures: u32) -> bool {
         if failures == 1 {
             self.logged = FailureLog::default();
@@ -320,14 +282,12 @@ impl ListenerStatus {
     }
 }
 
-/// Retry delay after `failures` consecutive failures: 5 s doubling to 60 s.
 pub(crate) fn backoff(failures: u32) -> Duration {
     Duration::from_secs(5)
         .saturating_mul(1 << failures.saturating_sub(1).min(4))
         .min(Duration::from_secs(60))
 }
 
-/// Server identities are prepared once per generation; only sockets are rebound.
 struct ListenerTls {
     dot: Option<Arc<rustls::ServerConfig>>,
     doh: Option<Arc<rustls::ServerConfig>>,
@@ -357,8 +317,6 @@ struct Slot {
     bound: Option<Bound>,
 }
 
-// Name the protocol and address in bind errors: "address in use" alone does not
-// tell an operator which listener collided.
 async fn bind_slot(kind: ListenerKind, address: SocketAddr, tls: &ListenerTls) -> Result<Bound> {
     use crate::quic::Protocol;
     let quic = |config: &Option<Arc<rustls::ServerConfig>>, protocol| {
@@ -410,7 +368,6 @@ async fn serve_bound(
             crate::tls::serve(listener, tls.dot.clone().expect("DoT identity"), ingress).await
         }
         (_, Bound::Tcp(listener)) => {
-            // Advertise HTTP/3 only while its listener actually serves.
             let h3_port = tls.h3_port.map(|port| {
                 let listeners = listeners.clone();
                 Arc::new(move || listeners.serving(ListenerKind::Doh3).then_some(port))
@@ -431,8 +388,6 @@ async fn serve_bound(
     }
 }
 
-/// Owns one listener for the generation: serves it, and after a bind failure or
-/// an adapter exit rebinds only this listener until the generation stops.
 async fn supervise(
     index: usize,
     mut slot: Slot,
@@ -441,8 +396,6 @@ async fn supervise(
     runtimes: Arc<Mutex<Vec<Option<Arc<crate::quic::ListenerRuntime>>>>>,
     ingress: crate::ingress::Ingress,
 ) -> Result<()> {
-    // A listener that served this long counts as recovered: the next failure
-    // starts the backoff again from 5 seconds.
     const STABLE: Duration = Duration::from_secs(60);
     let mut stop = ingress.stop.clone();
     let mut failures = listeners.snapshot()[index].failures;
@@ -469,7 +422,6 @@ async fn supervise(
         };
         let address = bound.local_addr()?;
         if let Bound::Quic(listener) = &bound {
-            // The owner outlives adapter cancellation at the shutdown deadline.
             runtimes.lock().expect("QUIC runtimes")[index] = Some(listener.runtime());
         }
         listeners.running(index, address);
@@ -493,8 +445,6 @@ async fn supervise(
 }
 
 impl Server {
-    /// File-mode service is closed with the DNS generation; managed mode keeps
-    /// its process-owned service outside individual listener generations.
     pub async fn bind_with_filter_service(
         config: Config,
         certificates: Option<Arc<crate::tls::CertificateSet>>,
@@ -510,7 +460,6 @@ impl Server {
         server.reload.filters = Some(filters);
         Ok(server)
     }
-    /// Bind both protocols before accepting traffic. Port zero selects one shared port.
     pub async fn bind(config: Config) -> Result<Self> {
         let services = crate::runtime_services::RuntimeServices::ephemeral(
             crate::storage::RuntimeSettings::from_config(&config),
@@ -531,7 +480,6 @@ impl Server {
         Self::bind_with_policy(config, certificates, services, policy).await
     }
 
-    /// `config` has passed `Config::validate`; listener and upstream checks are not repeated.
     pub async fn bind_with_policy(
         mut config: Config,
         certificates: Option<Arc<crate::tls::CertificateSet>>,
@@ -578,13 +526,10 @@ impl Server {
         if let Some(doh) = &config.doh {
             planned.push((ListenerKind::Doh, doh.listen));
             if doh.http3 {
-                // H3 binds the exact DoH TCP address and actual port over UDP.
                 planned.push((ListenerKind::Doh3, doh.listen));
             }
         }
         planned.extend(config.doq.as_ref().map(|d| (ListenerKind::Doq, d.listen)));
-        // A listener that cannot bind does not stop the others; its supervisor
-        // retries it once the generation runs.
         let mut slots = Vec::with_capacity(planned.len());
         let mut status = Vec::with_capacity(planned.len());
         let mut unbound = Vec::new();
@@ -674,7 +619,6 @@ impl Server {
         })
     }
 
-    /// The DNS health generation this server publishes (file mode uses 1).
     pub fn set_generation(&mut self, generation: u64) {
         self.generation = generation;
     }
@@ -683,8 +627,6 @@ impl Server {
         self.listeners.clone()
     }
 
-    /// Bind errors of listeners that are not yet serving, for callers that must
-    /// not commit a partially bound candidate.
     pub fn unbound(&self) -> Option<Unbound> {
         let snapshot = self.listeners.snapshot();
         let errors: Vec<_> = snapshot.iter().filter_map(|l| l.error.clone()).collect();
@@ -694,7 +636,6 @@ impl Server {
         })
     }
 
-    /// The plain DNS address: actual when bound, configured while it retries.
     pub fn local_addr(&self) -> SocketAddr {
         self.config.listen
     }
@@ -733,10 +674,8 @@ impl Server {
             .collect()
     }
 
-    /// Publishes ready when every listener runs, degraded otherwise.
     pub fn publish_health(&self) {
         use crate::runtime_health::State;
-        // Republishing an unchanged state would move its changed_at timestamp.
         let current = self.services.health.snapshot();
         let state = if self.listeners.all_running() {
             State::Running
@@ -798,7 +737,6 @@ impl Server {
                 _ = &mut shutdown => break Ok(()),
                 _ = changed.changed() => self.publish_health(),
                 _ = ticker.tick(), if report => emit_metrics(&metrics, run_id, started, "periodic"),
-                // Supervisors return only after the stop signal, or by panicking.
                 Some(result) = supervisors.join_next() => {
                     break match result {
                         Ok(Err(error)) => Err(error),
@@ -810,8 +748,6 @@ impl Server {
         };
         self.reload.close();
         let _ = stopping.send(true);
-        // One listener's error does not cut the others' drain short: keep the
-        // first error and wait for every supervisor within the grace.
         let drained = timeout(
             Duration::from_millis(self.config.shutdown_grace_ms),
             async {
@@ -848,7 +784,6 @@ impl Server {
     }
 }
 
-/// Plain DNS over UDP and TCP on one address.
 async fn serve_plain(
     tcp: TcpListener,
     udp: Arc<udp::Socket>,
@@ -895,7 +830,6 @@ async fn serve_plain(
                 });
                 let Some((source, permit)) = admitted else {
                     metrics.inc(Counter::UdpDropped);
-                    // Bound parsing work in the receive loop even with history enabled.
                     let now = tokio::time::Instant::now();
                     if now >= next_rejection_log {
                         next_rejection_log = now + Duration::from_millis(10);
@@ -926,8 +860,6 @@ async fn serve_plain(
         }
     };
     drop(tcp);
-    // Only a generation stop forces it (and its upstream pool) down; after an
-    // error exit the supervisor rebinds this listener while others serve.
     ingress
         .drain(&mut tasks, ForcedShutdown::ListenerDrain)
         .await;
@@ -995,7 +927,6 @@ mod tests {
     use super::*;
     use crate::runtime_health::State;
 
-    /// A UDP payload that makes its query task panic.
     pub(super) const PANIC_DATAGRAM: &[u8] = b"parins-panic";
 
     #[tokio::test]
@@ -1026,8 +957,6 @@ mod tests {
                 shutdown_grace: Duration::from_millis(100),
                 max_streams: 1,
             };
-            // One byte cannot hold even the frame length: writing the answer
-            // stays pending until the client reads or closes the connection.
             let (mut client, server) = tokio::io::duplex(1);
             let task = tokio::spawn(serve_tcp(server, "127.0.0.1".parse().unwrap(), ingress));
             let mut query = hickory_proto::op::Message::new(
@@ -1131,8 +1060,6 @@ mod tests {
         let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.send_to(PANIC_DATAGRAM, address).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        // The unreachable upstream makes the answer a SERVFAIL; any answer shows
-        // the listener still serves.
         let mut query = Message::new(7, MessageType::Query, OpCode::Query);
         query.add_query(Query::query(
             Name::from_ascii("panic.test.").unwrap(),
@@ -1180,7 +1107,6 @@ mod tests {
         assert!(listener.record_failure("address in use", 1));
         assert!(!listener.record_failure("address in use", 2));
         listener.recovery_logged = Some(std::time::Instant::now());
-        // Served stably, then failed the same way: a new outage.
         assert!(listener.record_failure("address in use", 1));
         assert!(listener.recovery_logged.is_none());
     }
@@ -1191,8 +1117,6 @@ mod tests {
             "listen='127.0.0.1:0'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=200\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n",
         )
         .unwrap();
-        // Validation rejects this; here it makes the admin adapter exit with an
-        // error after binding, standing in for a listener failing at runtime.
         config.admin_listen = Some("0.0.0.0:0".parse().unwrap());
         let services = crate::runtime_services::RuntimeServices::ephemeral(
             crate::storage::RuntimeSettings::from_config(&config),
@@ -1226,10 +1150,7 @@ mod tests {
             .find(|l| l.kind == ListenerKind::Dns)
             .unwrap();
         assert_eq!(dns.state, ListenerState::Running);
-        // The failing listener did not force the generation or its upstreams down.
         assert_eq!(resolver.forced_shutdown(), None);
-        // It binds again after 5 s and exits at once: that is not a recovery, so
-        // the failure count (and with it the backoff) keeps growing.
         let failures = |listeners: &Listeners| {
             listeners
                 .snapshot()
@@ -1246,7 +1167,6 @@ mod tests {
         })
         .await;
         assert!(grew.is_ok());
-        // Stopping cancels the pending retry and releases every socket at once.
         let started = std::time::Instant::now();
         stop.send(()).unwrap();
         task.await.unwrap().unwrap();

@@ -1,5 +1,4 @@
 //! Bounded, unauthenticated official-release transport shared by app and helper.
-//! No caller-supplied URL, proxy, TLS roots, or command is accepted.
 use std::time::Duration;
 
 use crate::clock::unix_secs;
@@ -44,7 +43,6 @@ pub enum Latest {
         release: GithubRelease,
         etag: Option<String>,
     },
-    /// The coordinator must already possess a validated cached result.
     NotModified,
 }
 
@@ -170,8 +168,6 @@ impl GithubReader {
         .map_err(|_| ReaderError::new("request_timeout"))?
     }
 
-    /// Independently revalidate the confirmed release before opening its stream.
-    /// Caller owns the safe empty file descriptor, fsync, ELF checks, and cleanup.
     pub async fn download(
         &self,
         tuple: &DownloadTuple,
@@ -308,7 +304,6 @@ where
         if response.status != StatusCode::OK {
             return Err(http_error(response.status, &response.headers, unix_secs()));
         }
-        // No decompressor is enabled: a server ignoring identity is rejected.
         if response
             .headers
             .get(header::CONTENT_ENCODING)

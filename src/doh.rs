@@ -1,13 +1,4 @@
 //! DNS-over-HTTPS (HTTP/2), with socket-derived identity and bounded request work.
-//!
-//! Shutdown: only request streams with a complete query (END_STREAM received, so
-//! a GET whose query is in the URL is complete once its headers arrive) can force
-//! a stop. Streams still receiving a body are refused at once, like unfinished
-//! handshakes. Peer close notification (the two-phase GOAWAY) uses at most half
-//! the shutdown grace. An error exit outside a stop drains without forcing.
-//!
-//! Failed and timed-out TLS handshakes and connections without h2 are counted
-//! only on `/metrics`.
 use std::{net::IpAddr, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -26,16 +17,12 @@ use crate::{
 
 pub const PATH: &str = "/dns-query";
 
-/// The DoH HTTP/3 port while that listener is serving, `None` while it is not
-/// (for example while it retries a bind). Each HTTP/2 response asks, so Alt-Svc
-/// never sends clients to an HTTP/3 endpoint that is down.
 pub type H3Port = Arc<dyn Fn() -> Option<u16> + Send + Sync>;
 
 pub(crate) fn alt_svc(port: Option<u16>) -> String {
     port.map_or_else(|| "clear".into(), |port| format!("h3=\":{port}\"; ma=300"))
 }
 
-/// Shared HTTP/2 and HTTP/3 wire contract. No proxy header is used for identity.
 pub fn request_bytes(
     method: &str,
     path_and_query: &str,
@@ -141,8 +128,6 @@ pub async fn serve(
     outcome
 }
 
-/// rustls ends the handshake of a client whose offered ALPN lacks h2; a client
-/// without ALPN completes it and is counted after the handshake.
 fn handshake_failure(error: &std::io::Error) -> Diagnostic {
     match error
         .get_ref()
@@ -170,8 +155,6 @@ async fn connection(
     };
     let permits = Arc::new(Semaphore::new(ingress.max_streams));
     let mut requests = JoinSet::new();
-    // Peer close notification uses at most half of the shutdown grace, so an
-    // idle peer that never acknowledges GOAWAY cannot force the stop.
     let close_window = ingress.shutdown_grace / 2;
     let mut close_by = stop
         .borrow()
@@ -183,9 +166,6 @@ async fn connection(
         if let Some(close_by) = close_by {
             while requests.try_join_next().is_some() {}
             if requests.is_empty() {
-                // Only requests with a complete query hold a stopping connection.
-                // A responsive peer completes the two-phase GOAWAY; a silent one
-                // is dropped.
                 let _ = tokio::time::timeout_at(close_by, async {
                     while let Some(Ok((_, mut respond))) = connection.accept().await {
                         respond.send_reset(Reason::REFUSED_STREAM);
@@ -214,19 +194,14 @@ async fn connection(
                 let h3_port = h3_port.clone();
                 requests.spawn(async move {
                     let _permit = permit;
-                    // One total deadline includes body collection, resolution and response flow control.
                     let _ = timeout(ingress.io_timeout, request_task(request, respond, peer, ingress, h3_port)).await;
                 });
             }
         }
     }
     if *stop.borrow() {
-        // During a stop, complete queries finish even if the peer has gone;
-        // the listener grace bounds this wait and forces the stop on expiry.
         while requests.join_next().await.is_some() {}
     }
-    // Abort the remaining request tasks and wait for them, so no request work
-    // outlives the listener.
     requests.abort_all();
     while requests.join_next().await.is_some() {}
     Ok(())
@@ -240,12 +215,10 @@ async fn request_task(
     h3_port: Option<H3Port>,
 ) -> anyhow::Result<()> {
     let (parts, mut stream) = request.into_parts();
-    // Biased: a query received in full before the stop is still answered.
     let (body, status) = tokio::select! {
         biased;
         collected = collect(&mut stream) => collected?,
         () = ingress.stopped() => {
-            // No resolver work yet: the peer may retry this stream elsewhere.
             respond.send_reset(Reason::REFUSED_STREAM);
             return Ok(());
         }
@@ -276,7 +249,6 @@ async fn request_task(
     Ok(())
 }
 
-/// Reads the body until END_STREAM; `Some(413)` stops early at the size limit.
 async fn collect(stream: &mut h2::RecvStream) -> anyhow::Result<(Vec<u8>, Option<u16>)> {
     let mut body = Vec::new();
     while let Some(chunk) = stream.data().await {

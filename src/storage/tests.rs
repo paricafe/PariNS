@@ -53,7 +53,6 @@ async fn pause(handle: &Handle) -> (mpsc::Sender<()>, tokio::task::JoinHandle<Re
     (release, task)
 }
 
-/// Waits for the asynchronous existing-database open and check to finish.
 async fn checked(runtime: &RuntimeServices) {
     tokio::time::timeout(Duration::from_secs(15), async {
         while runtime.storage.status().health == "checking" {
@@ -76,7 +75,6 @@ async fn slow_existing_check_is_not_interrupted_and_keeps_queued_writes() {
     let runtime = RuntimeServices::open(dir.path(), settings(), 1).unwrap();
     runtime.storage.record_log(0, entry("fresh"));
     runtime.storage.flush().await.unwrap();
-    // A nonzero stored epoch proves records queued during the check adopt it.
     runtime.storage.clear_logs(0).await.unwrap();
     runtime.storage.record_log(1, entry("fresh"));
     runtime.metrics.inc(Counter::Requests);
@@ -355,7 +353,6 @@ async fn newer_logs_are_filtered_above_the_cursor_newest_first_and_capped() {
             .record_log(0, entry(if index % 2 == 0 { "blocked" } else { "fresh" }));
     }
     runtime.storage.flush().await.unwrap();
-    // Without a cursor the client already holds history: start from the newest id.
     let start = runtime
         .storage
         .newer_logs(None, ListOptions::default())
@@ -396,7 +393,6 @@ async fn newer_logs_are_filtered_above_the_cursor_newest_first_and_capped() {
         .await
         .unwrap();
     assert!(none.entries.is_empty() && !none.more);
-    // A filter that matches nothing still reports how far it scanned.
     let unmatched = runtime
         .storage
         .newer_logs(
@@ -615,8 +611,6 @@ async fn corrupt_database_is_preserved_unavailable_and_keeps_single_writer_lock(
 
 #[tokio::test]
 async fn a_database_without_tables_is_initialized_like_a_new_one() {
-    // What a crash during the first commit leaves once its journal rolls back:
-    // a valid, non-empty SQLite file with no tables.
     let dir = private_dir();
     let path = dir.path().join("observability.sqlite3");
     drop(crate::private_files::create_private(&path).unwrap());
@@ -733,8 +727,6 @@ async fn capacity_pending_clears_with_the_cleanup_that_resolves_it() {
         runtime.storage.record_log(0, entry("fresh"));
     }
     runtime.storage.flush().await.unwrap();
-    // Applying the limit removes 256 entries; one background cleanup removes
-    // the rest.
     let mut updated = settings();
     updated.query_log.max_entries = 100;
     runtime.storage.publish_settings(updated, 2);
@@ -756,7 +748,6 @@ async fn capacity_pending_clears_with_the_cleanup_that_resolves_it() {
         .unwrap();
         let (count, pending) = receive.await.unwrap();
         if count <= 100 {
-            // Seen from the worker's next pass, before any periodic refresh.
             assert!(!pending, "capacity_pending outlived the cleanup");
             break;
         }
@@ -790,7 +781,6 @@ async fn writes_during_pending_cleanup_keep_health_cleaning() {
         }
         flapped
     });
-    // Each batch fills the queue past 256, so the worker writes on every pass.
     for _ in 0..20 {
         for _ in 0..300 {
             runtime.storage.record_log(0, entry("fresh"));
@@ -858,8 +848,6 @@ fn abrupt_exit_child() {
         runtime.storage.record_log(0,entry("fresh")); runtime.metrics.inc(Counter::Requests); runtime.storage.flush().await.unwrap();
         inspect(&runtime.storage, |conn| {
             conn.execute_batch("PRAGMA wal_autocheckpoint=0; UPDATE metadata SET value=7 WHERE key='cleanup_manual'; PRAGMA cache_size=1; BEGIN IMMEDIATE; UPDATE query_log SET name='not-committed.test'; UPDATE metadata SET value=999 WHERE key='log_epoch';")?;
-            // Exit without dropping the connection. Reopening recovers committed
-            // WAL frames and discards the unfinished transaction.
             std::process::exit(23);
         }).await.unwrap();
     });
@@ -1265,7 +1253,6 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     .unwrap();
     runtime.metrics.inc(Counter::Requests);
     for _ in 0..8 {
-        // Each request yields a worker turn where the automatic scheduler runs.
         runtime.storage.flush().await.unwrap();
         let totals = runtime
             .storage
@@ -1293,10 +1280,6 @@ async fn rollback_past_reset_period_resets_once_and_preserves_new_counters_after
     reopened.storage.shutdown().await.unwrap();
 }
 
-/// Stored totals and points must have exactly the current fixed-cardinality
-/// shape (`validate_metrics`), so an older file with other keys is rejected.
-/// Changing the persisted statistics shape therefore requires a new
-/// DATABASE_FORMAT; update both pinned values together.
 #[test]
 fn persisted_statistics_shape_is_bound_to_database_format() {
     use sha2::{Digest, Sha256};
@@ -1342,7 +1325,6 @@ async fn periodic_flush_defers_cleanup_to_its_interval_without_capacity_pressure
     config.storage.flush_interval_ms = 100;
     config.storage.cleanup_interval_secs = 3600;
     let runtime = RuntimeServices::ephemeral(config);
-    // Opening runs one cleanup; each cleanup advances the stored clock floor.
     let opened = metadata(&runtime.storage, "clock_lower_ms").await;
     tokio::time::sleep(Duration::from_millis(20)).await;
     runtime.storage.record_log(0, entry("fresh"));
@@ -1363,8 +1345,6 @@ async fn periodic_flush_defers_cleanup_to_its_interval_without_capacity_pressure
 async fn shutdown_releases_directory_lock_even_with_a_duplicated_descriptor() {
     let directory = private_dir();
     let (path, lock) = private_directory(directory.path()).unwrap();
-    // A concurrent process spawn may briefly inherit this open file description.
-    // Closing only the worker's descriptor must not keep the directory locked.
     let duplicate = lock.try_clone().unwrap();
     let handle = Handle::start(
         Some((path, lock)),
@@ -1411,7 +1391,6 @@ async fn wal_sidecars_are_private_and_shutdown_checkpoints_before_rollback_polic
         let path = db.with_file_name(format!("observability.sqlite3{suffix}"));
         assert!(std::fs::metadata(path).map_or(true, |m| m.len() == 0));
     }
-    // The previous version uses this pragma after its read-only format check.
     let previous = rusqlite::Connection::open(&db).unwrap();
     previous
         .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL")
@@ -1538,7 +1517,6 @@ async fn structured_queue_accounts_nested_allocations_before_worker_serializes()
     e.answer = Vec::with_capacity(100);
     let expected = entry_charge(&e);
     runtime.storage.record_log(0, e.clone());
-    // Clone may compact capacity; the actual queued structure must be charged.
     assert_eq!(
         runtime.storage.status().pending_bytes,
         entry_charge(&e.clone())

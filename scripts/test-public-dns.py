@@ -118,9 +118,6 @@ async def probe(args, result):
                             self.body.extend(item.data)
                     except ValueError as error:
                         self.response.set_exception(error)
-                # aioquic 1.2.0 omits the HTTP end event when an ignored frame
-                # follows DATA. Its decoded stream still owns FIN, QPACK blocking
-                # and partial-frame state; accept only a fully parsed valid end.
                 stream = self.http._stream.get(self.stream_id)
                 if (self.response is not None and not self.response.done()
                         and not self.http._is_done and stream is not None
@@ -132,8 +129,6 @@ async def probe(args, result):
                         self.response.set_result(bytes(self.body))
                     except (ValueError, ProtocolError) as error:
                         self.response.set_exception(error)
-                # H3 owns its request and control streams. Generic StreamWriters
-                # would close them on collection, including peer-only streams.
                 if isinstance(event, StreamDataReceived):
                     return
             super().quic_event_received(event)

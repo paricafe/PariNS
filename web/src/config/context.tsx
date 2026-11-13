@@ -9,27 +9,18 @@ export interface ConfigResponse { toml: string; revision: number; has_backup: bo
 interface ParsedResponse { toml: string; settings: SettingsObject; transport_change?: TransportChange | null }
 interface ValidationResponse { restart_required: boolean; transport_change: TransportChange | null }
 
-/**
- * The saved configuration changed elsewhere and both sides edited the same
- * settings (or the draft edits only TOML text). The draft is kept until the
- * administrator chooses which side to keep.
- */
 export interface ConfigConflict {
-  /** Settings of the saved configuration the draft started from. */
   base: SettingsObject;
   remote: ConfigResponse;
   remoteSettings: SettingsObject;
-  /** Settings paths changed on both sides; empty when the draft edits only TOML text. */
   paths: string[];
 }
 
 export interface ConfigDraft {
   original: string;
   toml: string;
-  /** Internal optimistic-concurrency token for saves; never shown. */
   revision: number;
   hasBackup: boolean;
-  /** Parsed settings of `original`, the baseline for merging with a change made elsewhere. */
   base: SettingsObject;
   settings: SettingsObject;
   fields: Record<string, RawFieldValue>;
@@ -44,15 +35,12 @@ export interface ConfigDraft {
   previewTransportChange: TransportChange | null;
   pendingTransportChange: TransportChange | null;
   conflict: ConfigConflict | null;
-  /** The draft was merged onto a configuration saved elsewhere and needs another save. */
   merged: boolean;
 }
 
 export interface PreparedSave { toml: string; settings: SettingsObject; base: SettingsObject; revision: number; version: number; restart_required: boolean; transportChange: TransportChange | null }
 export interface PreparedRollback { revision: number; version: number; transportChange: TransportChange | null }
-/** `reconciled` means the save met a change made elsewhere: the draft was merged or awaits a choice. */
 export interface CommitResult { refreshed: boolean; transportChange: TransportChange | null; restartRequired: boolean; reconciled: Reconciled | null }
-/** How a draft met a configuration saved elsewhere: reloaded (no edits), merged, or awaiting a choice. */
 export type Reconciled = 'reloaded' | 'merged' | 'conflict';
 export type ConfigIssue = string | ModelError | ApiError;
 
@@ -63,7 +51,6 @@ interface ConfigContextValue {
   busy: boolean;
   locked: boolean;
   error: ConfigIssue | null;
-  /** Translation key of the step a save is waiting on, such as downloading new subscription lists. */
   progress: string | null;
   dirty: boolean;
   changes: number;
@@ -80,7 +67,6 @@ interface ConfigContextValue {
   commitPrepared(prepared: PreparedSave): Promise<CommitResult>;
   ensureParsed(): Promise<void>;
   reload(): Promise<void>;
-  /** Null when the configuration changed elsewhere and the draft was brought up to date instead. */
   previewRollback(): Promise<PreparedRollback | null>;
   rollback(prepared: PreparedRollback): Promise<CommitResult>;
   resolveUnknown(): Promise<'applied' | 'pending' | 'changed'>;
@@ -96,7 +82,6 @@ const fieldByPath = new Map(Object.values(settingPages).flatMap((page) => page.g
 const conditionalFields = [...fieldByPath.values()].filter((field) => field.when);
 const EMPTY_LISTENER = { listen: '', cert_file: '', key_file: '' };
 
-/** Number of unsaved changes shown to the user; zero means the draft is clean. */
 function changeCount(draft: ConfigDraft | null): number {
   if (!draft) return 0;
   const fields = Object.entries(draft.fields).filter(([path, raw]) => {
@@ -118,7 +103,6 @@ function isObject(value: unknown): value is SettingsObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** Dotted paths of the leaves in a `diffSettings` result; arrays and optional sections are leaves. */
 function changedPaths(changes: SettingsObject, prefix = ''): string[] {
   return Object.entries(changes).flatMap(([key, value]) => {
     const path = prefix ? `${prefix}.${key}` : key;
@@ -126,7 +110,6 @@ function changedPaths(changes: SettingsObject, prefix = ''): string[] {
   });
 }
 
-/** Paths edited on both sides, where one path equals or contains the other. */
 export function overlappingPaths(mine: SettingsObject, theirs: SettingsObject): string[] {
   const other = changedPaths(theirs);
   const within = (inner: string, outer: string) => inner === outer || inner.startsWith(`${outer}.`);
@@ -162,11 +145,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     } finally { setBusy(false); }
   }, [api]);
 
-  /**
-   * Brings a draft onto a configuration saved elsewhere. Non-overlapping edits
-   * are merged by Rust preview onto the new configuration; otherwise the draft
-   * is kept and the administrator chooses. Revisions stay internal.
-   */
   const reconcile = useCallback(async (local: { base: SettingsObject; settings: SettingsObject }): Promise<'merged' | 'conflict'> => {
     const owner = version.current;
     const remote = await api.request<ConfigResponse>('config');
@@ -262,7 +240,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       const field = fieldByPath.get(path)!;
       next = setPath(next, path, convertFieldValue(field, raw));
     }
-    // A field hidden by its condition, such as a custom block address under another block response, is removed.
     for (const field of conditionalFields) {
       if (getPath(next, field.when!.path) !== field.when!.value && getPath(next, field.path) != null) next = setPath(next, field.path, null);
     }
@@ -295,7 +272,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     return { toml: preview.toml, settings: preview.settings };
   }, [api, draft]);
 
-  /** Brings the draft up to date after a save elsewhere, keeping unsaved edits. */
   const syncWithServer = useCallback(async (): Promise<Reconciled | null> => {
     if (!draft || draft.unknownApply) return null;
     if (!changeCount(draft)) { await reload(); setError('app.reloadedElsewhere'); return 'reloaded'; }
@@ -354,7 +330,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       const { toml, settings } = await flush();
       assertVersion(before + 1);
       const owner = version.current;
-      // New subscription lists are downloaded and checked first; Rust accepts them only then.
       if (newSources(settings, draft.savedSources).length) {
         setProgress('subscriptions.downloading');
         try { await downloadNewSources(api, settings, draft.savedSources); } finally { setProgress(null); }
@@ -392,7 +367,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       finally { void refreshSession(); }
     } catch (reason) {
       if (reason instanceof ApiError && reason.code === 'REVISION') {
-        // Rust refused the save because the configuration was saved elsewhere; nothing was applied.
         writeLock.current = false;
         const reconciled = await reconcile(prepared);
         return { refreshed: false, transportChange: null, restartRequired: false, reconciled };
@@ -418,7 +392,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       assertVersion(before + 1);
       const owner = version.current;
       const mine = diffSettings(conflict.base, flushed.settings);
-      // A draft that edits only TOML text replaces the other document as written.
       const kept = Object.keys(mine).length
         ? await api.request<ParsedResponse>('config/preview', 'POST', { toml: conflict.remote.toml, changes: mine })
         : flushed;
@@ -450,7 +423,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       }
       if (!draft.pendingApply) throw new Error('No unknown save');
       if (remote.revision === draft.pendingApply.revision) {
-        // A disconnected PUT can be admitted after this read; old revision is not proof of failure.
         return 'pending';
       }
       if (remote.toml === draft.pendingApply.toml) {
@@ -475,7 +447,6 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       return { revision: draft.revision, version: owner, transportChange: result.transport_change };
     } catch (reason) {
       if (!(reason instanceof ApiError && reason.code === 'REVISION')) throw reason;
-      // "Undo last save" would now undo a save made elsewhere; show the new configuration instead.
       await syncWithServer();
       return null;
     }

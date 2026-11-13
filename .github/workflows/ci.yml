@@ -18,15 +18,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      # macOS builds the embedded console and runs only the Rust checks.
       - name: Install console dependencies
         working-directory: web
         run: npm ci --ignore-scripts
@@ -82,7 +81,6 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CC_x86_64_unknown_linux_musl: musl-gcc
         run: |
-          # The managed updater accepts only the native static release contract.
           sudo apt-get update
           sudo apt-get install --yes musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -95,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
       - name: Install pinned toolchain

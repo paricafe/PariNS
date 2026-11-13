@@ -1,11 +1,4 @@
 //! Global bounds on queries the recursor sends to authoritative servers.
-//!
-//! Every attempt to query an authoritative server, over UDP or TCP, is admitted
-//! before its own timeout starts: it takes one concurrency permit, held until the
-//! attempt ends, and one token from a shared rate bucket.
-//! UDP streams send once per admitted attempt; the pool owns subsequent attempts.
-//! Closing the bounds at shutdown fails queries waiting for a permit at once and
-//! queries waiting for a token when they wake.
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -59,9 +52,6 @@ impl Bounds {
         limit.saturating_sub(self.inflight.available_permits())
     }
 
-    /// Take one token, waiting while the bucket is empty. A token is taken
-    /// only when it is used, so a cancelled wait leaves no debt behind.
-    /// Returns false when the bounds closed during the wait.
     async fn take(&self) -> bool {
         let started = Instant::now();
         let mut waited = false;
@@ -73,9 +63,7 @@ impl Bounds {
                 let now = Instant::now();
                 let mut bucket = self.bucket.lock().unwrap_or_else(|e| e.into_inner());
                 let elapsed = now.saturating_duration_since(bucket.1).as_secs_f64();
-                // The bucket holds one second of tokens, so the sustained rate is a hard cap.
                 bucket.0 = (bucket.0 + elapsed * self.rate).min(self.rate);
-                // Lock acquisition can reorder observations; never count an interval twice.
                 bucket.1 = bucket.1.max(now);
                 if bucket.0 >= 1.0 {
                     bucket.0 -= 1.0;
@@ -133,7 +121,6 @@ impl ConnectionProvider for Provider {
                     .with_os_port_selection(cx.options.os_port_selection)
                     .avoid_local_ports(cx.options.avoid_local_udp_ports.clone())
                     .with_bind_addr(config.bind_addr)
-                    // Each send must pass through admit; retries belong to the pool.
                     .with_max_retries(1)
                     .exchange();
             return Ok(async move { Ok(stream) }.boxed());
@@ -145,8 +132,6 @@ impl ConnectionProvider for Provider {
         &self.runtime
     }
 
-    /// The pool awaits this before a server's attempt timeout starts, so waiting
-    /// for a permit or a token never counts against or penalizes the server.
     fn admit(&self) -> BoxFuture<'static, Result<Admission, NetError>> {
         let bounds = self.bounds.clone();
         async move {
@@ -159,7 +144,6 @@ impl ConnectionProvider for Provider {
                 return Err(NetError::from("recursion is shut down"));
             }
             bounds.sent.fetch_add(1, Ordering::Relaxed);
-            // The permit is held until the attempt ends.
             Ok(Admission::new(permit))
         }
         .boxed()
@@ -215,7 +199,6 @@ mod tests {
         let first = Instant::now();
         assert_eq!(bounds.sent.load(Ordering::Relaxed), 1);
         assert_eq!(bounds.inflight(1), 1);
-        // A lost response must not cause UdpClientStream's internal 333 ms resend.
         assert!(
             tokio::time::timeout(Duration::from_millis(700), server.recv_from(&mut packet))
                 .await
@@ -238,10 +221,8 @@ mod tests {
         let bounds = Bounds::new(10, 4);
         let start = Instant::now();
         let accounted = start + Duration::from_millis(200);
-        // A newer caller acquired the lock first and left one earned token.
         *bounds.bucket.lock().unwrap() = (1.0, accounted);
 
-        // The delayed caller can use that token, but must not rewind the bucket.
         assert!(bounds.take().await);
         assert_eq!(*bounds.bucket.lock().unwrap(), (0.0, accounted));
 
@@ -266,7 +247,6 @@ mod tests {
         for _ in 0..10 {
             assert!(bounds.take().await);
         }
-        // Many callers give up within one refill interval.
         for _ in 0..50 {
             assert!(
                 tokio::time::timeout(Duration::from_millis(1), bounds.take())
@@ -274,7 +254,6 @@ mod tests {
                     .is_err()
             );
         }
-        // One refill interval later a token is available again.
         let started = Instant::now();
         assert!(bounds.take().await);
         assert!(started.elapsed() <= Duration::from_millis(100));

@@ -56,7 +56,7 @@ impl Upstream {
                     0 => positive(&query, 60, 42),
                     1 => protocol::error_response(&query, ResponseCode::ServFail),
                     2 => protocol::error_response(&query, ResponseCode::Refused),
-                    3 => continue, // Deliberately silent upstream, for bounded timeout/cancellation.
+                    3 => continue,
                     4 if ecs::subnet(&query).is_some_and(|ecs| ecs.source_prefix() > 0) => {
                         protocol::error_response(&query, ResponseCode::Refused)
                     }
@@ -192,7 +192,6 @@ async fn stale_positive_is_failure_only_and_has_bounded_reply_ttl() {
     let resolver = Resolver::from_config(&config);
     let query = query("stale.test.");
     fill(&resolver, &query, 61);
-    // A successful upstream answer always wins over retained stale data.
     assert_eq!(
         resolve(&resolver, &query).await.answers[0].data,
         RData::A(A::new(192, 0, 2, 42))
@@ -291,12 +290,11 @@ async fn negative_and_other_ecs_namespaces_never_supply_stale() {
     );
     config.ecs.enabled = true;
     let resolver = Resolver::from_config(&config);
-    fill(&resolver, &query, 61); // No-ECS must not satisfy an ECS request.
+    fill(&resolver, &query, 61);
     assert_eq!(
         resolve(&resolver, &query).await.response_code,
         ResponseCode::ServFail
     );
-    // A Refused then anonymous retry failure must not resurrect original-subnet stale.
     let (outbound, context) =
         Context::prepare(&query, "192.0.2.1".parse().unwrap(), &config.ecs).unwrap();
     let answer = positive(&outbound, 60, 1);
@@ -546,7 +544,6 @@ async fn foreground_shares_pending_prefetch_across_expiry_and_falls_back_per_cal
         let mut buffer = [0; 4096];
         let (length, peer) = socket.recv_from(&mut buffer).await.unwrap();
         let outbound = protocol::decode(&buffer[..length]).unwrap();
-        // Keep the prefetch exchange pending until the original entry expires.
         tokio::time::timeout(Duration::from_secs(1), async {
             while resolver
                 .cache()

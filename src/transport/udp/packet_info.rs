@@ -18,7 +18,6 @@ pub(crate) enum ReplySource {
     V6(in6_pktinfo),
 }
 
-// Native ancillary alignment, fixed stack capacity: no per-packet heap buffer.
 #[repr(C)]
 struct ControlBuffer {
     alignment: [cmsghdr; 0],
@@ -28,8 +27,6 @@ struct ControlBuffer {
 pub(super) fn enable(socket: &UdpSocket, address: SocketAddr) -> io::Result<()> {
     if address.is_ipv6() {
         setsockopt(socket, sockopt::Ipv6RecvPacketInfo, &true)?;
-        // Dual-stack sockets report mapped destinations through IPV6_PKTINFO;
-        // macOS rejects IP_PKTINFO on an AF_INET6 socket.
     } else {
         setsockopt(socket, sockopt::Ipv4PacketInfo, &true)?;
     }
@@ -78,13 +75,10 @@ pub(super) async fn recv(
             for control in message.cmsgs()? {
                 match control {
                     ControlMessageOwned::Ipv4PacketInfo(mut info) => {
-                        // Receive ipi_addr is the actual header destination;
-                        // send ipi_spec_dst explicitly selects the reply source.
                         info.ipi_spec_dst = info.ipi_addr;
                         source = Some(ReplySource::V4(info));
                     }
                     ControlMessageOwned::Ipv6PacketInfo(info) => {
-                        // Preserve both address and interface (including scopes).
                         source = Some(ReplySource::V6(info));
                     }
                     _ => {}

@@ -11,7 +11,6 @@ export interface CacheRule {
   stale: boolean | null;
 }
 
-/** Each input stays a string so incomplete edits survive navigation and translation. */
 export type CacheRuleDraft = Record<keyof CacheRule, string>;
 
 export function defaultCacheRule(): CacheRule {
@@ -50,7 +49,6 @@ function optionalBoolean(value: string, field: "prefetch" | "stale"): boolean | 
   throw new ModelError("settings.validation.check", field);
 }
 
-/** Convert only for preview; DNS rule validation and matching remain Rust-owned. */
 export function decodeCacheRule(draft: CacheRuleDraft): CacheRule {
   const name = draft.name.trim();
   if (!name) throw new ModelError("views.domainError", "name");

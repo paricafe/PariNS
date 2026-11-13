@@ -13,7 +13,6 @@ use hickory_proto::{
     },
 };
 
-/// The resolver's foreground lookup (observed, fresh entries only).
 pub(super) fn get(
     cache: &Cache,
     query: &Message,
@@ -26,7 +25,6 @@ pub(super) fn get(
         .map(|hit| (hit.message, hit.scope))
 }
 
-/// The resolver's admission, checked against the current epoch.
 pub(super) fn insert(
     cache: &Cache,
     query: &Message,
@@ -199,7 +197,7 @@ fn error_zero_ttl_and_client_specific_edns_are_not_cached() {
     let mut q2 = q.clone();
     let mut edns = Edns::new();
     edns.options_mut()
-        .insert(EdnsOption::Unknown(10, vec![1; 8])); // DNS Cookie
+        .insert(EdnsOption::Unknown(10, vec![1; 8]));
     q2.edns = Some(edns.clone());
     insert(&cache, &q2, &answer(&q2, 1, 60), Scope::NoEcs, now);
     let mut r = answer(&q, 1, 60);
@@ -400,7 +398,6 @@ fn cname_negative_allows_duplicate_links_and_soa_with_other_sections() {
             25,
             RData::NS(NS(Name::from_ascii("ns.target.test.").unwrap())),
         ));
-        // Opaque but well-formed RDATA: hickory decodes DNSSEC types structurally.
         let rrsig = vec![
             0, 6, 13, 2, 0, 0, 0, 60, 0x70, 0, 0, 0, 0x60, 0, 0, 0, 0, 1, 4, b't', b'e', b's',
             b't', 0, 1, 2, 3,
@@ -984,7 +981,6 @@ fn outstanding_readers_remain_charged_after_invalidation() {
 fn inspection_and_race_checks_do_not_make_an_entry_popular() {
     let mut cfg = CacheConfig::default();
     cfg.prefetch.enabled = true;
-    // Three real lookups are needed, so peeks and inspections visibly add none.
     cfg.prefetch.min_hits = 3;
     let cache = Cache::new(cfg);
     let now = Instant::now();

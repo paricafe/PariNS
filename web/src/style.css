@@ -1,23 +1,4 @@
-/* Semantic tokens. Components use these names only; light and dark are
-   complete sets selected by the console's .dark class. Token names are a
-   shared contract (page styles such as observability.css use them): add, never rename.
-   Glass (Liquid Glass): thin, flat and clear. --surface (translucent fill, alpha from --glass-alpha),
-           --surface-strong (dense fill), --glass-sheen (faint top-down light; never a diagonal band),
-           --rim (specular edge: brightest along the top, weaker down the sides, faint but present at the
-           bottom, left-right symmetric; drawn by the outer surface's ::before), --glass-highlight (uniform
-           hairline for capsules and swatches), --edge / --edge-soft (control borders), --blur,
-           --glass-saturate, --glass-brightness. Depth comes from the rim, not from shadows: --shadow is a
-           faint neutral ambient shadow, --shadow-lift is for floating layers only (popups, save bar, drawer).
-           Dark is flatter still: a near-uniform rim, a hairline instead of a panel shadow, no sheen and a
-           neutral veil close to the canvas (a denser neutral fill over busy backdrops).
-           Only the outermost surface of a joined group gets backdrop-filter and the rim; inner parts use
-           --raised/--hover and no second blur, rim or shadow.
-   Radius: --radius (cards 24), --radius-lg (sheets, sidebar 28), --radius-control (inputs 14),
-           --radius-sm (= control), --radius-inner (nested blocks 16), --radius-pill (buttons),
-           --radius-row (row fills inside a card with an 8px inset = --radius − 8px).
-           Concentric nesting: inner radius = outer radius − inset.
-   Motion: --ease-out, --ease-spring, --dur-micro, --dur-theme;
-           animate transform/opacity only and drop motion under prefers-reduced-motion. */
+/* Shared console tokens, layout, and component styles. */
 :root {
   color-scheme: light;
   --canvas: #f4f5f7;
@@ -50,7 +31,6 @@
   color-scheme: dark;
   --canvas: #0c0c0e;
   --orb-1: #6d5efc; --orb-2: #0fb5a6; --orb-3: #c2417a; --grid-line: rgb(255 255 255 / .06);
-  /* Flat dark glass: a neutral veil close to the canvas, a near-uniform hairline rim, no sheen. */
   --glass-alpha: .05; --glass-brightness: 1;
   --surface: rgb(255 255 255 / var(--glass-alpha)); --surface-strong: rgb(30 30 33 / .92);
   --glass-sheen: none;
@@ -68,14 +48,11 @@
   --switch-on: #30d158; --switch-off: rgb(120 120 128 / .32); --segment-track: rgb(118 118 128 / .24); --segment-thumb: #636366;
   --row-bg: var(--surface); --separator: rgb(84 84 88 / .5); --destructive: #ff453a; --destructive-fill: #c52520; --link: #4c9dff;
 }
-/* Busier backdrops get a denser glass fill so text keeps WCAG AA contrast. */
 :root[data-backdrop="pattern"] { --glass-alpha: .34; }
 :root[data-backdrop="image"] { --glass-alpha: .58; }
-/* Dark: busier backdrops switch the veil to a neutral dark fill, so light text keeps its contrast. */
 :root.dark:is([data-backdrop="pattern"], [data-backdrop="image"]) { --surface: rgb(18 18 21 / var(--glass-alpha)); }
 :root.dark[data-backdrop="pattern"] { --glass-alpha: .4; }
 :root.dark[data-backdrop="image"] { --glass-alpha: .54; }
-/* HDR displays: brighter specular rims and accents in Display P3; SDR keeps the sRGB values above. */
 @media (dynamic-range: high) {
   :root {
     --edge: color(display-p3 1 1 1 / .95);
@@ -91,8 +68,6 @@
   }
 }
 
-/* Background presets: each sets the canvas for light and dark. The same selectors apply to the
-   root (page colour) and to each backdrop layer, so a fading-out layer keeps its own colour. */
 [data-bg="neutral"], [data-bg="orbs"], [data-bg="grid"], [data-bg="gradient"], [data-bg="custom"] { --canvas: #f4f5f7; }
 [data-bg="mist"] { --canvas: #edf1f7; }
 [data-bg="sand"] { --canvas: #f6f1e9; }
@@ -106,14 +81,11 @@
 :is(.dark[data-bg], .dark [data-bg])[data-bg="lavender"] { --canvas: #100e19; }
 :is(.dark[data-bg], .dark [data-bg])[data-bg="slate"] { --canvas: #15181d; }
 
-/* Theme changes cross-fade the page snapshot (View Transitions; opacity only, skipped under reduced motion). */
 ::view-transition-old(root), ::view-transition-new(root) { animation-duration: var(--dur-theme); animation-timing-function: ease; }
 
-/* Base: element defaults start from zero; components set their own spacing, borders and type. */
 *, ::before, ::after, ::backdrop { box-sizing: border-box; margin: 0; padding: 0; border: 0 solid; }
 html { min-width: 320px; line-height: 1.5; tab-size: 4; -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"; }
-/* Only the root paints the canvas so the ambient layer shows through. */
 body { min-width: 320px; min-height: 100vh; overflow-x: hidden; }
 h1, h2, h3, h4, h5, h6 { font-size: inherit; font-weight: inherit; }
 b, strong { font-weight: bolder; }
@@ -127,8 +99,6 @@ button, input, select, textarea, ::file-selector-button { font: inherit; letter-
 ::placeholder { opacity: 1; color: color-mix(in oklab, currentcolor 50%, transparent); }
 :-moz-ui-invalid { box-shadow: none; }
 ::-webkit-search-decoration { -webkit-appearance: none; }
-/* Date inputs keep the field's own height and alignment. Vendor pseudo-elements stay in separate
-   rules: a browser drops a whole selector list that names one it does not know. */
 ::-webkit-date-and-time-value { min-height: 1lh; text-align: inherit; }
 ::-webkit-datetime-edit { display: inline-flex; padding-block: 0; }
 ::-webkit-datetime-edit-fields-wrapper { padding: 0; }
@@ -161,8 +131,6 @@ small, .small { font-size: 13px; }
 .skip-link:focus { top: 12px; }
 .spacer { flex: 1; }
 
-/* Page backdrop (components/Backdrop.tsx): one layer per choice, cross-faded with opacity.
-   Patterns move with transforms only and stop under reduced motion. */
 .backdrop { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
 .backdrop-layer { position: absolute; inset: 0; overflow: hidden; background: var(--canvas); }
 .backdrop-layer > i { position: absolute; pointer-events: none; }
@@ -186,8 +154,6 @@ small, .small { font-size: 13px; }
 .backdrop .scrim { inset: 0; background: var(--canvas); transition: opacity var(--dur-theme) ease; }
 .backdrop[data-static] .backdrop-layer > i { animation: none; }
 
-/* Glass surfaces: clear fill with a faint sheen, blur/saturation, a uniform specular rim (::before below)
-   and a faint ambient shadow. Nested surfaces never blur twice (see "Joined glass" below). */
 .glass, .panel, .sidebar, .auth-card, .state-card, .save-bar, .notice, .update-hint, .beui-drawer__panel {
   background: var(--glass-sheen), var(--surface);
   -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
@@ -198,7 +164,6 @@ small, .small { font-size: 13px; }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .glass, .panel, .sidebar, .auth-card, .state-card, .save-bar, .notice, .update-hint, .beui-drawer__panel, .grouped { background: var(--surface-strong); }
 }
-/* Specular rim: a 1px ring over the border box, masked to the edge so it never tints the content. */
 :is(.glass, .panel, .sidebar, .auth-card, .state-card, .save-bar, .notice, .update-hint, .beui-drawer__panel, .grouped, .popover)::before {
   content: ""; position: absolute; inset: -1px; z-index: 1; border-radius: inherit; padding: 1px; pointer-events: none;
   background: var(--rim);
@@ -206,16 +171,13 @@ small, .small { font-size: 13px; }
   mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
 }
 .glass, .panel, .auth-card, .state-card, .notice, .update-hint, .grouped { position: relative; }
-/* Joined glass: a surface inside another shares the outer pane — no second blur, shadow or rim. */
 :is(.panel, .glass, .grouped, .sidebar, .auth-card, .state-card, .save-bar, .beui-drawer__panel) :is(.glass, .panel, .grouped, .notice, .update-hint) {
   -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none;
 }
 :is(.panel, .glass, .grouped, .sidebar, .auth-card, .state-card, .save-bar, .beui-drawer__panel) :is(.glass, .panel, .grouped, .notice, .update-hint)::before { content: none; }
 :is(.panel, .glass, .grouped, .sidebar, .auth-card, .state-card, .save-bar, .beui-drawer__panel) :is(.glass, .panel, .grouped) { background: var(--raised); border-color: transparent; }
 
-/* Each glass pane is a stacking context (backdrop-filter); lift the one holding an open popup above its neighbours. */
 :is(.panel, .kpi-card, .grouped, .auth-card, .state-card):has(.popover, .info-bubble) { z-index: 5; }
-/* Entry-animated stack children are stacking contexts too; lift the one holding the open popup. */
 :is(.page-stack, .settings-stack) > :has(.popover, .info-bubble) { position: relative; z-index: 6; }
 
 .button, .icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid transparent; border-radius: var(--radius-pill); min-height: 38px; padding: 8px 14px; font-weight: 600; white-space: nowrap; color: var(--text); transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s var(--ease-spring); }
@@ -243,7 +205,6 @@ h1 { font-size: 28px; line-height: 1.2; letter-spacing: -.025em; margin-bottom: 
 h2 { font-size: 17px; line-height: 1.3; letter-spacing: -.01em; margin-bottom: 8px; }
 h3 { font-size: 15px; }
 
-/* Shell. */
 .app-shell { display: grid; grid-template-columns: 248px minmax(0,1fr); min-height: 100vh; }
 .sidebar { position: sticky; top: 12px; height: calc(100vh - 24px); margin: 12px 0 12px 12px; border-radius: var(--radius-lg); padding: 18px 12px; z-index: 40; display: flex; flex-direction: column; overflow-y: auto; }
 .sidebar-brand { display: flex; align-items: center; gap: 11px; padding: 2px 8px 20px; }
@@ -266,10 +227,8 @@ h3 { font-size: 15px; }
 .theme-button-icon { display: grid; place-items: center; grid-area: 1 / 1; }
 .preferences select { min-height: 34px; border-radius: var(--radius-pill); border-color: var(--edge-soft); background: var(--surface); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font-size: 13px; padding: 5px 12px; }
 .main-content { width: min(100%, 1280px); margin: 0 auto; padding: 24px 32px 112px; min-height: calc(100vh - 64px); }
-/* Route changes focus this landmark; interactive controls keep their visible focus rings. */
 .main-content:focus { outline: none; }
 .page-stack, .settings-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
-/* Cards enter in sequence once; polling re-renders keep their elements. */
 .page-stack > *, .settings-stack > * { animation: rise .55s var(--ease-out) both; }
 .page-stack > :nth-child(2), .settings-stack > :nth-child(2) { animation-delay: 50ms; }
 .page-stack > :nth-child(3), .settings-stack > :nth-child(3) { animation-delay: 100ms; }
@@ -316,14 +275,12 @@ meter { width: 100%; }
 .more-options summary { cursor: pointer; font-weight: 600; width: fit-content; }
 .more-options[open] summary { margin-bottom: 10px; }
 
-/* Floating save bar. */
 .save-bar { position: fixed; z-index: 35; bottom: max(18px, env(safe-area-inset-bottom)); left: 260px; right: 0; margin-inline: auto; width: fit-content; max-width: calc(100% - 300px); background: var(--glass-sheen), var(--surface-strong); border-radius: var(--radius-pill); box-shadow: var(--shadow-lift); padding: 8px 8px 8px 22px; }
 .save-bar .button, .save-bar .beui-button { border-radius: var(--radius-pill); }
 .save-bar-content { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
 .save-bar-content > div:first-child { display: grid; gap: 2px; min-width: 0; }
 .save-bar-detail { margin: 0; max-width: 52ch; }
 
-/* Sign-in, setup and status pages. */
 .auth-topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
 .brand-link { display: inline-flex; align-items: center; gap: 10px; font-weight: 750; font-size: 17px; letter-spacing: -.02em; text-decoration: none; }
 .auth-wrap, .state-page { min-height: calc(100vh - 64px); padding: 32px 16px 80px; display: flex; justify-content: center; align-items: flex-start; }
@@ -356,7 +313,6 @@ meter { width: 100%; }
 .diff-add { background: color-mix(in srgb, var(--primary-2) 16%, transparent); font-weight: 600; }
 .diff-remove { background: color-mix(in srgb, var(--danger) 10%, transparent); text-decoration: line-through; text-decoration-thickness: 1px; }
 
-/* Loading skeletons replace "reading" text. */
 .skeleton { position: relative; overflow: hidden; border-radius: 10px; background: var(--raised); min-height: 14px; }
 .skeleton::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 7%, transparent), transparent); animation: shimmer 1.4s ease-in-out infinite; }
 @keyframes shimmer { to { transform: translateX(100%); } }
@@ -428,7 +384,6 @@ meter { width: 100%; }
 .attempt-list { padding-inline-start: 20px; }
 .attempt-list li { padding-block: 8px; overflow-wrap: anywhere; }
 
-/* Overview. */
 .overview-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .overview-head h1 { font-size: 30px; margin-bottom: 6px; }
 .overview-summary { color: var(--muted); margin: 0; max-width: 62ch; }
@@ -491,7 +446,6 @@ meter { width: 100%; }
 .fact-grid dd { margin: 3px 0 0; font-weight: 600; overflow-wrap: anywhere; }
 .table-scroll { min-width: 0; overflow-x: auto; }
 .data-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; text-align: left; }
-/* First/last rows inherit the card's corners (card inset 8px → --radius-row), so fills never poke past the curve. */
 .data-table tr:first-child > :first-child { border-top-left-radius: var(--radius-row); }
 .data-table tr:first-child > :last-child { border-top-right-radius: var(--radius-row); }
 .data-table tbody tr:last-child > :first-child { border-bottom-left-radius: var(--radius-row); }
@@ -516,7 +470,6 @@ meter { width: 100%; }
 .setup-label { font-weight: 600; font-size: 13px; }
 .settings-group .fields-grid { padding-top: 14px; border-top: 1px solid var(--divider); }
 
-/* Query log: glass filter bar, themed table, mobile cards and icon states. */
 .log-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .log-head > div { max-width: 68ch; }
 .log-head p { margin: 0; }
@@ -568,7 +521,6 @@ meter { width: 100%; }
 }
 
 
-/* ---- iOS layer (ui-copy-and-ios-motion): large titles, inset grouped lists, controls, sheets, banners ---- */
 .large-title h1 { font-size: 34px; font-weight: 700; letter-spacing: -.02em; line-height: 1.12; margin-bottom: 6px; }
 .page-head.large-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .page-head.large-title > div { min-width: 0; }
@@ -577,7 +529,6 @@ meter { width: 100%; }
 .topbar { isolation: isolate; }
 .topbar-title { font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
-/* Inset grouped list */
 .settings-group { display: grid; gap: 0; min-width: 0; }
 .group-title { margin: 0 0 7px 16px; font-size: 13px; font-weight: 500; letter-spacing: .01em; color: var(--muted); }
 .grouped { border-radius: var(--radius); overflow: visible; background: var(--glass-sheen), var(--row-bg); -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness)); backdrop-filter: blur(var(--blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness)); border: 1px solid transparent; box-shadow: var(--shadow); }
@@ -606,8 +557,6 @@ meter { width: 100%; }
 .settings-stack { display: grid; gap: 26px; }
 .row-disclosure { width: 100%; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; font-size: 15px; }
 .row-disclosure:hover { background: var(--hover); }
-/* First/last rows inherit the list's corners (inside its 1px rim); an expanding section clips with the
-   same radius, and a disclosure row squares its bottom only as its section opens (continuous transition). */
 .grouped > :first-child { border-top-left-radius: calc(var(--radius) - 1px); border-top-right-radius: calc(var(--radius) - 1px); }
 .grouped > :last-child, .grouped > :last-child > div, .grouped > :last-child > div > :last-child,
 .grouped > .row-disclosure[aria-expanded="false"]:nth-last-child(2) { border-bottom-left-radius: calc(var(--radius) - 1px); border-bottom-right-radius: calc(var(--radius) - 1px); }
@@ -634,7 +583,6 @@ meter { width: 100%; }
 .usage-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--primary), var(--primary-2)); transform-origin: left; transition: transform .7s var(--ease-out); }
 .subscription-summary { margin: 0; color: var(--muted); }
 
-/* Popup menu (select / More) */
 .select-control { position: relative; display: inline-flex; }
 .select-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px 10px 5px 12px; border: 0; border-radius: 999px; background: var(--raised); color: var(--text); font-size: 14px; cursor: pointer; }
 .select-button svg { color: var(--faint); }
@@ -649,13 +597,11 @@ meter { width: 100%; }
 .popover-item[data-destructive] { color: var(--destructive); }
 .popover-check { display: inline-flex; width: 16px; color: var(--link); }
 
-/* ⓘ info tip */
 .info-tip { position: relative; display: inline-flex; }
 .info-button { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--link); cursor: pointer; }
 .info-button[aria-expanded="true"] { background: var(--accent-soft); }
 .info-bubble { position: absolute; top: calc(100% + 6px); left: -8px; z-index: 55; width: min(300px, 78vw); padding: 10px 12px; border-radius: var(--radius-inner); background: var(--surface-strong); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); border: .5px solid var(--edge); box-shadow: var(--shadow-lift); color: var(--text); font-size: 13px; line-height: 1.5; transform-origin: top left; }
 
-/* Stepper */
 .stepper { display: inline-flex; align-items: center; gap: 8px; }
 .stepper input { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
 .stepper-buttons { display: inline-flex; border-radius: var(--radius-pill); background: var(--segment-track); overflow: hidden; }
@@ -664,7 +610,6 @@ meter { width: 100%; }
 .stepper-buttons button:disabled { color: var(--faint); cursor: not-allowed; }
 .stepper-buttons button:active:not(:disabled) { background: var(--hover); }
 
-/* Odometer */
 .odometer-visual { display: inline-flex; overflow: hidden; height: 1.15em; line-height: 1.15em; vertical-align: bottom; }
 .odometer-char::before { content: attr(data-char); white-space: pre; }
 .odometer-digit { display: inline-block; height: 1.15em; overflow: hidden; }
@@ -672,13 +617,10 @@ meter { width: 100%; }
 .odometer-reel::before { content: "0\A 1\A 2\A 3\A 4\A 5\A 6\A 7\A 8\A 9"; display: block; white-space: pre; line-height: 1.15em; }
 .odometer-reel[data-reduced] { transition: none; }
 
-/* Banner */
 .banner-region { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 0; right: 0; z-index: 120; display: flex; justify-content: center; pointer-events: none; }
 .banner { display: inline-flex; align-items: center; gap: 10px; max-width: min(520px, calc(100vw - 32px)); padding: 11px 18px; border-radius: 22px; background: var(--glass-sheen), color-mix(in srgb, var(--surface-strong) 90%, transparent); -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%); border: .5px solid var(--edge); box-shadow: var(--shadow-lift); font-weight: 600; font-size: 14px; }
 .banner svg { color: var(--switch-on); flex: 0 0 auto; }
 
-/* Sheets and action sheets; the page behind scales and dims (iOS card stacking). */
-/* Only the page content scales (fixed/sticky chrome keeps its containing block), around the viewport centre. */
 .route-content { transform-origin: 50% var(--modal-origin, 50vh); transition: transform .45s var(--ease-out), filter .45s var(--ease-out); }
 :root[data-modal] .route-content { transform: scale(.965); filter: brightness(.82); }
 .sheet-message { margin-bottom: 18px; line-height: 1.55; }
@@ -689,14 +631,11 @@ meter { width: 100%; }
 .diff-sheet { width: min(760px, calc(100vw - 32px)) !important; }
 .diff-sheet .diff-lines { max-height: 60dvh; }
 
-/* Press feedback: everything tappable scales slightly on press. */
 .button, .nav-item, .row-disclosure, .row-action, .select-button, .popover-item, .info-button, .beui-tab, .stepper-buttons button { transition-property: transform, background-color, border-color, box-shadow, color, opacity; transition-duration: .18s; transition-timing-function: var(--ease-out); }
 .button:active:not(:disabled), .nav-item:active, .select-button:active:not(:disabled), .info-button:active, .row-action:active:not(:disabled) { transform: scale(.97); }
 .row-disclosure:active, .popover-item:active { transform: scale(.985); }
-/* Corner radii follow expand/collapse at the section's pace, so no frame shows a square corner. */
 .row-disclosure { transition-property: transform, background-color, border-radius; transition-duration: .18s, .18s, .26s; }
 
-/* Trend legend swatches and gaps */
 .trend-legend span::before { content: ""; display: inline-block; width: 16px; height: 0; margin-right: 6px; vertical-align: middle; border-top: 2.5px solid var(--primary); }
 .trend-legend span[data-series="1"]::before { border-top: 2.5px dashed var(--primary-2); }
 .trend-legend span[data-series="2"]::before { border-top: 2.5px dotted var(--danger); }
@@ -726,9 +665,7 @@ meter { width: 100%; }
 }
 
 
-/* The phone push transition slides the page from the right; never let it create horizontal scrolling. */
 .main-content { overflow-x: clip; }
-/* Native <details> disclosures use the same chevron as grouped rows. */
 .setup-advanced > summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .setup-advanced > summary::-webkit-details-marker { display: none; }
 .setup-advanced > summary::after { content: "›"; font-size: 20px; line-height: 1; color: var(--faint); transition: transform .25s var(--ease-out); }
@@ -739,7 +676,6 @@ meter { width: 100%; }
 .group-title-row .group-title { margin-bottom: 0; }
 .grouped > .row-note, .settings-expand > div > .row-note { padding: 0 16px 10px; }
 
-/* Appearance sheet (components/AppearanceSheet.tsx). The page stays visible behind it for previewing. */
 .beui-drawer:has(.appearance-sheet)::backdrop { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
 .appearance-section { border: 0; margin: 18px 0 0; padding: 0; min-width: 0; display: grid; gap: 8px; }
 .appearance-section > .group-title { margin: 0 0 2px 4px; padding: 0; }

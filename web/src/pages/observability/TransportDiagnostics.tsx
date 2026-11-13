@@ -17,7 +17,6 @@ export function UpstreamAttempts({ trace, language }: { trace: UpstreamTrace; la
   </section>;
 }
 
-// Known counters first in a stable order (the server object is keyed alphabetically), then any newer ones verbatim.
 const RECURSION_GROUPS = [
   ['resolutions', 'resolution', ['started', 'answered', 'negative', 'bogus', 'failed', 'deadline', 'shutdown']],
   ['failures', 'failure', ['timeout', 'referral', 'budget', 'other']],

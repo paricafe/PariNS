@@ -25,7 +25,6 @@ export function StorageTools({ language }: { language: Language }) {
   const requestId = useRef(0);
   const t = (key: string) => translate(`storage.${key}`, language);
   const fail = (reason: unknown) => { if (!(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : String(reason)); };
-  // Statistics totals change only through the totals reset, so they are read on mount and after that reset rather than polled.
   const load = useCallback(async (includeStats: boolean) => {
     const owner = ++requestId.current;
     const current = await api.request<StatusView>('status');
@@ -59,7 +58,6 @@ export function StorageTools({ language }: { language: Language }) {
       }
     } finally { setBusy(false); }
   };
-  // A lost response is settled by the epoch on later status reads; the action is never sent again.
   const confirmation = useAutoConfirm(unknown !== null, async () => {
     if (!unknown) return undefined;
     const current = await load(unknown.action === 'totals');

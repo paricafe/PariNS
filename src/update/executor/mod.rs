@@ -1,35 +1,4 @@
-//! Fixed-purpose root update executor. No command, path, URL or service selector
-//! is accepted from the application. It never opens business state or executes a
-//! candidate as root.
-//!
-//! The root journal is the sole installed-identity anchor; public status and
-//! pending-launch health are bounded derivations of it, not a second database.
-//!
-//! - The application persists commit intent before its freeze and the fixed inbox
-//!   request. Unknown helper outcomes never unlock by timeout; only a matching
-//!   terminal fence and installed identity resolve that intent.
-//! - A new invocation drives the existing Abort arbitration for unfinished old work.
-//!   Root fences precommit work without changing an already committed operation,
-//!   recording the generic reason `aborted`; the application keeps its own reason.
-//! - Stage admission refusals, including a failure before root begins the
-//!   operation, are durable terminals in the same journal, correlated by operation
-//!   ID and phase nonce. They preserve the owning operation, its cooldown anchor and
-//!   fences, and publish both outcomes for reconciliation without replaying Stage.
-//!   A ManualRequired operation refuses every Stage. An Abort for an operation root
-//!   never began records an Aborted fence for it.
-//! - A matching Commit that fails a pre-installation check records Failed before
-//!   returning. Boot rollback publishes AwaitingReadiness in both the operation
-//!   and its launch descriptor so the application can request verification.
-//! - Launch readiness hashes `/proc/PID/exe` only after a health receipt from that
-//!   PID/InvocationID, once per process; `Type=simple` start returns before execve.
-//!   Each launch has a 180-second monotonic budget, including ten seconds of fresh
-//!   stable DNS/storage health. Installer rollback waits with the packaged helper
-//!   before the restored helper validates its own units and commits readiness.
-//! - Installer registration keeps prior terminal operations and fences. Only a
-//!   reinstallation that proved readiness closes a ManualRequired operation, as
-//!   Failed/`superseded_by_installation` with the same ID and phase nonce; a failed
-//!   or rolled-back installation leaves it ManualRequired. There is no in-place
-//!   re-verify.
+//! Fixed-purpose privileged updater and owner of the installation journal.
 mod fs;
 mod journal;
 mod readiness;
@@ -181,8 +150,6 @@ impl Executor {
             "invalid installer lock"
         );
         let lock = if register {
-            // Trusted installer passes its held lock on stdin. Adopt that
-            // open-file-description rather than taking a competing flock.
             fs::adopt_installer_lock(std::io::stdin(), &stat)?
         } else {
             lock
@@ -313,8 +280,6 @@ impl Executor {
         let report: Option<ManagedCheckOutput> =
             serde_json::from_slice(&self.private.read("install-preflight.json", 8192, true)?)?;
         if let Some(report) = &report {
-            // This is the candidate's saved read-only report, not a claim that
-            // the restored binary generated it. Its build must match this helper.
             report.validate_build(&current)?;
         }
         let revision = report.map(|report| report.check.config_revision);
@@ -356,7 +321,6 @@ impl Executor {
         let mut journal = self.wait_installation(nonce).await?;
         self.complete_installation(&mut journal)
     }
-    /// Observation only: the restored helper owns unit validation and completion.
     async fn wait_installation(&self, nonce: &str) -> Result<Journal> {
         let journal = self.install_match(nonce)?;
         let pending = journal
@@ -367,7 +331,6 @@ impl Executor {
             .await?;
         Ok(journal)
     }
-    /// Only after the installed program proved readiness.
     fn complete_installation(&self, journal: &mut Journal) -> Result<()> {
         journal.supersede_manual_recovery();
         journal.installation_pending = None;
@@ -378,15 +341,10 @@ impl Executor {
     }
     async fn run(&mut self) -> Result<()> {
         let state = state_directory()?;
-        // Consume the one name through a held directory FD before any other
-        // check. A request that fails later cannot keep PathExists active and
-        // exhaust the path unit's trigger limit.
         let bytes = state.read(INBOX_NAME, INBOX_LIMIT, false);
         state.remove(INBOX_NAME)?;
         let request = Inbox::parse(&bytes?)?;
         let units = validate_units().await;
-        // Without the journal no outcome can be recorded, and an unknown outcome
-        // never unlocks by timeout: the application keeps waiting.
         let mut journal = Journal::load(&self.private).map_err(|error| {
             anyhow::anyhow!(
                 "journal unreadable ({error:#}); the update request was consumed without \
@@ -407,9 +365,6 @@ impl Executor {
                 "installation_pending"
             );
         }
-        // A failed unit contract check is a failed precondition: each request
-        // records the terminal it has for one, so the application neither
-        // waits for nor resends a request that root consumed.
         match request.request.clone() {
             Request::Stage { .. } => {
                 self.stage(journal, &StageRequest::parse(request)?, units)
@@ -445,7 +400,6 @@ impl Executor {
                 }
                 self.commit(journal).await
             }
-            // Abort changes only the journal and needs no unit contract.
             Request::Abort {} => self.abort(journal, request).and(units),
             Request::VerifyRecovery {} => {
                 let op = matching(journal, request)?;
@@ -465,7 +419,6 @@ impl Executor {
             }
         }
     }
-    /// A consumed, matching Commit must leave a terminal if its service check fails.
     fn commit_service(
         &self,
         journal: &mut Journal,
@@ -496,9 +449,6 @@ impl Executor {
             .as_ref()
             .is_none_or(|op| op.status.operation_id != inbox.operation_id)
         {
-            // Root never began this operation: its Stage never arrived or was
-            // never consumed. Fence it so the application can end it, and so a
-            // late Stage for it is refused.
             journal.last_operation = Some(OperationStatus {
                 operation_id: inbox.operation_id.clone(),
                 phase_nonce: inbox.phase_nonce.clone(),
@@ -513,16 +463,11 @@ impl Executor {
         }
         let op = matching(journal, inbox)?;
         if op.status.phase.precommit() {
-            // Only the application knows why it aborted; it keeps its own reason.
             self.finish(journal, Phase::Aborted, Some("aborted"))?;
         }
-        // Persisted terminal is the irreversible fence against late commit.
         self.publish(journal)
     }
 
-    // An admitted Stage that fails before begin_stage is refused with a
-    // terminal; root has not begun it. Failures before admission (journal,
-    // malformed or mismatched request) remain unknown outcomes.
     fn reject_stage(
         &self,
         journal: &mut Journal,
@@ -572,7 +517,6 @@ impl Executor {
             if !op.status.phase.terminal() {
                 Some("update_in_progress")
             } else if op.status.phase == Phase::ManualRequired {
-                // Its staging directory may hold the only verified old program.
                 Some("manual_recovery_required")
             } else if at.saturating_sub(op.started_at_ms) < 60_000 {
                 Some("rate_limited")
@@ -591,8 +535,6 @@ impl Executor {
 
     fn begin_stage(&self, journal: &mut Journal, request: &StageRequest, at: u64) -> Result<()> {
         let (inbox, download) = (request.inbox, request.download);
-        // Record accepted before the first network request. ExecStopPost can
-        // then close metadata/download interruption as a real terminal.
         let mut candidate = journal.installed.clone();
         candidate.build.version = request.version.clone();
         candidate.sha256 = download.sha256.clone();
@@ -641,8 +583,6 @@ impl Executor {
             {
                 return Ok(Some("config_changed"));
             }
-            // The previous operation is terminal and not ManualRequired; only
-            // now, after every gate, are its staging files disposable.
             if let Some(op) = &journal.operation
                 && let Ok(dir) = self.staging.child(&op.status.operation_id)
             {
@@ -779,7 +719,6 @@ impl Executor {
         );
         Ok(())
     }
-    /// Publish the operation and its launch descriptor in the same phase.
     fn launch(&self, journal: &mut Journal, phase: Phase) -> Result<()> {
         let op = journal.operation.as_mut().context("missing operation")?;
         let rollback = phase != Phase::Starting;
@@ -797,8 +736,6 @@ impl Executor {
             initialized: true,
         });
         op.status.phase = phase;
-        // This must complete before systemctl start. Status is derived but is
-        // the bounded launch descriptor available inside DynamicUser sandbox.
         self.persist(journal)
     }
     async fn commit(&mut self, journal: &mut Journal) -> Result<()> {
@@ -826,7 +763,6 @@ impl Executor {
         self.phase(journal, Phase::Committing)?;
         self.phase(journal, Phase::Stopping)?;
         if stop_clean().await.is_err() {
-            // A forcibly stopped old version never authorizes candidate install.
             self.rollback(journal, "unclean_shutdown", false).await?;
             return Ok(());
         }
@@ -837,8 +773,6 @@ impl Executor {
             self.phase(journal, Phase::Validating)?;
             self.wait_ready(journal).await?;
             journal.commit()?;
-            // Unique commit point: installed identity AND succeeded in ONE
-            // durable journal replace, preceding the disposable public view.
             self.persist(journal)
         }
         .await;
@@ -873,8 +807,6 @@ impl Executor {
                 .and_then(|dir| dir.read("update-health.json", 8192, false))
                 .and_then(|bytes| Ok(serde_json::from_slice::<Health>(&bytes)?))
                 .ok();
-            // The root-owned running inode is immutable to the app. Hash once
-            // per PID/InvocationID, not tens of megabytes every health tick.
             let verified = executable.verified(
                 health.as_ref(),
                 pid,
@@ -922,10 +854,7 @@ impl Executor {
                 fs::sha256(dir.file("previous", MAX_BINARY_BYTES, true)?)? == old.sha256,
                 "backup identity changed"
             );
-            // Keep the only verified old copy available until durable terminal.
             let mut input = dir.file("previous", MAX_BINARY_BYTES, true)?;
-            // Resume an interrupted copy using the same bounded root-owned
-            // staging name; the verified previous ELF remains untouched.
             dir.remove("rollback")?;
             let mut output = dir.create("rollback", 0o755)?;
             std::io::copy(&mut input, &mut output)?;
@@ -963,8 +892,6 @@ impl Executor {
                 self.actual_hash()? == journal.installed.sha256,
                 "pending installation identity differs"
             );
-            // Installer owns this nonce until verify/rollback. Boot only
-            // republishes its durable descriptor; it never starts the app.
             return self.publish(&journal);
         }
         let Some(op) = &journal.operation else {
@@ -988,7 +915,6 @@ impl Executor {
             return self.finish(&mut journal, Phase::Failed, Some("interrupted"));
         }
         if !boot && !manager_running().await {
-            // During shutdown never queue a start job or wait for the app.
             return self.phase(&mut journal, Phase::AwaitingBootRecovery);
         }
         if op.rollback_started && !boot {
@@ -1011,8 +937,6 @@ impl Executor {
                 .await
                 .is_ok_and(|s| s.get("ActiveState").is_some_and(|v| v == "active"))
         {
-            // Live is still the old program and it was never stopped. Prove its
-            // readiness instead of stopping and restarting it.
             self.launch(&mut journal, Phase::RollingBack)?;
             if self.wait_ready(&journal).await.is_ok() {
                 return self.finish(&mut journal, Phase::RolledBack, Some("interrupted"));
@@ -1034,7 +958,6 @@ impl Executor {
     }
 }
 
-/// One Stage inbox, unpacked once with its release tag parsed.
 struct StageRequest<'a> {
     inbox: &'a Inbox,
     download: &'a DownloadTuple,
@@ -1099,8 +1022,6 @@ fn state_directory() -> Result<Dir> {
             path == Path::new(PRIVATE_STATE) || path == Path::new("private/parins-managed"),
             "unexpected StateDirectory mapping"
         );
-        // systemd's id-mapped backing can be nobody-owned. Parent ownership,
-        // fixed mapping and held FD establish scope, NOT dynamic UID equality.
         let parent = Dir::open(Path::new("/var/lib/private"), true)?;
         let fd = rustix::fs::openat(
             &parent.fd,
@@ -1295,9 +1216,6 @@ async fn validate_units() -> Result<()> {
     Ok(())
 }
 
-/// Non-root reinstall over a ManualRequired operation: the durable journal and
-/// public status are real; registration's ELF/systemd checks and readiness are
-/// inputs. Returns the public status before, during and after the installation.
 #[cfg(test)]
 pub(crate) fn manual_recovery_reinstall_fixture(
     path: &Path,
@@ -1337,8 +1255,6 @@ pub(crate) fn manual_recovery_reinstall_fixture(
     let before = read()?;
     let nonce = "9".repeat(32);
     let previous: Journal = serde_json::from_slice(&std::fs::read(path.join("journal.json"))?)?;
-    // Registration anchors the new program; install-restore re-anchors the
-    // restored previous journal after a failed installation.
     let anchor = if restored { old } else { installed };
     let pending = Installation {
         nonce: nonce.clone(),
@@ -1376,9 +1292,6 @@ pub(crate) fn consume_stage_failure_fixture(
     inbox: &[u8],
     at: u64,
 ) -> Result<PublicStatus> {
-    // Reuse the non-root filesystem fixture. The installed/service identity,
-    // Stage clock and download failure are inputs; no system service or network
-    // is used. Admission, durable journal and public publication are real.
     let executor = Executor::fixture(path)?;
     let mut journal: Journal = if path.join("journal.json").exists() {
         serde_json::from_slice(&std::fs::read(path.join("journal.json"))?)?
@@ -1421,9 +1334,6 @@ pub(crate) fn consume_abort_fixture(
     root: &PublicStatus,
     inbox: &[u8],
 ) -> Result<PublicStatus> {
-    // Only the filesystem/installation fixture is substituted: parsing, matching,
-    // Abort arbitration, journal durability and public-status publication are real.
-    // Without an active operation, root has no operation that matches the Abort.
     let executor = Executor::fixture(path)?;
     let mut journal = Journal {
         schema: 1,
@@ -1475,7 +1385,6 @@ mod tests {
         }
         let unit = include_str!("../../../deploy/parins-updater.service");
         let launch = STOP_WAIT_SECS + START_WAIT_SECS + readiness::LAUNCH_WAIT.as_secs();
-        // Leave time outside launch phases for validation and durable file work.
         assert!(seconds(unit, "TimeoutStartSec=") >= 2 * launch + 60);
         assert!(seconds(unit, "TimeoutStopSec=") >= launch + 60);
         assert!(
@@ -1637,8 +1546,6 @@ mod tests {
         executor.abort(&mut journal, &unknown).unwrap();
         assert!(terminal_fence(&journal, &unknown).unwrap());
 
-        // A separate legal Stage cannot replace an active installation owner,
-        // and finishing that owner cannot erase the rejected request's fence.
         journal.operation.as_mut().unwrap().status.phase = Phase::Committing;
         let mut blocked = request.clone();
         blocked.operation_id = "1".repeat(32);
@@ -1776,8 +1683,6 @@ mod tests {
             Some("config_changed")
         );
 
-        // The fixture has no installed binary. Root has not begun the
-        // operation, so the read failure is this request's terminal.
         journal.installed.sha256 = "d".repeat(64);
         let mut unreadable = stage_request();
         unreadable.operation_id = "1".repeat(32);
@@ -1958,7 +1863,6 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(fence.phase, Phase::Aborted);
-        // A late Stage for the fenced operation is refused without a new owner.
         let late = stage_request();
         assert!(
             !executor
@@ -2015,7 +1919,6 @@ mod tests {
         let mut journal = previous_journal();
         journal.operation.as_mut().unwrap().status.phase = Phase::Staged;
         journal.last_operation = None;
-        // No live binary exists; fail before any system service operation.
         assert!(executor.commit(&mut journal).await.is_err());
         let saved: Journal =
             serde_json::from_slice(&std::fs::read(dir.path().join("journal.json")).unwrap())

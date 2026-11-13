@@ -31,7 +31,6 @@ fn scopes(cache: &Cache, q: &Message, now: Instant) -> Vec<String> {
     scopes
 }
 
-/// Three networks over two /16 prefixes: the third answer promotes the record.
 const LEARNING: [&str; 3] = ["192.0.2.0/24", "192.0.3.0/24", "198.51.100.0/24"];
 
 fn learn(cache: &Cache, q: &Message, response: &Message, now: Instant) {
@@ -56,18 +55,15 @@ fn fingerprint_ignores_ttl_and_order_but_keeps_data_chain_and_negative_identity(
     reordered.answers[0].ttl = 5;
     reordered.metadata.id = 999;
     assert_eq!(print(&two), print(&reordered));
-    // Duplicate identical records describe the same RRset.
     let mut duplicated = two.clone();
     duplicated.add_answer(two.answers[0].clone());
     assert_eq!(print(&two), print(&duplicated));
-    // Case-insensitive owner names, but RDATA and rcode are significant.
     let mut upper = answer(&q, 1, 60);
     upper.answers[0].name = name("PRINT.test.");
     assert_eq!(print(&answer(&q, 1, 60)), print(&upper));
     assert_ne!(print(&answer(&q, 1, 60)), print(&answer(&q, 2, 60)));
     assert_ne!(print(&two), print(&answer(&q, 1, 60)));
 
-    // CNAME chains are part of the answer even when the final address agrees.
     let chained = |target: &str| {
         let mut response = protocol::error_response(&q, ResponseCode::NoError);
         response.add_answer(cname("print.test.", target, 60));
@@ -86,7 +82,6 @@ fn fingerprint_ignores_ttl_and_order_but_keeps_data_chain_and_negative_identity(
     chain_reordered.answers.reverse();
     assert_eq!(print(&chained("a.cdn.test.")), print(&chain_reordered));
 
-    // Negative answers: rcode, SOA owner and negative classification, not SOA TTL.
     let negative = negative_answer(&q);
     let mut aged = negative.clone();
     aged.authorities[0].ttl = 3;
@@ -110,7 +105,6 @@ fn promotion_needs_k_distinct_networks_across_two_wide_prefixes() {
     let response = answer(&q, 7, 60);
     let now = Instant::now();
     assert_eq!(state(&cache, &q, now), Value::Null);
-    // Repeating one network and many networks inside one /16 never promotes.
     store(&cache, &q, &response, exact("10.1.1.0/24"), now);
     assert_eq!(state(&cache, &q, now), "observing");
     store(&cache, &q, &response, exact("10.1.1.0/24"), now);
@@ -120,10 +114,8 @@ fn promotion_needs_k_distinct_networks_across_two_wide_prefixes() {
     assert_eq!(state(&cache, &q, now), "observing");
     assert!(cache.peek(&q, ecs("203.0.113.0/24"), now, false).is_none());
     assert_eq!(cache.snapshot()["ecs_shared_entries"], 0);
-    // A sample from a second /16 completes K networks with the required span.
     store(&cache, &q, &response, exact("10.2.0.0/24"), now);
     assert_eq!(state(&cache, &q, now), "shared");
-    // One learned entry replaces the per-network copies of the same answer.
     assert_eq!(scopes(&cache, &q, now), ["learned_v4"]);
     let hit = cache.lookup(&q, ecs("203.0.113.0/24"), now, false).unwrap();
     assert_eq!(hit.scope, Scope::Learned { ipv4: true });
@@ -134,11 +126,9 @@ fn promotion_needs_k_distinct_networks_across_two_wide_prefixes() {
     assert_eq!(stats["ecs_shared_entries"], 1);
     assert_eq!(stats["ecs_sharing_revocations"], 0);
     assert_eq!(cache.diagnostics_snapshot()["ecs_shared_entries"], 1);
-    // Later identical answers keep one learned copy.
     store(&cache, &q, &response, exact("203.0.113.0/24"), now);
     assert_eq!(scopes(&cache, &q, now), ["learned_v4"]);
 
-    // IPv6 spans use /32 and K counts distinct networks.
     let cache = Cache::new(sharing_config(2));
     store(&cache, &q, &response, exact("2001:db8:1::/56"), now);
     store(&cache, &q, &response, exact("2001:db8:2::/56"), now);
@@ -155,27 +145,23 @@ fn different_answer_revokes_at_once_and_cooldown_blocks_relearning() {
     let now = Instant::now();
     learn(&cache, &q, &same, now);
     assert_eq!(scopes(&cache, &q, now), ["learned_v4"]);
-    // A refresh from any network with a different answer removes the shared copy.
     store(&cache, &q, &different, exact("203.0.113.0/24"), now);
     assert_eq!(state(&cache, &q, now), "revoked");
     assert_eq!(scopes(&cache, &q, now), ["exact_ecs:203.0.113.0/24"]);
     assert!(cache.peek(&q, ecs("192.0.2.0/24"), now, false).is_none());
     assert_eq!(cache.snapshot()["ecs_sharing_revocations"], 1);
     assert_eq!(cache.snapshot()["ecs_shared_entries"], 0);
-    // Within the cooldown identical answers stay per network.
     let later = now + Duration::from_secs(599);
     learn(&cache, &q, &same, later);
     assert_eq!(state(&cache, &q, later), "revoked");
     assert_eq!(scopes(&cache, &q, later).len(), 3);
     assert!(cache.peek(&q, ecs("10.0.0.0/24"), later, false).is_none());
-    // After it, learning starts over.
     let after = now + Duration::from_secs(601);
     assert_eq!(state(&cache, &q, after), Value::Null);
     learn(&cache, &q, &same, after);
     assert_eq!(state(&cache, &q, after), "shared");
     assert_eq!(scopes(&cache, &q, after), ["learned_v4"]);
 
-    // A contradiction while observing excludes the name the same way.
     let q = query("rotating.test.");
     store(&cache, &q, &answer(&q, 1, 60), exact("192.0.2.0/24"), now);
     store(
@@ -204,7 +190,6 @@ fn expired_evidence_is_not_contradicted_by_a_later_answer() {
         exact("198.51.100.0/24"),
         now,
     );
-    // Both samples expired: a changed address starts a new observation.
     let later = now + Duration::from_secs(11);
     store(
         &cache,
@@ -243,7 +228,6 @@ fn sharing_never_crosses_family_no_ecs_privacy_or_query_flags() {
             .peek(&flagged, ecs("203.0.113.0/24"), now, false)
             .is_none()
     );
-    // Other namespaces of the same key are neither replaced nor taught.
     store(&cache, &q, &answer(&q, 2, 60), Scope::NoEcs, now);
     store(
         &cache,
@@ -253,7 +237,6 @@ fn sharing_never_crosses_family_no_ecs_privacy_or_query_flags() {
         now,
     );
     store(&cache, &q, &answer(&q, 4, 60), exact("2001:db8::/56"), now);
-    // Inspection reports the most cautious family: IPv6 is still observing.
     assert_eq!(state(&cache, &q, now), "observing");
     assert_eq!(
         scopes(&cache, &q, now),
@@ -276,7 +259,6 @@ fn sharing_never_crosses_family_no_ecs_privacy_or_query_flags() {
     assert_eq!(read(ecs("203.0.113.0/24")), RData::A(A::new(192, 0, 2, 1)));
     assert_eq!(read(None), RData::A(A::new(192, 0, 2, 2)));
     assert_eq!(read(ecs("0.0.0.0/0")), RData::A(A::new(192, 0, 2, 3)));
-    // A different-flag key learns independently.
     learn(&cache, &flagged, &answer(&flagged, 5, 60), now);
     assert_eq!(
         cache
@@ -296,7 +278,6 @@ fn inspection_reports_expired_shared_evidence_as_observing() {
     let now = Instant::now();
     learn(&cache, &q, &answer(&q, 1, 60), now);
     assert_eq!(state(&cache, &q, now + Duration::from_secs(3599)), "shared");
-    // After an hour the next answer starts a new observation.
     assert_eq!(
         state(&cache, &q, now + Duration::from_secs(3600)),
         "observing"
@@ -349,7 +330,6 @@ fn classification_table_is_bounded_lru_and_inspection_is_read_only() {
     for q in &names[..1024] {
         store(&cache, q, &answer(q, 1, 60), exact("192.0.2.0/24"), now);
     }
-    // Inspecting the oldest record must not refresh its LRU position.
     assert_eq!(state(&cache, &names[0], now), "observing");
     store(
         &cache,
@@ -372,7 +352,6 @@ fn older_work_cannot_teach_or_refill_after_invalidation_or_revocation() {
     let now = Instant::now();
     learn(&cache, &q, &same, now);
     let started = cache.epoch();
-    // Clearing the name removes the shared entry and forgets its classification.
     assert_eq!(cache.invalidate(Some(&name("race.test.")), None, None), 1);
     assert_eq!(state(&cache, &q, now), Value::Null);
     let decision = cache.insert_decision_if_epoch(&q, &same, exact("203.0.113.0/24"), now, started);
@@ -380,8 +359,6 @@ fn older_work_cannot_teach_or_refill_after_invalidation_or_revocation() {
     assert_eq!(state(&cache, &q, now), Value::Null);
     assert!(scopes(&cache, &q, now).is_empty());
 
-    // Work begun while the name was shared and finishing after a revocation is
-    // stored for its own network only, even though its answer matches.
     learn(&cache, &q, &same, now);
     let started = cache.epoch();
     store(&cache, &q, &answer(&q, 2, 60), exact("10.0.0.0/24"), now);
@@ -393,8 +370,6 @@ fn older_work_cannot_teach_or_refill_after_invalidation_or_revocation() {
     );
     assert!(cache.peek(&q, ecs("192.0.2.0/24"), now, false).is_none());
 
-    // Scope-filtered clearing of learned entries also resets classification;
-    // clearing another namespace does not.
     let q = query("scoped-clear.test.");
     learn(&cache, &q, &same, now);
     cache.invalidate(Some(&name("scoped-clear.test.")), None, Some(Scope::NoEcs));
@@ -433,7 +408,6 @@ fn learned_negative_answers_keep_negative_budget_ttl_and_no_stale_or_prefetch() 
             .is_none()
     );
 
-    // Positive learned entries follow the ordinary stale retention rule.
     let q = query("present.test.");
     learn(&cache, &q, &answer(&q, 1, 10), now);
     let stale = now + Duration::from_secs(11);
@@ -448,17 +422,11 @@ fn learned_negative_answers_keep_negative_budget_ttl_and_no_stale_or_prefetch() 
     );
 }
 
-/// A synthetic replay of the pattern observed in production: invariant names
-/// queried from many networks, geo-dependent names, and per-query rotation.
-/// It shows the qualitative hit-rate gain and that no client ever receives an
-/// answer differing from what its own network would have been given.
 #[test]
 fn synthetic_replay_gains_hits_without_serving_another_networks_answer() {
     let networks: Vec<String> = (0..24)
         .map(|i| format!("10.{}.{}.0/24", i % 6, i))
         .collect();
-    // Deterministic upstream: invariant names, geo names (answer per /16), and
-    // rotating names (answer changes each second).
     let upstream = |kind: usize, network: usize, second: u64| -> u8 {
         match kind {
             0 => 1,
@@ -488,8 +456,6 @@ fn synthetic_replay_gains_hits_without_serving_another_networks_answer() {
             total += 1;
             if let Some(hit) = cache.lookup(&q, outgoing, now, false) {
                 hits += 1;
-                // A geo name is never served across /16s; rotating names may
-                // serve their own network's cached answer within its TTL.
                 if kind != 2 {
                     assert_eq!(hit.message.answers[0].data, expected, "{name_index}");
                 }
@@ -505,7 +471,6 @@ fn synthetic_replay_gains_hits_without_serving_another_networks_answer() {
     println!("synthetic replay hit rate: exact_source {baseline:.3}, learned {learned:.3}");
     assert!(learned > baseline + 0.05, "{baseline} {learned}");
     assert!(stats["ecs_shared_hits"].as_u64().unwrap() > 0);
-    // Rotating names are excluded once their answers disagree.
     assert!(stats["ecs_sharing_revocations"].as_u64().unwrap() > 0);
 }
 
@@ -515,7 +480,6 @@ fn nested_prefixes_from_one_client_count_as_one_network() {
     let q = query("nested.test.");
     let response = answer(&q, 1, 60);
     let now = Instant::now();
-    // All of these contain 10.1.2.3, so a single client could send each one.
     for network in ["10.1.2.0/24", "10.1.0.0/16", "10.0.0.0/8", "10.1.2.0/28"] {
         store(&cache, &q, &response, exact(network), now);
     }
@@ -535,7 +499,6 @@ fn a_covering_prefix_replaces_every_sample_it_overlaps() {
     let now = Instant::now();
     store(&cache, &q, &response, exact("10.1.2.0/24"), now);
     store(&cache, &q, &response, exact("10.3.0.0/24"), now);
-    // The /8 overlaps both samples, so only it remains alongside new evidence.
     store(&cache, &q, &response, exact("10.0.0.0/8"), now);
     store(&cache, &q, &response, exact("192.0.2.0/24"), now);
     assert_eq!(state(&cache, &q, now), "observing");
@@ -551,12 +514,9 @@ fn shared_evidence_expires_and_must_be_proven_again() {
     let now = Instant::now();
     learn(&cache, &q, &response, now);
     assert_eq!(state(&cache, &q, now), "shared");
-    // Within the evidence age, one network's matching answer keeps sharing.
     let later = now + Duration::from_secs(1800);
     store(&cache, &q, &response, exact("203.0.113.0/24"), later);
     assert_eq!(scopes(&cache, &q, later), ["learned_v4"]);
-    // After an hour the same answer only starts a new observation and is stored
-    // for its own network: one network refreshing first cannot keep it shared.
     let renewed = now + Duration::from_secs(3600);
     store(&cache, &q, &response, exact("203.0.113.0/24"), renewed);
     assert_eq!(state(&cache, &q, renewed), "observing");
@@ -573,7 +533,6 @@ fn clearing_one_network_also_clears_the_learned_entry_that_serves_it() {
     let now = Instant::now();
     learn(&cache, &q, &response, now);
     assert_eq!(scopes(&cache, &q, now), ["learned_v4"]);
-    // An IPv6 network filter does not touch the IPv4 learned entry.
     cache.invalidate(
         Some(q.queries[0].name()),
         None,

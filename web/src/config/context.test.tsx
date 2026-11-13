@@ -421,7 +421,6 @@ describe('single configuration draft', () => {
       expect(draft.settings).toMatchObject({ max_inflight: 11, max_tcp_connections: 5 });
       expect(hook.result.current.dirty).toBe(true);
       expect(hook.result.current.error).toBeNull();
-      // The next save carries the new revision.
       let prepared!: Awaited<ReturnType<typeof hook.result.current.prepareSave>>;
       await act(async () => { prepared = await hook.result.current.prepareSave(); });
       expect(prepared.revision).toBe(2);

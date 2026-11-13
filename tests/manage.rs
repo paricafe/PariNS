@@ -75,7 +75,6 @@ struct Management {
 
 impl Management {
     async fn start(directory: &Path) -> Self {
-        // Keep ownership of the bound socket through server initialization.
         let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
         Self::start_reserved(directory, reservation).await
     }
@@ -145,7 +144,6 @@ impl Management {
     }
 
     async fn raw_at(&self, address: SocketAddr, bytes: &[u8]) -> Response {
-        // Only the request line: never print Cookie, binding or credential bodies.
         let request = request_label(bytes);
         timeout(DEADLINE, async {
             let mut stream = self.connect_at(address).await;
@@ -383,8 +381,6 @@ async fn management_startup_keeps_its_reserved_listener() {
     let address = listener.local_addr().unwrap();
     let directory = temporary.path().join("state");
     let mut starting = Box::pin(Management::start_reserved(&directory, listener));
-    // Suspend startup before its spawned server can run. Rebinding here used
-    // to succeed, so another parallel fixture could steal this address.
     assert!(futures_util::poll!(&mut starting).is_pending());
     let competing = TcpListener::bind(address).await;
     let reserved = competing.is_err();
@@ -397,9 +393,6 @@ async fn management_startup_keeps_its_reserved_listener() {
     );
 }
 
-/// Idle connections exhaust a low descriptor limit, so accepting fails with
-/// EMFILE. The management listener pauses and serves again once they close;
-/// the process (which also runs managed DNS) keeps running.
 #[tokio::test]
 async fn descriptor_exhaustion_pauses_the_management_listener_without_exiting() {
     let directory = tempfile::tempdir().unwrap();
@@ -408,8 +401,6 @@ async fn descriptor_exhaustion_pauses_the_management_listener_without_exiting() 
         .unwrap()
         .local_addr()
         .unwrap();
-    // Without -S or -H, ulimit lowers the hard limit too, so the process cannot
-    // raise its soft limit back at startup.
     let mut child = tokio::process::Command::new("sh")
         .args([
             "-c",
@@ -447,8 +438,6 @@ async fn descriptor_exhaustion_pauses_the_management_listener_without_exiting() 
     sleep(Duration::from_secs(1)).await;
     assert!(child.try_wait().unwrap().is_none(), "management exited");
     drop(idle);
-    // The server sees the idle connections close asynchronously; until it does,
-    // a new connection can exceed the management connection budget and be dropped.
     let request = server.wire("GET", "/api/session", None, None);
     timeout(DEADLINE, async {
         loop {
@@ -584,7 +573,6 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         true
     );
     let document = server.request("GET", "/", None, None).await.body;
-    // The address the document gives `path`, with its content version.
     let versioned = |path: &str| {
         let start = document.find(&format!("\"{path}?v=")).unwrap() + 1;
         document[start..start + document[start..].find('"').unwrap()].to_owned()
@@ -604,7 +592,6 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         let response = server.request("GET", &address, None, None).await;
         assert_eq!(response.status, 200);
         assert!(response.headers.contains(content_type));
-        // The document is never stored, so it always names the current versions.
         assert!(response.headers.contains(if path == "/" {
             "cache-control: no-store"
         } else {
@@ -612,10 +599,8 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         }));
         assert!(!response.headers.contains("content-encoding"));
         assert!(response.headers.contains("script-src 'self'"));
-        // Only a signed-out remote sign-in page with Turnstile allows Cloudflare.
         assert!(!response.headers.contains("challenges.cloudflare.com"));
         assert!(response.headers.contains("x-frame-options: deny"));
-        // HEAD sends the same headers without the body.
         let head = server.request("HEAD", &address, None, None).await;
         assert_eq!(head.status, 200);
         let undated = |headers: &str| {
@@ -628,7 +613,6 @@ async fn bootstrap_requires_token_and_private_api_rejects_cross_origin_and_wrong
         assert_eq!(undated(&head.headers), undated(&response.headers));
         assert!(head.headers.contains("content-length: "));
         assert!(head.body.is_empty());
-        // Another build's version, or none, is not stored.
         if path != "/" {
             for other in [path.to_owned(), format!("{path}?v=0")] {
                 let response = server.request("GET", &other, None, None).await;
@@ -799,8 +783,6 @@ async fn unsafe_api_requires_exact_origin_and_same_origin_fetch_metadata() {
     let server = Management::start(&temporary.path().join("state")).await;
     let valid =
         String::from_utf8(server.wire("POST", "/api/config/parse", None, Some(json!({})))).unwrap();
-    // A correct origin reaches authentication; malformed or cross-origin
-    // requests are rejected before any private API branch executes.
     server.raw(valid.as_bytes()).await.expect(401);
     let origin = format!("Origin: http://{}\r\n", server.address);
     for wire in [
@@ -861,7 +843,6 @@ async fn successful_login_creates_an_independent_session_and_failed_login_preser
         .expect(200);
     server.config(&current).await;
 
-    // Cookie is shared between tabs, while each tab still owns its binding.
     let (new_cookie, _) = current.split_once('|').unwrap();
     let (old_cookie, _) = old.split_once('|').unwrap();
     let old_tab_with_new_cookie =
@@ -894,7 +875,6 @@ async fn updates_only_validate_and_apply_keep_the_running_generation() {
     server.setup(&directory, &source).await;
     server.finish().await;
 
-    // A listener conflict leaves that listener retrying in a running generation.
     let occupied = TcpListener::bind(dns_address).await.unwrap();
     let server = Management::start(&directory).await;
     let login = server
@@ -912,7 +892,6 @@ async fn updates_only_validate_and_apply_keep_the_running_generation() {
         .await
         .expect(200);
     assert_eq!(before["dns_health"]["state"], "degraded");
-    // Once released, an incorrect full apply would restart the generation.
     drop(occupied);
     let next = format!("{source}\n[updates]\nauto_check=false\ncheck_interval_hours=168\n");
     for (method, path, body) in [
@@ -1220,8 +1199,6 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
     assert_eq!(after["generation"], status["generation"]);
     assert_eq!(after["listen"], status["listen"]);
     assert_eq!(after["cache"]["entries"], 0);
-    // A page inspected the first cache at epoch zero. A replacement starts at
-    // that same epoch, but the page must not be allowed to clear its new data.
     client
         .send_to(&query("cache.test.").to_vec().unwrap(), dns)
         .await
@@ -1316,7 +1293,6 @@ async fn cache_inspection_invalidation_and_hot_policy_apply_are_authenticated_an
         preserved["cache"]["cache_token"],
         current["cache"]["cache_token"]
     );
-    // A full DNS restart also creates a different cache at the same epoch.
     let restart = updates.replace("query_timeout_ms = 200", "query_timeout_ms = 250");
     let applied = server
         .request(
@@ -2167,8 +2143,6 @@ async fn validation_is_read_only_and_revisioned_apply_and_rollback_keep_dns_live
     server.finish().await;
 }
 
-/// Rule file errors reach the console, so they carry only a position and a
-/// kind; PariNS's own state files are rejected as rule files outright.
 #[tokio::test]
 async fn rule_file_errors_never_return_file_content() {
     let temporary = tempfile::tempdir().unwrap();
@@ -2363,8 +2337,6 @@ async fn persistence_failure_restores_previous_dns_and_can_be_retried_after_repa
     let token = server.setup(&directory, &original).await;
     let state_file = directory.join("state.json");
     let before = std::fs::read(&state_file).unwrap();
-    // A deliberately exposed state file must be rejected by the real Store;
-    // this reaches persistence after the candidate DNS sockets have bound.
     std::fs::set_permissions(&state_file, std::fs::Permissions::from_mode(0o644)).unwrap();
     let next = format!("{original}\n# persisted after permission repair\n");
     let rejected = server
@@ -2459,8 +2431,6 @@ async fn exhausted_socket_source_does_not_block_other_source_setup_or_login() {
             .unwrap().replacen("\r\n\r\n", &format!("\r\nX-Forwarded-For: 192.0.2.{attempt}\r\nForwarded: for=198.51.100.{attempt}\r\n\r\n"), 1);
         server.raw(wire.as_bytes()).await.expect(400);
     }
-    // Changing forwarding headers and opening another TCP socket cannot reset
-    // the actual IPv6 peer's debt.
     let wire = String::from_utf8(server.wire("POST", "/api/login", None, Some(json!({}))))
         .unwrap()
         .replacen("\r\n\r\n", "\r\nX-Forwarded-For: 203.0.113.1\r\n\r\n", 1);
@@ -2650,7 +2620,6 @@ async fn pasted_certificate_is_private_and_applies_via_existing_config_transacti
         .request("POST", "/api/certificates/import", None, Some(body.clone()))
         .await
         .expect(401);
-    // Import only stores the identity privately; it takes no configuration revision.
     let mut obsolete = body.clone();
     obsolete["revision"] = json!(1);
     server
@@ -2750,8 +2719,6 @@ async fn disconnected_transaction(stop_management: bool) {
         .await
         .unwrap();
     connection.flush().await.unwrap();
-    // The old listener closes before draining the deliberately pending query.
-    // This proves apply was admitted before the HTTP client disappears.
     timeout(DEADLINE, async {
         loop {
             if TcpStream::connect(old_dns).await.is_err() {
@@ -2769,8 +2736,6 @@ async fn disconnected_transaction(stop_management: bool) {
             serde_json::from_slice(&std::fs::read(directory.join("state.json")).unwrap()).unwrap();
         assert_eq!(disk["revision"], 2);
         assert_eq!(disk["toml"], next);
-        // Shutdown must also stop the DNS instance created by the accepted
-        // transaction, not leave an orphan listener after HTTP tasks disappear.
         let _tcp = TcpListener::bind(candidate_address).await.unwrap();
         let _udp = UdpSocket::bind(candidate_address).await.unwrap();
         return;

@@ -4,7 +4,6 @@ import { SPRING_IOS_FAST } from './beui/motion';
 
 export interface SegmentOption { value: string; label: string }
 
-/** iOS segmented control for choosing a value (radio semantics); shares the tab track styling. */
 export function Segmented({ id, value, options, onChange, label, disabled, className }: {
   id?: string; value: string; options: readonly SegmentOption[]; onChange(value: string): void; label: string; disabled?: boolean; className?: string;
 }) {

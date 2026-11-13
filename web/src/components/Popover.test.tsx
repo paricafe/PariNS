@@ -5,7 +5,6 @@ import { Select } from './Popover';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-/** jsdom has no layout: place the control and size the menu and viewport. */
 function layout(control: { left: number; right: number }, menuWidth: number, viewport: number) {
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     return { ...control, top: 0, bottom: 32, width: control.right - control.left, height: 32, x: control.left, y: 0, toJSON: () => ({}) } as DOMRect;
@@ -34,8 +33,6 @@ describe('Select menu placement', () => {
   });
 
   it('shifts back inside a narrow window when neither side fits', () => {
-    // 375 px: from 100 a 320 px menu passes the right edge (367) and would start
-    // at -180 aligned to the control's right edge.
     layout({ left: 100, right: 140 }, 320, 375);
     const menu = open();
     expect(menu.dataset.align).toBe('start');

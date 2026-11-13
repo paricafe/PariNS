@@ -1,11 +1,4 @@
-//! Managed DNS lifecycle. Configuration transactions survive HTTP disconnects.
-//! HTTP management survives unavailable DNS identities; saved DNS startup owns
-//! their retry and publishes its CertificateSet after binding. HTTPS management
-//! must prepare its identity before serving.
-//! Committed observation metadata is published separately from the transaction
-//! mutex so slow candidate preparation cannot block status and storage readers.
-//! Accepted tasks retain the mutation permit, prepare owned candidates without
-//! Manager, then reacquire it and recheck the saved revision before committing.
+//! Managed DNS lifecycle and configuration transactions.
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
@@ -83,8 +76,6 @@ impl Running {
             .find(|(name, _)| *name == "doh")
             .map(|(_, address)| address);
         let (stop, stopped) = oneshot::channel();
-        // The server publishes ready or degraded for this generation as its
-        // listeners come and go; this owner publishes only the terminal state.
         server.set_generation(generation);
         server.publish_health();
         let listeners = server.listeners();
@@ -114,7 +105,6 @@ impl Running {
                 Some("task_panic") => completion
                     .resolver
                     .force_shutdown(ForcedShutdown::TaskPanic),
-                // drain_deadline: a listener already recorded its own cause.
                 _ => {}
             }
             completion.services.set_dns_health(
@@ -167,7 +157,6 @@ pub(super) struct Manager {
     cache_ready: bool,
     pub store: Arc<Store>,
     pub saved: Option<Stored>,
-    /// Turnstile keys, published after their own Store write.
     pub turnstile: super::turnstile::State,
     running: Option<Running>,
     phase: Phase,
@@ -178,16 +167,10 @@ pub(super) struct Manager {
     last_reload: Option<Value>,
     reload_attempt: u64,
     startup: Option<StartupFailure>,
-    /// The saved local rules could not be compiled at startup, so the filter
-    /// service holds an empty placeholder. No start, retry or rollback restore
-    /// may serve it; only applying a configuration whose rules compile clears it.
     local_error: Option<String>,
-    /// Why the saved rollback copy cannot be used. Any apply replaces that copy.
     pub rollback_error: Option<String>,
 }
 
-/// Subscription fingerprints of the saved rollback copy. Startup needs them,
-/// so candidate preflight rejects a copy this version cannot read.
 pub(super) fn previous_fingerprints(saved: &Stored, dir: &std::path::Path) -> Result<Vec<String>> {
     let Some(text) = &saved.previous else {
         return Ok(Vec::new());
@@ -197,11 +180,8 @@ pub(super) fn previous_fingerprints(saved: &Stored, dir: &std::path::Path) -> Re
         .context("saved rollback configuration (previous revision) is invalid")
 }
 
-/// How long a validation waits for the subscription worker, within the
-/// management connection's 90 s limit.
 const VALIDATION_WORKER_WAIT: Duration = Duration::from_secs(60);
 
-/// A candidate's checks that run without the Manager lock.
 pub(super) struct Validation {
     dir: PathBuf,
     address: SocketAddr,
@@ -210,7 +190,6 @@ pub(super) struct Validation {
     impact: ChangeImpact,
 }
 
-/// One interpretation shared by validation, restart reporting and application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ChangeImpact {
     UpdatesOnly,
@@ -224,8 +203,6 @@ impl ChangeImpact {
     }
 }
 
-/// An accepted transaction owns this input while the mutation permit remains
-/// held. Preparing files and policy never requires the Manager mutex.
 pub(super) struct Preparation {
     next: Stored,
     expected_revision: u64,
@@ -312,9 +289,6 @@ async fn prepare(dir: PathBuf, address: SocketAddr, toml: String) -> Result<(Con
     .await?
 }
 
-/// The saved configuration failed to start (for example a port held by another
-/// program). `dns_retry` restarts it with bounded backoff until it succeeds, a
-/// new configuration is applied, or management shuts down.
 struct StartupFailure {
     attempts: u32,
     failed_at: Instant,
@@ -353,8 +327,6 @@ impl Manager {
             .unwrap_or_default();
         let local = config.as_ref().map(Config::load_policy).transpose();
         let local_error = local.as_ref().err().map(ToString::to_string);
-        // An unreadable rollback copy (for example after a downgrade) leaves
-        // management and the saved revision available; only rollback is not.
         let (previous, rollback_error) = match saved
             .as_ref()
             .map(|saved| previous_fingerprints(saved, &store.dir))
@@ -366,8 +338,6 @@ impl Manager {
                 (Vec::new(), Some(format!("{error:#}")))
             }
         };
-        // A broken local file must keep management available; Manager keeps
-        // local_error so no start path ever serves this placeholder policy.
         let local = local.ok().flatten().unwrap_or_default();
         use crate::filter_subscriptions::service::Service as Filters;
         let filters = Filters::open(
@@ -501,8 +471,6 @@ impl Manager {
         value
     }
 
-    /// Serialized by the existing mutation permit and Manager lock, including
-    /// while DNS is stopped. The management listener owns the same active set.
     pub async fn reload_certificates(&mut self, source: &'static str) -> Result<Value> {
         self.reload_attempt = self.reload_attempt.saturating_add(1);
         let started = crate::clock::unix_ms();
@@ -553,7 +521,6 @@ impl Manager {
             .map(|r| &r.resolver)
     }
 
-    /// Management-only changes do not depend on live DNS or its material files.
     fn updates_only(&self, next: &str) -> Result<bool> {
         let Some(saved) = &self.saved else {
             return Ok(false);
@@ -569,8 +536,6 @@ impl Manager {
         Ok(saved.toml != next && stripped(&saved.toml)? == stripped(next)?)
     }
 
-    /// Compare source documents, not compiled rules. Updates-only changes also
-    /// retain a stopped DNS state; cache/storage/filter changes require live DNS.
     pub fn change_impact(&self, next: &str) -> Result<ChangeImpact> {
         if self.updates_only(next)? {
             return Ok(ChangeImpact::UpdatesOnly);
@@ -581,9 +546,6 @@ impl Manager {
             .unwrap_or(ChangeImpact::Restart))
     }
 
-    /// Whether `next` differs from the running configuration only in cache,
-    /// storage, statistics, update or filter settings, and if so whether the
-    /// cache itself changes. `next_cache` is the cache section parsed from `next`.
     fn hot_change(&self, next: &str, next_cache: &CacheConfig) -> Option<ChangeImpact> {
         let running = self.running.as_ref().filter(|r| !r.task.is_finished())?;
         let previous = self.saved.as_ref()?;
@@ -607,7 +569,6 @@ impl Manager {
                 cache.as_object_mut()?.remove("persistence");
                 Some((value, cache, original))
             };
-        // The running generation's Config is the parsed saved configuration.
         match (
             split(&previous.toml, &running.config.cache),
             split(next, next_cache),
@@ -623,8 +584,6 @@ impl Manager {
         }
     }
 
-    /// Copies what validating `toml` needs, so the caller can release the
-    /// Manager lock before certificates are read and rules compiled.
     pub fn validation(&self, toml: &str) -> Result<Validation> {
         ensure!(toml.len() <= MAX_CONFIG, "configuration exceeds 256 KiB");
         Ok(Validation {
@@ -638,8 +597,6 @@ impl Manager {
 
     async fn restore(&mut self, toml: &str, snapshot: Option<ConsumedSnapshot>) {
         if let Some(error) = &self.local_error {
-            // Retrying cannot help: the local rules are compiled only when a
-            // configuration is applied. Keep the real reason visible.
             self.last_error = Some(format!("DNS unavailable: {error}"));
             self.publish_observation();
             return;
@@ -657,8 +614,6 @@ impl Manager {
                 "subscription_material_missing: DNS policy unavailable"
             );
             let current = self.active.lock().unwrap().snapshot.clone();
-            // HTTP management can start while DNS identities are unavailable.
-            // A successful DNS start publishes the same set its listeners use.
             let candidate = if current.certificates.is_none() {
                 let config = config.clone();
                 let address = self.address;
@@ -710,8 +665,6 @@ impl Manager {
                 self.startup_recovered();
             }
             Err(error) => {
-                // The full chain names the listener, e.g. "bind DoH 0.0.0.0:443:
-                // Address in use"; the outer message alone does not.
                 let error = format!("{error:#}");
                 self.last_error = Some(format!("DNS unavailable: {error}"));
                 self.services.set_dns_health(
@@ -726,7 +679,6 @@ impl Manager {
         self.publish_observation();
     }
 
-    /// Counts the failure; logging is rate limited by [`crate::server::FailureLog`].
     fn startup_failed(&mut self, error: String) {
         let now = Instant::now();
         let failure = self.startup.get_or_insert_with(|| StartupFailure {
@@ -741,9 +693,6 @@ impl Manager {
         }
     }
 
-    /// A running generation that ended without a stop request (a panic, or a
-    /// listener failure the Server could not ride out) is handed to `dns_retry`,
-    /// which restarts the saved revision as after a failed start.
     pub fn reap_exited(&mut self) {
         let Some(running) = self.running.take_if(|running| running.task.is_finished()) else {
             return;
@@ -767,8 +716,6 @@ impl Manager {
         }
     }
 
-    /// When the next automatic restart is due: 5 s after the first failure,
-    /// doubling to at most 60 s. `None` when nothing needs restarting.
     pub fn startup_retry_at(&self) -> Option<Instant> {
         let failure = self.startup.as_ref()?;
         if self.running.is_some() || self.saved.is_none() {
@@ -777,22 +724,17 @@ impl Manager {
         Some(failure.failed_at + crate::server::backoff(failure.attempts))
     }
 
-    /// Ends the running generation's task without a stop request.
     #[cfg(test)]
     pub(super) fn simulate_exit(&self) {
         self.running.as_ref().expect("running DNS").task.abort();
     }
 
-    /// Stops DNS and records a startup failure, as a non-bind start error would.
     #[cfg(test)]
     pub(super) async fn simulate_startup_failure(&mut self) {
         self.stop().await;
         self.startup_failed("simulated certificate material unavailable".into());
     }
 
-    /// Restarts the saved configuration. The caller holds the mutation permit
-    /// and has seen [`Self::startup_retry_at`] due under the Manager lock, which
-    /// guarantees a saved configuration and no running generation.
     pub async fn retry_startup(&mut self) {
         let toml = self
             .saved
@@ -819,14 +761,12 @@ impl Manager {
         })
     }
 
-    /// Test convenience: production releases Manager while preparation runs.
     #[cfg(test)]
     pub async fn apply(&mut self, next: Stored) -> Result<bool> {
         let prepared = self.preparation(next)?.run().await?;
         self.commit(prepared).await
     }
 
-    /// Only Manager may commit prepared state. Returns whether listeners restarted.
     pub async fn commit(&mut self, prepared: PreparedCandidate) -> Result<bool> {
         ensure!(
             prepared.expected_revision == self.saved.as_ref().map_or(0, |s| s.revision),
@@ -838,8 +778,6 @@ impl Manager {
             material,
             ..
         } = prepared;
-        // Management-only settings do not inspect changed certificate files,
-        // restart a stopped DNS service, or publish new storage/cache settings.
         let Some((candidate, filter_candidate)) = material else {
             let store = self.store.clone();
             let copy = next.clone();
@@ -853,13 +791,9 @@ impl Manager {
             self.publish_observation();
             return Ok(false);
         };
-        // The task can finish while preparation awaits. Reclassify against the
-        // live owner rather than applying a hot change to a departed runtime.
         if let Some(ChangeImpact::Hot { replace_cache }) =
             self.hot_change(&next.toml, &config.cache)
         {
-            // Manager's mutex serializes this transaction. There is no fallible
-            // IO after persist and no await between live swap and revision update.
             let store = self.store.clone();
             let saved = next.clone();
             let resolver = self.resolver().expect("running cache-only target").clone();
@@ -893,16 +827,12 @@ impl Manager {
                 self.filters.handle(),
             )
             .await?;
-            // An administrator's change is all or nothing: a candidate whose
-            // listeners cannot all bind is rejected before persistence, and the
-            // previous configuration is restored. Only restarts retry listeners.
             if let Some(unbound) = server.unbound() {
                 return Err(unbound.into());
             }
             let listen = server.local_addr();
             let store = self.store.clone();
             let saved = next.clone();
-            // Persist only after all candidate sockets and material are prepared.
             tokio::task::spawn_blocking(move || store.save(&saved)).await??;
             self.filters.publish_config(filter_candidate, next.revision);
             self.services
@@ -933,9 +863,6 @@ impl Manager {
                 if let Some(previous) = previous {
                     self.restore(&previous.toml, None).await;
                 }
-                // A failed restart of the previous configuration already explains
-                // what dns_retry keeps restarting, and unavailable local rules
-                // explain why it was not restarted; keep those messages.
                 if self.running.is_none() && self.startup.is_none() && self.local_error.is_none() {
                     self.last_error = Some(format!("Apply failed; DNS is stopped: {error:#}"));
                 }
@@ -969,7 +896,6 @@ impl Manager {
         self.publish_observation();
     }
 
-    /// Called once after management mutations are closed and drained.
     pub async fn terminal_shutdown(&mut self) {
         self.filters.close();
         let stopped = match self.running.take() {

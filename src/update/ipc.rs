@@ -1,4 +1,4 @@
-//! Bounded local protocol. Root's journal, never these requests, owns installation.
+//! Bounded local protocol.
 use serde::{Deserialize, Serialize};
 
 use super::{build_info::BuildInfo, contract::valid_sha256, reader::DownloadTuple};
@@ -8,10 +8,6 @@ pub const INBOX_NAME: &str = "update-request.json";
 pub const INBOX_LIMIT: usize = 8192;
 pub const STATUS_LIMIT: usize = 32768;
 
-/// What `parins --manage --check` read. The running version and the candidate
-/// must report the same inputs; only digests of the inputs themselves appear,
-/// never encodings derived by one version, so a new version that encodes its
-/// policy differently still matches.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckReport {
@@ -19,17 +15,12 @@ pub struct CheckReport {
     pub inputs: CheckInputs,
 }
 
-/// SHA-256 of each input category, as lowercase hex.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckInputs {
-    /// The saved TOML.
     pub configuration: String,
-    /// Rule files outside the TOML (`filter_file`).
     pub rule_files: String,
-    /// Each selected subscription source's stored content and the catalog revision.
     pub subscriptions: String,
-    /// DoT, DoH and DoQ certificate chains.
     pub certificates: String,
     pub upstream_ca: String,
 }
@@ -48,7 +39,6 @@ impl CheckReport {
             .into_iter()
             .all(|digest| valid_sha256(digest))
     }
-    /// Input categories that differ, for the preflight log; never their contents.
     pub fn differences(&self, other: &Self) -> Vec<&'static str> {
         let (a, b) = (&self.inputs, &other.inputs);
         [
@@ -66,7 +56,6 @@ impl CheckReport {
     }
 }
 
-/// Exact stdout contract of `parins --manage --check`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedCheckOutput {
@@ -274,8 +263,6 @@ pub struct PublicStatus {
     pub capability: Capability,
     pub active_operation: Option<OperationStatus>,
     pub last_operation: Option<OperationStatus>,
-    /// Omitted when empty: after an installer rollback the new helper serves an
-    /// older application whose status schema rejects unknown fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_terminal: Option<OperationStatus>,
     pub pending_launch: Option<PendingLaunch>,
@@ -319,7 +306,6 @@ mod tests {
 
     #[test]
     fn status_without_additional_terminal_stays_readable_by_previous_schema() {
-        // Top-level schema of v0.1.6 PublicStatus, which has no additional_terminal.
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         #[allow(dead_code)]

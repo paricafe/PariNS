@@ -1,7 +1,6 @@
 import { useId, useState, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 
-/** Collapsed-by-default section with an animated height (CSS grid rows). */
 export function Disclosure({ title, children, defaultOpen = false }: { title: string; children: ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const id = useId();

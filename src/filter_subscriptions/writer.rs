@@ -71,8 +71,6 @@ impl AsyncWrite for StagingWriter {
             #[cfg(test)]
             let before_write = self.before_write.take();
             self.pending = Some(tokio::task::spawn_blocking(move || {
-                // A dropped JoinHandle does not stop blocking IO. Retain ownership
-                // here, not only on the cancellable async caller or Store.
                 let _lease = lease;
                 #[cfg(test)]
                 if let Some(before_write) = before_write {
@@ -89,7 +87,6 @@ impl AsyncWrite for StagingWriter {
         if self.pending.is_some() {
             ready!(self.poll_pending(cx))?;
         }
-        // std::fs::File has no userspace buffering; Store owns fsync/commit.
         Poll::Ready(Ok(()))
     }
 
@@ -132,7 +129,6 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         writer.before_write = Some(Box::new(move || {
             let _ = started_tx.send(());
-            // Even a failed assertion cannot strand the runtime's blocking pool.
             let _ = release_rx.recv_timeout(std::time::Duration::from_secs(5));
         }));
         let mut write = Box::pin(writer.write_all(b"cancelled.test\n"));

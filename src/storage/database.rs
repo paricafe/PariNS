@@ -34,13 +34,10 @@ struct Database {
     settings_pending: bool,
     age_pending: bool,
     reset_clock_ms: u64,
-    /// Records queued before the asynchronous open learned the stored epoch
-    /// belong to it until the first clear after open.
     opened_log_epoch: u64,
     coverage: Coverage,
 }
 
-/// SQLite VM operations between cancellation checks of the existing-file check.
 const CHECK_PROGRESS_OPS: std::ffi::c_int = if cfg!(test) { 1 } else { 1000 };
 #[cfg(test)]
 pub(super) static CHECK_DELAYS: Mutex<Vec<(PathBuf, Duration)>> = Mutex::new(Vec::new());
@@ -66,8 +63,6 @@ pub(super) fn run(
         Some((dir, lock)) => (Some(dir), Some(lock)),
         None => (None, None),
     };
-    // An existing database is opened and checked off the worker loop, so
-    // startup never waits for it and controls are answered meanwhile.
     let mut checking = None;
     let mut database = match prepare(directory.as_deref()) {
         Ok(true) => opened(&shared, Database::open(directory.clone(), true, &shared)),
@@ -96,17 +91,12 @@ pub(super) fn run(
         if let Some(join) = checking.take_if(|join| join.is_finished()) {
             database = finish_check(&shared, join);
         }
-        // One bounded control operation between batches prevents log floods
-        // from starving management, without allowing controls to starve writes.
         if let Ok(command) = commands.try_recv() {
             if let Command::Shutdown(reply) = command {
                 shared.stop.store(true, Ordering::Release);
-                // Stop cancels an unfinished check at its next progress callback.
                 if let Some(join) = checking.take() {
                     database = finish_check(&shared, join);
                 }
-                // The terminal flush already cleaned up; closing commits only
-                // what arrived since.
                 let result = if let Some(db) = database.as_mut() {
                     let result = db
                         .drain(&shared, &logs, Instant::now() + Duration::from_secs(8))
@@ -118,7 +108,6 @@ pub(super) fn run(
                     Err(Error::StorageUnavailable("database unavailable".into()))
                 };
                 drop(database);
-                // close alone retains flock while a duplicated/inherited descriptor lives.
                 let unlocked = _lock
                     .as_ref()
                     .map_or(Ok(()), File::unlock)
@@ -171,8 +160,6 @@ pub(super) fn run(
                 }
                 let refreshed = db.refresh_log_state(&shared);
                 db.report_error(&shared, &refreshed);
-                // Publish the outcome at once: a stale capacity_pending would
-                // repeat the cleanup on every pass until the next refresh.
                 db.update_status(&shared);
                 last_status = Instant::now();
             }
@@ -212,8 +199,6 @@ pub(super) fn run(
     }
 }
 
-/// Publishes the outcome on the worker, once it owns the database: an earlier
-/// "healthy" from the checking thread would admit commands it cannot yet serve.
 fn opened(shared: &Shared, result: Result<Database>) -> Option<Database> {
     match result {
         Ok(database) => {
@@ -239,7 +224,6 @@ fn finish_check(shared: &Shared, join: thread::JoinHandle<Result<Database>>) -> 
     });
     opened(shared, result)
 }
-/// Creates a missing database file; returns whether it is new and empty.
 fn prepare(directory: Option<&Path>) -> Result<bool> {
     let Some(dir) = directory else {
         return Ok(true);
@@ -353,16 +337,11 @@ impl Database {
         conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 64)?;
         conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 64)?;
         conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
-        // A crash during the first commit can leave a non-empty file whose hot
-        // journal rolls it back to no tables on open. Such a file holds no data,
-        // so it is initialized like a new one instead of failing the format check.
         let fresh = fresh
             || conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
                 r.get::<_, i64>(0)
             })? == 0;
         if !fresh {
-            // No deadline: a large file on a cold page cache may take long.
-            // Only process shutdown interrupts the check.
             let cancel = shared.clone();
             #[cfg(test)]
             let hold = test_check_delay(directory.as_deref()).map(|d| Instant::now() + d);
@@ -401,20 +380,16 @@ impl Database {
             conn.progress_handler(0, None::<fn() -> bool>)?;
         }
         if fresh {
-            // WAL initializes the database header, so set auto-vacuum first.
             conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
         }
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-2048; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576;")?;
         if fresh {
-            // auto_vacuum must precede the first table. Tables and the format
-            // row commit together, so a crash never leaves an unformatted file.
             let tx = conn.transaction()?;
             tx.execute_batch(SCHEMA)?;
             tx.prepare_cached("INSERT INTO metadata VALUES('format',?1)")?
                 .execute([DATABASE_FORMAT])?;
             tx.commit()?;
         }
-        // Read stored state first; publish it below under short locks.
         let lower = epoch(&conn, "clock_lower_ms")?;
         let log_epoch = epoch(&conn, "log_epoch")?;
         let totals_epoch = epoch(&conn, "totals_epoch")?;
@@ -460,8 +435,6 @@ impl Database {
             let mut owner = shared.stats.lock().expect("statistics owner");
             owner.totals_epoch = totals_epoch;
             owner.history_epoch = history_epoch;
-            // Points sampled while checking belong to the stored epochs. A
-            // checkpoint taken before the stored base was loaded must not persist.
             for point in &mut owner.points {
                 point.history_epoch = history_epoch;
                 point.totals_epoch = totals_epoch;
@@ -564,8 +537,6 @@ impl Database {
     }
     fn set_page_cap(&self) -> Result<()> {
         let (size, count, _) = self.page_info()?;
-        // SQLite cannot reduce below current size. Freeze growth until bounded
-        // cleanup reaches the desired cap; status retains capacity_pending.
         let cap = (self
             .settings
             .storage
@@ -620,7 +591,6 @@ impl Database {
         shared.latest_log_id.store(latest, Ordering::Release);
         Ok(())
     }
-    /// Capacity trims on the write path never vacuum the database.
     fn trim_capacity(&mut self) -> Result<()> {
         let now = self.cleanup_now();
         let tx = self.conn.transaction()?;
@@ -665,7 +635,6 @@ impl Database {
             record_cleanup(&tx, CleanupReason::DatabaseLimit, removed as u64, now)?;
             tx.commit()?;
         }
-        // Reclaim the WAL before treating the database itself as over capacity.
         self.checkpoint(true)?;
         Ok(())
     }
@@ -765,8 +734,6 @@ impl Database {
             self.refresh_log_state(shared)?;
             self.committed(shared);
         }
-        // Age expiry waits for the cleanup interval; only a write that leaves
-        // a bound exceeded, or the file near its cap, cleans up right away.
         result.and_then(|_| {
             if self.capacity_pressure()? {
                 self.trim_capacity()?;
@@ -851,8 +818,6 @@ impl Database {
         if let Some(cp) = latest
             && cp.run_id == self.run_id
         {
-            // Adopt this exclusive process's run only as part of its first
-            // committed checkpoint. Merely opening history need not write it.
             tx.prepare_cached("UPDATE statistics_totals SET run_id=?1,seq=0 WHERE id=1 AND epoch=?2 AND run_id<>?1")?.execute(params![cp.run_id,cp.totals.epoch])?;
             tx.prepare_cached("UPDATE statistics_totals SET since_ms=?1,seq=?2,payload=?3 WHERE id=1 AND epoch=?4 AND run_id=?5 AND seq<?2")?.execute( params![cp.totals.since_ms,cp.seq,serde_json::to_vec(&cp.totals)?,cp.totals.epoch,cp.run_id])?;
         }
@@ -944,9 +909,6 @@ impl Database {
             Command::Shutdown(_) => unreachable!("run handles shutdown"),
         }
     }
-    /// Commits every queued record and a final statistics checkpoint. An
-    /// explicit flush then cleans up, leaving the stored data within its
-    /// bounds, including age retention.
     fn drain(
         &mut self,
         shared: &Shared,
@@ -971,7 +933,6 @@ impl Database {
         }
         Ok(())
     }
-    /// A slow scan yields to writes and uses the existing busy response.
     fn bounded<T>(&mut self, budget: Duration, read: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
         let deadline = Instant::now() + budget;
         self.conn
@@ -980,7 +941,6 @@ impl Database {
         self.conn.progress_handler(0, None::<fn() -> bool>)?;
         result
     }
-    /// Newest first; returns at most `limit` entries plus one to detect more.
     fn select(
         &self,
         before_id: Option<u64>,
@@ -1016,7 +976,6 @@ impl Database {
             }
         }
         if let Some(search) = filter.search.filter(|s| !s.is_empty()) {
-            // Reuse one numbered parameter for the four searchable columns.
             let p = values.len() + 1;
             clauses.push(format!("(instr(lower(name),?{p})>0 OR instr(client,?{p})>0 OR instr(lower(coalesce(upstream,'')),?{p})>0 OR instr(lower(qtype),?{p})>0)"));
             values.push(search.to_ascii_lowercase().into());
@@ -1036,8 +995,6 @@ impl Database {
                 limit + 1
             )
         };
-        // Bound each cache-key lookup before merging. A single IN query sorts
-        // every cached row because its index starts with cache, not id.
         let sql = if cached {
             let branches = ["cache='fresh'", "cache='stale'", "cache='servfail'"]
                 .map(|term| format!("SELECT id,payload FROM ({})", select(Some(term))));
@@ -1102,7 +1059,6 @@ impl Database {
                     .query_row("SELECT COALESCE(MAX(id),0) FROM query_log", [], |r| {
                         r.get::<_, i64>(0)
                     })? as u64;
-            // Without a cursor the page already holds history: start from now.
             let Some(after_id) = after_id else {
                 return Ok(Newer {
                     entries: Vec::new(),
@@ -1145,15 +1101,10 @@ impl Database {
         })
     }
     fn reset_totals(&mut self, shared: &Shared, expected: u64) -> Result<ClearResult> {
-        // The worker serializes resets; capture a cut under the sampler lock,
-        // but never hold that lock over IO. During commit the sampler may queue
-        // old-epoch checkpoints, which reset_committed discards after success.
         let (cut, since, run_id) = {
             let owner = shared.stats.lock().expect("statistics owner");
             (shared.metrics.snapshot(), unix_ms(), owner.run_id.clone())
         };
-        // The reset schedule and retention floor share one logical clock.
-        // Displayed since_ms remains wall time, which may have moved backwards.
         let reset_clock_ms = self.cleanup_now();
         let tx = self.conn.transaction()?;
         let next = check_epoch(&tx, "totals_epoch", expected)?;
@@ -1275,7 +1226,6 @@ impl Database {
             s.error = Some(error.clone());
         }
     }
-    /// A write ends a degraded state, but pending cleanup stays visible.
     fn committed(&self, shared: &Shared) {
         let mut status = shared.status.lock().expect("storage status");
         status.last_commit_at_ms = Some(unix_ms());
@@ -1287,7 +1237,6 @@ impl Database {
         .into();
         status.error = None;
     }
-    /// Reads the database and files first, then publishes under one short lock.
     fn update_status(&mut self, shared: &Shared) {
         let pages = self.page_info().ok();
         let files = self.directory.as_ref().map(|dir| {

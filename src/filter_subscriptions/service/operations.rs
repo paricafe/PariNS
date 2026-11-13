@@ -160,8 +160,6 @@ impl Service {
         };
         let id = format!("{:016x}", rand::random::<u64>());
         drop(state);
-        // begin is an admission transaction under the caller's mutation/freeze
-        // gate; execute below never changes catalog authority.
         {
             let mut locked = self.store.lock().unwrap();
             if locked.is_none() {
@@ -304,8 +302,6 @@ impl Service {
                             error_line: failure.line,
                         },
                     ));
-                    // A failed source keeps its old selection. Other successes
-                    // form one complete aggregate, never a partial compile.
                 }
             }
         }
@@ -451,8 +447,6 @@ impl Service {
                             stats.decoded_bytes as u64 == downloaded.bytes,
                             Failure::new("subscription_parse")
                         );
-                        // Full parse/limits before object installation; aggregate
-                        // sorting is performed only once in the complete build.
                         Ok(Some(PreparedMetadata {
                             fingerprint: source.fingerprint,
                             sha256: downloaded.sha256,
@@ -503,8 +497,6 @@ impl Service {
             let store = locked
                 .as_mut()
                 .context(Failure::new("subscription_storage_unavailable"))?;
-            // Parent already holds its mutation/freeze gate. State excludes
-            // close/config-revision changes through the rename+Arc commit point.
             let mut state = owner.state.lock().unwrap();
             check_work(&owner, candidate.work.deadline)?;
             ensure!(
@@ -558,12 +550,10 @@ impl Service {
             }
             state.recent = state.operation.take();
             state.active_request = None;
-            if outcome == super::super::store::CommitOutcome::CommittedUncertain {
-                // Current policy is committed. GC is paused by Store until a
-                // future worker reconciles the actual durable authority.
-                if let Some(operation) = state.recent.as_mut() {
-                    operation.error = Some(Failure::new("subscription_durability_uncertain"));
-                }
+            if outcome == super::super::store::CommitOutcome::CommittedUncertain
+                && let Some(operation) = state.recent.as_mut()
+            {
+                operation.error = Some(Failure::new("subscription_durability_uncertain"));
             }
             drop(state);
             owner.observe_store(store);
@@ -780,8 +770,6 @@ impl Service {
                 automatic: true,
             };
             let owner = self.clone();
-            // Missing startup sources are downloaded even with auto_update off.
-            // Admit that real download through the same worker and GC-root gate.
             let begin =
                 tokio::task::spawn_blocking(move || owner.begin_sync(request, true)).await??;
             let Some(mut work) = begin.work else {

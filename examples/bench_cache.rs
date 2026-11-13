@@ -1,5 +1,4 @@
 //! In-process cache operations per second with 1, 2 and 4 workers.
-//! Run `cargo run --release --example bench_cache -- --seconds 1 --repeats 3`.
 
 use std::{
     hint::black_box,
@@ -18,13 +17,11 @@ use hickory_proto::{
 };
 use parins::{cache::Cache, config::CacheConfig, ecs::Scope, protocol};
 
-// Calls the cache the way the resolver does.
 struct SharedCache(Cache);
 impl SharedCache {
     fn new() -> Self {
         Self(Cache::new(benchmark_config()))
     }
-    // The resolver's calls, including their decision diagnostics.
     fn insert(&self, fixture: &Fixture, now: Instant) {
         self.0.insert_decision_if_epoch(
             &fixture.query,
@@ -152,7 +149,6 @@ fn run(workload: Workload, workers: usize, duration: Duration) {
             cache.insert(fixture, inserted);
         }
     }
-    // Synthetic time makes TTL checks identical even if the machine is busy.
     let lookup_time = inserted + Duration::from_secs(5);
     let barrier = Arc::new(Barrier::new(workers + 1));
     let threads = (0..workers)

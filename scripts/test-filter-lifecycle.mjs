@@ -1,4 +1,4 @@
-// Disposable installed-service capacity fixture. Never log configuration or auth.
+// Disposable installed-service capacity fixture.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -157,7 +157,7 @@ function sourceConditional(binding) {
     content_sha256: binding?.content_sha256 ?? null };
 }
 function sourceBodySha(status, encoding, bytes) {
-  if (status !== 200) return null; // In particular, 304 never proves the next fixture is ready.
+  if (status !== 200) return null;
   assert(bytes.length <= 4096, 'bounded fixture transfer');
   const normalized = (encoding ?? 'identity').toLowerCase();
   if (!['gzip', 'identity'].includes(normalized)) throw fail('source_fixture_encoding');
@@ -193,7 +193,6 @@ async function sourcePeer(binding, address, evidence, timeoutMs) {
     return await new Promise((resolve, reject) => {
       const req = https.request(url, { method: 'GET', agent: false, signal,
         servername: url.hostname, ALPNProtocols: ['http/1.1'], autoSelectFamily: false,
-        // Match async DNS so early connection errors reach HTTPS request listeners.
         lookup: (_host, _options, callback) => process.nextTick(callback, null, address.address, address.family),
         headers: sourceHeaders(binding) }, res => {
         evidence.probe_http_status = res.statusCode;
@@ -230,7 +229,6 @@ async function sourceProbe(binding, evidence, deadline) {
       new Promise((_, reject) => { timeout = setTimeout(() => reject(fail('source_probe_dns_timeout')), Math.min(10000, remaining)); })]);
   } finally { clearTimeout(timeout); }
   assert(addresses.length > 0 && addresses.length <= 16);
-  // One OS DNS snapshot per scan; never combine successes from different scans.
   const unique = [...new Map(addresses.map(address => [`${address.family}:${address.address}`, address])).values()];
   evidence.resolved_addresses = unique; evidence.peers = [];
   for (const address of unique) {
@@ -239,7 +237,6 @@ async function sourceProbe(binding, evidence, deadline) {
     try { peer.decoded_sha256 = await sourcePeer(binding, address, peer, deadline - performance.now()); }
     catch (error) {
       peer.error = safeCode(error.code);
-      // Only a failed TCP connection is unreachable. TLS/HTTP/decode failure cannot be excluded.
       if (peer.tcp_connected) throw error;
       if (performance.now() >= deadline) throw fail('source_fixture_readiness_timeout');
     }
@@ -377,8 +374,6 @@ function mainPid() {
   return Number(execFileSync('systemctl', ['show', '--property=MainPID', '--value', UNIT], { encoding: 'utf8' }).trim());
 }
 function privileged(pid, ...args) {
-  // Rename existing inodes, never create an owner-dependent directory. If startup
-  // failed and its namespace vanished, root can restore the same exact host path.
   assert(Number.isSafeInteger(pid) && pid >= 0);
   return execFileSync('sudo', ['-n', ...(pid > 1 ? ['nsenter', `--target=${pid}`, '--mount', '--root', '--'] : []), ...args],
     { encoding: 'utf8', maxBuffer: MiB, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, LC_ALL: 'C' } }).trim();
@@ -489,7 +484,6 @@ async function updateEvidence({ round, current, next, runtime, upstream, evidenc
   evidence.push(attempt);
   const hold = upstream.hold(name, `lifecycle-${current.toLowerCase()}.test`);
   const heldStarted = performance.now();
-  // Attach rejection immediately: a failed held request must never be unhandled.
   let heldFailure; const held = probe(runtime.port, name, true, SLO.server_deadline_ms)
     .catch(error => { heldFailure = error; });
   let released = false;
@@ -528,7 +522,7 @@ async function updateEvidence({ round, current, next, runtime, upstream, evidenc
       before: selected(before), held: selected(pinned), released: selected(after) };
   } catch (error) { attempt.error = safeCode(error.code); throw error; }
   finally {
-    if (!released) { try { hold.release(); } catch { /* No upstream arrival; held request is bounded. */ } }
+    if (!released) { try { hold.release(); } catch { } }
     await held;
   }
 }

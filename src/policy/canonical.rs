@@ -1,11 +1,9 @@
-//! Bounded streaming rule parser for local and subscription rules. It produces
-//! canonical logical rules, which `radix` builds into the lookup index.
+//! Bounded streaming rule parser for local and subscription rules.
 use hickory_proto::rr::Name;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{io::BufRead, mem::size_of, net::IpAddr};
 
-/// Included in source fingerprints; not an index serialization version.
 pub const PARSER_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +70,6 @@ const _: () = assert!(size_of::<Record>() == 16);
 pub struct Limits {
     pub max_rules: usize,
     pub max_memory_bytes: usize,
-    /// Active, retired, local-base and caller-owned IO capacity, not RSS.
     pub retained_bytes: usize,
 }
 impl Default for Limits {
@@ -109,8 +106,6 @@ impl Budget {
     }
 }
 
-/// Allocate a separate explicitly-sized buffer: the old and new capacities are
-/// charged together *before* allocation, including growth that will later shrink.
 pub(super) fn grow<T>(
     buffer: &mut Vec<T>,
     needed: usize,
@@ -200,7 +195,6 @@ impl Key {
     }
 }
 
-/// The longest kept suffix rule covering `bytes`, searched at each label boundary.
 fn longest_cover(arena: &[u8], suffixes: &[Record], bytes: &[u8]) -> Option<Entry> {
     let mut boundaries = [0usize; 128];
     let (mut count, mut position) = (0, 0);
@@ -225,10 +219,7 @@ pub struct Builder {
     pub(super) arena: Vec<u8>,
     pub(super) records: Vec<Record>,
     pub(super) budget: Budget,
-    /// Slots below this are local rules, which outrank subscription rules.
     pub(super) local_slots: u16,
-    /// Answer class of each slot: slots with one class answer alike. Empty
-    /// means every slot answers alike.
     pub(super) classes: Vec<u16>,
     max_rules: usize,
     decoded_bytes: usize,
@@ -245,11 +236,9 @@ pub struct SourceStats {
     pub lines: u64,
     pub input_rules: usize,
     pub decoded_bytes: usize,
-    /// Exact repeated (kind, normalized domain) rules within this source.
     pub duplicates: usize,
 }
 impl Builder {
-    /// Local text participates in the aggregate decoded-input budget too.
     pub(crate) fn account_local_text(&mut self, bytes: usize) -> Result<(), Error> {
         if let Some(error) = self.failed {
             return Err(error);
@@ -295,11 +284,9 @@ impl Builder {
             failed: None,
         })
     }
-    /// Answer class of each slot, from `Policy::aggregate_classes`.
     pub(crate) fn set_classes(&mut self, classes: Vec<u16>) {
         self.classes = classes;
     }
-    /// Slots are assigned by the caller: local first, then configured source order.
     pub fn add(&mut self, domain: &str, group: Group, source_slot: u16) -> Result<(), Error> {
         if let Some(error) = self.failed {
             return Err(error);
@@ -360,8 +347,6 @@ impl Builder {
                 .then_with(|| key(arena, a.entry).cmp(key(arena, b.entry)))
                 .then(a.entry.source_slot.cmp(&b.entry.source_slot))
         });
-        // Sorting is non-preemptible; its owner retains the memory lease until
-        // this worker really exits, including when its caller is cancelled.
         check()?;
         let mut ranges = [0..0, 0..0, 0..0, 0..0];
         let mut read = 0;
@@ -370,9 +355,6 @@ impl Builder {
         let classes = &self.classes;
         let uniform = classes.windows(2).all(|pair| pair[0] == pair[1]);
         let class = |slot: u16| classes.get(usize::from(slot)).copied().unwrap_or(0);
-        // A covered block rule is dropped only when it cannot change the answer:
-        // every slot answers alike, a local rule covers a subscription rule, or
-        // the covering rule (the longest such suffix) has its class and layer.
         let covers = |group: usize, cover: Entry, entry: Entry| {
             let local = |entry: Entry| entry.source_slot < local_slots;
             group < 2
@@ -382,11 +364,8 @@ impl Builder {
                     && local(cover) == local(entry))
         };
         for group in 0..4 {
-            // Kept suffixes that cover the current key, longest last. Keys are
-            // sorted, so an entry stops covering once a later key leaves it.
             let mut ancestors = [None::<Entry>; 128];
             let mut depth = 0;
-            // Only the lowest slot of an identical key survives, kept or not.
             let mut last: Option<Entry> = None;
             let start = write;
             while read < self.records.len() && self.records[read].group as usize == group {
@@ -414,7 +393,6 @@ impl Builder {
                 };
                 let redundant = duplicate || cover.is_some_and(|cover| covers(group, cover, entry));
                 if !redundant && group % 2 == 0 {
-                    // A label-aligned key nests at most 127 suffixes deep.
                     ancestors[depth] = Some(entry);
                     depth += 1;
                 }
@@ -446,8 +424,6 @@ impl Builder {
         })
     }
 
-    /// Reads one bounded line at a time; caller accounts for its BufRead capacity
-    /// in retained_bytes. Errors poison this candidate; it cannot be published.
     pub fn parse_source(
         &mut self,
         mut reader: impl BufRead,
@@ -622,7 +598,6 @@ fn duplicate_count(records: &[Record], arena: &[u8]) -> usize {
         .count()
 }
 
-/// Canonical logical rules, the input of `radix::Index::build`.
 pub struct Canonical {
     pub(super) arena: Vec<u8>,
     pub(super) records: Vec<Record>,

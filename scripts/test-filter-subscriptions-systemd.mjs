@@ -1,5 +1,4 @@
-// Real installed service only. Auth stays in memory; stdout contains evidence,
-// never response bodies, credentials, cookies or source content.
+// Disposable installed-service acceptance for filter subscriptions.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -105,8 +104,6 @@ function privilegedRead(file, maxBuffer = 256 * 1024) {
 }
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function stagingEnospcProof(trace) {
-  // -f prefixes TIDs, -yy resolves the FD, -s0 omits payload. Never emit raw
-  // trace lines; require the exact owned staging filename and Linux errno.
   const pattern = /^(?:\d+\s+)?write\(\d+<\/var\/lib\/(?:private\/)?parins-managed\/filter-subscriptions\/staging\/download-[a-f0-9]{64}\.tmp(?: \(deleted\))?>, [^\r\n]*, ([1-9]\d*)\)\s+= -1 ENOSPC(?:\s|\()/gm;
   const writes = [...trace.matchAll(pattern)];
   assert(writes.length > 0, 'real download write must return ENOSPC');
@@ -172,8 +169,6 @@ async function blocked(evidence) {
 async function run() {
 await request('POST', '/api/login', JSON.parse(await readFile(path.join(fixture, 'credentials.json'), 'utf8')));
 if (stage === 'activate') {
-  // Installer readiness and app/root reconciliation are distinct. Wait only via
-  // reads before the first mutation; never replay prepare or wait in frozen tests.
   const installation_reconciliation = await waitForInstallationReconciliation();
   const config = await request('GET', '/api/config');
   assert(!config.toml.includes('[filter_subscriptions]') && !config.toml.includes('[updates]'), 'fresh fixture configuration');
@@ -200,9 +195,6 @@ if (stage === 'activate') {
     sha256: prepared.sha256, fingerprint: active.fingerprint, domain,
     config_revision: state.config_revision, content_revision: state.content_revision,
     input_rules: state.input_rules, index_rules: state.index_rules };
-  // Config owns activation. Its successful commit has no second catalog commit:
-  // GC roots are synchronized at the next worker admission or non-frozen open.
-  // Keep the root assertion for the following actual restart/refresh stages.
   selected(evidence, false);
   await blocked(evidence);
   await writeFile(evidencePath, JSON.stringify(evidence) + '\n', { mode: 0o600, flag: 'wx' });
@@ -215,7 +207,6 @@ if (stage === 'activate') {
   assert.equal(before.input_rules, evidence.input_rules);
   const active = before.sources.find(item => item.id === source.id);
   assert(active?.active && active.ready);
-  // An update freeze is reported as status; every other stage is available.
   assert.equal(before.unavailable_reason, stage === 'frozen' ? 'update_in_progress' : null);
   selected(evidence);
   await blocked(evidence);
@@ -235,8 +226,6 @@ if (stage === 'activate') {
       assert.equal(previous.write_proof.errno, 'ENOSPC');
       assert.equal(before.generation, previous.generation);
     }
-    // New URL identity has no validator, so the real reader must consume a 200
-    // body. A 304 or network failure cannot produce the required write trace.
     const result = await operation('/api/filter/subscriptions/prepare',
       { source: draft }, stage === 'enospc' ? 'failed' : 'succeeded');
     assert.notEqual(result.fingerprint, evidence.fingerprint);
@@ -280,8 +269,6 @@ if (stage === 'activate') {
     assert.equal(digest(privilegedRead(`${directory}/catalog.json`)), digest(catalog));
     assert.equal((await snapshot()).operation, null);
   } else if (stage === 'offline' || stage === 'unfrozen') {
-    // Respect the real per-source 60s manual refresh budget. No mutation retries
-    // or clock/catalog rewrites are used to bypass it; auto_update is disabled.
     const due = (active.last_attempt ?? 0) * 1000 + 61000;
     assert(due <= Date.now() + 62000, 'fixture source clock is not in the future');
     while (Date.now() < due) await delay(Math.min(1000, due - Date.now()));
@@ -313,7 +300,6 @@ try {
   await writeFile(artifact, JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify(result));
 } catch (error) {
-  // Error messages can contain assertion values; only store a stable identifier.
   const code = safeCode(error.code, 'fixture_failed');
   const location = String(error.stack).match(/test-filter-subscriptions-systemd\.mjs:\d+:\d+/)?.[0] ?? 'unknown';
   const http = httpDiagnostic(error.http?.method, error.http?.api_path,

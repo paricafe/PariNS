@@ -3,10 +3,6 @@ import { ExpandRow } from '../../components/ExpandRow';
 import { diagnosticLabel } from './diagnostics';
 import type { StorageStatus } from './storage';
 
-/**
- * Key storage facts first (space used, disk free, record range, losses);
- * every raw counter stays available under “Detailed counts”.
- */
 export function StorageStatusPanel({ status, language, compact = false }: { status: StorageStatus; language: Language; compact?: boolean }) {
   const t = (key: string) => translate(`storage.${key}`, language);
   const r = (key: string) => translate(`reliability.${key}`, language);
@@ -17,7 +13,6 @@ export function StorageStatusPanel({ status, language, compact = false }: { stat
   const used = status.database_bytes + status.journal_bytes + status.cache_snapshot_bytes;
   const dropped = status.dropped_logs + status.dropped_points;
   const lastDrop = status.last_dropped_log_at_ms;
-  // Time only for today; otherwise include the date.
   const lastDropText = lastDrop === null ? null : translate('storage.lastDrop', language, {
     time: new Date(lastDrop).toDateString() === new Date().toDateString() ? formatDate(lastDrop, language, { timeStyle: 'short' }) : date(lastDrop),
   });

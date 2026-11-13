@@ -137,7 +137,6 @@ fn current_previous_and_work_pins_survive_expiry_and_pressure() {
     let pinned = prepare(&mut store, "pinned", b"pinned.test\n", 100);
     let discard = prepare(&mut store, "discard", b"discard.test\n", 100);
     let pin = store.pin(&pinned).unwrap();
-    // Test-only transaction primitive: real configuration publication is not exposed.
     let mut catalog = store.catalog.clone();
     catalog.current = vec![digest(b"current")];
     catalog.previous = vec![digest(b"previous")];
@@ -277,7 +276,6 @@ fn catalog_limits_and_duplicate_references_are_authoritative() {
     assert!(validate_catalog(&catalog).is_err());
     catalog.records.pop();
     catalog.current = vec![digest(b"absent")];
-    // Disabled/new configured sources have GC references before their first LKG.
     assert!(validate_catalog(&catalog).is_ok());
     catalog.current = vec![digest(b"one"); 2];
     assert!(validate_catalog(&catalog).is_err());
@@ -477,8 +475,6 @@ fn reopen_waits_for_authoritative_config_roots_before_expiring_preparations() {
     let (_dir, mut store) = store();
     let hash = prepare(&mut store, "new-config-source", b"new.test\n", 100);
     let path = store.dir.clone();
-    // Model Config having been saved immediately before the process stopped,
-    // without the follow-up catalog GC-root synchronization.
     drop(store);
     let now = 100 + PREPARED_TTL;
     let mut reopened = Store::open(&path, 8 * 1024 * 1024).unwrap();

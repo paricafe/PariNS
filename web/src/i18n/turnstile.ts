@@ -1,4 +1,3 @@
-/** Cloudflare Turnstile on the sign-in page and in Account & security. */
 export const turnstileMessages = {
   loopbackLogin: ['从本机（回环地址，例如 SSH 隧道）登录，不需要人机验证。', 'Signing in from this machine (loopback, such as an SSH tunnel) skips human verification.'],
   widgetFailed: ['人机验证无法加载。请检查网络后刷新页面；也可以通过 SSH 隧道从本机登录。', "Human verification couldn't load. Check the network and refresh the page, or sign in from this machine through an SSH tunnel."],

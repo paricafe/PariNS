@@ -17,7 +17,6 @@ export interface OverviewPageProps {
   api: ApiClient;
   language: Language;
   onOpenDns: () => void;
-  /** Presentation only: number of configured upstream servers, when known. */
   upstreamCount?: number | null;
 }
 
@@ -36,10 +35,6 @@ function uptime(seconds: number | null, language: Language): string {
   return minutes > 0 ? translate("shell.durationMinutes", language, { minutes }) : translate("shell.durationJustNow", language);
 }
 
-/**
- * Display-only signal: most upstream operations failed over roughly the last minute.
- * Null until two samples give a delta, so a fresh page does not claim upstreams are healthy.
- */
 function upstreamTrouble(samples: readonly UpstreamSample[]): boolean | null {
   if (samples.length < 2) return null;
   const first = samples[0]; const last = samples[samples.length - 1];
@@ -99,7 +94,6 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [query, setQuery] = useState<Record<string, string>>({ range: '1h' });
-  // The range of the samples on screen: the chart keeps its axis until the new range's samples arrive.
   const [shown, setShown] = useState(query);
   const [rangeError, setRangeError] = useState(false);
   const [refreshKey, refresh] = useState(0);
@@ -122,7 +116,6 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
         const now = Date.now();
         const samples = [...upstreamSamples.current, { at: now, operations: counters.upstream_operations ?? 0, failures: counters.upstream_failures ?? 0 }]
           .filter((sample) => now - sample.at <= 65_000);
-        // A restart resets process counters; start a new window.
         upstreamSamples.current = samples.some((sample, index) => index > 0 && sample.operations < samples[index - 1].operations) ? samples.slice(-1) : samples;
         setTroubled(upstreamTrouble(upstreamSamples.current));
       } catch {
@@ -285,10 +278,8 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
   </div>;
 }
 
-/** Protocol names are the same in every language; the metrics endpoint (`admin_listen`) has a translated name. */
 const LISTENER_LABELS: Record<Exclude<ListenerStatus['kind'], 'admin'>, string> = { dns: 'DNS', dot: 'DoT', doh: 'DoH', doh3: 'DoH HTTP/3', doq: 'DoQ' };
 
-/** Listeners of a running generation that are being rebound on their own; the rest keep serving. */
 function ListenerFailures({ listeners, t }: { listeners: ListenerStatus[]; t: (key: string, params?: Record<string, string | number>) => string }) {
   return <div role="alert" className="notice error startup-failure">
     <strong>{t('shell.listenerDownTitle')}</strong>
@@ -302,7 +293,6 @@ function ListenerFailures({ listeners, t }: { listeners: ListenerStatus[]; t: (k
   </div>;
 }
 
-/** A saved configuration that cannot start (for example unreadable certificate material); Rust retries it automatically. */
 function StartupFailure({ error, t }: { error: string; t: (key: string, params?: Record<string, string | number>) => string }) {
   const conflict = /bind (.+?) (\S+:\d+): address (?:already )?in use/i.exec(error);
   return <div role="alert" className="notice error startup-failure">

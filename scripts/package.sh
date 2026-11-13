@@ -32,8 +32,6 @@ if [ -n "$version" ] || [ -n "$target" ]; then
 else
     release_mode=false
 fi
-# A standalone package always embeds assets built from this checkout. Do not
-# infer freshness from an existing, ignored web/dist directory.
 (
     cd web
     npm ci --ignore-scripts
@@ -84,5 +82,4 @@ fi
 tar -czf "target/packages/$archive.tar.gz" -C "$staging" "$archive"
 (cd target/packages && shasum -a 256 "$archive.tar.gz") > "target/packages/$archive.tar.gz.sha256"
 printf 'Package: target/packages/%s.tar.gz\nChecksum: target/packages/%s.tar.gz.sha256\n' "$archive" "$archive"
-# Leave the small staging directory for inspection; no broad cleanup command.
 printf 'Staging: %s\n' "$staging"

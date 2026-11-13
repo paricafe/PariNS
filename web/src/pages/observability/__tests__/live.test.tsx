@@ -8,7 +8,6 @@ import { STORAGE_KEYS } from "../../../appearance/preferences";
 import type { LogEntry, LogListResponse } from "../logs";
 import { storage } from './fixtures';
 
-/** Minimal server side of the live protocol; the page only sees the WebSocket API. */
 class FakeSocket {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -22,7 +21,6 @@ class FakeSocket {
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   constructor(readonly url: string) { FakeSocket.instances.push(this); }
-  /** Like the server, every subscribe has a distinct acknowledgement. */
   state: Record<string, unknown> = { type: 'state', log: 'ok', log_epoch: 3 };
   answerSubscribes = true;
   send(data: string) {
@@ -100,10 +98,8 @@ describe('LiveLogClient', () => {
     socket.open();
     socket.answerSubscribes = false;
     client.update({ interval: 3, cursor: 40, filter: { search: 'b.test', status: null, cache: null } });
-    // Still the old filter's batch: it must not be inserted under the new filter.
     socket.push({ type: 'entries', entries: [row(43, 'a.test')], cursor: 43, more: false });
     expect(received).toEqual([]);
-    // A spontaneous state from the old poll is not a subscription acknowledgement.
     socket.push({ type: 'state', log: 'ok', log_epoch: 3 });
     socket.push({ type: 'entries', entries: [row(60, 'a.test')], cursor: 60, more: false });
     expect(received).toEqual([]);
@@ -139,7 +135,7 @@ describe('LiveLogClient', () => {
     const client = new LiveLogClient(() => BINDING, events, { interval: null, cursor: null, filter: { search: null, status: null, cache: null } });
     client.start({ interval: null, cursor: null, filter: { search: null, status: null, cache: null } });
     latest().open();
-    expect(latest().ofType('refresh')).toHaveLength(0); // manual mode waits for an explicit refresh
+    expect(latest().ofType('refresh')).toHaveLength(0);
     latest().push({ type: 'entries', entries: [row(43, 'a.test')], cursor: 43, more: false });
     latest().serverClose(1001);
     expect(events.log.at(-1)).toBe('reconnecting');
@@ -147,7 +143,6 @@ describe('LiveLogClient', () => {
     expect(FakeSocket.instances).toHaveLength(1);
     vi.advanceTimersByTime(1);
     expect(FakeSocket.instances).toHaveLength(2);
-    // This connection fails before the server answers anything, so backoff grows.
     latest().answerSubscribes = false;
     latest().open();
     expect(latest().ofType('subscribe')[0]).toMatchObject({ cursor: 43 });
@@ -157,7 +152,7 @@ describe('LiveLogClient', () => {
     vi.advanceTimersByTime(1);
     expect(FakeSocket.instances).toHaveLength(3);
     for (let attempt = 0; attempt < 8; attempt += 1) { latest().serverClose(1006); vi.advanceTimersByTime(30_000); }
-    expect(FakeSocket.instances).toHaveLength(11); // capped at 30 s, still retrying
+    expect(FakeSocket.instances).toHaveLength(11);
     latest().serverClose(4401);
     expect(events.log.at(-1)).toBe('unauthorized');
     vi.advanceTimersByTime(60_000);
@@ -356,12 +351,10 @@ describe('LogsPage detail card', () => {
     expect(button.getAttribute('aria-expanded')).toBe('true');
     expect(button.getAttribute('aria-controls')).toBe(card()!.id);
     expect(card()!.textContent).toContain('example.test 60 A 192.0.2.1');
-    // Moving from the button into the card keeps it open.
     fireEvent.pointerLeave(button, { pointerType: 'mouse' });
     fireEvent.pointerEnter(card()!, { pointerType: 'mouse' });
     await wait(200);
     expect(card()).toBeTruthy();
-    // Hovering another button replaces the hover card, so only one is open.
     fireEvent.pointerLeave(card()!, { pointerType: 'mouse' });
     fireEvent.pointerEnter(detailButton('second.test'), { pointerType: 'mouse' });
     await waitFor(() => expect(detailButton('second.test').getAttribute('aria-expanded')).toBe('true'));
@@ -395,7 +388,6 @@ describe('LogsPage detail card', () => {
     const button = detailButton('example.test');
     button.focus();
     fireEvent.click(button, { detail: 0 });
-    // The scrolling body inside the dialog takes focus, so arrow keys scroll long details.
     expect(card()!.contains(document.activeElement)).toBe(true);
     expect(document.activeElement).not.toBe(button);
     fireEvent.keyDown(card()!, { key: 'Escape' });
@@ -419,7 +411,6 @@ describe('LogsPage detail card', () => {
     await mount(() => page(entries, 3));
     fireEvent.click(detailButton('example.test'), { detail: 1 });
     expect(card()).toBeTruthy();
-    // A new list without the record (here a filtered reload) closes the card.
     entries = [row(50, 'replaced.test')];
     fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
     await waitFor(() => expect(screen.getAllByText('replaced.test').length).toBeGreaterThan(0));

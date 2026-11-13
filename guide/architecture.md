@@ -39,6 +39,37 @@ ECS and AD handling run before delivery. Stale fallback belongs to each foregrou
 consumer. A transport confirms delivery only after its write succeeds; dropping an
 unconfirmed delivery records cancellation. Cache code performs no network IO.
 
+An answer that cannot be stored can still supersede an older overlapping
+answer. This includes complete, transaction-independent answers with zero TTL
+or Extended DNS Errors that make replay ineligible. The cache checks the epoch
+under the shard lock before learning ECS sharing or admitting a response.
+Capacity diagnostics copy bounded occupancy and eviction counters without
+scanning or touching entries. Resident occupancy includes entries beyond
+their fresh lifetime.
+
+### Upstream transport
+
+DoH selects GET while the encoded URI fits and POST otherwise. Both HTTP
+versions account for HTTP `Age` in response TTLs before returning the DNS
+message. HTTP/3 can fall back to verified HTTP/2 only before sending the query.
+After the HEADERS frame is written, the attempt keeps the resolver deadline
+and any failure goes through normal upstream failure handling. The pool can
+advance to another bootstrap address only after an unsent attempt. DoT's
+bounded retry on a closed reused connection is described in
+[Configuration](configuration.md#upstreams).
+
+HTTP/3 pre-send and connection failures start a cooldown from 2 to 30 seconds.
+A stream failure on an open connection leaves that cooldown alone, and an
+outcome from a replaced connection cannot modify its successor. An HTTP/3
+answer resets the cooldown. A definitive HTTP 4xx response disables HTTP/3
+until pool replacement. Statuses 408, 414, 421, 425, 429 and 431 are excluded
+from that rule.
+
+Recursive resolution acquires a global rate token and concurrency permit
+for every authoritative attempt before its server timeout starts. The
+recursor owns bounded delegation, name server and DNSSEC key caches. The
+Resolver's cache remains the answer cache for both resolution modes.
+
 ## State ownership and lifetime
 
 | State | Owner | Lifetime or change boundary |
@@ -57,6 +88,16 @@ SQLite has one worker that owns the WAL database. DNS producers enqueue bounded
 structured entries without waiting for disk or serialization. Status reads use
 cached storage observations. Per-request logs are opt-in and bounded separately
 from aggregate metrics.
+
+The subscription catalog is the durable selection authority. Validators bind
+the final URL, request representation and accepted content. The worker
+persists source objects before selecting them and never reconstructs a
+missing or corrupt catalog by scanning objects. An uncertain directory sync
+after a rename keeps both catalog versions and pauses collection until
+reconciliation. Background work rechecks the saved configuration, selected
+content, local rules and update freeze before publishing. Configuration apply
+persists its configuration before the policy swap, while background refresh
+commits catalog selection before publishing its aggregate.
 
 Management observation has no configuration or credential authority. Manager
 publishes committed lifecycle metadata and weak Resolver references to a short
@@ -126,12 +167,39 @@ background work are quiescent. Configuration apply and rollback do not save one.
 Cache save and storage flush have separate bounded budgets; storage releases its
 directory lock only after the save boundary.
 
+During listener shutdown, only streams that received a complete DNS query
+can force a stop. This requires the end of the request stream for DoH and FIN
+for DoQ. Unfinished handshakes and incomplete queries are cancelled promptly.
+Peer close notification uses at most half the shutdown grace. Outside a
+generation stop, an adapter exit drains independently and its supervisor
+rebinds the affected listener while the shared resolver and upstream pool stay
+available.
+
+TCP admission pauses briefly on descriptor or buffer exhaustion. An error
+limited to a pending connection leaves the listener available. QUIC
+admission sends a stateless Retry to an unvalidated address before taking
+a connection slot or a source budget.
+
 ## Updates and security boundaries
 
 The authenticated management API applies Host/Origin checks and an HttpOnly Cookie
 plus an in-memory session binding. The browser never persists that binding,
 credentials or configuration drafts. Live-log sockets have their own admission,
 authentication, resource limits and shutdown owner.
+
+The live log endpoint requires Origin and the session Cookie before upgrade.
+The first message supplies the in-memory binding. Failure to authenticate
+closes with 4401, session revocation or expiration closes with 4403, and idle
+timeout closes with 4408. The management shutdown drain closes sockets with
+1001. The storage worker owns polls, and each accepted subscription receives
+a `subscribed` acknowledgement before its entries. Independent `state`
+updates cannot acknowledge a change of subscription.
+
+Authentication attempt budgets use the socket peer, grouping IPv6 addresses
+by /64 and treating IPv4-mapped peers as IPv4. Password hashing has a
+separate global concurrency budget. A cancelled caller's blocking hash
+holds its permit until the computation finishes. Credential changes
+preserve the saved configuration revision and revoke sessions at commit.
 
 Changing the management origin navigates to the new console document and revokes
 existing sessions. Cross-site entry permits only a top-level `GET /` navigation
@@ -145,3 +213,12 @@ fixed installation paths; its journal is the installed-identity authority. It
 does not own DNS, configuration or runtime databases and never executes a
 candidate as root. Changes to this helper contract require separate release and
 installation compatibility decisions.
+
+A matching terminal fence and installed identity resolve outstanding commit
+intent. A Stage refusal is recorded under its operation ID and phase nonce,
+including refusals before an operation begins. This lets the application
+reconcile without replaying Stage. A matching Commit that fails a
+pre-installation check records failure before returning. Boot rollback
+publishes the restored launch for readiness verification. A
+`manual_required` operation remains open until a reinstallation proves
+readiness, and the journal keeps its terminal fences across registration.

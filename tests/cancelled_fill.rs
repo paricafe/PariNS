@@ -1,5 +1,5 @@
-//! A caller that leaves after its upstream query was sent lets the query finish
-//! in the bounded refresh budget, only to fill the cache.
+//! A caller that leaves after its upstream query was sent lets the query finish in the
+//! bounded refresh budget, only to fill the cache.
 mod common;
 
 use std::{net::IpAddr, sync::Arc, time::Duration};
@@ -23,7 +23,6 @@ fn config(servers: Vec<String>) -> Config {
     config
 }
 
-/// Starts a resolution and returns once `upstream` received its query.
 async fn started(
     resolver: &Arc<Resolver>,
     name: &str,
@@ -81,7 +80,6 @@ fn counter(resolver: &Resolver, name: &str) -> u64 {
 
 #[tokio::test]
 async fn unsent_work_is_cancelled_with_its_caller() {
-    // The upstream accepts TCP but never answers the TLS handshake.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let resolver = Arc::new(Resolver::from_config(&config(vec![format!(
         "tls://{}",
@@ -117,7 +115,6 @@ async fn work_over_the_refresh_budget_is_cancelled() {
     let (second, _, _) = started(&resolver, "second.test.", &upstream).await;
     cancel(first).await;
     cancel(second).await;
-    // Only the first fill fits in the one refresh slot.
     until(|| resolver.metrics().snapshot().upstream_inflight == 1).await;
     let refresh = resolver.refresh_snapshot();
     assert_eq!((refresh.active, refresh.cancelled_fill_rejected), (1, 1));
@@ -186,7 +183,6 @@ async fn parallel_losers_are_still_cancelled_during_a_cache_fill() {
     assert_eq!(counter(&resolver, "cache_store_admitted"), 1);
     assert_eq!(counter(&resolver, "upstream_attempt_succeeded"), 1);
     assert_eq!(counter(&resolver, "upstream_attempt_cancelled"), 1);
-    // The cached answer serves the next query without upstream IO.
     let reply = resolver
         .resolve_with_transport(
             &common::query(8, "parallel.test.", RecordType::A)
@@ -221,7 +217,6 @@ async fn a_joined_caller_that_leaves_last_hands_over_the_sent_work() {
     });
     until(|| counter(&resolver, "flight_joined") == 1).await;
     cancel(leader).await;
-    // The follower still waits, so no refresh slot is taken yet.
     assert_eq!(resolver.refresh_snapshot().scheduled, 0);
     cancel(follower).await;
     assert_eq!(resolver.refresh_snapshot().active, 1);

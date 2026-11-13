@@ -7,7 +7,6 @@ const MARGIN = 8;
 const GAP = 6;
 const MAX_WIDTH = 440;
 
-/** Places the card beside its anchor in viewport coordinates: below unless above has more room, clamped to the viewport. */
 function place(card: HTMLElement, anchor: HTMLElement) {
   const box = anchor.getBoundingClientRect();
   const width = document.documentElement.clientWidth;
@@ -24,11 +23,6 @@ function place(card: HTMLElement, anchor: HTMLElement) {
   });
 }
 
-/**
- * A glass card in a body portal, so table overflow never clips it. It follows its
- * anchor on scroll and resize; the owner handles opening and closing. With `focus`
- * (opened from the keyboard) the scrolling body takes focus so arrow keys scroll it.
- */
 export function DetailPopover({ id, label, anchor, focus, onPointerEnter, onPointerLeave, onPointerDown, onKeyDown, children }: {
   id: string; label: string; anchor: HTMLElement; focus: boolean; children: ReactNode;
   onPointerEnter(event: PointerEvent): void; onPointerLeave(event: PointerEvent): void; onPointerDown(): void; onKeyDown(event: KeyboardEvent<HTMLElement>): void;

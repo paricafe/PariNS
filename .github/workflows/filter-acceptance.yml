@@ -1,6 +1,4 @@
 name: Filter acceptance
-# Expensive acceptance is rerun manually for the exact release candidate SHA.
-# Path-triggered runs validate harness changes; they do not replace normal CI.
 on:
   workflow_dispatch:
   push:
@@ -19,10 +17,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
@@ -54,7 +52,7 @@ jobs:
           sh scripts/test-systemd.sh --ephemeral-ci --package "$PWD/target/filter-acceptance-package/parins-$version-linux-x86_64" --filter-subscriptions
       - name: Preserve acceptance evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: filter-subscriptions-${{ github.sha }}
           if-no-files-found: warn

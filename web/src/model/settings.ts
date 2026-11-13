@@ -1,4 +1,3 @@
-/** UI field descriptions only; Rust owns configuration parsing and validation. */
 export type FieldType = "text" | "lines" | "select" | "checkbox" | "nullable" | "number" | "endpoint";
 
 export interface SettingField {
@@ -9,23 +8,18 @@ export interface SettingField {
   min?: number;
   max?: number;
   options?: readonly (readonly [string, string])[];
-  /** Presentation only: listed under the group's “More options” row. */
   advanced?: boolean;
-  /** Presentation only: help that affects security or availability stays visible instead of behind ⓘ. */
   visibleHelp?: boolean;
-  /** Shown while the draft value at `path` equals `value`; otherwise the field is hidden and Save removes its value. */
   when?: { path: string; value: string };
 }
 
 export interface SettingGroup {
   id: string;
   titleKey: string;
-  /** Footer text; omitted when the title and fields say enough. */
   helpKey?: string;
   enableKey: string;
   fields: readonly SettingField[];
   optional?: "dot" | "doh" | "doq";
-  /** Presentation only: shown while the draft value at `path` equals `value`. */
   when?: { path: string; value: string };
 }
 
@@ -57,7 +51,6 @@ const page = (id: string, groups: readonly SettingGroup[]): SettingPage => ({
   id, titleKey: `settings.page.${id}.title`, introKey: `settings.page.${id}.intro`, groups,
 });
 
-/** Answers to a blocked query: `[filter].block_response`, and the optional mode of a subscription source. */
 export const BLOCK_RESPONSES = ["nodata", "null_ip", "custom_ip", "nxdomain", "refused"] as const;
 export type BlockResponse = typeof BLOCK_RESPONSES[number];
 

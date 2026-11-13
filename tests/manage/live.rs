@@ -15,7 +15,6 @@ fn live_config() -> String {
     )
 }
 
-/// A raw upgrade request, for rejections that must happen before 101.
 fn upgrade_wire(server: &Management, token: Option<&str>, origin: Option<&str>) -> Vec<u8> {
     let mut wire = format!(
         "GET {PATH} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
@@ -73,7 +72,6 @@ async fn subscribe(socket: &mut Live, interval: Value, cursor: Value, filter: Va
     .await;
 }
 
-/// The next JSON message, or the close code as `{"close":code}`.
 async fn next(socket: &mut Live, wait: Duration) -> Value {
     timeout(wait, async {
         loop {
@@ -214,7 +212,6 @@ async fn live_interval_and_manual_modes_push_filtered_entries_after_the_cursor()
     let mut manual = authenticated(&server, &token).await;
     subscribe(&mut manual, Value::Null, json!(newest), json!({})).await;
     assert_eq!(next(&mut manual, DEADLINE).await["type"], "subscribed");
-    // Even unchanged global state acknowledges each queued subscription once.
     subscribe(
         &mut manual,
         Value::Null,
@@ -228,7 +225,6 @@ async fn live_interval_and_manual_modes_push_filtered_entries_after_the_cursor()
     }
     pong(&mut manual).await;
 
-    // The upstream failure does not match the blocked filter.
     resolve(dns, "other.test.").await;
     resolve(dns, "example.test.").await;
     stored(&server, &token, 4).await;
@@ -240,7 +236,6 @@ async fn live_interval_and_manual_modes_push_filtered_entries_after_the_cursor()
     assert!(entries[0]["id"].as_u64().unwrap() > newest);
     assert_eq!(pushed["cursor"], entries[0]["id"]);
 
-    // Manual mode is silent across interval boundaries until refresh.
     sleep(Duration::from_millis(1500)).await;
     pong(&mut manual).await;
     send(&mut manual, json!({"type":"refresh"})).await;
@@ -261,7 +256,6 @@ async fn live_interval_and_manual_modes_push_filtered_entries_after_the_cursor()
         json!({"type":"entries","entries":[],"cursor":ids[0],"more":false})
     );
 
-    // Clearing the log is reported as a new epoch on the next poll.
     server
         .request(
             "POST",

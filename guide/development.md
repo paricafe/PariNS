@@ -22,6 +22,17 @@ The console is a React and TypeScript app in `web/`. Its build output in `web/di
 is embedded into the Rust binary, so build it before compiling Rust. Production runs
 only the Rust binary. `npm run build` also writes Brotli and gzip copies of
 `app.js` and `app.css` and adds a content version to each address in `index.html`.
+Only requests for the embedded resource's exact version receive year-long
+caching. The console document and mismatched resource versions use
+`no-store`. API, WebSocket and DoH responses are outside asset compression.
+
+The console stores presentation preferences and the query-log refresh interval
+locally. Custom background images live in IndexedDB. Unavailable browser
+storage falls back to defaults. Credentials, session bindings, private keys,
+query records and configuration drafts stay out of both storage mechanisms.
+Shared style tokens serve the console and page styles. Apply backdrop blur
+and rim styling once on the outer surface of a joined group, and honor
+`prefers-reduced-motion` in motion treatments.
 
 Run the checks that match your change:
 
@@ -197,6 +208,10 @@ checksums, raw binaries, manifest and `scripts/bootstrap.sh`, with notes from
 downloads `releases/latest/download/bootstrap.sh` and checks that it installs the
 tagged version.
 
+The tagged commit must be on `main`. Assets are uploaded to a draft before
+publication. A patch to an older line keeps the highest published version as
+`latest`.
+
 To prepare a release, change the version in `Cargo.toml` and the default version in
 `scripts/bootstrap.sh` (its `version=` default and usage text) together;
 `sh scripts/test-bootstrap.sh` checks the usage text, and the package staging checks
@@ -211,7 +226,8 @@ and a native `cc` compiler for service fixture checks. They cover these contract
 
 - The bootstrap uses the Cargo version and the default, unpinned entry point.
   `sh scripts/test-bootstrap.sh --package ARCHIVE.tar.gz` stages a real native package
-  the same way.
+  the same way. Keep the bootstrap entry point last so an incomplete download
+  piped to the shell cannot start an install.
 - Extracted programs receive executable permissions after checksum verification,
   so the installer can run the helper during live preflight.
 - Archives with unexpected paths, links, special files or checksum mismatches are
@@ -235,6 +251,18 @@ and a native `cc` compiler for service fixture checks. They cover these contract
   Preflight rejection uses a fixture-owned native executable with a fixed exit
   status, independent of host utility packaging.
 
+The installed managed unit's first line identifies its installer contract.
+The installer compares the existing managed unit to the package template,
+and the updater compares all four managed unit files to its embedded copies.
+Preserve their exact bytes during comment or formatting changes.
+
+Live preflight pins the target mount namespace in the installer and gives the
+trusted helper a path to that descriptor. The helper drops credentials and
+capabilities before executing the candidate. Separate bounded output files
+limit stdout and stderr while preserving the candidate's exit status.
+Registration uses the held installer lock. Release it before restarting the
+update request path so queued requests reach an idle helper.
+
 The root executor's launch-loop tests use Tokio's paused monotonic clock. They
 cover storage becoming ready after the former one-minute deadline, restored
 identities, the fresh ten-second stability window, process replacement, missing
@@ -249,6 +277,12 @@ to complete the pending installation.
 Suites that install software or change a system refuse to run without
 `--ephemeral-ci` on a disposable GitHub-hosted Linux runner. Never run them on a
 developer machine or an existing installation, and keep their guards.
+
+Re-run filter acceptance manually for the exact release candidate. Its
+path-triggered runs check harness changes. The public DNS workflow is a
+single operator-directed probe. It does not gate routine CI or measure
+capacity. The QEMU suite keeps raw serial and cloud-init output private and
+publishes only fixed status categories and counts.
 
 | Workflow | Command | What it covers |
 | --- | --- | --- |

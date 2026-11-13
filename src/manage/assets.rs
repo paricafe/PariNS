@@ -1,14 +1,4 @@
 //! Embedded console files.
-//!
-//! The build precompresses `app.js` and `app.css` (Brotli and gzip) and gives
-//! every resource address in `index.html` a content version (`?v=` and the
-//! first 16 hex digits of the file's SHA-256). Only a request that names the
-//! version of the embedded file is cached for a year; any other request, such
-//! as a document from another build, and the document itself stay `no-store`
-//! (set for every other response in [`super::handle`]). HEAD gets the same
-//! headers without a body. API, WebSocket and DoH responses are never compressed.
-//! The document's Turnstile marker is selected with its CSP, so the browser
-//! never infers that document's permissions from a later account setting.
 
 use axum::{
     body::Body,
@@ -21,7 +11,6 @@ use std::sync::OnceLock;
 pub(super) struct Asset {
     kind: &'static str,
     plain: &'static [u8],
-    /// Brotli and gzip versions of `plain`.
     encoded: Option<(&'static [u8], &'static [u8])>,
     version: OnceLock<String>,
 }
@@ -74,8 +63,6 @@ pub(super) fn find(path: &str) -> Option<&'static Asset> {
     }
 }
 
-/// The marker and response policy describe the same document, even when the
-/// account's Turnstile setting changes before the browser reads login options.
 pub(super) fn document(request: &Parts, turnstile: bool) -> Response {
     let asset = find("/").expect("embedded console document");
     let mut response = asset.response(request);
@@ -97,7 +84,6 @@ pub(super) fn document(request: &Parts, turnstile: bool) -> Response {
 }
 
 impl Asset {
-    /// The content version that `index.html` gives this file.
     fn version(&self) -> &str {
         self.version.get_or_init(|| {
             Sha256::digest(self.plain)[..8]
@@ -107,7 +93,6 @@ impl Asset {
         })
     }
 
-    /// A GET or HEAD `request` for this file.
     pub(super) fn response(&self, request: &Parts) -> Response {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(self.kind));
@@ -146,9 +131,6 @@ impl Asset {
     }
 }
 
-/// The weight in thousandths that the request's `Accept-Encoding` (RFC 9110
-/// section 12.5.3) gives `coding`. An explicit entry overrides `*`; an absent
-/// header or coding gets 0, so the original file is sent.
 fn quality(request: &HeaderMap, coding: &str) -> u16 {
     let mut wildcard = None;
     for entry in request
@@ -177,7 +159,6 @@ fn quality(request: &HeaderMap, coding: &str) -> u16 {
     wildcard.unwrap_or(0)
 }
 
-/// Parses a qvalue (`0`, `0.5`, `1.000`) into thousandths; anything else is invalid.
 fn weight(value: &str) -> Option<u16> {
     let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -203,7 +184,6 @@ mod tests {
         request.body(()).unwrap().into_parts().0
     }
 
-    /// The address `index.html` gives `path`, with its content version.
     fn versioned(path: &str) -> String {
         let document = std::str::from_utf8(find("/").unwrap().plain).unwrap();
         let start = document.find(&format!("\"{path}?v=")).unwrap() + 1;
@@ -275,7 +255,6 @@ mod tests {
                 current.headers()[header::CACHE_CONTROL],
                 "public, max-age=31536000, immutable"
             );
-            // Another build's version, or none, must not pin this content.
             for other in [path.to_owned(), format!("{path}?v=0000000000000000")] {
                 let response = asset.response(&request("GET", &other, &all));
                 assert!(!response.headers().contains_key(header::CACHE_CONTROL));

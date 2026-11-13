@@ -21,7 +21,6 @@ interface LoginOptions { turnstile: { site_key: string; action: string } | null;
 export function LoginPage({ language }: { language: Language }) {
   const { api, login, state, turnstileAllowed } = useSession();
   const [options, setOptions] = useState<LoginOptions | null>(null);
-  // Sign-in waits for the options: they say whether it needs Turnstile.
   const [optionsFailed, setOptionsFailed] = useState(false);
   const [optionsAttempt, setOptionsAttempt] = useState(0);
   const [username, setUsername] = useState(''); const [password, setPassword] = useState('');
@@ -36,8 +35,6 @@ export function LoginPage({ language }: { language: Language }) {
     return () => { live = false; };
   }, [api, optionsAttempt]);
   const turnstile = options?.turnstile ?? null;
-  // Only a document served signed out while Turnstile was on may load the widget (its script
-  // policy is relaxed for it); any other document reloads once to get that policy.
   const widgetAllowed = options !== null && turnstileAllowed();
   useEffect(() => { if (turnstile && !widgetAllowed) reloadConsole(); }, [turnstile, widgetAllowed]);
   const submit = async (event: FormEvent) => {
@@ -49,7 +46,6 @@ export function LoginPage({ language }: { language: Language }) {
     } catch (reason) { setError(present(reason, language)); }
     finally {
       setBusy(false);
-      // Each Turnstile token is single-use.
       if (turnstile) setResetSignal((value) => value + 1);
     }
   };
@@ -72,7 +68,6 @@ export function LoginPage({ language }: { language: Language }) {
 type ListenMode = 'local' | 'network';
 const LISTEN: Record<ListenMode, string> = { local: '127.0.0.1:5353', network: '0.0.0.0:53' };
 type Preset = 'cloudflare' | 'google' | 'quad9' | 'alidns' | 'custom';
-/** Hostname DoH endpoints need explicit bootstrap addresses; Rust validates both. */
 const PRESETS: Record<Exclude<Preset, 'custom'>, { servers: string[]; bootstrap: string[] }> = {
   cloudflare: { servers: ['https://cloudflare-dns.com/dns-query'], bootstrap: ['1.1.1.1:53', '1.0.0.1:53'] },
   google: { servers: ['https://dns.google/dns-query'], bootstrap: ['8.8.8.8:53', '8.8.4.4:53'] },
@@ -81,7 +76,6 @@ const PRESETS: Record<Exclude<Preset, 'custom'>, { servers: string[]; bootstrap:
 };
 const lines = (value: string) => value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 
-/** An occupied listener address: setup binds every listener before saving and reports CONFIG_CONFLICT. */
 function listenerInUse(error: unknown): error is ApiError {
   return error instanceof ApiError && error.code === 'CONFIG_CONFLICT';
 }
@@ -108,7 +102,6 @@ export function SetupPage({ language }: { language: Language }) {
   const next = async (trigger?: HTMLElement) => {
     setError(null);
     if (step === 0) {
-      // These match Rust's rules and name the first missing step.
       const problem = !token.trim() ? 'app.setupTokenRequired' : !username.trim() ? 'app.usernameRequired'
         : !validUsername(username.trim()) ? 'account.usernameInvalid'
         : passwordProblem(password) ?? (password !== confirmPassword ? 'account.mismatch' : null);
@@ -120,7 +113,6 @@ export function SetupPage({ language }: { language: Language }) {
       let candidate: string;
       try { candidate = networkTemplate(template, listen, upstreams); }
       catch (reason) { setError(present(reason, language)); return; }
-      // A configuration edited by hand in the review step is kept unless the network settings changed.
       if (toml !== generated && candidate !== generated && !await confirm(translate('shell.setupRegenerate', language), 'shell.regenerate', trigger)) return;
       if (toml === generated || candidate !== generated) { setToml(candidate); setGenerated(candidate); }
     }

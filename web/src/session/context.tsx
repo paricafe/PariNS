@@ -3,25 +3,19 @@ import { ApiClient, ApiError, CookieUnavailable, StaleRequest, type SessionView,
 import { reloadConsole } from '../features/updates/reload';
 
 export type SessionPhase = 'checking' | 'setup' | 'setup-unknown' | 'login' | 'ready' | 'connection-error' | 'cookie-unavailable' | 'logout-unknown' | 'transport-change';
-/** `logout`: for `logout-unknown`, whether the sign-out request is still running, its result is being confirmed, or the session is known to remain. */
-/** `credentials`: the outcome of an account or Turnstile change that ended every session. */
 export interface SessionState { phase: SessionPhase; error?: string; transport?: TransportView; nextOrigin?: string | null; credentials?: CredentialOutcome; logout?: 'sending' | 'unconfirmed' | 'signed-in' }
 export type CredentialOutcome = 'changed' | 'unknown' | 'turnstileChanged' | 'turnstileUnknown';
 
 interface SessionContextValue {
   state: SessionState;
   api: ApiClient;
-  /** `reload`: reload the document after signing in, which drops the sign-in page's Turnstile allowance. */
   login(username: string, password: string, options?: { turnstileToken?: string | null; reload?: boolean }): Promise<void>;
   rotateCredentials(currentPassword: string, username: string, newPassword: string): Promise<void>;
-  /** Sets or clears the Turnstile keys; every session ends. */
   changeTurnstile(body: unknown): Promise<void>;
-  /** Whether this document's server-selected script policy permits Turnstile. */
   turnstileAllowed(): boolean;
   setup(username: string, password: string, toml: string, token: string): Promise<void>;
   logout(): Promise<void>;
   retryLogout(): Promise<void>;
-  /** Reads the session after an unconfirmed sign-out; never sends the sign-out again. */
   confirmLogout(): Promise<'signed-out' | 'signed-in' | 'other'>;
   recheck(): Promise<void>;
   transportChanged(change: TransportChange): void;
@@ -45,7 +39,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const expectUpdateRestart = useCallback((expected: boolean) => { updateRestart.current = expected; }, []);
   const phase = useRef<SessionPhase>(state.phase);
   phase.current = state.phase;
-  // A lost credential response requires an explicit password check, even if its old Cookie still works.
   const credentialLoginEpoch = useRef<number | null>(null);
   const needsCredentialLogin = useCallback(() => credentialLoginEpoch.current === api.currentEpoch, [api]);
 
@@ -124,7 +117,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const announce = () => channel.current?.postMessage('changed');
 
-  // Only this tab serializes its own buttons. The server binding/realm checks own cross-tab safety.
   const authAction = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     if (authInFlight.current) throw new ApiError(409, 'BUSY', 'An authentication action is running');
     authInFlight.current = true;
@@ -150,7 +142,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     announce();
   }, [api, applySession]);
 
-  // A sign-in on a document that showed Turnstile reloads, so the signed-in console keeps the strict policy.
   const finishSignIn = useCallback(async (reload: boolean) => {
     if (!reload) { await confirmLogin(); return; }
     const view = await api.session();
@@ -236,7 +227,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         const view = await api.session();
         const actual = view.session?.binding ?? null;
         if (actual && actual !== expected) {
-          // Never apply an old page's logout intention to a newer login.
           logoutIntent.current = false;
           applySession(view);
           throw new ApiError(409, 'SESSION_CHANGED', 'Another session is active');
@@ -262,7 +252,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     logoutIntent.current = true;
     bootId.current += 1;
     api.replaceBinding(null);
-    setState({ phase: 'logout-unknown', logout: 'sending' }); // Mask private UI before touching the network.
+    setState({ phase: 'logout-unknown', logout: 'sending' });
     await performLogout(logoutBinding.current);
   }, [api, performLogout]);
 
@@ -285,7 +275,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       return 'signed-out';
     }
     if (actual !== logoutBinding.current) {
-      // A newer sign-in in another tab is not this page's to end.
       logoutIntent.current = false;
       applySession(view);
       return 'other';

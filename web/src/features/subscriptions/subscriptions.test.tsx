@@ -108,9 +108,9 @@ describe('subscription draft and console', () => {
     const date = formatDate(1900000000000, 'en', { dateStyle: 'medium', timeStyle: 'short' });
     await waitFor(() => expect(next()).toBe(date));
     fireEvent.click(screen.getByRole('switch', { name: 'Automatic updates' }));
-    expect(next()).toBe(date); // Unsaved disabling is still only a draft.
+    expect(next()).toBe(date);
     await act(async () => { await config.preview(); });
-    expect(next()).toBe(date); // Preview must not replace the saved baseline.
+    expect(next()).toBe(date);
     let prepared!: Awaited<ReturnType<typeof config.prepareSave>>;
     await act(async () => { prepared = await config.prepareSave(); });
     await act(async () => { await config.commitPrepared(prepared); });
@@ -186,7 +186,6 @@ describe('subscription draft and console', () => {
     expect(screen.getByDisplayValue('https://raw.githubusercontent.com/Natsuki-Kaede/Natsuki-List/main/natsuki-list.list')).toBeTruthy();
     expect(screen.getAllByRole('switch', { name: '开启' }).every((item) => item.getAttribute('aria-checked') === 'false')).toBe(true);
     expect(request.mock.calls.filter(([path]) => path.includes('/prepare') || path.includes('/refresh'))).toHaveLength(0);
-    // The ID follows the name until it is edited under More options.
     expect(screen.getByDisplayValue('natsuki-list')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '验证并下载' })).toBeNull();
     fireEvent.change(screen.getByDisplayValue('Natsuki List'), { target: { value: 'Natsuki 主列表' } });

@@ -4,14 +4,12 @@ import "./observability.css";
 import { isolatedPoints, trendSeries, type HistorySample, type TrendKey, type TrendPoint } from "./metrics";
 
 interface Trace { key: TrendKey; dash?: string; color: string }
-// Dash patterns keep the series distinguishable without color.
 const traces: readonly Trace[] = [
   { key: "requests", color: "var(--primary)" },
   { key: "cache_hits", dash: "8 5", color: "var(--primary-2)" },
   { key: "blocked", dash: "2 5", color: "var(--danger)" },
 ];
 
-/** Closed areas under each continuous run of points. */
 function areaFor(points: readonly TrendPoint[], x: (time: number) => number, y: (value: number) => number, base: number): string {
   let path = "";
   let run: { time: number; value: number }[] = [];
@@ -27,7 +25,6 @@ function areaFor(points: readonly TrendPoint[], x: (time: number) => number, y: 
   return path;
 }
 
-/** Time spans between continuous runs: the service was down, restarted or the clock jumped. */
 function gapsFor(points: readonly TrendPoint[]): [number, number][] {
   const gaps: [number, number][] = [];
   let last: number | null = null;
@@ -51,7 +48,6 @@ function pathFor(points: readonly TrendPoint[], x: (time: number) => number, y: 
   return path;
 }
 
-/** A hover/keyboard stop: a sample with values, or a span where the service was not running. */
 type Stop = { kind: "point"; index: number; time: number } | { kind: "gap"; from: number; to: number; time: number };
 
 function stopsFor(points: readonly TrendPoint[]): Stop[] {
@@ -61,7 +57,6 @@ function stopsFor(points: readonly TrendPoint[]): Stop[] {
   return stops.sort((a, b) => a.time - b.time);
 }
 
-/** Inside a gap shows the gap; anywhere else snaps to the nearest sample. */
 function stopAt(stops: readonly Stop[], time: number): Stop | null {
   const gap = stops.find((stop) => stop.kind === "gap" && stop.from < time && time < stop.to);
   if (gap) return gap;
@@ -82,7 +77,6 @@ export function TrendChart({ samples, hours, language, end }: { samples: readonl
   const [width, setWidth] = useState(770);
   const [activeTime, setActiveTime] = useState<number | null>(null);
   const tipX = useRef<number | null>(null);
-  /** The SVG keeps its aspect ratio, so pointer and tooltip positions map through the rendered scale and centring offset. */
   const geometry = () => {
     const rect = svg.current?.getBoundingClientRect();
     if (!rect?.width || !rect.height) return null;
@@ -98,7 +92,6 @@ export function TrendChart({ samples, hours, language, end }: { samples: readonl
     return () => observer.disconnect();
   }, [samples.length]);
 
-  // Keep the tooltip centred on the stop but inside the chart box.
   useLayoutEffect(() => {
     const element = tip.current;
     const box = container.current;
@@ -135,7 +128,6 @@ export function TrendChart({ samples, hours, language, end }: { samples: readonl
     setActiveTime(stop?.time ?? null);
   };
   const onPointer = (event: PointerEvent<SVGSVGElement>) => {
-    // Touch shows on tap only; a mouse or pen follows the pointer.
     if (event.type === "pointermove" && event.pointerType === "touch") return;
     if (event.type === "pointerdown" && event.pointerType !== "touch") return;
     locate(event.clientX);

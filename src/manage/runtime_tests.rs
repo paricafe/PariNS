@@ -205,7 +205,6 @@ async fn local_policy_retirement_is_checked_before_managed_config_and_certificat
         assert!(manager.filters.ready());
         assert!(manager.filters.snapshot().sources.is_empty());
         let resolver = manager.resolver().unwrap().clone();
-        // Keep the same generation Arc that an in-flight DNS request owns.
         let old_request = manager.filters.handle().snapshot();
         let mut second = manager.saved.clone().unwrap();
         second.revision += 1;
@@ -214,8 +213,6 @@ async fn local_policy_retirement_is_checked_before_managed_config_and_certificat
         let generation = manager.filters.snapshot().generation;
         assert_eq!(generation, old_request.number + 1);
 
-        // Changed raw input/counts with identical publication content remain
-        // saveable while a retired request is held, with or without a Store.
         let mut metadata = manager.saved.clone().unwrap();
         metadata.revision += 1;
         metadata.toml = metadata
@@ -232,8 +229,6 @@ async fn local_policy_retirement_is_checked_before_managed_config_and_certificat
         let mut third = saved.clone();
         third.revision += 1;
         third.toml = third.toml.replace("'two.test', 'two.test'", "'three.test'");
-        // Exercise both hot persistence and the listener/certificate commit
-        // path. Busy must reject before either saves Config or stops live DNS.
         for restart in [false, true] {
             if restart {
                 third.toml = third.toml.replace("max_inflight=16", "max_inflight=17");
@@ -293,7 +288,6 @@ async fn local_policy_retirement_is_checked_before_managed_config_and_certificat
 }
 
 async fn assert_sampler(services: &RuntimeServices, running: bool, generation: u64) {
-    // Isolate the current-state tail from intentional aggregate transition gaps.
     services
         .storage
         .clear_history(services.storage.status().history_epoch)
@@ -533,7 +527,6 @@ async fn aborted_dns_task_publishes_failed_sampler_state_and_never_clean_shutdow
     services.set_dns_state(false, 1);
     assert_eq!(services.health.snapshot().code, Some("task_aborted"));
 
-    // Model a newer live generation, then drop another old completion owner.
     services.set_dns_health(HealthState::Running, 2, None);
     drop(RuntimeCompletion {
         services: services.clone(),
@@ -636,8 +629,6 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
 async fn occupied_listener_degrades_only_itself_and_recovers_when_the_port_is_free() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("state")).unwrap();
-    // Another program holds the admin port, as the third-party service did with
-    // 443 after the production reboot. Plain DNS must keep serving meanwhile.
     let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = holder.local_addr().unwrap().port();
     store
@@ -677,7 +668,6 @@ async fn occupied_listener_degrades_only_itself_and_recovers_when_the_port_is_fr
     );
     let dns = listeners.iter().find(|l| l["kind"] == "dns").unwrap();
     assert_eq!(dns["state"], "running");
-    // The conflict ends: only that listener is rebound, in the same generation.
     drop(holder);
     let recovered = tokio::time::timeout(Duration::from_secs(8), async {
         while !manager.services.health.snapshot().ready {
@@ -772,15 +762,12 @@ async fn unreadable_local_rules_keep_dns_stopped_after_a_failed_apply_rolls_back
         .unwrap();
     assert!(manager.resolver().is_none());
     let reason = manager.last_error.clone().expect("local rules failure");
-    // The candidate's rules compile, but one of its listeners cannot bind, so
-    // apply restores the saved revision whose local rules are unavailable.
     let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = holder.local_addr().unwrap().port();
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.toml = format!("admin_listen='127.0.0.1:{port}'\n{}", config());
     let error = manager.apply(next.clone()).await.unwrap_err();
-    // The occupied port is reported as such, so the console can say so.
     assert!(
         error
             .downcast_ref::<crate::server::Unbound>()
@@ -795,7 +782,6 @@ async fn unreadable_local_rules_keep_dns_stopped_after_a_failed_apply_rolls_back
     assert_eq!(manager.last_error.as_ref(), Some(&reason));
     assert_eq!(manager.status()["running"], false);
     assert!(manager.startup_retry_at().is_none());
-    // A configuration whose rules compile replaces the placeholder.
     drop(holder);
     manager.apply(next).await.unwrap();
     assert!(manager.resolver().is_some());
@@ -831,7 +817,6 @@ async fn an_unreadable_rollback_copy_keeps_management_and_marks_rollback_unavail
             .is_some_and(|reason| reason.contains("rollback configuration")),
         "{reason}"
     );
-    // A new apply replaces the rollback copy with the running configuration.
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.previous = Some(next.toml.clone());

@@ -35,16 +35,11 @@ done
 owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1"; }
 links() { stat -c %h "$1" 2>/dev/null || stat -f %l "$1"; }
 digest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-# Data that earlier installer runs left: the candidate copy for the read-only
-# preflight, and install backups beyond the newest $1. Only an entry with the
-# installer's own name pattern and type, not a link and owned by the installing
-# user is listed. Online update copies under .update/<operation> are not.
 leftovers() {
     keep=$1 user=$(id -u)
     for path in "$bin_dir/.update/install-preflight" "$bin_dir/.update/.install-preflight."*; do
         if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(owner "$path")" = "$user" ]; then printf '%s\n' "$path"; fi
     done
-    # Newest first; mktemp names hold only letters and digits.
     ls -dt -- "$bin_dir"/.install-backup.* 2>/dev/null | while IFS= read -r path; do
         case "${path##*/}" in .install-backup.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;; *) continue ;; esac
         [ -d "$path" ] && [ ! -L "$path" ] && [ "$(owner "$path")" = "$user" ] || continue
@@ -78,7 +73,6 @@ check_path() {
 [ -f "$build_info" ] && [ ! -L "$build_info" ] || fail 'verified install-build-info.json is required'
 [ -f "$unit_source" ] && [ ! -L "$unit_source" ] || fail 'managed service template missing or symlinked'
 if [ -z "$root" ]; then
-    # Inspect, never execute, a candidate as root before installation. ELF64 LE only.
     for executable in "$binary" "$helper"; do
     elf=$(od -An -tx1 -N6 "$executable" | tr -d ' \n')
     [ "$elf" = 7f454c460201 ] || fail 'binary must be a Linux ELF64 little-endian executable'
@@ -121,8 +115,6 @@ fi
 before_binary= before_unit=
 [ ! -f "$binary_target" ] || before_binary=$(digest "$binary_target")
 [ ! -f "$unit_target" ] || before_unit=$(digest "$unit_target")
-# Ownership must be established before replacing files or asking systemd to
-# prepare StateDirectory. DynamicUser may chown a directory before ExecStart.
 state_dir="$root/var/lib/parins-managed"
 private_dir="$root/var/lib/private/parins-managed"
 for path in "$root/var" "$root/var/lib" "$root/var/lib/private"; do
@@ -140,8 +132,6 @@ if [ ! -f "$unit_target" ]; then
         [ ! -e "$path" ] && [ ! -L "$path" ] || fail "state directory is not installer-owned: $path"
     done
 else
-    # The base unit owns the identity/directory contract. Other service keys
-    # remain installer-owned; a drop-in may only add read-only certificate groups.
     awk '
         /^[[:space:]]*([#;]|$)/ { next }
         /^\[/ { section=$0; next }
@@ -186,8 +176,6 @@ check_dropin() {
         END { exit bad }
     ' "$1" || fail "drop-in changes the managed contract (only SupplementaryGroups is supported): $1"
 }
-# Include the service-wide and dash-prefix drop-in hierarchies, including when
-# a fresh service is not yet loaded and systemctl cannot report DropInPaths.
 for base in "$root/etc/systemd/system" "$root/run/systemd/system" "$root/usr/local/lib/systemd/system" "$root/usr/lib/systemd/system" "$root/lib/systemd/system"; do
     for suffix in service.d parins-.service.d parins-managed.service.d; do
         directory="$base/$suffix"
@@ -208,8 +196,6 @@ if [ -n "$root" ]; then
     done
 else
     command -v getent >/dev/null 2>&1 || fail 'getent is required to inspect service identity'
-    # Exclude nss-systemd, which legitimately reports the running dynamic user;
-    # check every other configured NSS source, including directory accounts.
     for database in passwd group; do
         sources=$(awk -F: -v database="$database" '
             $1 == database { sub(/#.*/, "", $2); gsub(/\[[^]]*\]/, "", $2); print $2 }
@@ -263,7 +249,6 @@ if [ -z "$root" ]; then
 fi
 printf 'Install %s -> %s\nRegister %s\n' "$binary" "$binary_target" "$unit_target"
 if "$dry_run"; then
-    # After an installation, its own backup is the newest of the two kept.
     leftovers 1 | while IFS= read -r path; do printf 'Would remove old installer data: %s\n' "$path"; done
     printf '%s\n' 'Dry run: no files or services changed.'
     exit 0
@@ -275,16 +260,9 @@ done
 request_path_stopped=false request_path_enabled=true
 if [ -z "$root" ]; then
     for command in flock timeout prlimit; do command -v "$command" >/dev/null 2>&1 || fail "missing installer dependency: $command"; done
-    # The helper duplicates this held descriptor during register. Closing it
-    # before registration would open an installer/updater race.
     exec 9>"$updater_private/lock"
     chmod 0600 "$updater_private/lock"
     flock -n 9 || fail 'another installer or update is active'
-    # The installer owns the update request path for its whole window. A
-    # request written meanwhile (for example by the starting service) would
-    # otherwise trigger a helper that fails on this lock until systemd's
-    # trigger limit fails the path unit. Until the rollback handler is armed,
-    # an early exit releases the lock before restarting the path.
     if systemctl is-active --quiet parins-updater.path 9>&-; then
         request_path_stopped=true
         trap 'exec 9>&-; systemctl start parins-updater.path || true' EXIT
@@ -364,9 +342,6 @@ rollback() {
             if "$was_active" && "$new_started"; then
                 restore_nonce=$("$helper" install-restore <&9 9<&-) || { printf '%s\n' 'Manual recovery required: prior version was not started.' >&2; exit "$status"; }
                 flock -u 9; exec 9>&-; lock_held=false
-                # The packaged helper supplies the longer storage wait without
-                # committing. The restored helper validates its own unit contract
-                # and completes the matching installation with fresh health.
                 systemctl start parins-managed.service &&
                     "$helper" install-wait "$restore_nonce" &&
                     "$helper_target" install-verify "$restore_nonce" || printf '%s\n' 'Manual recovery required: prior version readiness not confirmed.' >&2
@@ -376,13 +351,10 @@ rollback() {
             fi
         fi
     elif ! "$committed" && [ -z "$root" ] && "$stopped" && "$was_active"; then
-        # A read-only preflight failure before replacement has never run the
-        # candidate and cannot have introduced candidate business writes.
         flock -u 9; exec 9>&-; lock_held=false
         systemctl start parins-managed.service || true
     fi
     if "$request_path_stopped" && ! "$committed"; then
-        # Release the lock first: a queued request must reach an idle helper.
         if "$lock_held"; then flock -u 9; exec 9>&-; lock_held=false; fi
         systemctl start parins-updater.path || printf '%s\n' 'The update request path was not restarted. Run: sudo systemctl reset-failed parins-updater.path parins-updater.service && sudo systemctl enable --now parins-updater.path' >&2
     fi
@@ -411,11 +383,6 @@ if [ -z "$root" ]; then
         exec 8<"/proc/$original_pid/ns/mnt"
         mount_namespace="/proc/$$/fd/8"
         low_preflight() (
-            # dash applies command redirections in its calling shell before
-            # forking. Keep FD 8 pinned in the installer while the child closes
-            # its copies and opens the parent's /proc/PID/fd/8 in the trusted helper.
-            # Two output files at 32 KiB each bound the combined output to
-            # 64 KiB without losing the candidate's exit status in a pipeline.
             env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C timeout --signal=KILL 30 \
                 prlimit --fsize=32768 -- "$helper" install-preflight --mount="$mount_namespace" "$uid" "$gid" "$groups" \
                 </dev/null 8<&- 9<&- >"$updater_private/install-preflight.json" 2>"$updater_private/install-preflight-error.txt"
@@ -457,9 +424,6 @@ mv -f "$temporary" "$helper_target"
 temporary=$(mktemp "$updater_private/.install-build-info.XXXXXX")
 install -m 0600 "$build_info" "$temporary"
 mv -f "$temporary" "$updater_private/install-build-info.json"
-# Remove leftovers while the installer lock is held and the update request
-# path is stopped, so no online update runs at the same time. A rollback
-# needs only this run's backup, which is never listed.
 leftovers 2 | while IFS= read -r path; do
     if [ -n "$root" ]; then
         printf 'Would remove old installer data: %s\n' "$path"
@@ -472,7 +436,6 @@ done
 if [ -z "$root" ]; then
     systemctl daemon-reload 9>&-
     installation_nonce=$("$helper_target" register <&9 9<&-)
-    # No lock is inherited by systemctl or the service processes it launches.
     flock -u 9
     exec 9>&-
     lock_held=false
@@ -483,10 +446,6 @@ if [ -z "$root" ]; then
     committed=true
     systemctl enable --now parins-updater.path || request_path_enabled=false
 fi
-# First-setup guidance, after install-verify confirmed this invocation's
-# readiness. The service publishes readiness only after it created the setup
-# token for uninitialized state, so no extra wait is needed. Print only an
-# exact one-time token read from a regular, singly linked file.
 fresh_guidance() {
     token_file="$state_dir/setup-token" token=
     if [ -f "$token_file" ] && [ ! -L "$token_file" ] && [ "$(links "$token_file")" = 1 ]; then
@@ -494,8 +453,6 @@ fresh_guidance() {
         case "$token" in *[!0-9a-f]*) token= ;; esac
         [ "${#token}" = 64 ] || token=
     fi
-    # A local route lookup sends no traffic. Behind NAT this is the private
-    # address, so the guidance names the public-address case.
     address=$(ip -4 route get 192.0.2.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }') || address=
     [ -n "$address" ] || address=SERVER_ADDRESS
     login=${SUDO_USER:-root}
@@ -528,7 +485,6 @@ else
         'View logs: sudo journalctl -u parins-managed.service -n 50 --no-pager'
 fi
 if ! "$request_path_enabled"; then
-    # Committed: report and exit non-zero without rolling back.
     printf 'Installed, but the update request path is not enabled. Backup: %s\n' "$backup" >&2
     printf '%s\n' 'Enable it: sudo systemctl reset-failed parins-updater.path parins-updater.service && sudo systemctl enable --now parins-updater.path' >&2
     exit 1

@@ -29,11 +29,11 @@ jobs:
       CC_aarch64_unknown_linux_musl: musl-gcc
       PARINS_OFFICIAL_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
@@ -52,7 +52,6 @@ jobs:
         run: |
           set -euo pipefail
           rustup show active-toolchain
-          # build.rs checks the tag, version and source SHA of official builds.
           version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           sudo apt-get update
@@ -94,7 +93,7 @@ jobs:
           mkdir -p target/release-acceptance
           tar -xzf "target/packages/$archive.tar.gz" -C target/release-acceptance
           sh scripts/test-systemd.sh --ephemeral-ci --package "$PWD/target/release-acceptance/$archive"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-${{ matrix.arch }}
           if-no-files-found: error
@@ -108,13 +107,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: release-*
           merge-multiple: true
@@ -129,7 +128,7 @@ jobs:
             (cd target/release-assets && sha256sum --check "parins-$version-linux-$arch.tar.gz.sha256")
           done
           node scripts/update-manifest.mjs target/release-assets "$version" "$GITHUB_SHA" "$mode"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: update-manifest
           if-no-files-found: error
@@ -142,18 +141,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: release-*
           merge-multiple: true
           path: target/release-assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: update-manifest
           path: target/release-assets
@@ -166,21 +165,17 @@ jobs:
           version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
           test "$GITHUB_REF_NAME" = "$version"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          # Publish only a tag whose commit is on main.
           relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq '.status')
           case "$relation" in
             identical|ahead) ;;
             *) echo "Tagged commit $GITHUB_SHA is not on main ($relation); refusing to publish" >&2; exit 1 ;;
           esac
           node scripts/release-notes.mjs "$version" > "$RUNNER_TEMP/parins-release-notes.md"
-          # API errors fail closed; an existing draft or release must never be overwritten.
           releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | "\(.tag_name) \(.draft or .prerelease)"')
           if printf '%s\n' "$releases" | cut -d ' ' -f 1 | grep -Fxq "$version"; then
             echo "Release $version already exists; refusing to overwrite it" >&2
             exit 1
           fi
-          # Only the highest published version becomes latest. A patch to an
-          # older line must not move the latest download (bootstrap.sh) back.
           highest=$(printf '%s\n' "$releases" |
             awk -v version="$version" '$2 == "false" && $1 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 } END { print version }' |
             sort -V | tail -n 1)
@@ -192,7 +187,6 @@ jobs:
             sha256sum --check "parins-$version-linux-$arch.tar.gz.sha256"
           done
           cp ../../scripts/bootstrap.sh bootstrap.sh
-          # A failed asset upload can leave a draft, but never a publicly available partial release.
           gh release create "$version" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "PariNS $version" --notes-file "$RUNNER_TEMP/parins-release-notes.md" \
             "parins-$version-linux-x86_64.tar.gz" "parins-$version-linux-x86_64.tar.gz.sha256" \

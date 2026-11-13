@@ -1,4 +1,3 @@
-/** Presentation-only unit families; stored values are always the base unit Rust expects. */
 export type UnitFamily = 'bytes' | 'milliseconds' | 'seconds';
 export const UNITS: Record<UnitFamily, readonly (readonly [key: string, factor: number])[]> = {
   bytes: [['bytes', 1], ['kib', 1024], ['mib', 1024 ** 2], ['gib', 1024 ** 3]],
@@ -17,7 +16,6 @@ export function isUnitFamily(value: unknown): value is UnitFamily {
   return value === 'bytes' || value === 'milliseconds' || value === 'seconds';
 }
 
-/** The largest unit that represents a nonzero base value exactly. */
 export function exactUnit(family: UnitFamily, base: number): readonly [key: string, factor: number] {
   return [...UNITS[family]].reverse().find(([, factor]) => base % factor === 0) ?? UNITS[family][0];
 }

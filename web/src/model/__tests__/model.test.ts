@@ -59,7 +59,6 @@ describe("configuration form model", () => {
     expect(convertFieldValue(fields[1], " ")).toBeNull();
     expect(convertFieldValue(fields[1], " 192.0.2.1 ")).toBe("192.0.2.1");
     expect(() => convertFieldValue(fields[3], "0")).toThrow(ModelError);
-    // Rule lines stay raw; Rust parses the optional block response after the domain.
     const block = settingPages.filters.groups.find((group) => group.id === "filterRules")!.fields.find((field) => field.path === "filter.block_suffix")!;
     expect(convertFieldValue(block, " track.example nxdomain \npage.example 192.0.2.10 2001:db8::10\n")).toEqual(["track.example nxdomain", "page.example 192.0.2.10 2001:db8::10"]);
   });
@@ -183,7 +182,6 @@ describe("unit field ranges", () => {
   });
 
   it("reports unit field bounds in their largest exact unit, in both languages", () => {
-    // 65 GB is above the 64 GiB snapshot limit.
     const bytes = issue("cache.persistence.max_bytes", String(65 * 1024 ** 3));
     expect(bytes.key).toBe("settings.validation.rangeUnit");
     expect(presentIssue(bytes, "zh-CN")).toBe("请填写 1 MB 到 64 GB 之间的值。");

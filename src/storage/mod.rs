@@ -1,10 +1,4 @@
-//! Private runtime storage. One SQLite WAL owner; DNS producers enqueue bounded
-//! structured entries and never wait for serialization or IO. Row-limit eviction
-//! shares the insert transaction. Capacity trims do not vacuum; periodic cleanup,
-//! reduced limits and explicit flush reclaim pages. Shutdown follows the terminal
-//! flush, commits what arrived since and checkpoints the WAL before releasing its lock.
-//! Age cleanup continues in bounded batches between controls and writes; an explicit
-//! flush completes pending age batches within its flush deadline.
+//! Private runtime storage.
 mod database;
 pub(crate) use database::DATABASE_FORMAT;
 mod observation;
@@ -278,8 +272,6 @@ pub(super) struct LogItem {
     charge: u64,
     enqueued_at: Instant,
 }
-/// Log epoch handed to producers before the stored epoch is known. Stored
-/// epochs never exceed `i64::MAX`.
 const PENDING_LOG_EPOCH: u64 = u64::MAX;
 type Reply<T> = oneshot::Sender<Result<T>>;
 #[cfg(test)]
@@ -304,7 +296,6 @@ struct Inner {
 }
 impl Drop for Inner {
     fn drop(&mut self) {
-        // No joining on a Tokio worker. Explicit shutdown is the durable boundary.
         self.shared.stop.store(true, Ordering::Release);
         self.worker.unpark();
     }
@@ -379,7 +370,6 @@ impl Handle {
             })?;
         Ok(handle)
     }
-    /// Called only after the authoritative configuration transaction commits.
     pub fn publish_settings(&self, settings: RuntimeSettings, revision: u64) {
         let mut desired = self.0.shared.desired.lock().expect("storage settings");
         if revision < desired.revision {
@@ -495,13 +485,10 @@ impl Handle {
             .map_err(|e| Error::Invalid(e.to_string()))?;
         self.request(|reply| Command::List(options, reply)).await
     }
-    /// Entries with id above `after_id` matching the list filter, newest first.
-    /// Callers validate `filter` and the cursor at their trust boundary.
     pub async fn newer_logs(&self, after_id: Option<u64>, filter: ListOptions) -> Result<Newer> {
         self.request(|reply| Command::Newer(after_id, filter, reply))
             .await
     }
-    /// The latest committed log ID; reading it never enters the SQLite queue.
     pub fn latest_log_id(&self) -> u64 {
         self.0.shared.latest_log_id.load(Ordering::Acquire)
     }
@@ -529,8 +516,6 @@ impl Handle {
     }
 }
 
-/// Queue accounting covers the owned structure and every heap allocation.
-/// Serialization, including its exact stored-byte charge, belongs to the worker.
 fn entry_charge(entry: &Entry) -> u64 {
     let strings = [
         &entry.client,
@@ -605,9 +590,6 @@ fn status(shared: &Shared) -> Status {
 }
 
 fn private_directory(path: &Path) -> anyhow::Result<(PathBuf, File)> {
-    // The caller-specified root can be systemd's DynamicUser logical link.
-    // Managed mode validates its owned `runtime` child before calling us.
-    // All component files are checked only inside the resolved private root.
     let (dir, lock) = crate::private_files::lock_private_dir(path, "runtime")?;
     for name in [
         "observability.sqlite3",

@@ -34,7 +34,6 @@ export class CookieUnavailable extends Error {
 export type ApiMethod = 'GET' | 'POST' | 'PUT';
 type AuthEvent = 'unauthorized' | 'session-changed' | 'transport-changed';
 
-// Only this layer knows the session binding. It is never persisted or broadcast.
 export class ApiClient {
   private epoch = 0;
   private binding: string | null = null;

@@ -77,7 +77,6 @@ pub(super) struct Drops {
     pub io_failure: AtomicU64,
     pub entry_too_large: AtomicU64,
     pub stopped: AtomicU64,
-    /// Wall-clock time of the most recent drop; 0 until one happens.
     last_at_ms: AtomicU64,
 }
 impl Drops {

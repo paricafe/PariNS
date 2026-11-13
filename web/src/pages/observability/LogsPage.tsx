@@ -21,7 +21,6 @@ export interface LogsPageProps {
   api: ApiClient;
   language: Language;
   onOpenSettings: () => void;
-  /** Saved subscription source names by ID, for the rule source of a blocked query. */
   sourceNames?: Readonly<Record<string, string>>;
 }
 
@@ -77,7 +76,6 @@ function LogDetail({ entry, language, sourceNames }: { entry: LogEntry; language
 }
 
 const PAGE_SIZE = 50;
-/** Live insertion keeps the head list bounded; older rows stay reachable through the cursor. */
 const MAX_ROWS = 200;
 const HOVER_DELAY_MS = 150;
 const detailId = (id: number) => `log-detail-${id}`;
@@ -85,7 +83,6 @@ const intervals = ['manual', '1', '3', '5', '10'] as const;
 
 interface Pending { entries: LogEntry[]; count: number; overflow: boolean; more: boolean }
 const noPending: Pending = { entries: [], count: 0, overflow: false, more: false };
-/** The open detail card: hover cards close when the pointer leaves, pinned ones only on request. */
 interface Detail { id: number; pinned: boolean; anchor: HTMLButtonElement; keyboard: boolean }
 
 const isFiltered = (filter: LogFilter) => filter.search !== '' || filter.status !== null || filter.cache !== null;
@@ -118,7 +115,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
   const [detail, setDetail] = useState<Detail | null>(null);
   const client = useRef<LiveLogClient | null>(null);
   const refreshRequested = useRef(false);
-  /** Newest id this page has seen at the head, shown or pending. */
   const known = useRef(0);
   const epoch = useRef<number | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -159,7 +155,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
     }
   }, [api, subscription]);
 
-  /** Prepends entries newer than the shown head, as one animated batch. */
   const insert = useCallback((incoming: readonly LogEntry[]) => {
     setEnterAfter(view.current.top);
     setResult((previous) => {
@@ -182,7 +177,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
     else void load(null, appliedRef.current);
   }, [insert, load]);
 
-  // One live client per page; handlers read the latest render through refs.
   useEffect(() => {
     const live = new LiveLogClient(() => api.currentBinding, {
       entries(incoming, more) {
@@ -193,7 +187,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
         known.current = Math.max(known.current, newest(fresh));
         const { atHead: head, paused: hold, pending: waiting } = view.current;
         if (head && (forced || !hold)) {
-          // A capped batch leaves a hole below it; reread the head instead of inserting around it.
           if (more || waiting.overflow) void load(null, appliedRef.current);
           else insert([...fresh, ...waiting.entries]);
           return;
@@ -206,7 +199,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
       state(state) {
         setLiveLog(state);
         if (epoch.current !== null && state.log_epoch !== epoch.current) {
-          // The log was cleared elsewhere: drop everything shown and start from the new head.
           epoch.current = state.log_epoch;
           known.current = 0;
           setDetail(null);
@@ -218,7 +210,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
         setLiveStatus(status);
         if (status === 'unauthorized') {
           setSuspended(true); setLiveStopped(true);
-          // An ordinary request lets the session layer classify the failure like any other 401.
           void load(null, appliedRef.current);
         }
         if (status === 'open') setLiveStopped(false);
@@ -232,7 +223,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
   useEffect(() => {
     const live = client.current;
     if (!live) return;
-    // Manual mode holds no connection; Refresh reads the list instead.
     if (!ready || hidden || suspended || interval === null) live.stop();
     else live.start(subscription());
   }, [ready, hidden, suspended, interval, subscription]);
@@ -244,7 +234,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
     const onVisible = () => {
       const isHidden = document.visibilityState === "hidden";
       setHidden(isHidden);
-      // Later syncs come from the live connection, which catches up as soon as it reconnects.
       if (!isHidden && !loaded.current) void load(null, appliedRef.current);
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -255,17 +244,14 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
       setUnknownEpoch(null); setFailure(null); setNotice('app.logsCleared');
     }
   }, [unknownEpoch, result]);
-  // A lost clear response is settled by reading the log epoch; the clear is never sent again.
   const clearCheck = useAutoConfirm(unknownEpoch !== null, async () => {
     const next = await api.request<LogListResponse>("query-log/list", "POST", { ...appliedRef.current, before_id: null, limit: PAGE_SIZE });
     return unknownEpoch !== null && next.page.log_epoch > unknownEpoch ? true : undefined;
   }, () => { void load(null, appliedRef.current); });
-  // Insertion resumes when the detail card closes.
   useEffect(() => {
     if (openId === null && atHead && !isFiltered(applied) && pending.count) showPending();
   }, [openId, atHead, applied, pending.count, showPending]);
   useEffect(() => () => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }, []);
-  // A card whose record left the list (cap, filter, clear) closes instead of reopening later.
   useEffect(() => { if (detail && openId === null) setDetail(null); }, [detail, openId]);
   useEffect(() => {
     if (!detail) return;
@@ -275,7 +261,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
       if (owned(event.target as Node)) return;
       closeDetail(owned(document.activeElement) && !anchor.contains(document.activeElement));
     };
-    // Escape returns focus only when the card or its button has it; elsewhere it just closes the card.
     const key = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       if (owned(document.activeElement)) { event.preventDefault(); closeDetail(true); } else closeDetail(false);
@@ -309,12 +294,10 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
         const anchor = event.currentTarget;
         hoverTimer.current = setTimeout(() => {
           hoverTimer.current = null;
-          // Hover never replaces a pinned card.
           setDetail((current) => current?.pinned || current?.id === id ? current : { id, pinned: false, anchor, keyboard: false });
         }, HOVER_DELAY_MS);
       },
       onPointerLeave: hoverClose,
-      // Click, tap, Enter and Space pin the card; pressing a pinned card's button closes it.
       onClick: (event: MouseEvent<HTMLButtonElement>) => {
         cancelTimer();
         const anchor = event.currentTarget;
@@ -323,7 +306,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
       },
     };
   }
-  /** The card lives in a body portal; Tab returns to its button instead of the end of the page. */
   function cardKey(event: KeyboardEvent<HTMLElement>) {
     if (event.key === 'Tab') { event.preventDefault(); closeDetail(true); }
   }
@@ -400,7 +382,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
         <button type="submit" className="button primary">{translate("ui.filter", language)}</button>
       </form>
       <Segmented label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} options={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
-        // Uncommitted search and result fields apply only through Filter.
         const filter = { ...appliedRef.current, cache: cache === 'all' ? null : cache as CacheFilter };
         appliedRef.current = filter; setApplied(filter); setNotice(''); setDetail(null); void load(null, filter);
       }} />
@@ -455,7 +436,6 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
               </tr>)}</tbody></table>
           </div>
         </>}
-    {/* Pressing inside a hover card pins it, so selecting text never closes it. */}
     <AnimatePresence>{detail && detailEntry && openId !== null && <DetailPopover key={detail.id} id={detailId(detail.id)} label={translate("views.queryDetails", language)} anchor={detail.anchor} focus={detail.keyboard}
       onPointerEnter={(event) => { if (event.pointerType === 'mouse') cancelTimer(); }} onPointerLeave={hoverClose}
       onPointerDown={() => setDetail((current) => current && { ...current, pinned: true })} onKeyDown={cardKey}>

@@ -6,8 +6,6 @@ use hickory_proto::{
 };
 use std::{hint::black_box, time::Instant};
 
-// Enabled only by the opt-in concurrent benchmark, with preallocated per-thread
-// buffers. Production builds contain no timers, buffers or measurement branches.
 thread_local! {
     static LOCK_WAITS: std::cell::RefCell<Option<Vec<u64>>> = const { std::cell::RefCell::new(None) };
 }

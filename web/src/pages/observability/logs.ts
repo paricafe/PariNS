@@ -8,7 +8,6 @@ export interface LogAnswer {
   data: string;
 }
 
-/** The rule that blocked a query; `source_id` null means local rules. */
 export interface LogBlock {
   rule: string;
   source_id: string | null;
@@ -43,7 +42,6 @@ export interface LogEntry {
   recursion_desired: boolean;
   answer: LogAnswer[];
   answer_truncated: boolean;
-  /** Present on blocked queries; older entries omit it. */
   block?: LogBlock | null;
 }
 

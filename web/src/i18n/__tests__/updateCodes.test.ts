@@ -10,16 +10,12 @@ import coordinator from '../../../../src/manage/updates.rs?raw';
 import operation from '../../../../src/manage/updates/operation.rs?raw';
 import state from '../../../../src/manage/updates/state.rs?raw';
 
-// The update panel shows check errors, operation phases and reasons, capability
-// reasons and update API error codes through `updates.<code>`. They come from
-// these Rust sources as snake_case string literals, so every such literal outside
-// test modules needs a translation unless it is listed below.
 const SOURCES = { httpsReader, updateReader, contract, executor, journal, ipc, coordinator, operation, state };
 const NOT_SHOWN = new Set([
-  'snake_case', // serde attribute
-  'https', // URI scheme
-  'rule_files', 'upstream_ca', // preflight input categories, logged only
-  'operation_missing', 'operation_changed', 'launch_identity_mismatch', // internal errors; the API reports update_state_unavailable
+  'snake_case',
+  'https',
+  'rule_files', 'upstream_ca',
+  'operation_missing', 'operation_changed', 'launch_identity_mismatch',
 ]);
 
 function productionCode(source: string): string {
@@ -30,9 +26,7 @@ function productionCode(source: string): string {
 function codes(): Set<string> {
   const found = new Set<string>();
   for (const source of Object.values(SOURCES).map(productionCode)) {
-    // Literals followed by ':' are JSON keys in `json!` views.
     for (const [, code] of source.matchAll(/"([a-z]+(?:_[a-z0-9]+)+)"(?!\s*:)/g)) found.add(code);
-    // One-word reasons and phases.
     for (const [, a, b, c] of source.matchAll(/(?:Some|Err)\(\s*"([a-z]+)"|\|_\| "([a-z]+)"|set_phase\([^,]+, "([a-z]+)"/g)) found.add(a ?? b ?? c);
   }
   const phases = /pub enum Phase \{([^}]*)\}/.exec(productionCode(ipc))?.[1] ?? '';

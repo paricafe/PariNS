@@ -24,10 +24,10 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CC_x86_64_unknown_linux_musl: musl-gcc
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
@@ -40,14 +40,13 @@ jobs:
           sudo apt-get install --yes musl-tools binutils qemu-system-x86 qemu-utils cloud-image-utils openssh-client
           rustup target add x86_64-unknown-linux-musl
           version="v$(cargo pkgid --locked | sed 's/.*[@#]//')"
-          # package.sh builds/tests the exact Web assets before embedding Rust.
           sh scripts/package.sh --version "$version" --target x86_64-unknown-linux-musl
           mkdir -p target/update-recovery-package
           tar -xzf "target/packages/parins-$version-linux-x86_64.tar.gz" -C target/update-recovery-package
           python3 -B scripts/test-update-reboot.py --ephemeral-ci --package "$PWD/target/update-recovery-package/parins-$version-linux-x86_64" --scenario '${{ matrix.scenario }}'
       - name: Preserve only sanitized evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: update-boot-recovery-${{ matrix.scenario }}-${{ github.sha }}
           if-no-files-found: warn

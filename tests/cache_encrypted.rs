@@ -1,5 +1,5 @@
-//! Production-contract fixtures: verified encrypted upstream, missing ECS,
-//! Padding, real UDP ingress, and a consumed clean-snapshot restart.
+//! Production-contract fixtures: verified encrypted upstream, missing ECS, Padding, real
+//! UDP ingress, and a consumed clean-snapshot restart.
 mod common;
 
 use bytes::Bytes;
@@ -85,7 +85,6 @@ async fn mock(http: bool) -> Mock {
                         if http {
                             let mut connection=h2::server::handshake(stream).await.unwrap();
                             while let Some(Ok((request,mut respond)))=connection.accept().await {
-                                // RFC 8484 GET: the query is the unpadded base64url `dns` parameter.
                                 let query=request.uri().query().and_then(|q| q.split('&').find_map(|p| p.strip_prefix("dns="))).unwrap();
                                 let bytes=base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD,query).unwrap();
                                 count.fetch_add(1,Ordering::SeqCst);

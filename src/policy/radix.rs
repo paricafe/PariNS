@@ -4,11 +4,7 @@ use hickory_proto::rr::Name;
 use std::mem::size_of;
 
 const NONE: u16 = u16::MAX;
-/// Exact ownership prefix: magic, big-endian index version, semantics version.
-/// The 32-byte input digest follows immediately, starting at byte 16.
 pub(crate) const DERIVED_PREFIX: &[u8; 16] = b"PRNSRDX\0\0\0\0\x01\0\0\0\x01";
-// Every non-root edge consumes at least one of at most 254 encoded bytes.
-// Explicit frames replace recursion so variable-depth build scratch is charged.
 const MAX_BUILD_DEPTH: usize = 255;
 #[derive(Clone, Copy)]
 struct Frame {
@@ -172,8 +168,6 @@ impl Index {
             while common < first.len().min(last.len()) && first[common] == last[common] {
                 common += 1;
             }
-            // The shortest key in this lexicographic range bounds the common
-            // prefix, so a complete-rule terminal is never compressed across.
             let offset = self.arena.len();
             grow(&mut self.arena, offset + common - depth, &mut input.budget)?;
             self.arena.extend_from_slice(&first[depth..common]);
@@ -238,15 +232,11 @@ impl Index {
             position += edge.len();
         }
     }
-    /// The block rule that chooses the answer, or None when the name is allowed
-    /// or not blocked. Local slots rank before subscription slots, then exact
-    /// before suffix, then the longest suffix, then the lowest slot.
     pub fn block_match(&self, name: &Name, local_slots: u16) -> Option<Match> {
         let query = Key::query(name);
         let query = query.as_slice();
         let mut index = 0;
         let mut position = 0;
-        // (subscription, suffix, shorter, slot): lower ranks win.
         type Rank = (bool, bool, std::cmp::Reverse<u16>, u16);
         let mut best: Option<(Match, Rank)> = None;
         let mut consider = |found: Match| {
@@ -304,11 +294,10 @@ impl Index {
     pub fn index_bytes(&self) -> usize {
         self.arena.capacity() + self.nodes.capacity() * size_of::<Node>()
     }
-    #[allow(dead_code)] // Standalone benchmark also compiles this source without cfg(test).
+    #[allow(dead_code)]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
-    /// Only copies the bounded matched rule, never the whole source.
     pub fn rule(&self, name: &Name, matched: Match) -> String {
         let key = Key::query(name);
         let mut bytes = &key.as_slice()[..usize::from(matched.matched_key_len)];

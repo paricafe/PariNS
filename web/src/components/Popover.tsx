@@ -3,7 +3,6 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Check, ChevronsUpDown } from 'lucide-react';
 import { SPRING_IOS_FAST } from './beui/motion';
 
-/** Closes on outside pointer-down; Escape is handled by each control so focus can return. */
 function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, close: () => void) {
   useEffect(() => {
     if (!open) return;
@@ -13,15 +12,12 @@ function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, cl
   }, [open, root, close]);
 }
 
-/** Distance the menu keeps from the viewport edges. */
 const EDGE = 8;
 
 function Pop({ open, children, align = 'start', role, id, label, onKeyDown }: { open: boolean; children: ReactNode; align?: 'start' | 'end'; role: 'listbox' | 'menu'; id: string; label: string; onKeyDown(event: KeyboardEvent<HTMLElement>): void }) {
   const reduced = useReducedMotion();
   const menu = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState({ align, shift: 0 });
-  // Opens on the preferred side of its control, flips when only the other side fits,
-  // and otherwise shifts back inside the viewport. Measured before paint.
   useLayoutEffect(() => {
     const element = menu.current;
     const anchor = element?.parentElement;
@@ -55,7 +51,6 @@ function nextIndex(key: string, current: number, count: number): number | null {
 
 export interface SelectOption { value: string; label: string }
 
-/** An iOS-style popup menu standing in for a native <select>; a listbox keeps select semantics. */
 export function Select({ id, value, options, onChange, label, disabled, className }: {
   id?: string; value: string; options: readonly SelectOption[]; onChange(value: string): void; label: string; disabled?: boolean; className?: string;
 }) {
@@ -98,7 +93,6 @@ export function Select({ id, value, options, onChange, label, disabled, classNam
 
 export interface MenuAction { label: string; onSelect(trigger: HTMLElement): void; disabled?: boolean; destructive?: boolean }
 
-/** Action menu ("More"); disabled actions are omitted so only usable actions are offered. */
 export function Menu({ label, icon, actions, align = 'end' }: { label: string; icon: ReactNode; actions: readonly MenuAction[]; align?: 'start' | 'end' }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -110,7 +104,6 @@ export function Menu({ label, icon, actions, align = 'end' }: { label: string; i
   const close = () => setOpen(false);
   useDismiss(open, root, close);
   useEffect(() => { if (open) items.current[active]?.focus(); }, [open, active]);
-  // While nothing can run (for example during a save) the button stays focusable but inert, so focus is never dropped.
   const inert = !available.length;
   const run = (action: MenuAction) => { setOpen(false); const trigger = button.current!; trigger.focus(); action.onSelect(trigger); };
   const onKey = (event: KeyboardEvent<HTMLElement>) => {

@@ -1,6 +1,4 @@
 //! Keep immediate socket-release acceptance in its own test process.
-//! Concurrent subprocess fixtures can briefly inherit CLOEXEC sockets before exec,
-//! so do not add subprocess-spawning tests to this integration-test target.
 mod common;
 
 use std::{sync::Arc, time::Duration};
@@ -80,9 +78,6 @@ async fn quic_shutdown_deadline_releases_socket_with_an_incomplete_stream() {
     stop.send(()).unwrap();
     timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     if let Err(error) = UdpSocket::bind(address).await {
-        // Keep the immediate rebind assertion: a later successful bind would
-        // hide incomplete cleanup. Inspect current owners only after it has failed
-        // so CI can distinguish a retained listener from ephemeral-port reuse.
         #[cfg(target_os = "linux")]
         {
             eprintln!(

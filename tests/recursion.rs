@@ -39,7 +39,6 @@ fn query(name: &str, dnssec_ok: Option<bool>, ad: bool) -> Message {
     query
 }
 
-/// A validated answer as the recursion source stores it: AD set.
 fn validated(query: &Message, target: Option<&str>) -> Message {
     let mut response = protocol::error_response(query, ResponseCode::NoError);
     response.metadata.authentic_data = true;
@@ -121,8 +120,6 @@ async fn filtered_answers_lose_ad() {
     assert!(!reply.authentic_data);
 }
 
-/// A recursive resolver holding a validated answer that went stale a second
-/// ago.
 fn stale_validated(query: &Message) -> Resolver {
     let mut config = config(ResolutionMode::Recursive);
     config.cache.stale.enabled = true;
@@ -176,7 +173,6 @@ async fn a_stale_answer_behind_a_cached_failure_never_carries_ad() {
 async fn a_stale_answer_after_a_failed_resolution_never_carries_ad() {
     let query = query("stale.test.", Some(true), false);
     let resolver = stale_validated(&query);
-    // A shut down recursion fails every resolution before sending a query.
     resolver.shutdown_refresh().await;
     let reply = reply(&resolver, &query).await;
     assert_eq!(reply.answers.len(), 1, "{reply:?}");

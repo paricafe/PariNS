@@ -3,16 +3,10 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { effectiveOverlay, isPattern, type BackgroundId } from '../appearance/preferences';
 import type { CustomImage } from '../appearance/useAppearance';
 
-/**
- * Fixed, pointer-free page background shared by every screen. Each choice is its own layer
- * carrying data-bg, so the outgoing layer keeps its colours while the new one fades in
- * (opacity only). Patterns animate transforms only and are static under reduced motion.
- */
 export function Backdrop({ background, image, overlay, dark }: { background: BackgroundId; image: CustomImage | null; overlay: number; dark: boolean }) {
   const reduced = useReducedMotion();
   const kind = background === 'custom' && image ? 'image' : isPattern(background) ? 'pattern' : 'solid';
   const shown: BackgroundId = background === 'custom' && !image ? 'neutral' : background;
-  // Glass reads its fill strength from this: busier backdrops get a denser text backing.
   useEffect(() => { document.documentElement.dataset.backdrop = kind; }, [kind]);
   const key = shown === 'custom' ? `custom:${image?.url}` : shown;
   return <div className="backdrop" aria-hidden="true" data-static={reduced || undefined}>

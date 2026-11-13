@@ -17,7 +17,6 @@ use std::{
 
 const FP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// A deadline no test reaches.
 fn far() -> Instant {
     Instant::now() + Duration::from_secs(3600)
 }
@@ -352,8 +351,6 @@ mod process {
     }
 
     async fn start(directory: &Path, config: &Path, generation: usize) -> (ChildGuard, SocketAddr) {
-        // The binary binds UDP on its TCP port, and startup consumes the clean
-        // snapshot before binding, so select a port free on both rather than retry.
         let listen = (0..16)
             .find_map(|_| {
                 let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -507,8 +504,6 @@ mod process {
             assert_eq!(address(&request(endpoint).await), 1);
             assert_eq!(mock.requests.load(Ordering::Acquire), 1);
             mock.mode.store(replacement, Ordering::Release);
-            // The restored short-lived answer crosses the configured prefetch
-            // threshold. Its new non-admissible response supersedes old data.
             sleep(Duration::from_millis(700)).await;
             request(endpoint).await;
             timeout(Duration::from_secs(5), async {
@@ -594,7 +589,6 @@ mod process {
         stop(&mut second, true).await;
     }
 
-    /// Production-like timeouts: the DoH I/O timeout exceeds the shutdown grace.
     fn doh_configuration(directory: &Path, upstream: SocketAddr) -> (PathBuf, Vec<u8>) {
         let key = rcgen::KeyPair::generate().unwrap();
         let certificate = rcgen::CertificateParams::new(vec!["localhost".into()])
@@ -645,8 +639,6 @@ mod process {
         .unwrap()
     }
 
-    /// Completes TLS and the HTTP/2 handshake, then stops reading, like a
-    /// sleeping client behind a stale NAT mapping.
     async fn silent_h2_peer(
         address: SocketAddr,
         der: Vec<u8>,
@@ -671,7 +663,6 @@ mod process {
             )
             .await
             .unwrap();
-        // Dropping the request handle would let the client close by itself.
         let (sender, mut connection) = h2::client::handshake(tls).await.unwrap();
         assert!(
             timeout(Duration::from_millis(200), &mut connection)
@@ -697,7 +688,6 @@ mod process {
             directory.path().join("data").join(CLEAN_FILE).is_file(),
             "{stderr}"
         );
-        // The terminal report reaches the journal, not only the exiting process.
         assert!(
             stderr
                 .lines()
@@ -736,7 +726,6 @@ mod process {
         })
         .await
         .unwrap();
-        // The 2-second query timeout outlives the 1-second shutdown grace.
         stop(&mut first, true).await;
         let stderr = fs::read_to_string(directory.path().join("stderr-1.txt")).unwrap();
         assert!(

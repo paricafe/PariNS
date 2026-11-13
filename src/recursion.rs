@@ -1,25 +1,4 @@
-//! Recursive resolution from the root servers with DNSSEC validation, an
-//! alternative to the upstream pool selected by `[resolution] mode`.
-//!
-//! The Resolver keeps the deadline, cache, coalescing, filtering and stale
-//! fallback for both sources; this module owns the hickory recursor, its global
-//! outbound bounds, and the translation of a recursive result into a response:
-//!
-//! - ECS: the client subnet the Resolver prepared is sent only to the answer's
-//!   authoritative servers. Their scope is echoed in the response, and a missing
-//!   ECS option from an authority means the answer does not depend on the
-//!   client network (RFC 7871), so it is echoed as scope 0, which the cache
-//!   shares within the address family. Answers never become ExactSource.
-//! - DNSSEC: Bogus data becomes SERVFAIL with Extended DNS Error 6. AD is set
-//!   only when every answer record, and for a negative answer every authority
-//!   record, is Secure. A positive answer keeps in its authority section only the
-//!   NSEC/NSEC3 records and their signatures, and only for DO clients, so a
-//!   downstream validator can check a wildcard expansion. CD clients receive
-//!   the unvalidated denial records with AD clear. Proof is evaluated before
-//!   DNSSEC records that a non-DO client did not query are stripped.
-//! - Infrastructure caches (delegations, name servers, DNSSEC keys) belong to
-//!   the recursor and are bounded by entry counts; answers are never read from
-//!   or stored in the recursor's answer cache.
+//! DNSSEC-validating recursive resolution through the pinned Hickory recursor.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -52,27 +31,17 @@ use crate::{ecs, protocol};
 
 mod outbound;
 
-/// RFC 8914 Extended DNS Error option code and the "DNSSEC Bogus" info code.
 const EDE: u16 = 15;
 const EDE_DNSSEC_BOGUS: u16 = 6;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// Also query authoritative servers over IPv6.
     pub ipv6: bool,
-    /// Sustained queries per second to all authoritative servers together.
     pub max_outbound_per_second: u32,
-    /// Queries to authoritative servers admitted at once, while waiting for a rate
-    /// token or a response.
     pub max_outbound_inflight: usize,
-    /// Referral and CNAME depth for one resolution.
     pub max_depth: u8,
-    /// Queries to authoritative servers one lookup may send, including delegations,
-    /// name server addresses and CNAME targets. Each DS or DNSKEY lookup for DNSSEC
-    /// validation has a budget of its own; the outbound bounds cap the total.
     pub max_queries_per_request: u16,
-    /// Delegation, name server and DNSSEC key responses kept by the recursor.
     pub cache_entries: u64,
 }
 
@@ -157,7 +126,6 @@ pub struct Recursion {
 }
 
 impl Recursion {
-    /// `settings` has passed `Settings::validate`. Must run inside a Tokio runtime.
     pub fn new(settings: &Settings) -> Result<Self> {
         let bounds = outbound::Bounds::new(
             settings.max_outbound_per_second,
@@ -169,7 +137,6 @@ impl Recursion {
             recursion_limit: settings.max_depth,
             ns_recursion_limit: settings.max_depth,
             max_queries_per_request: settings.max_queries_per_request,
-            // Some authoritative servers answer NXDOMAIN for empty non-terminals.
             qname_minimization: QNameMinimization::Relaxed,
             ..RecursorOptions::default()
         };
@@ -198,7 +165,6 @@ impl Recursion {
         })
     }
 
-    /// Resolve the prepared outbound query. The caller bounds the time.
     pub async fn exchange(&self, query: &Message) -> Result<Message> {
         ensure!(
             !self.shutdown.load(Ordering::Acquire),
@@ -209,12 +175,9 @@ impl Recursion {
         let dnssec_ok = query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
         let mut options = ResolveOptions::default();
         options.client_subnet = subnet;
-        // The Resolver's cache owns answers, partitioned by ECS scope.
         options.bypass_response_cache = true;
-        // CD: the client validates; return data unchecked (RFC 4035 §3.2.2).
         options.checking_disabled = query.checking_disabled;
         self.counts.started.fetch_add(1, Ordering::Relaxed);
-        // Counts a resolution dropped unfinished: at the deadline, by a cancelled request or at shutdown.
         let mut pending = Pending(Some(self));
         let resolution = self
             .recursor
@@ -232,8 +195,6 @@ impl Recursion {
         self.bounds.close();
     }
 
-    /// Fixed-cardinality counters for the local Prometheus exposition:
-    /// (name, help, gauge).
     pub fn metrics(&self) -> Vec<(&'static str, &'static str, u64, bool)> {
         let c = &self.counts;
         let load = |v: &AtomicU64| v.load(Ordering::Relaxed);
@@ -360,7 +321,6 @@ impl Recursion {
     }
 }
 
-/// A resolution still in progress; dropping it unfinished records why it ended.
 struct Pending<'a>(Option<&'a Recursion>);
 
 impl Drop for Pending<'_> {
@@ -404,7 +364,6 @@ impl Counts {
             Kind::Answered => add(&self.answered),
             Kind::Negative => add(&self.negative),
             Kind::Bogus => add(&self.bogus),
-            // Cancellation and shutdown are not resolution faults.
             Kind::Failed(_) if shutting_down => add(&self.shutdown),
             Kind::Failed(kind) => {
                 add(match kind {
@@ -448,11 +407,6 @@ enum FailKind {
 }
 
 impl FailKind {
-    /// Typed variants are matched first. Errors that crossed the validating layer
-    /// arrive as text: the recursor's `From<RecursorError> for NetError` keeps only
-    /// `to_string()` for everything but negative answers, so their kind is
-    /// recovered from that text. Diagnostics only: the answer is the same SERVFAIL
-    /// either way.
     fn of(error: &RecursorError) -> Self {
         match error {
             RecursorError::Timeout | RecursorError::Net(NetError::Timeout) => Self::Timeout,
@@ -491,7 +445,6 @@ struct Outcome {
     scope: Option<EcsScope>,
 }
 
-/// Translate a recursive result for `query` into a response message.
 fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsScope) -> Outcome {
     let (code, answers, authorities) = match result {
         Ok(message) => (
@@ -502,9 +455,6 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
         Err(error) => match classify(error) {
             Failure::Negative(negative) => (negative.code, Vec::new(), negative.authorities),
             Failure::Bogus => return bogus(query, scope),
-            // A referral loop or an exhausted query budget is a definitive
-            // answer for this question: SERVFAIL, which the cache may keep
-            // briefly (RFC 9520). Timeouts and other errors are not cached.
             Failure::Other(_, kind @ (FailKind::Referral | FailKind::Budget)) => {
                 return Outcome {
                     response: Ok(protocol::error_response(query, ResponseCode::ServFail)),
@@ -526,18 +476,10 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
     let answered = answers
         .iter()
         .any(|record| record.record_type() == query.queries[0].query_type());
-    // A positive answer stands on its answer records. Its authority section keeps
-    // only denial records for DO clients: a wildcard-expanded answer needs its
-    // NSEC/NSEC3 proof that no closer name exists (RFC 4035 §5.3.4, RFC 5155
-    // §8.8), which the recursor has already checked. Other authority records, such
-    // as delegation NS RRsets that are unsigned by design (validated as Bogus), are
-    // dropped and never affect the proof. A negative answer keeps its SOA and
-    // denial records, which carry its proof.
     let (authorities, proof) = if answered {
         let dnssec_ok = query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
         let denials = authorities
             .into_iter()
-            // CD clients need the received proof to perform validation themselves.
             .filter(|record| {
                 dnssec_ok
                     && is_denial(record)
@@ -557,7 +499,6 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
     response.authorities = authorities;
     response.metadata.authentic_data =
         !query.checking_disabled && proof == Some(Validation::Secure);
-    // Evaluate the proof before removing records the client did not request.
     let mut response = response.maybe_strip_dnssec_records(
         query
             .edns
@@ -577,7 +518,6 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
     }
 }
 
-/// An NSEC or NSEC3 record, or a signature over one.
 fn is_denial(record: &Record) -> bool {
     let denial = |kind| matches!(kind, RecordType::NSEC | RecordType::NSEC3);
     match &record.data {
@@ -586,7 +526,6 @@ fn is_denial(record: &Record) -> bool {
     }
 }
 
-/// The weakest proof among the records; None for an empty set.
 fn validation<'a>(records: impl Iterator<Item = &'a Record>) -> Option<Validation> {
     records
         .filter(|record| record.record_type() != RecordType::OPT)
@@ -604,14 +543,12 @@ fn validation<'a>(records: impl Iterator<Item = &'a Record>) -> Option<Validatio
         })
 }
 
-/// The authorities' ECS behaviour as an echo of the prepared client subnet.
 fn echo_scope(query: &Message, response: &mut Message, scope: EcsScope) {
     let Some(sent) = ecs::subnet(query) else {
         return;
     };
     let prefix = match scope {
         EcsScope::Scope(prefix) => prefix,
-        // No authority returned ECS: the answer does not depend on the network.
         _ => 0,
     };
     ecs::set_subnet(
@@ -666,7 +603,6 @@ fn classify(error: RecursorError) -> Failure {
     })
 }
 
-/// A response this module produced for DNSSEC Bogus data.
 pub fn is_bogus(response: &Message) -> bool {
     response.metadata.response_code == ResponseCode::ServFail
         && response
@@ -789,8 +725,6 @@ mod tests {
         assert!(response.authentic_data && response.authorities.is_empty());
     }
 
-    /// A wildcard-expanded answer keeps its NSEC proof for DO clients, so a
-    /// downstream validator can check that no closer name exists.
     #[test]
     fn positive_answer_keeps_only_denial_proof_for_dnssec_clients() {
         use hickory_proto::{
@@ -836,7 +770,6 @@ mod tests {
         );
         ns.proof = Proof::Bogus;
         let denial = vec![nsec.clone(), signature(RecordType::NSEC)];
-        // An unvalidated proof record is never passed on under an AD answer.
         let mut unproven = nsec.clone();
         unproven.name = Name::from_ascii("other.example.").unwrap();
         unproven.proof = Proof::Indeterminate;
@@ -988,7 +921,6 @@ mod tests {
             assert!(!response.authentic_data);
             assert_eq!(ecs::subnet(&response).unwrap().scope_prefix(), 0);
         }
-        // Without client ECS nothing is echoed.
         let response = respond(
             &query(None, false),
             answer(vec![a(Proof::Secure)]),
@@ -1021,8 +953,6 @@ mod tests {
 
     #[test]
     fn failed_validation_error_becomes_servfail_with_ede_6() {
-        // `DnsError::Nsec` (a failed denial proof) shares this arm but is not
-        // constructible outside hickory.
         let q = query(None, true);
         let error = RecursorError::Net(NetError::Dns(DnsError::DnssecBogus));
         let response = respond(&q, Err(error), EcsScope::NotSent).response.unwrap();

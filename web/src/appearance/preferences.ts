@@ -1,13 +1,9 @@
-// Browser-local preferences. Only language, theme, background choice, overlay strength
-// and the query log refresh interval live in localStorage (the custom image itself lives
-// in IndexedDB, see imageStore.ts). Never store credentials, session bindings, PEM, logs or drafts here.
-// Every access tolerates unavailable or throwing storage: the console then runs with defaults.
+// Browser-local presentation and query-log refresh preferences.
 
 export type Theme = 'system' | 'light' | 'dark';
 export const THEME_ORDER: readonly Theme[] = ['system', 'light', 'dark'];
 export const nextTheme = (theme: Theme): Theme => THEME_ORDER[(THEME_ORDER.indexOf(theme) + 1) % THEME_ORDER.length];
 
-/** Solid presets (light and dark values live in style.css under [data-bg]), patterns, and the uploaded image. */
 export const SOLID_BACKGROUNDS = ['neutral', 'mist', 'sand', 'sage', 'lavender', 'slate'] as const;
 export const PATTERN_BACKGROUNDS = ['orbs', 'grid', 'gradient'] as const;
 export type BackgroundId = typeof SOLID_BACKGROUNDS[number] | typeof PATTERN_BACKGROUNDS[number] | 'custom';
@@ -31,7 +27,6 @@ export function readPreference(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
 }
 
-/** Writes or removes (null) a preference; returns false when the browser refuses storage. */
 export function writePreference(key: string, value: string | null): boolean {
   try {
     if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value);
@@ -58,10 +53,6 @@ export function storedOverlay(): number {
 }
 export const saveOverlay = (overlay: number) => writePreference(STORAGE_KEYS.overlay, overlay === DEFAULT_OVERLAY ? null : String(clampOverlay(overlay)));
 
-/**
- * Text backing for a custom image: a bright image under the dark theme (or a dark image under
- * the light theme) needs a stronger canvas-coloured scrim so glass text keeps WCAG AA contrast.
- */
 export function effectiveOverlay(overlay: number, luminance: number, dark: boolean): number {
   const mismatch = dark ? luminance > 0.45 : luminance < 0.4;
   return Math.max(overlay, mismatch ? 55 : 20);

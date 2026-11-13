@@ -60,7 +60,6 @@ impl Evictions {
     }
 }
 
-/// Resident occupancy, not a census of fresh answers. Byte charges include held readers.
 #[derive(Serialize)]
 pub(super) struct PartitionSnapshot {
     pub entries: usize,

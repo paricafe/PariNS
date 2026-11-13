@@ -23,9 +23,6 @@ expect_failure() {
     fi
 }
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
-# Exercise the installer's real EXIT handler without invoking the live install
-# path. A successful reinstallation has stopped the old service and already
-# closed its lock descriptor; cleanup must not unlock or restart it again.
 sed -n '/^rollback() {/,/^}$/p' "$repo/scripts/install.sh" > "$fixture/rollback-function.sh"
 sh -eu -c '
     . "$1"
@@ -35,10 +32,6 @@ sh -eu -c '
     exec 9>&-
     trap rollback EXIT
 ' sh "$fixture/rollback-function.sh"
-# A failed candidate restores the old helper and unit contract. The packaged
-# helper may wait longer, but only the restored helper may finish verification.
-# Exercise the real EXIT handler with distinct helper executables and failures
-# on either side of that handoff, without touching host services.
 for recovery_case in ready wait-failed verify-failed; do
     recovery="$fixture/$recovery_case"
     mkdir -p "$recovery/backup" "$recovery/bin" "$recovery/units" "$recovery/private" "$recovery/libexec"
@@ -57,7 +50,6 @@ case "$1" in
     install-restore) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
     install-wait)
         [ "$2" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]
-        # No inherited installer lock; this operation acquires its own.
         ! ( : <&9 ) 2>/dev/null
         [ "$RECOVERY_CASE" != wait-failed ]
         ;;
@@ -114,8 +106,6 @@ RESTORED_HELPER
         grep -Fq 'Manual recovery required: prior version readiness not confirmed.' "$recovery/output"
     fi
 done
-# The namespace is pinned in the installer across both preflight calls. Inspect
-# the actual parent's FD while the child runs, without entering it or requiring privilege.
 sed -n '/^        low_preflight() /,/^        [})]$/p' "$repo/scripts/install.sh" > "$fixture/preflight-function.sh"
 cat > "$fixture/tools/env" <<'MOCK_ENV'
 #!/bin/sh
@@ -157,8 +147,6 @@ if command -v dash >/dev/null 2>&1; then preflight_shell=dash; fi
     exec 8<&- 9>&-
 ' sh "$fixture"
 rm "$fixture/tools/env"
-# First-setup guidance prints the exact token, a filled-in tunnel and the local
-# URL, and never a symlinked, hard-linked or malformed token file.
 sed -n '/^fresh_guidance() {/,/^}$/p' "$repo/scripts/install.sh" > "$fixture/guidance-function.sh"
 mkdir "$fixture/guidance-tools" "$fixture/guidance-state"
 printf '#!/bin/sh\nprintf "192.0.2.1 via 198.51.100.1 dev eth0 src 198.51.100.7 uid 0\\n"\n' > "$fixture/guidance-tools/ip"
@@ -240,7 +228,6 @@ cmp "$binary" "$stage/opt/parins-managed/parins"
 [ "$(sed -n 1p "$stage/var/lib/parins/tls/cert.pem")" = 'external public HTTPS certificate' ]
 [ "$(mode "$stage/var/lib/parins/tls/identity.pem")" = 600 ]
 [ "$(sed -n 1p "$stage/etc/systemd/system/parins.service")" = 'legacy service unchanged' ]
-# Fail the second atomic rename after the binary changed; both old files return.
 cp "$stage/opt/parins-managed/parins" "$fixture/previous-binary"
 printf 'third candidate\n' > "$binary"
 real_mv=$(command -v mv)
@@ -250,15 +237,11 @@ expect_failure --root "$stage" --binary "$binary"
 cmp "$fixture/previous-binary" "$stage/opt/parins-managed/parins"
 cmp "$repo/deploy/parins-managed.service" "$stage/etc/systemd/system/parins-managed.service"
 rm "$fixture/tools/mv"
-# DynamicUser logical links are accepted only with the known private backing.
 mkdir "$stage/var/lib/private"
 mv "$stage/var/lib/parins-managed" "$stage/var/lib/private/parins-managed"
 ln -s private/parins-managed "$stage/var/lib/parins-managed"
 sh "$repo/scripts/install.sh" --helper "$helper" --build-info "$build_info" --root "$stage" --binary "$binary"
 [ "$(sed -n 1p "$stage/var/lib/parins-managed/state.json")" = 'private existing state' ]
-# Leftovers of earlier runs: the preflight copy and backups beyond the newest
-# two. Staging and dry runs only print them; look-alike names, links and online
-# update copies are never listed.
 managed="$(CDPATH= cd -- "$stage/opt/parins-managed" && pwd -P)"
 rm -rf "$managed"/.install-backup.*
 for backup in OLD001:202601010000 OLD002:202601020000 OLD003:202601030000 OLD004:202601040000; do
@@ -281,7 +264,6 @@ for kept in .install-backup.OLD001 .install-backup.OLD004 .install-backup.keep-m
     [ -e "$managed/$kept" ]
 done
 [ "$(find "$managed" -maxdepth 1 -name '.install-backup.??????' -type d | wc -l)" -eq 5 ]
-# Every rejected preflight must precede replacement, backups and service calls.
 cp "$stage/opt/parins-managed/parins" "$fixture/preflight-binary"
 cp "$stage/etc/systemd/system/parins-managed.service" "$fixture/preflight-unit"
 backups=$(find "$stage/opt/parins-managed" -name '.install-backup.*' | wc -l)
@@ -293,7 +275,6 @@ for directive in 'User=someone' 'Group=someone' 'DynamicUser=no' 'StateDirectory
 done
 rm "$stage/etc/systemd/system/parins-managed.service.d/override.conf"
 [ "$(find "$stage/opt/parins-managed" -name '.install-backup.*' | wc -l)" = "$backups" ]
-# Changing the base unit itself also invalidates its ownership contract.
 sed '/DynamicUser=yes/a\
 User=custom
 ' "$fixture/preflight-unit" > "$stage/etc/systemd/system/parins-managed.service"
@@ -363,8 +344,6 @@ for scenario in unknown-directory dangling-link orphaned-private legacy-state le
     expect_failure --root "$target" --binary "$binary" --dry-run
     [ ! -e "$target/opt" ]
 done
-# Older managed layouts are rejected before any write, with a manual-handling
-# hint; the removed enrollment option is not accepted either.
 old_layout="$fixture/old-layout"
 mkdir -p "$old_layout/etc/systemd/system" "$old_layout/opt/parins-managed" "$old_layout/var/lib/parins-managed"
 printf '# PariNS managed installer unit v2\n[Service]\nStateDirectory=parins-managed\n' > "$old_layout/etc/systemd/system/parins-managed.service"
@@ -378,13 +357,11 @@ grep -Fq 'unknown option: --enable-updater' "$fixture/failure.log"
 cmp "$fixture/old-unit" "$old_layout/etc/systemd/system/parins-managed.service"
 grep -Fxq 'existing state stays byte-identical' "$old_layout/var/lib/parins-managed/state.json"
 [ ! -e "$old_layout/usr" ]
-# Even an owned unit cannot legitimize an unexpected logical or backing link.
 cp "$fixture/preflight-unit" "$stage/etc/systemd/system/parins-managed.service"
 rm "$stage/var/lib/parins-managed"
 ln -s "$fixture/outside" "$stage/var/lib/parins-managed"
 expect_failure --root "$stage" --binary "$binary"
 rm "$stage/var/lib/parins-managed"
-# The same private backing without its logical link is not silently adopted.
 expect_failure --root "$stage" --binary "$binary"
 [ ! -e "$fixture/systemctl-called" ]
 sed -n '/^make_rejecting_candidate() {/,/^}$/p' "$repo/scripts/test-systemd.sh" > "$fixture/native-candidate-function.sh"

@@ -38,7 +38,6 @@ pub(super) struct Candidate {
 pub(super) struct Plan {
     pub plan_id: String,
     pub expires_at_ms: u64,
-    /// Kept only so state files written by older versions still load.
     pub config_revision: u64,
     pub current_sha256: String,
 }
@@ -128,8 +127,6 @@ fn validate(state: &AppState) -> Result<()> {
     }
     Ok(())
 }
-/// Each temporary name has one process-owned writer. The writer reuses it, so
-/// crashes cannot accumulate files.
 pub(super) fn atomic(dir: &Path, name: &str, temp: &str, bytes: &[u8]) -> Result<()> {
     let target = dir.join(name);
     crate::private_files::checked_open(&target, false)?;

@@ -1,11 +1,9 @@
 import type { LogEntry } from './logs';
 import { STORAGE_KEYS, readPreference, writePreference } from '../../appearance/preferences';
 
-/** Seconds between pushes; null is manual mode, where the page closes the connection and refreshes through the list API. */
 export type LiveInterval = 1 | 3 | 5 | 10 | null;
 const INTERVALS: readonly LiveInterval[] = [1, 3, 5, 10];
 
-/** The administrator's last choice in this browser; manual by default and when storage is unavailable. */
 export function storedLiveInterval(): LiveInterval {
   const stored = Number(readPreference(STORAGE_KEYS.logRefresh));
   return INTERVALS.find((interval) => interval === stored) ?? null;
@@ -14,10 +12,6 @@ export const saveLiveInterval = (interval: LiveInterval) => writePreference(STOR
 export interface LiveFilter { search: string | null; status: string | null; cache: string | null }
 export interface LiveSubscription { interval: LiveInterval; cursor: number | null; filter: LiveFilter }
 export interface LiveLogState { log: 'ok' | 'disabled' | 'unavailable' | 'checking'; log_epoch: number }
-/**
- * `unauthorized` (4401/4403) is terminal: the client stops and the page decides what
- * comes next. Every other close reconnects with bounded backoff.
- */
 export type LiveStatus = 'connecting' | 'open' | 'reconnecting' | 'unauthorized' | 'stopped';
 
 export interface LiveHandlers {
@@ -26,7 +20,6 @@ export interface LiveHandlers {
   status(status: LiveStatus): void;
 }
 
-/** Server messages; anything else is a protocol error. */
 type LiveMessage =
   | { type: 'entries'; entries: LogEntry[]; cursor: number | null; more: boolean }
   | ({ type: 'state' | 'subscribed' } & LiveLogState)
@@ -39,10 +32,6 @@ export function liveUrl(location: Pick<Location, 'protocol' | 'host'> = window.l
   return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/query-log/live`;
 }
 
-/**
- * One live query-log WebSocket. The session binding is read from the API client at
- * each connect and sent only as the first message; it never enters the URL.
- */
 export class LiveLogClient {
   private socket: WebSocket | null = null;
   private ping: ReturnType<typeof setInterval> | null = null;
@@ -56,7 +45,6 @@ export class LiveLogClient {
     this.subscription = initial;
   }
 
-  /** Connects (or keeps the open connection) with the given settings. */
   start(subscription: LiveSubscription) {
     this.subscription = subscription;
     if (this.running) { this.update(subscription); return; }
@@ -70,24 +58,17 @@ export class LiveLogClient {
     if (this.socket?.readyState === WebSocket.OPEN) this.subscribe();
   }
 
-  /**
-   * The server acknowledges every subscribe before any entries for it.
-   * Entries arriving before that answer belong to the previous filter or cursor, and
-   * would insert unmatched rows or skip matching ones: they are dropped.
-   */
   private subscribe() {
     this.unanswered += 1;
     this.send({ type: 'subscribe', ...this.subscription });
   }
 
-  /** Asks for new entries now; returns false when no connection can carry it. */
   refresh(): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN) return false;
     this.send({ type: 'refresh' });
     return true;
   }
 
-  /** Records the newest id the page holds so a reconnect resumes after it. */
   advance(cursor: number | null) { this.subscription = { ...this.subscription, cursor }; }
 
   stop() {
@@ -98,7 +79,6 @@ export class LiveLogClient {
 
   private connect() {
     const binding = this.binding();
-    // The session layer owns sign-in; without a binding there is nothing to authenticate with.
     if (!binding) { this.running = false; this.handlers.status('stopped'); return; }
     this.handlers.status(this.failures ? 'reconnecting' : 'connecting');
     const socket = new WebSocket(liveUrl());
@@ -108,13 +88,11 @@ export class LiveLogClient {
       this.send({ type: 'auth', binding });
       this.unanswered = 0;
       this.subscribe();
-      // Resuming after a gap: fetch what was missed now instead of waiting for the interval.
       if (this.subscription.interval !== null) this.send({ type: 'refresh' });
       this.ping = setInterval(() => this.send({ type: 'ping' }), PING_MS);
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) return;
-      // A message this console cannot read ends the connection like a network failure.
       try { this.receive(event.data); } catch (error) { console.error(error); this.closed(1002); }
     };
     socket.onclose = (event) => { if (this.socket === socket) this.closed(event.code); };

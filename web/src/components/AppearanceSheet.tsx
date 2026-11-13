@@ -18,7 +18,6 @@ function Swatch({ id, name, checked, onSelect, label, image }: { id: BackgroundI
   </label>;
 }
 
-/** Sheet for the background preset/pattern and the browser-local custom image; the top-bar button owns the theme. */
 export function AppearanceSheet({ appearance }: { appearance: Appearance }) {
   const { language, background, overlay, image } = appearance;
   const [open, setOpen] = useState(false);

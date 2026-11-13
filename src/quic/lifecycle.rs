@@ -42,7 +42,6 @@ impl ListenerRuntime {
 
     pub(crate) async fn shutdown(&self) {
         self.abort();
-        // Keep joins in the owner, so cancelling this wait cannot lose cleanup.
         while poll_fn(|cx| {
             self.tasks
                 .lock()
@@ -53,8 +52,6 @@ impl ListenerRuntime {
         .await
         .is_some()
         {}
-        // Cancelled application connection/stream tasks can still hold sockets
-        // until their destructors run; driver completion alone is insufficient.
         let mut released = self.released.subscribe();
         while !*released.borrow_and_update() {
             released.changed().await.expect("QUIC socket release owner");
@@ -104,14 +101,12 @@ impl Drop for Release {
 
 #[derive(Debug)]
 struct Socket {
-    // Field order ensures the real socket is dropped before release is signalled.
     inner: Arc<dyn AsyncUdpSocket>,
     _release: Release,
 }
 
 #[derive(Debug)]
 struct Poller {
-    // The delegate may retain the real socket. Drop it before the notifying owner.
     inner: Pin<Box<dyn UdpPoller>>,
     _owner: Arc<Socket>,
 }

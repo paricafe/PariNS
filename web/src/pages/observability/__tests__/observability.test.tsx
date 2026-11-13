@@ -52,11 +52,9 @@ describe("observability data math", () => {
   it("uses cache lookups and request timer counts as denominators", () => {
     expect(cacheHitRate(status.metrics?.counters)).toBe(30);
     expect(cacheHitRate({ cache_hits: 0, cache_misses: 0 })).toBeNull();
-    // Hit rate = (fresh hits + stale hits + coalesced) / cache lookups: queries with no upstream request of their own.
     expect(cacheHitRate({ cache_hits: 30, cache_misses: 70, cache_lookup_stale: 2, flight_joined: 8 })).toBe(40);
     expect(cacheBreakdown({ cache_hits: 30, cache_misses: 70, cache_lookup_stale: 2, flight_joined: 8 }))
       .toEqual({ lookups: 100, hits: 30, stale: 2, joined: 8, misses: 60 });
-    // A follower that also fell back to a stale answer is never counted past the lookups.
     expect(cacheHitRate({ cache_hits: 1, cache_misses: 2, cache_lookup_stale: 2, flight_joined: 2 })).toBe(100);
     expect(averageLatencyMillis(status.metrics?.request_latency)).toBe(2.5);
     expect(averageLatencyMillis({ count: 0, sum_micros: 0, buckets: [] })).toBeNull();
@@ -112,12 +110,10 @@ describe("OverviewPage", () => {
         ? { ...status, metrics: { ...status.metrics, counters: { ...status.metrics!.counters, upstream_operations: operations, upstream_failures: failures } } }
         : stats);
       render(<OverviewPage api={api} language="en" onOpenDns={() => {}} />);
-      // One sample has no delta, so the page does not yet claim upstreams are healthy.
       await waitFor(() => expect(screen.getByText('DNS is running')).toBeTruthy());
       operations += 10; failures += 8;
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
       await waitFor(() => expect(screen.getByText('Upstreams not responding')).toBeTruthy());
-      // Once the failing samples leave the 65 s window, the warning clears.
       operations += 10;
       await act(async () => { await vi.advanceTimersByTimeAsync(70_000); });
       await waitFor(() => expect(screen.getByText('Running normally')).toBeTruthy());
@@ -157,7 +153,6 @@ describe("OverviewPage", () => {
     expect(screen.getByText('Failed to start')).toBeTruthy();
     expect(screen.getByText(error)).toBeTruthy();
     view.unmount();
-    // Another startup error keeps the generic explanation and the raw text.
     const other = { ...failed, last_error: 'DNS unavailable: subscription_material_missing: DNS policy unavailable' };
     render(<OverviewPage api={fakeApi((path) => path === 'status' ? other : stats)} language="zh-CN" onOpenDns={() => {}} />);
     await waitFor(() => expect(screen.getByText('DNS 未运行')).toBeTruthy());
@@ -271,7 +266,6 @@ describe("LogsPage", () => {
     const view = render(<LogsPage api={api} language="en" onOpenSettings={() => {}} />);
     await waitFor(() => expect(screen.getAllByText('fresh.test').length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole('button', { name: /Older queries/ }));
-    // Text typed but not filtered stays out of the request.
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'typed.test' } });
     fireEvent.click(screen.getByRole('radio', { name: 'Stale hit' }));
     await waitFor(() => expect(screen.getAllByText('stale.test').length).toBeGreaterThan(0));
@@ -279,7 +273,6 @@ describe("LogsPage", () => {
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });
     expect(screen.queryByText('late.test')).toBeNull();
     fireEvent.click(screen.getAllByRole('button', { name: 'Query details' })[0]);
-    // The scope reads in plain language; the raw code stays verbatim behind ⓘ, and the record ID is gone.
     expect(screen.getAllByText(/Only for requests from exactly 192.0.2.0\/24/).length).toBeGreaterThan(0);
     fireEvent.click(screen.getAllByRole('button', { name: 'Raw scope code' })[0]);
     expect(screen.getAllByRole('note').some((note) => note.textContent === 'exact_ecs:192.0.2.0/24')).toBe(true);

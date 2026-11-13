@@ -1,5 +1,5 @@
-//! Private pinned HTTPS transport, plus the response-header and retry helpers
-//! its readers share. Callers retain their distinct URL permissions.
+//! Private pinned HTTPS transport, plus the response-header and retry helpers its readers
+//! share.
 use bytes::Bytes;
 use futures_util::Stream;
 use http::{HeaderMap, StatusCode, Uri, header};
@@ -67,8 +67,6 @@ impl HttpsReader {
             .await
     }
 
-    /// One request with a body to a public HTTPS destination, within the same
-    /// connect/header deadline as `request`.
     pub(crate) async fn send(
         &self,
         method: http::Method,
@@ -79,7 +77,6 @@ impl HttpsReader {
         let host = validate_https_uri(&uri)?.to_owned();
         let port = uri.port_u16().unwrap_or(443);
         timeout(CONNECT_TIMEOUT, async {
-            // Pin the checked addresses to the actual socket: no second DNS lookup.
             let addresses: Vec<_> = lookup_host((host.as_str(), port))
                 .await
                 .map_err(|_| ReaderError::new("network_error"))?
@@ -120,7 +117,6 @@ impl HttpsReader {
             .map_err(|_| ReaderError::new("tls_error"))
     }
 }
-/// HTTP/1.1 exchange on an established stream; the body streams afterwards.
 async fn exchange<S>(
     stream: S,
     method: http::Method,
@@ -186,8 +182,6 @@ where
     })
 }
 
-/// Plain HTTP to a local test server: no TLS, address pinning or public-address
-/// check. Only tests that fake a remote service may use it.
 #[cfg(test)]
 pub(crate) async fn send_plain(
     address: SocketAddr,
@@ -247,7 +241,6 @@ pub(crate) fn validate_headers(headers: &HeaderMap) -> Result<(), ReaderError> {
     }
     Ok(())
 }
-/// The declared body length; a malformed value is an invalid response.
 pub(crate) fn content_length(headers: &HeaderMap) -> Result<Option<u64>, ReaderError> {
     headers
         .get(header::CONTENT_LENGTH)
@@ -259,8 +252,6 @@ pub(crate) fn content_length(headers: &HeaderMap) -> Result<Option<u64>, ReaderE
         })
         .transpose()
 }
-/// Retry-After as a Unix time in seconds: delay seconds added to `now`, or an
-/// HTTP date.
 pub(crate) fn retry_after_unix(headers: &HeaderMap, now: u64) -> Option<u64> {
     let value = headers.get(header::RETRY_AFTER)?.to_str().ok()?;
     value

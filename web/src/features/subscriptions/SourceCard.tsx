@@ -10,7 +10,6 @@ export function failureText(failure: Failure, language: Language) {
   return `${translate(hasTranslation(key) ? key : 'subscriptions.error', language)}${failure.line === null ? '' : ` (${translate('subscriptions.line', language, { line: failure.line })})`}`;
 }
 
-/** Status in words: saved sources report the server's state; new ones download when the configuration is saved. */
 function stateKey(source: SubscriptionDraft, status: SourceStatus | undefined, savedSource: SubscriptionSource | undefined): string {
   if (status?.active) return 'active';
   if (!source.enabled) return 'inactive';
@@ -21,7 +20,6 @@ function stateKey(source: SubscriptionDraft, status: SourceStatus | undefined, s
 export function SourceCard({ source, index, status, language, locked, working, savedSource, subscriptionsEnabled, takenIds, change, remove, refresh }: {
   source: SubscriptionDraft; index: number; status?: SourceStatus; language: Language;
   locked: boolean; working: boolean; savedSource?: SubscriptionSource; subscriptionsEnabled: boolean;
-  /** IDs of the other sources, so a generated ID stays unique. */
   takenIds: readonly string[];
   change(source: SubscriptionDraft): void; remove(): void; refresh(): void;
 }) {

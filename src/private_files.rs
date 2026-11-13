@@ -1,5 +1,4 @@
-//! Shared low-level private-file and private-directory checks, including the
-//! directory lock. Callers retain lifecycle and authority.
+//! Private-file checks and directory locking.
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::{self, File, OpenOptions},
@@ -7,7 +6,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Open external configuration material without waiting for a FIFO writer.
 pub(crate) fn open_regular(path: &Path, what: &str) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -81,11 +79,6 @@ pub(crate) fn private_permissions(metadata: &fs::Metadata, mode: u32) -> Result<
     Ok(())
 }
 
-/// Creates `path` with mode 0700 when missing, resolves it, and takes the
-/// exclusive lock on its private `lock` file. The input may be a symlink (a
-/// systemd DynamicUser state directory is one); the resolved directory must be
-/// private and be neither the filesystem root nor HOME. `what` names the
-/// directory in errors.
 pub(crate) fn lock_private_dir(path: &Path, what: &str) -> Result<(PathBuf, File)> {
     fs::DirBuilder::new()
         .recursive(true)

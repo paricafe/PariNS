@@ -1,16 +1,4 @@
 //! Credentials share Store's commit point, independently of DNS configuration.
-//!
-//! - A credential change is its own Store transaction, never a DNS configuration
-//!   apply. It preserves the current/previous TOML and the configuration revision.
-//! - The hash and attempt budget run outside Manager locks; serialized admission
-//!   rechecks the verified username/hash and the caller's session.
-//! - After Store's rename commit, saved credentials are published and all sessions
-//!   revoked without awaiting, in Manager then Active lock order.
-//! - Session issuance rechecks its credential snapshot. Protected manual mutations,
-//!   including special updater paths, recheck session/realm at admission; schedulers
-//!   need no session and already accepted background work is not revoked.
-//! - A success or unknown outcome requires explicit login: never replay, clear the
-//!   Cookie, issue a replacement session, or broadcast sensitive inputs.
 use super::{ApiError, Manager, Shared, Snapshot, Stored, decode, error, internal, invalid, store};
 use axum::http::{HeaderMap, StatusCode};
 use serde::Deserialize;
@@ -73,15 +61,11 @@ pub(super) async fn rotate(
         input.current_password,
         move || store::hash_password(&new_password).map_err(invalid),
         |shared, mut manager, hash| async move {
-            // Clone at admission: unrelated configuration work may have completed
-            // while hashing, and its revision/previous document must survive.
             let mut next = manager.saved.as_ref().ok_or_else(internal)?.clone();
             next.username = username;
             next.password_hash = hash;
             tokio::task::spawn_blocking(move || {
                 manager.store.save(&next).map_err(|_| internal())?;
-                // Store rename is the commit point. No await separates publication
-                // from revocation; retain the Manager -> Active lock order.
                 manager.saved = Some(next);
                 shared.active.lock().unwrap().sessions.clear();
                 Ok(json!({"reauthentication_required":true}))
@@ -93,10 +77,6 @@ pub(super) async fn rotate(
     .await
 }
 
-/// The flow every credential change shares. The current password and the CPU
-/// work of `prepare` run outside Manager on the existing hash permit. The
-/// mutation permit then admits `commit`, which outlives the HTTP request and
-/// runs only while the caller's session and the verified credentials hold.
 pub(super) async fn change<R, Commit>(
     shared: Arc<Shared>,
     transport: Arc<Snapshot>,

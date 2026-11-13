@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, StaleRequest, type ApiClient } from '../../session/client';
 import { pollDelay, type Failure, type SubscriptionState } from './types';
 
-/** `savedKey` changes whenever a configuration save lands, so status is re-read at once. */
 export function useSubscriptions(api: ApiClient, savedKey: unknown) {
   const [state, setState] = useState<SubscriptionState | null>(null);
   const [error, setError] = useState<Failure | null>(null);
@@ -51,13 +50,11 @@ export function useSubscriptions(api: ApiClient, savedKey: unknown) {
   }, [load, savedKey]);
   const visibleDelay = pollDelay(state, pending, unknown, false);
   useEffect(() => { reschedule.current(); }, [visibleDelay]);
-  /** Updates one saved source (or all with `null`); new sources are downloaded by Save. */
   const refresh = async (sourceId: string | null) => {
     if (sending.current) return;
     sending.current = true; setPending(true); setError(null); setUnknown(false); setOperationId(null);
     const token = owner.current;
     try {
-      // The server works against its current saved configuration; no client revision is sent.
       const body = { source_id: sourceId };
       const result = await api.request<{ operation_id: string }>('filter/subscriptions/refresh', 'POST', body);
       if (token !== owner.current) return;

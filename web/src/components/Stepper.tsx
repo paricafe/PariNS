@@ -1,11 +1,6 @@
 import { Minus, Plus } from 'lucide-react';
 import { translate, type Language } from '../i18n';
 
-/**
- * iOS-style stepper for small integer ranges. Typing keeps the raw draft for
- * Rust validation; − and + only step a clean integer within the field's
- * declared bounds, which mirror the Rust schema.
- */
 export function Stepper({ id, label, value, min, max, disabled, language, onChange, describedBy, invalid }: {
   id: string; label: string; value: string; min: number; max: number; disabled?: boolean; language: Language; onChange(value: string): void; describedBy?: string; invalid?: boolean;
 }) {

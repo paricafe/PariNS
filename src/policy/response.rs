@@ -1,5 +1,4 @@
-//! What a blocked query is answered with: the configured method, its rule-line
-//! syntax, and the synthesized answer (addresses or SOA, TTL, EDE 15).
+//! Parsing and construction of configured DNS block responses.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -14,13 +13,11 @@ use hickory_proto::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// RFC 8914 Extended DNS Error option code and the "Blocked" info code.
 const EDE: u16 = 15;
 const EDE_BLOCKED: u16 = 15;
 pub(super) const DEFAULT_TTL_SECS: u32 = 10;
 pub(super) const MAX_TTL_SECS: u32 = 86_400;
 
-/// The configured method names, as written in `[filter]` and subscription sources.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockMode {
@@ -34,23 +31,17 @@ pub enum BlockMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlockResponse {
-    /// NOERROR without records, with a synthesized SOA.
     Nodata,
-    /// A answers 0.0.0.0 and AAAA answers ::.
     NullIp,
-    /// A and AAAA answer the configured address of their family, if any.
     CustomIp {
         ipv4: Option<Ipv4Addr>,
         ipv6: Option<Ipv6Addr>,
     },
-    /// NXDOMAIN with a synthesized SOA.
     Nxdomain,
     Refused,
 }
 
 impl BlockResponse {
-    /// Global `[filter]` and subscription-source settings: addresses belong to
-    /// `custom_ip` only, which needs at least one.
     pub fn from_settings(
         mode: BlockMode,
         ipv4: Option<Ipv4Addr>,
@@ -86,8 +77,6 @@ impl BlockResponse {
         })
     }
 
-    /// The method written after a block rule's domain: a method name, or one or
-    /// two unicast addresses (at most one per family) for a custom IP.
     pub(super) fn parse_rule(tokens: &[&str]) -> Result<Self> {
         match tokens {
             ["nodata"] => return Ok(Self::Nodata),
@@ -126,7 +115,6 @@ impl BlockResponse {
         hash.update(self.label().as_bytes());
         hash.update([0]);
     }
-    /// Names the method and its addresses.
     pub(super) fn label(&self) -> String {
         match self {
             Self::CustomIp { ipv4, ipv6 } => format!("custom_ip {ipv4:?} {ipv6:?}"),
@@ -134,9 +122,6 @@ impl BlockResponse {
         }
     }
 
-    /// The answer to `query` blocked by `rule`. Only IN-class A and AAAA
-    /// questions get addresses; every other question is answered as nodata
-    /// (or NXDOMAIN or REFUSED). It never carries AD.
     pub(super) fn answer(&self, query: &Message, rule: &Name, ttl: u32) -> Message {
         let question = &query.queries[0];
         let code = match self {
@@ -188,8 +173,6 @@ impl BlockResponse {
     }
 }
 
-/// Owned by the blocking rule; MINIMUM is the TTL so clients cache the
-/// negative answer exactly as long (RFC 2308).
 fn soa(rule: &Name, class: DNSClass, ttl: u32) -> Record {
     let mut record = Record::from_rdata(
         rule.clone(),
@@ -214,9 +197,6 @@ fn unicast(address: IpAddr) -> bool {
         && address != IpAddr::V4(Ipv4Addr::BROADCAST)
 }
 
-/// The block method for every index slot. Slots below `local_slots` are local
-/// rules (slot 0 follows the global method, the rest are distinct per-rule
-/// methods in first-declaration order); the others are subscription sources.
 #[derive(Clone, Debug)]
 pub(crate) struct Responses {
     pub global: BlockResponse,
@@ -233,7 +213,6 @@ impl Responses {
             .flatten()
             .unwrap_or(self.global)
     }
-    /// The answer class of every slot: slots with one class answer alike.
     pub fn classes(&self) -> Vec<u16> {
         let mut distinct: Vec<BlockResponse> = Vec::new();
         (0..self.slots.len() as u16)

@@ -63,23 +63,17 @@ impl Default for Rules {
     }
 }
 
-/// Distinct per-rule block methods in local rules, each with its own index slot.
 pub(crate) const MAX_LOCAL_RESPONSES: usize = 1024;
 
-/// Configuration owns validated source rules, never a prematurely compiled
-/// index. The subscription worker owns candidate compilation and its budget.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "Rules")]
 pub struct LocalRules {
     rules: Arc<Rules>,
     global: BlockResponse,
-    /// Per-rule methods in first-declaration order; slot `i + 1` is `variants[i]`.
     variants: Arc<[BlockResponse]>,
-    /// Every rule line and setting, which decide each rule's slot and method.
     digest: [u8; 32],
 }
 
-/// A rule line is a domain, then for block rules an optional method.
 fn split_rule(rule: &str, group: Group) -> Result<(&str, Option<BlockResponse>)> {
     ensure!(rule.trim() == rule, "leading or trailing whitespace");
     let mut tokens = rule.split_whitespace();
@@ -106,9 +100,6 @@ impl TryFrom<Rules> for LocalRules {
     }
 }
 impl LocalRules {
-    /// `quote` names offending rule text in errors. A rule file can be any
-    /// local file, so its errors name only the rule's position. Reasons are
-    /// fixed program text and never repeat rule content.
     fn new(rules: Rules, quote: bool) -> Result<Self> {
         ensure!(
             rules
@@ -123,7 +114,6 @@ impl LocalRules {
             rules.bytes() <= 8 * 1024 * 1024,
             "filter exceeds 8 MiB of rule text"
         );
-        // Serde shows only the message, so each one carries its cause.
         let global =
             BlockResponse::from_settings(rules.block_response, rules.block_ipv4, rules.block_ipv6)
                 .map_err(|error| anyhow::anyhow!("invalid filter block_response: {error}"))?;
@@ -194,7 +184,6 @@ impl LocalRules {
                 .collect(),
         }
     }
-    /// Adds every enabled rule under the slot of its method.
     fn add_to(&self, builder: &mut Builder, mut check: impl FnMut() -> Result<()>) -> Result<()> {
         builder.local_slots = self.local_slots();
         builder.classes = self.responses().classes();
@@ -273,8 +262,6 @@ impl LocalPolicySource {
                 let mut file = crate::private_files::open_regular(path, "filter file")?;
                 let length = usize::try_from(file.metadata()?.len())?;
                 ensure!(length <= MAX, "filter file exceeds 8 MiB");
-                // Reserve the bounded input buffer before reading. Keep it
-                // charged alongside parsed rules and the candidate index.
                 let mut budget = Builder::new(limits)?.budget;
                 let mut bytes = Vec::new();
                 canonical::grow(&mut bytes, length, &mut budget)?;
@@ -299,8 +286,6 @@ impl LocalPolicySource {
     }
 }
 
-/// A rule file's TOML error, reduced to its position and a fixed kind: the
-/// parser's own message can quote the file, which may be any local file.
 fn file_error(text: &str, error: &toml::de::Error) -> anyhow::Error {
     let kind = match toml::from_str::<toml::Table>(text) {
         Err(_) => "TOML syntax error",
@@ -368,7 +353,6 @@ pub enum Scope {
 }
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct Witness {
-    /// null identifies local rules; subscription IDs are always nonempty.
     pub source_id: Option<String>,
     pub rule: String,
     pub scope: Scope,
@@ -378,11 +362,9 @@ pub struct Explanation {
     pub decision: Decision,
     pub witness: Option<Witness>,
 }
-/// The rule that blocked a query and the method its answer used, for the query log.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BlockTrace {
     pub rule: String,
-    /// null identifies local rules.
     pub source_id: Option<String>,
     pub response: String,
 }
@@ -396,7 +378,6 @@ impl TryFrom<Rules> for Policy {
 }
 
 impl Policy {
-    /// The effective-rule digest is calculated once during compilation.
     pub fn semantic_digest(&self) -> [u8; 32] {
         self.data.index.semantic_digest
     }
@@ -406,7 +387,6 @@ impl Policy {
         responses: Responses,
         local: Option<LocalRules>,
     ) -> Self {
-        // Each slot's witness is its source and the answer it actually gives.
         let witnesses: Vec<_> = source_ids
             .iter()
             .enumerate()
@@ -425,16 +405,12 @@ impl Policy {
             }),
         }
     }
-    /// Slot IDs of an aggregate on this local policy: its local slots, then
-    /// one slot per subscription source in the given order.
     pub(crate) fn aggregate_ids(&self, sources: impl IntoIterator<Item = String>) -> Vec<String> {
         vec![String::new(); usize::from(self.data.responses.local_slots)]
             .into_iter()
             .chain(sources)
             .collect()
     }
-    /// An aggregate index built on this local policy; `sources` holds each
-    /// subscription source's method in slot order (None follows the global one).
     pub(crate) fn aggregate(
         &self,
         index: radix::Index,
@@ -454,31 +430,24 @@ impl Policy {
         responses.slots.extend(sources);
         responses
     }
-    /// Covers every block method of an aggregate on this local policy, so a
-    /// method change publishes a new generation.
     pub(crate) fn aggregate_responses_digest(
         &self,
         sources: impl IntoIterator<Item = Option<BlockResponse>>,
     ) -> [u8; 32] {
         self.aggregate_responses(sources).digest()
     }
-    /// Answer classes of an aggregate's slots; they decide which covered rules
-    /// the index keeps, so they name the derived index too.
     pub(crate) fn aggregate_classes(
         &self,
         sources: impl IntoIterator<Item = Option<BlockResponse>>,
     ) -> Vec<u16> {
         self.aggregate_responses(sources).classes()
     }
-    /// Digest of the local rule text and settings; empty for an aggregate.
     pub(crate) fn local_digest(&self) -> [u8; 32] {
         self.data
             .local
             .as_ref()
             .map_or([0; 32], |local| local.digest)
     }
-    /// Stable effective decisions and their actual bounded witnesses, excluding
-    /// unused sources and input-only statistics such as repeated source lines.
     pub(crate) fn publication_digest(&self) -> [u8; 32] {
         self.data.publication_digest
     }
@@ -574,7 +543,6 @@ impl Policy {
             }
         }
     }
-    /// Parse and validate a complete replacement before the caller publishes it.
     pub fn load(path: &Path) -> Result<Self> {
         LocalPolicySource::File(path.to_owned()).compile(Limits::default(), || Ok(()))
     }
@@ -586,16 +554,11 @@ impl Policy {
             .is_some_and(|matched| (matched.group as u8) >= 2)
     }
 
-    /// The answer for a blocked `name`, chosen by the most specific rule:
-    /// local exact, local suffix (longest), subscription exact, subscription
-    /// suffix (longest); sources in configured order.
     fn block_answer(&self, query: &Message, name: &Name) -> Option<(Message, BlockTrace)> {
         let responses = &self.data.responses;
         let found = self.data.index.block_match(name, responses.local_slots)?;
         let response = responses.get(found.source_slot);
         let rule = self.data.index.rule(name, found);
-        // The SOA owner is the question name or an ancestor: the rule's name
-        // when it matched the question, else the question name itself.
         let qname = query.queries[0].name();
         let owner = if name == qname {
             Name::from_ascii(format!("{rule}.")).expect("matched rules are DNS names")
@@ -617,9 +580,6 @@ impl Policy {
         self.block_answer(query, query.queries[0].name())
     }
 
-    /// Only follow answer CNAMEs reachable from the original question and class.
-    /// A name's allow exception never skips checks on a different chain target.
-    /// A blocked chain name replaces the whole answer with that rule's method.
     pub fn apply_response(&self, query: &Message, response: &mut Message) -> Option<BlockTrace> {
         if self.index_rules() == 0 {
             return None;

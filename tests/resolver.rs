@@ -47,7 +47,6 @@ async fn ignores_unrelated_responses_and_restores_client_id() {
             .send_to(&invalid.to_vec().unwrap(), peer)
             .await
             .unwrap();
-        // A matching answer from the wrong socket must also be ignored.
         let rogue = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut forged = valid.clone();
         forged.metadata.response_code = ResponseCode::NXDomain;

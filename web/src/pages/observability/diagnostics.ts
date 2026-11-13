@@ -7,7 +7,6 @@ export interface UpstreamAttempt extends UpstreamResult { pool_generation: numbe
 export interface UpstreamTrace { attempts: UpstreamAttempt[]; omitted: number }
 export interface UpstreamEndpoint { slot: number; label: string; address: string }
 export interface UpstreamDiagnostics { scope: string; pool_generation: number; since_ms: number; slots: { slot: number; counts: (UpstreamResult & { count: number })[] }[]; endpoints: UpstreamEndpoint[] }
-/** Counters since the DNS generation started; `outbound.inflight` is a current gauge. */
 export interface RecursionDiagnostics {
   scope: string;
   resolutions: Record<string, number>;
@@ -36,7 +35,6 @@ export function decisionLabel(kind: 'lookup' | 'store', decision: CacheDecision 
   return `${diagnosticLabel(`${kind}_${decision.outcome}`, language)}${decision.reason ? ` · ${diagnosticLabel(`reason_${decision.reason}`, language)}` : ''}`;
 }
 
-/** A cache scope tag (`no_ecs`, `exact_ecs:…`, a network, …) in plain language. */
 export function scopeNote(scope: string, language: Language): string {
   if (scope === 'no_ecs') return translate('reliability.scopeNoEcs', language);
   if (scope === 'privacy_v4') return translate('reliability.scopePrivacyV4', language);

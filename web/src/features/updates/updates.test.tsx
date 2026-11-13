@@ -59,7 +59,6 @@ describe('software update presentation', () => {
     const update = screen.getByRole('button', { name: 'Update now' });
     update.focus(); fireEvent.click(update);
     expect(screen.getByRole('dialog', { name: 'Unsaved changes' }).textContent).toContain('Save or discard them before confirming the update.');
-    // Keeping the draft closes the sheet; the sheet returns focus to its trigger.
     fireEvent.click(screen.getByRole('button', { name: 'Save my changes first' }));
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(update);
@@ -83,7 +82,6 @@ describe('software update presentation', () => {
     expect(mocks.config.setUpdateLocked).toHaveBeenCalledWith(true);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
     await waitFor(() => expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1));
-    // Actions are offered only while they can run; an unconfirmed apply hides Update now.
     expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
     current.last_operation = { operation_id: 'op-1', phase: 'failed', version: '0.1.5', reason: 'preflight_failed', downloaded_bytes: 0, total_bytes: 100 };
     fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));

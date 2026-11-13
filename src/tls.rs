@@ -1,6 +1,4 @@
 //! Verified TLS configuration and DNS-over-TLS adapters (RFC 7858 / RFC 8310).
-//! Upstream DoT uses the strict privacy profile: a TLS failure fails the attempt.
-//! The resolver owns upstream deadlines.
 
 use std::{
     fmt,
@@ -89,8 +87,6 @@ pub fn load_identity(files: &TlsFiles) -> Result<Arc<CertifiedKey>> {
     validate_pem_identity(&certificate, &private_key)
 }
 
-/// Only the chosen management identity needs a browser host. Dates and key
-/// consistency are validated by the shared preparation boundary for all roles.
 pub fn validate_management_identity(key: &CertifiedKey, host: &str) -> Result<()> {
     let name = ServerName::try_from(host.to_owned()).context("invalid management TLS name")?;
     let leaf = key.cert.first().context("TLS certificate chain is empty")?;
@@ -113,8 +109,6 @@ impl fmt::Display for ManagementNameMismatch {
 
 impl std::error::Error for ManagementNameMismatch {}
 
-/// Validate an imported identity before any secret is persisted. Parsing and
-/// key consistency use the same provider as file-backed listener identities.
 pub fn validate_pem_identity(
     certificate_pem: &[u8],
     private_key_pem: &[u8],
@@ -154,8 +148,6 @@ fn checked_identity(
             let usage = parsed
                 .extended_key_usage()
                 .context("invalid TLS certificate extended key usage")?;
-            // rustls-webpki's server_auth usage accepts an absent EKU, but an
-            // explicit EKU must contain serverAuth (anyEKU alone is not enough).
             ensure!(
                 usage.is_none_or(|usage| usage.value.server_auth),
                 "TLS certificate leaf does not allow server authentication"
@@ -163,13 +155,10 @@ fn checked_identity(
         }
     }
     let key = CertifiedKey::from_der(certificates, key, &rustls::crypto::ring::default_provider())?;
-    // from_der permits providers that cannot determine key consistency; ours must prove it.
     key.keys_match()?;
     Ok(Arc::new(key))
 }
 
-/// Verified upstream client configuration: the configured CA file, or the
-/// WebPKI roots when none is set, offering exactly one ALPN protocol.
 pub(crate) fn client_config(ca_file: Option<&Path>, alpn: &[u8]) -> Result<ClientConfig> {
     let mut roots = RootCertStore::empty();
     if let Some(path) = ca_file {
@@ -240,7 +229,6 @@ impl Upstream {
             }
         };
         let result = async {
-            // A failed connect sent nothing, so the caller may try another address.
             let Some(pool) = &self.pool else {
                 mark(&mut attempt, ConnectionUse::New);
                 return transaction(
@@ -255,8 +243,6 @@ impl Upstream {
             };
             client_stage(&mut attempt, Stage::Wait);
             let mut slot = pool.checkout(address).await;
-            // Never leave a borrowed/partially consumed stream in shared state. A
-            // cancelled query drops it along with this guard, leaving None.
             let cached = slot.take().filter(|idle| {
                 idle.address == address && idle.returned.elapsed() < pool.idle_timeout
             });
@@ -279,11 +265,6 @@ impl Upstream {
             let response = match transaction(&mut stream, query, &mut attempt).await {
                 Ok(response) => response,
                 Err(error) if reused && closed_connection(&error) => {
-                    // The one exception to "a sent query is never resent": a server
-                    // may close an idle connection at any time, and a query written
-                    // into a closed connection was never processed. Retry only this
-                    // transport closure (`closed_connection`), once, on a new
-                    // connection within the original query budget.
                     drop(stream);
                     if let Some(attempt) = &mut attempt {
                         attempt.finish(&Err::<(), _>(error));
@@ -327,7 +308,6 @@ impl Upstream {
             .connect(self.server_name.clone(), stream)
             .await?;
         client_stage(attempt, Stage::Validate);
-        // Legacy DoT servers may omit ALPN; an explicitly different protocol is never accepted.
         ensure!(
             stream
                 .get_ref()
@@ -416,15 +396,12 @@ pub async fn serve(
                 tasks.spawn(async move {
                     let _permit = permit;
                     let _source = source;
-                    // Connection admission precedes TLS work, so slow handshakes are bounded too.
                     let _ = connection(stream, peer, acceptor, ingress).await;
                 });
             }
         }
     };
     drop(listener);
-    // Only a generation stop forces it (and its upstream pool) down; after an
-    // error exit the supervisor rebinds this listener while others serve.
     ingress
         .drain(&mut tasks, crate::resolver::ForcedShutdown::DotDrain)
         .await;
@@ -459,7 +436,6 @@ async fn connection(
             _ = ingress.stop.changed() => return Ok(()),
             result = timeout(ingress.io_timeout, tcp::read_frame(&mut stream)) => result??,
         };
-        // Once admitted, a query can finish during the server's bounded shutdown grace.
         let (response, delivery) = ingress.handle_for_delivery(&bytes, peer.ip(), "dot").await;
         let Some(response) = response else {
             return Ok(());

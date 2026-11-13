@@ -3,7 +3,6 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Info } from 'lucide-react';
 import { SPRING_IOS_FAST } from './beui/motion';
 
-/** ⓘ button that reveals a field explanation on demand; the text stays in the DOM order after the button. */
 export function InfoTip({ text, label }: { text: string; label: string }) {
   const [open, setOpen] = useState(false);
   const reduced = useReducedMotion();
@@ -26,7 +25,6 @@ export function InfoTip({ text, label }: { text: string; label: string }) {
   useEffect(() => {
     if (!open) return;
     const down = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
-    // Escape closes the open tip from any focus position, before an enclosing dialog or card sees it.
     const key = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault(); event.stopPropagation(); setOpen(false);

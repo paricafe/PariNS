@@ -1,4 +1,4 @@
-// Real official-A metadata checks only. No apply, candidate download or release fabrication.
+// Acceptance for official release metadata checks.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,7 +12,6 @@ import { cpuList, linuxUsage, parse, query, verifyLinuxServer } from './lib/wire
 import { aResponse, distribution, dueCount, ioStat, oracle, plannedCount, probe, runWirePhase } from './lib/managed-wire.mjs';
 
 const MiB = 1024 * 1024;
-// The shared driver's update_* names mean the caller's action window here: CHECK.
 const SLO = Object.freeze({ rate: 1000, steady_ms: 60000, update_ms: 120000,
   refresh_at_ms: 15000, client_deadline_ms: 1000, steady_p99_ms: 20, update_p99_ms: 50,
   timeout_fraction: .001, correct_qps: 999, steady_rss_bytes: 256 * MiB, update_rss_bytes: 512 * MiB });
@@ -96,8 +95,6 @@ async function quiet(version, commit, honorCooldown) {
     const key = JSON.stringify(selectedCheck(state));
     if (key !== previous || state.check.state === 'checking') stableSince = performance.now();
     previous = key;
-    // The process-owned scheduler revisits saved settings at least once per second.
-    // An additional idle-phase check below rejects any late pre-existing check.
     if (state.check.state !== 'checking' && performance.now() - stableSince >= 1500
       && (!honorCooldown || Date.now() >= state.check.retry_at_ms)) return state;
     await delay(250);
@@ -112,7 +109,6 @@ function releaseIdentity(release, version) {
   return { tag: release.tag_name, release_id: release.id, published_at: release.published_at };
 }
 async function publicLatest(version) {
-  // Intentionally unauthenticated: management cookies/bindings never enter fetch.
   const response = await fetch(LATEST, { redirect: 'error', signal: AbortSignal.timeout(15000),
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'PariNS-official-check-fixture' } });
   if (!response.ok) throw fail(`public_latest_http_${response.status}`);

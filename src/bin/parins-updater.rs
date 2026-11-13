@@ -55,8 +55,6 @@ fn install_preflight() -> anyhow::Result<()> {
         "privileged preflight identity"
     );
 
-    // Enter and drop privileges in this single-threaded host executable. Path
-    // lookup in the target mount namespace starts only after the drop.
     let namespace = File::open(mount)?;
     setns(&namespace, CloneFlags::CLONE_NEWNS)?;
     drop(namespace);

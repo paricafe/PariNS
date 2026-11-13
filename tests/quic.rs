@@ -41,7 +41,6 @@ struct Fixture {
     source_limits: Arc<parins::limits::Limiter>,
     resolver: Arc<Resolver>,
     queries: Arc<Semaphore>,
-    /// With held answers, each permit releases one upstream answer.
     answers: Arc<Semaphore>,
 }
 
@@ -62,7 +61,6 @@ async fn already_stopped_listener_releases_port_before_returning() {
         shutdown_grace: Duration::from_millis(100),
         max_streams: 2,
     };
-    // The single-thread executor has not polled Quinn's detached driver yet.
     quic::serve(endpoint, Protocol::Doq, ingress).await.unwrap();
     UdpSocket::bind(address).await.unwrap();
 }
@@ -176,10 +174,7 @@ impl Fixture {
         assert_eq!(self.queries.available_permits(), 7);
     }
 
-    /// The client's request and budgets are released at once; its sent
-    /// upstream query may go on to fill the cache.
     async fn wait_for_cancelled_query(&self) {
-        // Less than both the 500ms adapter and 2000ms resolver deadlines.
         timeout(Duration::from_millis(200), async {
             loop {
                 let metrics = self.resolver.metrics().snapshot();
@@ -218,7 +213,6 @@ impl Fixture {
             self.connections.available_permits(),
             self.connection_capacity
         );
-        // Source admission is released as well as the global semaphore.
         assert!(self.source_limits.try_connection(self.address.ip()).is_ok());
         UdpSocket::bind(self.address).await.unwrap();
         self.upstream.abort();
@@ -407,8 +401,6 @@ async fn quic_connection_and_stream_caps_and_bounded_shutdown() {
             .is_err()
     );
     fixture.close().await;
-    // Incomplete frames consume the grace. Forced socket release cannot promise
-    // that a peer receives a final packet; close() verifies local port/permit release.
     client.close(0u32.into(), b"done");
 }
 
@@ -553,8 +545,6 @@ async fn doq_inflight_stop_sending_cancels_dns_and_preserves_connection() {
             .try_query(fixture.address.ip())
             .is_ok()
     );
-    // The sent query (whose answer this upstream drops) goes on to fill the
-    // cache within the resolver deadline; the connection keeps serving.
     assert_eq!(fixture.resolver.refresh_snapshot().active, 1);
     let (mut send, mut recv) = connection.open_bi().await.unwrap();
     send.write_all(&named_frame(0, "other.test."))
@@ -661,12 +651,9 @@ async fn h3_answer_to_a_stopped_stream_counts_as_cancelled() {
     stream.send_data(Bytes::from(query(42))).await.unwrap();
     stream.finish().await.unwrap();
     fixture.wait_for_upstream_query().await;
-    // h3 does not report the STOP_SENDING while the server resolves; the
-    // answer released below then fails to write.
     stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
     tokio::time::sleep(Duration::from_millis(50)).await;
     fixture.answers.add_permits(1);
-    // Less than the 500ms adapter deadline.
     let counters = timeout(Duration::from_millis(400), async {
         loop {
             let counters = fixture.resolver.metrics().snapshot().counters;
@@ -714,8 +701,6 @@ async fn doq_and_h3_source_rate_budget_returns_dns_servfail_without_upstream_io(
             .unwrap()
             .await
             .unwrap();
-        // Complete the pair before the one-second token refill. A changed ECS
-        // option (and HTTP forwarding headers) cannot create a new source.
         timeout(Duration::from_millis(900), async {
             match protocol {
                 Protocol::Doq => {
@@ -863,9 +848,6 @@ async fn doq_and_h3_source_connection_cap_is_independent_and_reclaimed() {
     }
 }
 
-/// A spoofed source never completes address validation: its Initial gets a
-/// stateless Retry and holds neither the global connection slot nor the
-/// per-source budget, so a validating client still connects at capacity one.
 #[tokio::test]
 async fn unvalidated_initials_take_no_connection_slot_or_source_budget() {
     for protocol in [Protocol::Doq, Protocol::H3] {
@@ -880,7 +862,6 @@ async fn unvalidated_initials_take_no_connection_slot_or_source_budget() {
             1,
         )
         .await;
-        // Capture a genuine client Initial at a socket that never answers.
         let capture = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let capturer = fixture.client(protocol);
         let _pending = capturer
@@ -893,7 +874,6 @@ async fn unvalidated_initials_take_no_connection_slot_or_source_budget() {
             .unwrap();
         initial.truncate(length);
         capturer.close(0u32.into(), b"captured");
-        // Replay it from an address that ignores the server's Retry.
         capture.send_to(&initial, fixture.address).await.unwrap();
         let name = |event: &str| {
             format!(
@@ -905,7 +885,6 @@ async fn unvalidated_initials_take_no_connection_slot_or_source_budget() {
             )
         };
         let counter = |event: &str| fixture.resolver.metrics().snapshot().counters[&name(event)];
-        // A Retry leaves no counter; give the endpoint time to answer it.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(counter("incoming"), 0);
         assert_eq!(fixture.connections.available_permits(), 1);
@@ -923,7 +902,6 @@ async fn unvalidated_initials_take_no_connection_slot_or_source_budget() {
         .await
         .unwrap()
         .unwrap();
-        // The validating client was retried too, then admitted once.
         assert_eq!(counter("incoming"), 1);
         timeout(Duration::from_secs(1), async {
             while counter("handshake_established") == 0 {

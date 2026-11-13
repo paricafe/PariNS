@@ -1,10 +1,8 @@
-// In-browser preparation of a custom background: decode, downscale to the long-edge limit,
-// re-encode under the byte budget and measure mean luminance for the text-backing scrim.
+// Prepares a custom console background image in the browser.
 
 export const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
 export const MAX_EDGE = 2560;
 export const MAX_BYTES = 1.5 * 1024 * 1024;
-/** Bounds decode memory: a highly compressed file can still expand to gigabytes, so a header declaring more pixels is refused before decoding. */
 export const MAX_INPUT_PIXELS = 100_000_000;
 const QUALITIES = [0.86, 0.78, 0.7, 0.6];
 
@@ -34,10 +32,6 @@ function draw(source: CanvasImageSource, width: number, height: number): HTMLCan
   return canvas;
 }
 
-/**
- * Mean relative luminance (0–1) of an 8×8 thumbnail. The source is a bitmap decoded from a
- * local file, so the canvas is never cross-origin tainted and its pixels are readable.
- */
 function luminance(source: CanvasImageSource): number {
   const data = draw(source, 8, 8).getContext('2d')!.getImageData(0, 0, 8, 8).data;
   const linear = (value: number) => { const c = value / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
@@ -46,7 +40,6 @@ function luminance(source: CanvasImageSource): number {
   return total / (data.length / 4);
 }
 
-/** Intrinsic size from the PNG, JPEG or WebP header without decoding; null when unrecognised. */
 export function headerSize(bytes: Uint8Array): { width: number; height: number } | null {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const ascii = (at: number, text: string) => [...text].every((c, i) => bytes[at + i] === c.charCodeAt(0));
@@ -66,7 +59,6 @@ export function headerSize(bytes: Uint8Array): { width: number; height: number }
     return null;
   }
   if (bytes[0] === 0xff && bytes[1] === 0xd8) {
-    // Walk JPEG segments to the first start-of-frame marker.
     let at = 2;
     while (at + 9 < bytes.length && bytes[at] === 0xff) {
       const marker = bytes[at + 1];
@@ -82,18 +74,12 @@ export function headerSize(bytes: Uint8Array): { width: number; height: number }
 
 export async function prepareImage(file: Blob): Promise<PreparedImage> {
   if (!(ACCEPTED_TYPES as readonly string[]).includes(file.type)) throw new ImageError('type');
-  // Headers are near the start; a JPEG's frame header may follow large metadata, so read
-  // the whole file only when the first part does not contain it.
   const size = headerSize(new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer()))
     ?? (file.size > 256 * 1024 ? headerSize(new Uint8Array(await file.arrayBuffer())) : null);
-  // Without a readable size the decode could not be bounded (or the content is not the
-  // declared format): refuse rather than decode at full size.
   if (!size) throw new ImageError('decode');
   if (size.width * size.height > MAX_INPUT_PIXELS) throw new ImageError('size');
   let bitmap: ImageBitmap;
   try {
-    // Decode straight to the target size when it is known, so the full-size image never
-    // has to exist in memory.
     const target = fitWithin(size.width, size.height);
     bitmap = target.width < size.width || target.height < size.height
       ? await createImageBitmap(file, { resizeWidth: target.width, resizeHeight: target.height, resizeQuality: 'high' })
@@ -102,12 +88,10 @@ export async function prepareImage(file: Blob): Promise<PreparedImage> {
   try {
     let { width, height } = fitWithin(bitmap.width, bitmap.height);
     const measured = luminance(bitmap);
-    // Shrink further only when no quality step fits the byte budget (bounded: at most five sizes).
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const canvas = draw(bitmap, width, height);
       for (const quality of QUALITIES) {
         let blob = await encode(canvas, 'image/webp', quality);
-        // Browsers without a WebP encoder return PNG; JPEG keeps the budget meaningful there.
         if (blob && blob.type !== 'image/webp') blob = await encode(canvas, 'image/jpeg', quality);
         if (blob && blob.size <= MAX_BYTES) return { blob, luminance: measured };
       }

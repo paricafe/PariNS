@@ -10,7 +10,6 @@ use tokio::{
 
 const PASSWORD: &str = "local-original-password";
 const LOCAL: &str = "127.0.0.1:40000";
-/// A distinct non-loopback peer per call, for calls not about the attempt budget.
 const ANY: &str = "any";
 
 fn peer(text: &str) -> SocketAddr {
@@ -66,7 +65,6 @@ fn host() -> HeaderMap {
     headers
 }
 
-/// A signed-in administrator, as after an ordinary sign-in.
 fn signed_in(shared: &Shared) -> HeaderMap {
     let transport = shared.active.lock().unwrap().snapshot.clone();
     let session = shared.session(&transport).unwrap();
@@ -149,7 +147,6 @@ enum Reply {
     Hang,
 }
 
-/// A local stand-in for Cloudflare siteverify, recording request bodies.
 async fn siteverify(reply: Arc<StdMutex<Reply>>) -> (SocketAddr, Arc<StdMutex<Vec<String>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -223,7 +220,6 @@ async fn turnstile_is_checked_before_the_password_except_from_loopback() {
     )
     .await
     .unwrap();
-    // A credential change: every session ended; the configuration envelope stays.
     assert!(shared.active.lock().unwrap().sessions.is_empty());
     assert_eq!(
         call(&shared, ANY, &other, "GET", "/api/account", json!(null))
@@ -291,7 +287,6 @@ async fn turnstile_is_checked_before_the_password_except_from_loopback() {
     let body = bodies.lock().unwrap().last().cloned().unwrap();
     assert!(body.contains("secret=0x4AAAAAAA-secret") && body.contains("response=token-1"));
 
-    // Failures and outages are refused before any password check.
     let other = "192.0.2.41:1";
     for (answer, expected) in [
         (
@@ -315,7 +310,6 @@ async fn turnstile_is_checked_before_the_password_except_from_loopback() {
             expected
         );
     }
-    // They spent this peer's attempts.
     *reply.lock().unwrap() =
         Reply::Json(r#"{"success":true,"hostname":"127.0.0.1","action":"login"}"#);
     assert_eq!(
@@ -323,7 +317,6 @@ async fn turnstile_is_checked_before_the_password_except_from_loopback() {
         "LOGIN_LIMIT"
     );
 
-    // A loopback socket peer (an SSH tunnel) is not asked, even if Cloudflare is down.
     *reply.lock().unwrap() = Reply::Status(503);
     let count = bodies.lock().unwrap().len();
     for loopback in [LOCAL, "[::1]:4000", "[::ffff:127.0.0.1]:4000"] {
@@ -357,7 +350,6 @@ async fn turnstile_is_checked_before_the_password_except_from_loopback() {
         true
     );
 
-    // Keeping the saved secret while changing the site key.
     set(&shared, json!({"site_key": "0x4AAAAAAA-other"}))
         .await
         .unwrap();
@@ -391,7 +383,6 @@ async fn changes_need_the_password_and_a_turnstile_change_voids_sign_ins_in_flig
     assert_eq!(wrong.1, "CURRENT_PASSWORD_INCORRECT");
     assert_eq!(shared.active.lock().unwrap().sessions.len(), 1);
     assert!(shared.manager.lock().await.turnstile.keys.is_none());
-    // A sign-in admitted before the change cannot finish after it.
     let admitted = admission(&shared).await;
     set(&shared, json!({"site_key": "a", "secret_key": "b"}))
         .await
@@ -435,7 +426,6 @@ async fn cloudflare_test_keys_are_accepted_only_as_a_pair() {
     )
     .await;
     assert_eq!(view["turnstile"]["test_keys"], "pass");
-    // Keeping the test secret still needs a test site key.
     assert_eq!(
         set(&shared, json!({"site_key": "0x4AAAAAAA-site"}))
             .await
@@ -459,7 +449,6 @@ async fn cloudflare_test_keys_are_accepted_only_as_a_pair() {
     )
     .await;
     assert_eq!(view["turnstile"]["test_keys"], "fail");
-    // An unpaired file is rejected at startup and by the managed check.
     let store = shared.manager.lock().await.store.clone();
     store
         .atomic_write(

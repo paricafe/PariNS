@@ -15,7 +15,6 @@ function time(value: string | number | null | undefined, language: Language): st
   return new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 const RECOVERY = ['manual_recovery_required', 'installation_pending'];
-/** Release target triple as a readable platform; the raw triple stays behind ⓘ. */
 function platformName(target: string, language: Language): string {
   const os = target.includes('apple-darwin') ? 'macOS' : target.includes('linux') ? 'Linux' : target.includes('windows') ? 'Windows' : null;
   const arch = target.startsWith('aarch64') ? os === 'macOS' ? translate('updates.appleSilicon', language) : 'ARM64' : target.startsWith('x86_64') ? os === 'macOS' ? 'Intel' : 'x86_64' : null;
@@ -53,7 +52,6 @@ export function UpdatePanel({ language }: { language: Language }) {
   const config = useConfig();
   const confirm = useConfirm();
   const [draftPrompt, setDraftPrompt] = useState(false);
-  // Actions are shown only while they can run, so the pressed button disappears; keep focus on the status line.
   const statusRow = useRef<HTMLSpanElement>(null);
   const holdFocus = () => statusRow.current?.focus({ preventScroll: true });
   const [draftError, setDraftError] = useState(false);
@@ -70,7 +68,6 @@ export function UpdatePanel({ language }: { language: Language }) {
       await updates.apply(candidate);
     }
   };
-  // Recovery states need the installer, not a different release.
   const recovery = view && RECOVERY.includes(view.capability.reason ?? '') ? view.capability.reason : null;
   const savedAutoCheck = Boolean(config.draft?.settings.updates && (config.draft.settings.updates as { auto_check?: boolean }).auto_check);
   const checkable = Boolean(view && !updates.action && !installBusy && view.check.state !== 'checking' && retry <= Date.now());

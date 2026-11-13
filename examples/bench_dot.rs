@@ -1,7 +1,4 @@
-//! Fresh versus pooled DoT transactions against one loopback TLS peer.
-//! cargo run --release --example bench_dot -- [queries=300] [concurrency=8]
-//! Runs fresh then pooled with identical input and no DNS response cache; repeat
-//! trials to account for first-run warmup and compare medians, not one sample.
+//! Loopback benchmark for fresh and pooled DNS-over-TLS connections.
 use std::{
     net::SocketAddr,
     sync::{

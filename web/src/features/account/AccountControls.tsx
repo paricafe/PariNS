@@ -37,11 +37,9 @@ function AccountForm({ language, setBusy }: { language: Language; setBusy: (busy
     const trigger = event.currentTarget instanceof HTMLFormElement ? event.currentTarget.querySelector<HTMLElement>('button[type="submit"]') ?? undefined : undefined;
     setError(null);
     if (!validUsername(username)) { setError('account.usernameInvalid'); return; }
-    // The same 12–256 byte limit as Rust.
     const problem = passwordProblem(newPassword);
     if (problem) { setError(problem); return; }
     if (newPassword !== confirmation) { setError('account.mismatch'); return; }
-    // Like signing out: the change ends every session, so an unsaved draft is lost.
     if (config.dirty && !await confirmAction(t('draftConfirm'), 'account.continue', trigger)) return;
     mutation.current = true; setSubmitting(true); setBusy(true);
     try { await rotateCredentials(currentPassword, username, newPassword); config.discard(); }
@@ -83,7 +81,6 @@ function AccountBody({ language, setBusy }: { language: Language; setBusy: (busy
       .catch((reason) => { if (live && !(reason instanceof StaleRequest)) setError(toConfigIssue(reason)); });
     return () => { live = false; };
   }, [api]);
-  // The password form never waits for the Turnstile settings; only their panel does.
   return <>
     <AccountForm language={language} setBusy={setBusy} />
     {view ? <TurnstilePanel view={view} language={language} setBusy={setBusy} />

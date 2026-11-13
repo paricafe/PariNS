@@ -10,7 +10,6 @@ pub enum State {
     Unconfigured,
     Starting,
     Running,
-    /// Serving, but at least one listener is missing and being rebound. Not ready.
     Degraded,
     Stopped,
     Failed,
@@ -43,7 +42,6 @@ impl Health {
         if generation < current.generation {
             return false;
         }
-        // A late normal-stop event cannot erase a failure of the same runtime.
         if generation == current.generation
             && current.state == State::Failed
             && state != State::Starting

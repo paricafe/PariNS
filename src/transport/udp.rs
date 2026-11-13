@@ -28,7 +28,6 @@ impl Socket {
         Ok(Self(socket))
     }
 
-    /// None is a consumed datagram with truncated payload/control information.
     pub(crate) async fn recv(
         &self,
         bytes: &mut [u8],

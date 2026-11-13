@@ -12,14 +12,12 @@ export function getPath(object: unknown, path: string): unknown {
   return path.split(".").reduce<unknown>((value, key) => isObject(value) ? value[key] : undefined, object);
 }
 
-/** Lists the server always sends, since it serializes the complete configuration. */
 interface ConfigLists { "cache.rules": CacheRule[]; "filter_subscriptions.sources": SubscriptionSource[] }
 
 export function configList<P extends keyof ConfigLists>(settings: SettingsObject, path: P): ConfigLists[P] {
   return getPath(settings, path) as ConfigLists[P];
 }
 
-/** Immutable nested write for a touched form field. */
 export function setPath<T extends SettingsObject>(object: T, path: string, value: unknown): T {
   const keys = path.split(".");
   if (keys.some((key) => !key || key === "__proto__" || key === "prototype" || key === "constructor")) {
@@ -51,7 +49,6 @@ function sameValue(left: unknown, right: unknown): boolean {
   return false;
 }
 
-/** Only changed keys are sent to Rust preview; arrays and optional sections replace atomically. */
 export function diffSettings(before: SettingsObject, after: SettingsObject): SettingsObject {
   const changes: SettingsObject = {};
   for (const [key, value] of Object.entries(after)) {
@@ -62,7 +59,6 @@ export function diffSettings(before: SettingsObject, after: SettingsObject): Set
   return changes;
 }
 
-/** Initial setup can only edit known keys in the supplied server template. */
 export function networkTemplate(template: string, listen: string, upstreams: SettingsObject): string {
   const lines = template.split("\n");
   const changes = new Map<string, unknown>([["listen", listen], ...Object.entries(upstreams).map(([key, value]) => [`upstreams.${key}`, value] as const)]);

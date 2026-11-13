@@ -1,4 +1,4 @@
-//! Opt-in bounded request records. SQLite owns retention, IDs, and clear barriers.
+//! Opt-in bounded request records.
 use std::{
     net::IpAddr,
     time::{Duration, Instant},
@@ -117,7 +117,6 @@ pub struct Entry {
     pub recursion_desired: bool,
     pub answer: Vec<Record>,
     pub answer_truncated: bool,
-    /// The rule and method of a blocked query; absent in entries before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<crate::policy::BlockTrace>,
 }
@@ -130,23 +129,18 @@ pub struct Page {
     pub log_epoch: u64,
     pub storage: crate::storage::Status,
 }
-/// At most this many entries answer one live poll; `more` reports the cap.
 pub const NEWER_LIMIT: usize = 200;
-/// Entries newer than a live cursor, newest first, from one storage read.
 #[derive(Debug)]
 pub struct Newer {
     pub entries: Vec<Entry>,
     pub more: bool,
     pub log_epoch: u64,
-    /// Highest id stored when the query ran, matching or not: the next poll
-    /// starts here, so a rarely matching filter never rescans older rows.
     pub scanned_to: u64,
 }
 pub struct QueryLog {
     storage: crate::storage::Handle,
 }
 
-/// Resolver-owned decisions; never inferred from global counters or configuration.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamRelation {
@@ -171,9 +165,6 @@ pub(crate) struct Trace {
     pub block: Option<crate::policy::BlockTrace>,
 }
 
-/// A cancelled foreground future still has one terminal history entry, which
-/// keeps the decisions made before the cancellation. The original epoch
-/// prevents cancellation from repopulating a cleared log.
 pub(crate) struct Pending<'a> {
     log: &'a QueryLog,
     epoch: u64,
@@ -184,8 +175,6 @@ pub(crate) struct Pending<'a> {
 }
 
 impl Pending<'_> {
-    /// Completes the entry with the answer. `deliver` records it as answered;
-    /// dropping it first records the request as cancelled.
     pub(crate) fn resolve(&mut self, response: Option<&Message>) {
         let entry = self.entry.as_mut().expect("pending query log entry");
         entry.finish(

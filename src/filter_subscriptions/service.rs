@@ -1,5 +1,4 @@
-//! Process-owned subscription work. Manager owns the final mutation/freeze gate;
-//! this module never calls Manager while holding its worker or storage locks.
+//! Process-owned subscription work.
 mod material;
 mod operations;
 
@@ -66,8 +65,6 @@ impl Failure {
         {
             return Self::new("subscription_download");
         }
-        // All remaining errors are local storage/IO failures. Never return raw
-        // paths, configured URL queries, TLS errors, or remote response text.
         Self::new("subscription_storage_unavailable")
     }
 }
@@ -154,7 +151,6 @@ pub struct Service {
     handle: Arc<PolicyHandle>,
     state: Mutex<State>,
     store: Mutex<Option<Store>>,
-    /// Opened frozen: the Store waits for [`Service::thaw`].
     deferred: AtomicBool,
     worker: Arc<Semaphore>,
     reader: SubscriptionReader,
@@ -164,8 +160,6 @@ pub struct Service {
     responses: Mutex<Option<std::collections::VecDeque<Vec<crate::https_reader::WireResponse>>>>,
 }
 
-// A blocking builder retains this permit until its real buffers are released,
-// even if the async owner goes away. No aborted handle pretends memory is free.
 struct Lease {
     _permit: OwnedSemaphorePermit,
 }
@@ -182,8 +176,6 @@ pub struct ConfigCandidate {
 }
 
 impl Service {
-    /// `frozen`: a software update froze the process. The Service then
-    /// publishes read-only material and keeps its Store closed until [`Self::thaw`].
     pub async fn open(
         path: PathBuf,
         local: Policy,
@@ -296,7 +288,6 @@ impl Service {
                 service.state.lock().unwrap().unavailable = Some(Failure::from_error(&error).code);
             }
         }
-        // Startup jitter is bounded and cached; no request/GET starts work.
         let owner = service.clone();
         if !frozen {
             tokio::task::spawn_blocking(move || owner.seed_schedule()).await??;
@@ -304,11 +295,6 @@ impl Service {
         Ok(service)
     }
 
-    /// A Service opened while a software update froze the process published
-    /// read-only material and left its Store closed. Management calls this after
-    /// the update coordinator thaws; it opens the Store once and seeds the refresh
-    /// schedule. A failure keeps `subscription_storage_unavailable` and the next
-    /// call retries. Other Services return at once.
     pub async fn thaw(self: &Arc<Self>) {
         if !self.deferred.load(Ordering::Acquire) {
             return;
@@ -319,7 +305,6 @@ impl Service {
             .is_ok_and(|opened| opened)
         {
             let owner = self.clone();
-            // The Store is open; a failed schedule write is retried by later work.
             let _ = tokio::task::spawn_blocking(move || owner.seed_schedule()).await;
         }
     }
@@ -347,7 +332,6 @@ impl Service {
             Ok(store) => store,
             Err(error) => {
                 let mut state = self.state.lock().unwrap();
-                // Thaw retries every second; log each new failure once.
                 if state.unavailable.as_deref() != Some("subscription_storage_unavailable") {
                     eprintln!("PariNS subscription storage unavailable: {error:#}");
                 }
@@ -355,7 +339,6 @@ impl Service {
                 return false;
             }
         };
-        // A frozen start that could not build its policy keeps that reason.
         {
             let mut state = self.state.lock().unwrap();
             if state.ready_policy {
@@ -468,8 +451,6 @@ impl Service {
             .await
     }
 
-    /// Raw local rules/files must enter the same worker before allocating their
-    /// replacement index; a caller must not compile a parallel local candidate.
     pub async fn prepare_config_from_source(
         self: &Arc<Self>,
         settings: Settings,
@@ -481,9 +462,6 @@ impl Service {
             .await
     }
 
-    /// Like `prepare_config_from_source`, for a check that changes nothing: it
-    /// waits up to `wait` for the worker (a subscription refresh or another
-    /// candidate) instead of answering busy at once.
     pub async fn check_config_from_source(
         self: &Arc<Self>,
         settings: Settings,
@@ -600,9 +578,6 @@ impl Service {
                 material::local_material(&local, &settings)?
             };
             drop(locked);
-            // All storage paths share the publication gate while the candidate
-            // owns the single worker. Reject before callers commit Config or
-            // certificates, but allow metadata-only changes with retired readers.
             if owner.handle.snapshot().policy.publication_digest()
                 != material.policy.publication_digest()
             {
@@ -627,8 +602,6 @@ impl Service {
         .await?
     }
 
-    /// Caller saved Config under its mutation permit. Follow-up disk maintenance
-    /// is deferred to the next worker; it cannot roll back that committed Config.
     pub fn publish_config(&self, candidate: ConfigCandidate, new_revision: u64) {
         assert!(std::ptr::eq(self, Arc::as_ptr(&candidate.service)));
         let mut state = self.state.lock().unwrap();
@@ -720,8 +693,6 @@ impl Service {
         store.reconcile_sync()?;
         store.set_references(current, previous)?;
         store.set_quota(quota)?;
-        // Failed pre-publication work and schedule-only config changes update
-        // cached status immediately, but persist only inside the next gate.
         for record in statuses {
             if store
                 .record(&record.fingerprint)

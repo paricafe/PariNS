@@ -16,17 +16,10 @@ const resolveDark = (theme: Theme, systemDark: boolean) => theme === 'dark' || t
 
 interface ViewTransition { ready: Promise<void>; finished: Promise<void> }
 
-/**
- * Cross-fades the whole page between the old and new theme (View Transitions animate
- * snapshots with opacity only). The DOM is not remounted, so controls, drafts, focus and
- * the session are untouched; without support, with reduced motion or on a hidden page
- * (which does not render, so the transition would time out) the change is instant.
- */
 function withThemeTransition(update: () => void) {
   const start = (document as Document & { startViewTransition?: (callback: () => void) => ViewTransition }).startViewTransition;
   if (typeof start !== 'function' || prefersReducedMotion() || document.visibilityState !== 'visible') { update(); return; }
   const transition = start.call(document, () => flushSync(update));
-  // A skipped or timed-out transition only loses the animation; the theme still changes.
   transition.ready.catch(() => {});
   transition.finished.catch(() => {});
 }
@@ -57,7 +50,6 @@ export function useAppearance() {
     imageUrl.current = URL.createObjectURL(blob);
     setImage({ url: imageUrl.current, luminance });
   };
-  // A stored custom background is restored from IndexedDB; a missing image falls back to the default.
   useEffect(() => {
     let active = true;
     if (storedBackground() === 'custom') void loadImage().then((stored) => {
@@ -78,7 +70,6 @@ export function useAppearance() {
   };
   const changeBackground = (next: BackgroundId) => { setBackground(next); saveBackground(next); };
   const changeOverlay = (next: number) => { const value = clampOverlay(next); setOverlay(value); saveOverlay(value); };
-  /** Prepares and shows an uploaded image; `saved` is false when this browser cannot keep it beyond this visit. */
   const uploadImage = async (file: Blob): Promise<{ saved: boolean }> => {
     const prepared = await prepareImage(file);
     const saved = await saveImage({ blob: prepared.blob, luminance: prepared.luminance });

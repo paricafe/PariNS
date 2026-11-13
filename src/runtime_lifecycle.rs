@@ -29,9 +29,6 @@ pub async fn consume(
     }
 }
 
-/// Restore admits the most recently used entries until `RESTORE_LOADING` and
-/// keeps them; the rest of `RESTORE_BUDGET` covers returning from the worker.
-/// Only a restore stuck past the budget (for example in IO) stops DNS startup.
 const RESTORE_BUDGET: Duration = Duration::from_secs(5);
 const RESTORE_LOADING: Duration = Duration::from_millis(4500);
 
@@ -62,18 +59,10 @@ pub async fn restore(
     }
 }
 
-/// Cache snapshot save and runtime-data drain run in parallel, each bounded by
-/// this budget, so a slow save cannot starve the drain.
 const TERMINAL_BUDGET: Duration = Duration::from_secs(10);
-/// The save writes the most recently used entries until this point; the rest of
-/// `TERMINAL_BUDGET` covers fsync and publishing the complete, partial snapshot.
 const SAVE_WRITING: Duration = Duration::from_secs(8);
-/// The final storage close, after the save, drains only what arrived since.
 const CLOSE_BUDGET: Duration = Duration::from_secs(2);
 
-/// No caller may enter serving again after this boundary. A save failure must
-/// still let independent log/statistics persistence finish. Storage releases
-/// the runtime directory lock only after the snapshot save has finished.
 pub async fn terminal(
     services: Arc<RuntimeServices>,
     persistence: Arc<CachePersistence>,
@@ -87,8 +76,6 @@ pub async fn terminal(
             ..Default::default()
         };
         if let Some((resolver, _, false)) = &stopped {
-            // Listener causes are bounded names; other drain failures (filters,
-            // reload, managed task) are reported generically.
             let cause = resolver
                 .forced_shutdown()
                 .map_or("drain_incomplete", |cause| cause.as_str());
@@ -120,8 +107,6 @@ pub async fn terminal(
             };
             match result {
                 Ok(saved) => {
-                    // Skipped entries were expired or over the per-entry or
-                    // total byte limits when the snapshot was written.
                     eprintln!(
                         "cache snapshot saved: {} entries, {} skipped, {} bytes in {} ms{}",
                         saved.saved,
@@ -156,8 +141,6 @@ pub async fn terminal(
     let drain = tokio::time::timeout(TERMINAL_BUDGET, services.storage.flush());
     let (report, drained) = tokio::join!(save, drain);
     let Some(report) = report else {
-        // The cancelled save may still be finishing its blocking work; keep the
-        // directory lock until the process exits.
         match drained {
             Ok(Ok(())) => {}
             Ok(Err(error)) => eprintln!("runtime data flush incomplete: {error}"),
@@ -168,8 +151,6 @@ pub async fn terminal(
             ..Default::default()
         };
     };
-    // Close reports the final storage outcome; drain failures are counted as
-    // dropped records in storage status.
     match tokio::time::timeout(CLOSE_BUDGET, services.storage.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => eprintln!("runtime data flush incomplete: {error}"),

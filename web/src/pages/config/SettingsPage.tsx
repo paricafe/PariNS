@@ -44,7 +44,6 @@ function FieldRow({ field, language, value, onChange, disabled, issue }: { field
   const invalid = issue ? true : undefined;
   const errorNote = issue ? <small id={errorId} className="row-note field-error">{presentIssue(issue, language)}</small> : null;
   const note = noteId ? <small id={noteId} className="row-note">{help}</small> : null;
-  // "wide" rows (text fields, unit inputs, steppers) stack under the label on phones; switches and short pickers stay inline.
   const row = (control: ReactNode, layout: 'inline' | 'wide' | 'stacked' = 'wide', labelFor: string | undefined = id) => <div className="row" data-layout={layout}>
     <div className="row-label">{labelFor ? <label htmlFor={labelFor}>{label}</label> : <span>{label}</span>}{tip}</div>
     <div className="row-control">{control}</div>{note}{errorNote}
@@ -87,7 +86,6 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
   const [moreOpen, setMoreOpen] = useState<ReadonlySet<string>>(new Set());
   const focusedError = useRef<ConfigIssue | null>(null);
   const page = settingPages[pageId];
-  // Focus belongs to the field owner, after its collapsed row has become interactive.
   useLayoutEffect(() => {
     if (!error) { focusedError.current = null; return; }
     if (focusedError.current === error || !(error instanceof ModelError) || !error.path) return;
@@ -98,7 +96,6 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
       setMoreOpen((open) => new Set(open).add(owner.id));
       return;
     }
-    // Wait for the browser to apply visibility/inert and the route landmark's focus.
     const frame = window.requestAnimationFrame(() => {
       const element = document.getElementById(target.id!);
       const input = element?.matches('input, textarea, button') ? element : element?.querySelector<HTMLElement>('input, textarea, button');
@@ -112,7 +109,6 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
   const value = (field: SettingField) => draft.fields[field.path] ?? fieldDisplayValue(getPath(draft.settings, field.path), field);
   const recursive = (draft.fields['resolution.mode'] ?? getPath(draft.settings, 'resolution.mode')) === 'recursive';
   const hasError = (field: SettingField) => matchesFieldError(error, field.path);
-  // A conditional group or field stays visible while it holds a validation error, so focus can reach it.
   const shown = (condition: { path: string; value: string } | undefined) => !condition || (draft.fields[condition.path] ?? getPath(draft.settings, condition.path)) === condition.value;
   return <div className="settings-stack">{page.groups.map((group) => {
     if (!shown(group.when) && !group.fields.some(hasError)) return null;
@@ -142,7 +138,6 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
   })}</div>;
 }
 
-/** Optional comparison of the TOML being edited with the saved configuration. */
 function TomlChanges({ language }: { language: Language }) {
   const { draft } = useConfig();
   const [open, setOpen] = useState(false);
@@ -163,10 +158,8 @@ function TomlChanges({ language }: { language: Language }) {
 export function CacheRules({ language }: { language: Language }) {
   const { draft, locked, setRules, error } = useConfig();
   const reduced = useReducedMotion();
-  // Row keys follow add, move and remove, so a removed row is the one that animates out.
   const keys = useRef<number[]>([]);
   const serial = useRef(0);
-  // The rule editor owns stable row IDs; errors address positions in the current draft.
   useEffect(() => {
     const target = error instanceof ModelError && error.path ? fieldErrorTarget(error.path) : null;
     if (target?.kind !== 'rule' || target.index === undefined) return;
@@ -211,12 +204,10 @@ export function CacheRules({ language }: { language: Language }) {
 
 interface Inspection { cache_token: string; explanation: { state: 'fresh' | 'stale' | 'failure' | 'miss' | 'bypass'; reason: string; scope: string | null; policy?: Record<string, unknown> }; inspection: { variants: Variant[]; truncated: boolean; ecs_sharing?: 'observing' | 'shared' | 'revoked' | null } }
 
-/** Restore outcome as one sentence; the raw reason stays available behind ⓘ. */
 export function restoreSummary(report: SnapshotReport, language: Language): string {
   const reason = report.reason;
   const counts = { restored: formatNumber(report.restored, language), skipped: formatNumber(report.skipped, language) };
   if (reason === null) return translate('shell.restoreDone', language, counts);
-  // Running out of time keeps the entries already loaded.
   if (reason === 'deadline') return translate('shell.restoreDeadline', language, counts);
   const key = reason === 'no_clean_snapshot' ? 'restoreNoSnapshot' : reason === 'persistence_disabled' ? 'restoreDisabled'
     : reason.startsWith('unsupported snapshot version') ? 'restoreFormat' : reason.startsWith('snapshot policy mismatch') ? 'restorePolicy' : 'restoreFailed';
@@ -301,7 +292,6 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
     catch (reason) { setError(toConfigIssue(reason)); }
     finally { setWorking(false); }
   };
-  /** Clears the listed entry's name, type and scope against the inspected cache token, then shows the cache again. */
   const clear = async (variant: Variant, trigger: HTMLElement) => {
     if (!result || !await confirmAction(t('clearEntryConfirm'), 'views.clearEntry', trigger)) return;
     setWorking(true); setError(null);
@@ -406,7 +396,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
     if (!target || target.page !== pageId) return;
     const rule = /^cache\.rules\.(\d+)\.([a-z_]+)$/.exec(error.path);
     if (rule && cacheTab !== 'rules') { setCacheTab('rules'); return; }
-    if (rule) return; // CacheRules maps the current position to its stable row ID.
+    if (rule) return;
     if (pageId === 'cache' && !rule && cacheTab !== 'settings') { setCacheTab('settings'); return; }
     if (target.kind !== 'source' || !target.id) return;
     const id = target.id;
@@ -423,7 +413,6 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   const intro = pageId === 'advanced' ? null : t(settingPages[pageId].introKey);
   const title = pageId === 'advanced' ? t('app.advanced') : t(settingPages[pageId].titleKey);
   if (pageId !== 'advanced' && needsParse) return <div className="page-stack"><h1>{title}</h1><p className="notice" role="status">{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate('/advanced')}>{t('app.returnToToml')}</button></div>;
-  // A check without saving belongs with the raw TOML editor; settings pages simply save.
   const check = () => void validate().then((result) => {
     if (result.transport_change) setNotice(transportChangeText(result.transport_change, language));
     else banner(t(dirty ? result.restart_required ? 'app.validRestart' : 'app.validCache' : 'shell.validSaved'));

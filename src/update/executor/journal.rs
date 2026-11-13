@@ -37,9 +37,6 @@ pub struct Installation {
 }
 
 impl Installation {
-    /// `install-restore` re-anchors the previous program after a failed
-    /// installation; only that launch skips cache restoration. Its readiness
-    /// proves the rollback, not the installation, and closes nothing.
     pub fn restores_previous(&self) -> bool {
         self.launch.skip_cache_restore
     }
@@ -139,8 +136,6 @@ impl Journal {
             op.status.reason = reason.map(str::to_owned);
             op.status.updated_at_ms = unix_ms();
             op.pending_launch = None;
-            // A separately rejected Stage still needs its own fence even when
-            // the installation owner later finishes. Both live in this journal.
             if self
                 .last_operation
                 .as_ref()
@@ -150,9 +145,6 @@ impl Journal {
             }
         }
     }
-    /// A registered installation keeps the previous terminal operation and
-    /// fences: the application may still hold that operation's intent and can
-    /// only reconcile against its own operation ID and phase nonce.
     pub fn installation(
         previous: Option<Journal>,
         installed: InstalledIdentity,
@@ -168,10 +160,6 @@ impl Journal {
             installation_pending: Some(pending),
         }
     }
-    /// A verified reinstallation closes an operation that needed manual
-    /// recovery with a terminal the application can reconcile (same ID and
-    /// phase nonce). Called only after the pending installation proved
-    /// readiness; a restored previous program leaves ManualRequired in place.
     pub fn supersede_manual_recovery(&mut self) {
         if self
             .installation_pending
@@ -197,10 +185,6 @@ impl Journal {
     }
 }
 
-/// The running executable's hash, computed at most once per PID/InvocationID.
-/// `systemctl start` of a Type=simple unit returns before the target's execve,
-/// so /proc/PID/exe can still show systemd's image. Only a health receipt from
-/// that same PID/InvocationID proves the application itself is running.
 #[derive(Default)]
 pub struct ExecutableIdentity(Option<(u32, String, String)>);
 impl ExecutableIdentity {
@@ -218,7 +202,6 @@ impl ExecutableIdentity {
         if self.0.as_ref().is_none_or(|(old_pid, old_invocation, _)| {
             *old_pid != pid || old_invocation != invocation
         }) {
-            // A failed read is retried on the next tick rather than cached.
             let Some(digest) = hash(pid) else {
                 return false;
             };
@@ -230,7 +213,6 @@ impl ExecutableIdentity {
     }
 }
 
-/// Helper monotonic time, not wall time or the app timestamp, owns liveness.
 #[derive(Default)]
 pub struct Readiness {
     last: Option<(u64, u64)>,
@@ -327,23 +309,18 @@ mod tests {
         };
         (pending, health)
     }
-    /// Type=simple returns from `systemctl start` after fork but before the
-    /// target execve, so /proc/PID/exe can first show systemd's own image.
     #[test]
     fn executable_hash_is_taken_only_after_the_process_reported_health() {
         let (_, health) = sample();
         let invocation = health.invocation_id.clone();
         let expected = "a".repeat(64);
-        // Same PID throughout: systemd's image until execve, then the target.
         let exec_done = std::cell::Cell::new(false);
         let image = |pid: u32| {
             assert_eq!(pid, health.pid);
             Some(if exec_done.get() { "a" } else { "e" }.repeat(64))
         };
         let mut identity = ExecutableIdentity::default();
-        // `systemctl start` returned; no receipt from this process yet.
         assert!(!identity.verified(None, health.pid, &invocation, &expected, image));
-        // The application runs and writes its receipt.
         exec_done.set(true);
         assert!(identity.verified(Some(&health), health.pid, &invocation, &expected, image));
         assert!(identity.verified(
@@ -353,7 +330,6 @@ mod tests {
             &expected,
             |_| unreachable!()
         ));
-        // A receipt from another process does not authorize hashing this one.
         let mut stale = health.clone();
         stale.pid += 1;
         let mut fresh = ExecutableIdentity::default();
@@ -364,7 +340,6 @@ mod tests {
             &expected,
             |_| unreachable!()
         ));
-        // A failed read is retried rather than cached.
         let mut retry = ExecutableIdentity::default();
         assert!(!retry.verified(Some(&health), health.pid, &invocation, &expected, |_| None));
         assert!(

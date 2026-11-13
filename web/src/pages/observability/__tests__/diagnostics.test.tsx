@@ -25,7 +25,6 @@ describe('server-owned diagnostic presentation', () => {
   it('leads with key storage facts, keeps nullable filesystem readings and raw errors, and moves counters into details', () => {
     const current = { ...storage, dropped_logs: 2, last_dropped_log_at_ms: 1700000000000, query_log_coverage: { earliest_time_ms: 1700000000000, latest_time_ms: 1700000026000, span_ms: 26000 }, filesystem: { ...storage.filesystem, total_bytes: null, available_bytes: null, error: 'filesystem_unavailable', stale: true, low_space: true } };
     const view = render(<StorageStatusPanel status={current} language="en" />);
-    // An earlier day shows the date as well as the time.
     expect(screen.getByText(/^2 records could not be saved · last query log drop: \d+\/\d+\/\d+, /)).toBeTruthy();
     expect(screen.getByText(/last readings/)).toBeTruthy();
     expect(screen.getByText('filesystem_unavailable')).toBeTruthy();
@@ -37,7 +36,6 @@ describe('server-owned diagnostic presentation', () => {
     expect(screen.getByText(/^2 records could not be saved · last query log drop: \d{1,2}:\d{2}\s?[AP]M$/)).toBeTruthy();
   });
   it('says in words that storage settings are pending, never as revision numbers', () => {
-    // A fixed commit time keeps the rendered clock from containing the revision digits.
     render(<StorageStatusPanel status={{ ...storage, last_commit_at_ms: 1700000000000, configured_revision: 18, applied_revision: 17 }} language="en" />);
     expect(screen.getByText("Some storage settings haven't taken effect yet; they're being applied.")).toBeTruthy();
     expect(screen.queryByText(/18|revision|version/i)).toBeNull();
@@ -51,14 +49,12 @@ describe('server-owned diagnostic presentation', () => {
     expect(screen.getByText(/DoH \/ HTTP\/2 · Validating the response · Succeeded/)).toBeTruthy();
     expect(screen.getByText('256')).toBeTruthy();
     expect(screen.getByText('3 more requests not shown.')).toBeTruthy();
-    // Slots are numbered from 1 and carry no internal generation tag.
     expect(screen.getAllByText(/^Upstream 1 · /)).toHaveLength(2);
     expect(screen.queryByText(/#2/)).toBeNull();
   });
   it('keeps admission, handoff and actual protocol counts distinct', () => {
     const protocol = { handshake_inflight: 1, handshake_established: 9, stream_inflight: 2, stream_response_handed_to_transport: 8, admission_source_rejected: 3, stream_peer_cancelled: 4 };
     render(<TransportDiagnostics language="en" recursion={null} upstreams={{ scope: 'pool_generation', pool_generation: 5, since_ms: 1700000000000, slots: [{ slot: 0, counts: [{ protocol: null, stage: 'wait', outcome: 'cancelled', reason: 'caller_cancelled', count: 7 }] }], endpoints: [{ slot: 0, label: 'tls://dns.example', address: '192.0.2.53:853' }] }} quic={{ scope: 'process', doq: protocol, doh3: protocol }} />);
-    // Each upstream is named by its configured label and the address it was reached at.
     expect(screen.getByText('tls://dns.example')).toBeTruthy();
     expect(screen.getByText(/reached at 192\.0\.2\.53:853/)).toBeTruthy();
     expect(screen.queryByText('Upstream 1')).toBeNull();
@@ -73,7 +69,6 @@ describe('server-owned diagnostic presentation', () => {
     const view = render(<TransportDiagnostics language="en" upstreams={null} recursion={recursion} quic={quic} />);
     expect(screen.queryByText('Upstream request diagnostics')).toBeNull();
     expect(screen.getByText('Recursive resolution diagnostics')).toBeTruthy();
-    // Internal scope tags are not shown.
     expect(screen.queryByText('recursion_generation')).toBeNull();
     const resolutions = screen.getByRole('heading', { name: 'Resolutions' }).parentElement!;
     expect([...resolutions.querySelectorAll('dt')].map((term) => term.textContent)).toEqual(['Started', 'Answered', 'Name or record does not exist', 'Failed DNSSEC validation', 'Failed', 'Cancelled at the query timeout', 'Ended by shutdown']);

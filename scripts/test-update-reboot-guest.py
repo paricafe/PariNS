@@ -51,13 +51,11 @@ def setup(api, credentials, token):
         rejected = SetupRejected(status, value, attempt)
         if status != 409 or rejected.diagnostic['code'] != 'update_in_progress' or attempt == 3:
             raise rejected
-        time.sleep(1)  # Only an explicit non-accepted rejection may be retried.
+        time.sleep(1)
 
 
 def check_config():
     user = pwd.getpwnam('up6')
-    # A dropped-UID process cannot reopen the root-owned stdin pipe on Linux.
-    # This exact guest-only file contains the same configuration sent to setup.
     with CHECK_CONFIG.open('x') as output:
         os.fchmod(output.fileno(), 0o600)
         os.fchown(output.fileno(), user.pw_uid, user.pw_gid)
@@ -104,8 +102,6 @@ def staged_fixture(journal, operation, nonce, invocation, revision, stamp):
     assert journal['operation'] is None and journal['installation_pending'] is None
     result = copy.deepcopy(journal)
     installed = result['installed']
-    # Inert identity copied from the actual installation. No candidate file,
-    # manifest or official flag is manufactured; only precommit recovery runs.
     result['operation'] = dict(
         status=dict(operation_id=operation, phase_nonce=nonce, phase='staged',
                     version=installed['build']['version'], reason=None, updated_at_ms=stamp,
@@ -195,7 +191,6 @@ def recovered_fence(old, current):
     assert op['status']['phase'] == 'failed' and op['status']['reason'] == 'interrupted'
     assert not op['rollback_attempted'] and not op['rollback_started']
     assert op['pending_launch'] is None
-    # A real late Commit is consumed by the unchanged root protocol.
     run('systemctl', 'stop', 'parins-updater.path')
     request = dict(schema=1, operation_id=old['operation_id'], phase_nonce=old['phase_nonce'],
                    request=dict(kind='commit', invocation_id=old['invocation'], config_revision=1))
@@ -209,8 +204,6 @@ def recovered_fence(old, current):
 
 
 def journal_write_enospc(trace):
-    # strace records failed writes only, with zero string bytes. Never return
-    # raw trace text: only this exact root-journal destination and errno count.
     return bool(re.search(r'\bwrite\(\d+</var/lib/parins-updater/private/\.journal\.json\.tmp>, '
                           r'[^\n]*\)\s+= -1 ENOSPC\b', trace))
 
@@ -240,8 +233,6 @@ def journal_enospc():
         disk.truncate(size)
     try:
         run('mkfs.ext4', '-q', '-F', '-m', '0', str(image))
-        # Allocate blocks at write time so the evidence targets write ENOSPC,
-        # not a later delayed-allocation/fsync boundary.
         run('mount', '-o', 'loop,nodelalloc', str(image), str(private))
         mounted = True
         private.chmod(0o700)
@@ -250,8 +241,6 @@ def journal_enospc():
         source = mount[0]['source']
         assert source.startswith('/dev/loop')
         assert run('losetup', '--noheadings', '--output', 'BACK-FILE', source) == str(image)
-        # Copy the exact durable input, never manufacture an official identity
-        # or write a terminal result on behalf of the real helper.
         with JOURNAL.open('xb') as output:
             output.write(original)
             output.flush()
@@ -286,8 +275,6 @@ def journal_enospc():
         assert JOURNAL.read_bytes() == original
         assert hashlib.sha256(Path('/opt/parins-managed/parins').read_bytes()).hexdigest() == old['elf_sha256']
         assert hashlib.sha256((APP / 'state.json').read_bytes()).hexdigest() == old['state_sha256']
-        # Recover on the SAME volume and journal, including the failed helper's
-        # temporary file. Only this fixture's filler is removed.
         filler.unlink()
         run('systemctl', 'restart', 'parins-update-recovery.service')
         run('systemctl', 'start', UNIT)
@@ -320,11 +307,9 @@ def main():
     os.umask(0o077)
     if action == 'install':
         assert not APP.exists() and not JOURNAL.exists()
-        # Package members and metadata are verified before the real installer.
         subprocess.run(['sha256sum', '--check', 'SHA256SUMS'], cwd='/home/up6/package',
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         run('sh', '/home/up6/package/install.sh')
-        # Exercise the actual Config parser before sending a setup mutation.
         check_config()
         atomic(CREDS, dict(username='up6-admin', password=secrets.token_hex(24)))
         api = API()
@@ -375,7 +360,6 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        # API bodies/keys/passwords/installer output never leave the guest.
         frames = traceback.extract_tb(error.__traceback__)
         line = next(frame.lineno for frame in reversed(frames) if frame.filename == __file__)
         detail = {'error': type(error).__name__, 'stage': sys.argv[1], 'line': line}

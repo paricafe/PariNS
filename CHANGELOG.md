@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.4 — 2026-11-20
+
 ### Upgrade
 
 - Update recovery and installer preflight require helper protocol 7. Run the complete installer
@@ -10,15 +12,45 @@
 
 ### Fixed
 
-- Drop privileges inside the trusted installer helper before executing the candidate.
-- Limit management connections per source and bound request body time separately.
+- Drop privileges and close inherited descriptors inside the trusted installer helper before
+  executing the candidate.
+- Limit management connections per source, bound request body time separately, and keep
+  certificate reloads and recovery outside the management mutex.
 - Sample rejected UDP history and skip its DNS decoding when history is disabled.
-- Reject special files for local filtering rules and upstream CAs, and cap CA input size.
-- Reject IPv4 multicast destinations for recursive lookups.
-- Update `rustix` to address `RUSTSEC-2026-0486`.
-
-- Upgrade bundled SQLite through `rusqlite` to address `RUSTSEC-2026-0459`
-  (CVE-2026-119375), which affects a database opened with a crafted mismatched WAL.
+- Reject special files for local filtering rules and upstream CAs, cap CA and imported combined
+  PEM input sizes consistently, and reject conflicting duplicate local block methods.
+- Reject IPv4 multicast destinations for recursive lookups, and classify anomalous non-NOERROR
+  responses with QTYPE-matching answers as negative so denial proofs and AD rules apply.
+- Normalize outbound EDNS UDP payload size to 1232 bytes for coalescing while keeping each
+  client's reply limit, convert extended RCODEs for non-EDNS clients to SERVFAIL, and handle
+  narrower ECS scopes, snapshot-restored sharing revocation cooldowns, and full-section sharing
+  fingerprints.
+- Account for detached reader bytes before cache byte eviction, settle refresh usefulness on
+  foreground coalesced hits, fix concurrent flight handover and refresh scheduling lock ordering,
+  retire failed HTTP/3 and retried HTTP/2 connections cleanly, narrow the HTTP/3 connect budget,
+  fix idle tracking races, and improve DoT pool slot selection.
+- Flush admitted HTTP/2, DoQ and HTTP/3 responses within shutdown grace, keep TCP accept
+  exhaustion backoff across select wakes, and acquire plain TCP global query permits only after
+  source admission.
+- Upgrade bundled SQLite through `rusqlite` to address `RUSTSEC-2026-0459` (CVE-2026-119375) and
+  update `rustix` past `RUSTSEC-2026-0486`.
+- Recover from `SQLITE_FULL` under tight database limits with bounded eviction and batch
+  splitting, prioritize storage flush and shutdown over cancelled reads, order trend capacity
+  eviction by monotonic retention time, preserve logs across database open, and enforce live
+  WebSocket session revocation and expiry across waits and sends.
+- Fix filter subscription local memory budgeting, reuse-path coordinator reservation checks,
+  in-memory degradation on derived index disk limits, deadline retry backoff, target catalog
+  quota alignment, corrupt prepared-object self-healing, stale index pin release, and startup
+  orphan reclamation.
+- Require `parins-update-recovery.service` before `parins-updater.service`, avoid aborting active
+  recovery handshakes, prevent frozen update state writes and version-mismatched 304 ETag
+  blinding, recheck `state.json` after stopping the service during installation, harden installer
+  rollback against disk exhaustion, and deduplicate `manual_required` operation reporting.
+- Enforce strict CSP document reload on authenticated console sessions, preserve deterministic
+  401/409 API errors, validate large unit inputs with `BigInt`, compare enabled subscriptions
+  against saved effective sources, handle 422 merge conflicts and reactivation config sync
+  cleanly, align unsaved-change counts with non-restarting equivalent saves, and fix query log,
+  update restart tracking, custom background, error translation and Turnstile retry handling.
 - Installation, online updates and rollback allow up to three minutes per launch
   for storage checking and ten seconds of fresh, verified DNS/storage health.
   systemd's outer update and recovery timeouts cover the longer launch budgets.

@@ -7,7 +7,7 @@ use super::build_info::BuildInfo;
 
 pub const REPOSITORY: &str = "paricafe/PariNS";
 pub const UPDATE_PROTOCOL: u32 = 1;
-pub const HELPER_PROTOCOL: u32 = 6;
+pub const HELPER_PROTOCOL: u32 = 7;
 pub const INSTALL_CONTRACT: &str = "linux-managed-updater-v1";
 pub const DURABLE_CONTRACT_EPOCH: u32 = 1;
 pub const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;

@@ -8,9 +8,9 @@ use std::{
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use hickory_proto::op::Message;
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, timeout, timeout_at};
 
-use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, Reason, Stage};
+use super::diagnostics::{ActualProtocol, Attempt, AttemptScope, ConnectionUse, Reason, Stage};
 use super::transport::{InFlight, Usage, doh_answer, doh_chunk, doh_head};
 use super::{Endpoint, not_sent};
 
@@ -34,6 +34,12 @@ struct State {
     refused: Option<u16>,
 }
 
+enum ConnectionOutcome {
+    Answered,
+    Failed,
+    StreamFailed,
+}
+
 impl State {
     fn connection_failed(&mut self, now: Instant) {
         if self.retry_after.is_some_and(|until| until > now) {
@@ -47,6 +53,24 @@ impl State {
     fn answered(&mut self) {
         self.failures = 0;
         self.retry_after = None;
+    }
+
+    fn finish(&mut self, connection: Option<&Arc<Connection>>, outcome: ConnectionOutcome) {
+        let current = match (connection, &self.connection) {
+            (Some(used), Some(current)) => Arc::ptr_eq(used, current),
+            (None, None) => true,
+            _ => false,
+        };
+        if current {
+            match outcome {
+                ConnectionOutcome::Answered => self.answered(),
+                ConnectionOutcome::Failed => {
+                    self.connection = None;
+                    self.connection_failed(Instant::now());
+                }
+                ConnectionOutcome::StreamFailed => {}
+            }
+        }
     }
 }
 
@@ -117,63 +141,80 @@ impl Client {
         let budget =
             Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now()) / 2);
         if budget.is_zero() {
+            attempt.reason(Reason::Deadline);
+            attempt.skipped();
             return Err(not_sent(anyhow::anyhow!("HTTP/3 deadline exhausted")));
         }
         let mut connection = None;
+        let mut attempted = false;
         let mut sent = false;
-        let request = timeout(
-            budget,
-            self.send(
-                spec,
+        let result = timeout_at(deadline, async {
+            let (request, outbound) = super::transport::doh_request(spec, query)?;
+            let (parts, body) = request.into_parts();
+            let active = match timeout(
+                budget,
+                self.connection(spec, address, &mut attempt, &mut attempted),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(error) => {
+                    attempt.reason(Reason::Deadline);
+                    return Err(error.into());
+                }
+            };
+            connection = Some(active.clone());
+            let _in_flight = InFlight::new(&active.usage);
+            let mut sender = active.sender.clone();
+            attempt.stage(Stage::RequestWrite);
+            attempted = true;
+            let stream = sender
+                .send_request(http::Request::from_parts(parts, ()))
+                .await?;
+            sent = true;
+            self.finish_request(
+                RequestGuard(stream, false),
+                body,
+                &outbound,
                 query,
-                address,
                 &mut attempt,
-                &mut connection,
-                &mut sent,
-            ),
-        )
+            )
+            .await
+        })
         .await;
-        let request = match request {
-            Ok(request) => request,
+        let result = match result {
+            Ok(result) => result,
             Err(error) => {
                 attempt.reason(Reason::Deadline);
                 Err(error.into())
             }
         };
-        let result = match request {
-            Ok((stream, outbound, in_flight)) => {
-                self.receive(stream, in_flight, &outbound, query, &mut attempt)
-                    .await
-            }
-            Err(error) => Err(error),
-        };
         attempt.finish(&result);
-        {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let current = match (&connection, &state.connection) {
-                (Some(used), Some(current)) => Arc::ptr_eq(used, current),
-                (None, None) => true,
-                _ => false,
-            };
-            if current {
-                match &result {
-                    Ok(_) => state.answered(),
-                    Err(error)
-                        if sent
-                            && !matches!(
-                                error.downcast_ref::<h3::error::StreamError>(),
-                                Some(
-                                    h3::error::StreamError::ConnectionError { .. }
-                                        | h3::error::StreamError::RemoteClosing { .. }
-                                )
-                            )
-                            && connection.as_ref().is_some_and(|connection| {
-                                connection.quic.close_reason().is_none()
-                                    && !connection.driver.is_finished()
-                            }) => {}
-                    Err(_) => state.connection_failed(Instant::now()),
+        if attempted {
+            let outcome = match &result {
+                Ok(_) => ConnectionOutcome::Answered,
+                Err(error) => {
+                    let stream = error.downcast_ref::<h3::error::StreamError>();
+                    let failed = matches!(
+                        stream,
+                        Some(
+                            h3::error::StreamError::ConnectionError { .. }
+                                | h3::error::StreamError::RemoteClosing { .. }
+                        )
+                    ) || connection.as_ref().is_none_or(|connection| {
+                        connection.quic.close_reason().is_some() || connection.driver.is_finished()
+                    }) || (!sent && stream.is_none());
+                    if failed {
+                        ConnectionOutcome::Failed
+                    } else {
+                        ConnectionOutcome::StreamFailed
+                    }
                 }
-            }
+            };
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish(connection.as_ref(), outcome);
         }
         result.map_err(|error| if sent { error } else { not_sent(error) })
     }
@@ -186,11 +227,7 @@ impl Client {
             .is_some_and(|until| until > Instant::now())
     }
 
-    fn cached(
-        &self,
-        address: SocketAddr,
-        observed: &mut Option<Arc<Connection>>,
-    ) -> Option<Arc<Connection>> {
+    fn cached(&self, address: SocketAddr) -> Option<Arc<Connection>> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state
             .connection
@@ -199,8 +236,8 @@ impl Client {
         {
             state.connection = None;
         }
-        *observed = state.connection.clone();
-        observed
+        state
+            .connection
             .as_ref()
             .filter(|c| c.quic.remote_address() == address)
             .cloned()
@@ -211,9 +248,10 @@ impl Client {
         spec: &Endpoint,
         address: SocketAddr,
         attempt: &mut Attempt,
-        observed: &mut Option<Arc<Connection>>,
+        attempted: &mut bool,
     ) -> Result<Arc<Connection>> {
-        if let Some(connection) = self.cached(address, observed) {
+        if let Some(connection) = self.cached(address) {
+            attempt.connection(ConnectionUse::Reused);
             return Ok(connection);
         }
         attempt.stage(Stage::Wait);
@@ -222,14 +260,21 @@ impl Client {
             attempt.skipped();
             anyhow::bail!("HTTP/3 cooling down");
         }
-        if let Some(connection) = self.cached(address, observed) {
+        if let Some(connection) = self.cached(address) {
+            attempt.connection(ConnectionUse::Reused);
             return Ok(connection);
         }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .connection = None;
         let bind = if address.is_ipv4() {
             "0.0.0.0:0"
         } else {
             "[::]:0"
         };
+        *attempted = true;
+        attempt.connection(ConnectionUse::New);
         attempt.stage(Stage::Connect);
         let mut endpoint = EndpointGuard(quinn::Endpoint::client(bind.parse()?)?);
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(self.tls.clone())?;
@@ -267,7 +312,6 @@ impl Client {
             usage,
             driver,
         });
-        *observed = Some(connection.clone());
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -275,43 +319,18 @@ impl Client {
         Ok(connection)
     }
 
-    async fn send(
-        &self,
-        spec: &Endpoint,
-        query: &Message,
-        address: SocketAddr,
-        attempt: &mut Attempt,
-        used: &mut Option<Arc<Connection>>,
-        sent: &mut bool,
-    ) -> Result<(RequestGuard, Message, InFlight)> {
-        let connection = self.connection(spec, address, attempt, used).await?;
-        let mut sender = connection.sender.clone();
-        let in_flight = InFlight::new(&connection.usage);
-        let (request, outbound) = super::transport::doh_request(spec, query)?;
-        let (parts, body) = request.into_parts();
-        attempt.stage(Stage::RequestWrite);
-        let mut stream = RequestGuard(
-            sender
-                .send_request(http::Request::from_parts(parts, ()))
-                .await?,
-            false,
-        );
-        *sent = true;
-        if !body.is_empty() {
-            stream.0.send_data(body).await?;
-        }
-        stream.0.finish().await?;
-        Ok((stream, outbound, in_flight))
-    }
-
-    async fn receive(
+    async fn finish_request(
         &self,
         mut stream: RequestGuard,
-        _in_flight: InFlight,
+        body: Bytes,
         outbound: &Message,
         query: &Message,
         attempt: &mut Attempt,
     ) -> Result<Message> {
+        if !body.is_empty() {
+            stream.0.send_data(body).await?;
+        }
+        stream.0.finish().await?;
         attempt.stage(Stage::ResponseHeaders);
         let response = stream.0.recv_response().await?;
         if definite_refusal(response.status()) {
@@ -331,7 +350,119 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use super::super::diagnostics::{Diagnostics, Operation, Outcome};
     use super::*;
+
+    #[tokio::test]
+    async fn exhausted_setup_budget_is_a_skipped_deadline() {
+        let client = Client::new(crate::tls::client_config(None, b"h3").unwrap());
+        let spec = Endpoint::parse("https://127.0.0.1:443").unwrap();
+        let address = "127.0.0.1:443".parse().unwrap();
+        let deadline = Instant::now();
+        let operation = Operation::new(true, None);
+        let scope = AttemptScope::new(&Diagnostics::new(1), &operation, 0, deadline);
+        assert!(
+            client
+                .exchange(&spec, &Message::query(), address, deadline, &scope)
+                .await
+                .unwrap_err()
+                .is::<super::super::NotSent>()
+        );
+        let trace = operation.trace().unwrap();
+        assert_eq!(trace.attempts.len(), 1);
+        assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
+        assert_eq!(trace.attempts[0].outcome, Outcome::Skipped);
+    }
+
+    #[tokio::test]
+    async fn failed_connection_is_retired_and_its_late_answer_keeps_cooldown() {
+        use hickory_proto::{
+            op::Query,
+            rr::{Name, RecordType},
+        };
+        use rustls::pki_types::PrivatePkcs8KeyDer;
+        let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = identity.cert.der().clone();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.clone()],
+                PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        server.alpn_protocols = vec![b"h3".to_vec()];
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server).unwrap();
+        let endpoint = quinn::Endpoint::server(
+            quinn::ServerConfig::with_crypto(Arc::new(crypto)),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let address = endpoint.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let quic = endpoint.accept().await.unwrap().await.unwrap();
+            let mut server = h3::server::builder()
+                .build::<_, Bytes>(h3_quinn::Connection::new(quic.clone()))
+                .await
+                .unwrap();
+            let _request = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            quic.close(1u32.into(), b"test");
+            endpoint.wait_idle().await;
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let client = Client::new(
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let spec = Endpoint::parse(&format!("https://localhost:{}", address.port())).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let operation = Operation::new(true, None);
+        let scope = AttemptScope::new(&Diagnostics::new(1), &operation, 0, deadline);
+        let old = timeout_at(
+            deadline,
+            client.connection(
+                &spec,
+                address,
+                &mut scope.start(Some(ActualProtocol::Doh3)),
+                &mut false,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut query = Message::query();
+        query.add_query(Query::query(
+            Name::from_ascii("retire.test.").unwrap(),
+            RecordType::A,
+        ));
+        let error = client
+            .exchange(&spec, &query, address, deadline, &scope)
+            .await
+            .unwrap_err();
+        assert!(!error.is::<super::super::NotSent>());
+        {
+            let mut state = client.state.lock().unwrap();
+            assert!(state.connection.is_none());
+            let until = state.retry_after.unwrap();
+            state.finish(Some(&old), ConnectionOutcome::Answered);
+            assert_eq!(state.retry_after, Some(until));
+        }
+        drop(old);
+        timeout_at(deadline, server).await.unwrap().unwrap();
+    }
 
     #[test]
     fn connection_failures_back_off_to_30_seconds_and_reset_after_an_answer() {

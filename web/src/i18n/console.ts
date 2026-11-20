@@ -1,3 +1,5 @@
+import { updatesMessages } from './updates';
+
 export const apiMessages = {
   CURRENT_PASSWORD_INCORRECT: ['当前密码不正确，请重新输入。', 'The current password is incorrect. Try again.'],
   CERTIFICATE_INVALID: ['证书无法使用。请确认证书与私钥匹配且在有效期内。{detail}', "The certificate can't be used. Check that the certificate and private key match and are within their validity period. {detail}"],
@@ -34,6 +36,11 @@ export const apiMessages = {
   ORIGIN: ["请从控制台当前的地址打开此页面。", "Open this page from the console's current address."],
   JSON_REQUIRED: ["请求格式无效，请刷新页面后重试。", "The request was malformed. Refresh the page and try again."],
   BODY_LIMIT: ["提交的内容过大或不完整，请精简后重试。", "The submitted content is too large or incomplete. Shorten it and try again."],
+  BODY_TIMEOUT: ['接收请求超时，请检查连接后重试。', 'Receiving the request timed out. Check the connection and try again.'],
+  LIVE_LIMIT: ['实时查询记录连接已达上限，请关闭其他查询记录页面后重试。', 'The live query log connection limit was reached. Close another query log page and try again.'],
+  STOPPING: ['管理服务正在停止。请在服务启动后重试。', 'The management service is stopping. Try again once it starts.'],
+  WEBSOCKET_REQUIRED: ['实时查询记录需要 WebSocket 连接。', 'The live query log requires a WebSocket connection.'],
+  update_in_progress: updatesMessages.update_in_progress,
   BAD_RESPONSE: ["服务器的回复不完整，无法确认操作是否成功。请先查看当前状态。", "The server's reply was incomplete, so the result is unknown. Check the current state first."],
   HTTP: ["请求失败（HTTP {status}）。{detail}", "Request failed (HTTP {status}). {detail}"],
 } as const;

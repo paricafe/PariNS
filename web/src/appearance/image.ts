@@ -60,13 +60,19 @@ export function headerSize(bytes: Uint8Array): { width: number; height: number }
   }
   if (bytes[0] === 0xff && bytes[1] === 0xd8) {
     let at = 2;
-    while (at + 9 < bytes.length && bytes[at] === 0xff) {
-      const marker = bytes[at + 1];
-      const length = view.getUint16(at + 2);
+    while (bytes[at] === 0xff) {
+      while (at < bytes.length && bytes[at] === 0xff) at += 1;
+      const marker = bytes[at++];
+      if (marker === 0xd9 || marker === 0xda) break;
+      if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue;
+      if (at + 2 > bytes.length) break;
+      const length = view.getUint16(at);
+      if (length < 2 || at + length > bytes.length) break;
       if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
-        return { width: view.getUint16(at + 7), height: view.getUint16(at + 5) };
+        if (length < 7) break;
+        return { width: view.getUint16(at + 5), height: view.getUint16(at + 3) };
       }
-      at += 2 + length;
+      at += length;
     }
   }
   return null;

@@ -294,7 +294,7 @@ impl Index {
     pub fn index_bytes(&self) -> usize {
         self.arena.capacity() + self.nodes.capacity() * size_of::<Node>()
     }
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }

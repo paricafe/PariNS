@@ -8,7 +8,6 @@ use crate::clock::unix_ms;
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Unconfigured,
-    Starting,
     Running,
     Degraded,
     Stopped,
@@ -44,7 +43,7 @@ impl Health {
         }
         if generation == current.generation
             && current.state == State::Failed
-            && state != State::Starting
+            && (state != State::Failed || code == current.code)
         {
             return false;
         }
@@ -75,6 +74,9 @@ mod tests {
         health.publish(State::Failed, 2, Some("listener_failed"));
         assert!(!health.publish(State::Stopped, 2, None));
         assert_eq!(health.snapshot().code, Some("listener_failed"));
+        assert!(health.publish(State::Failed, 2, Some("task_panic")));
+        assert_eq!(health.snapshot().code, Some("task_panic"));
+        assert!(!health.publish(State::Failed, 2, Some("task_panic")));
         health.publish(State::Running, 3, None);
         assert!(health.snapshot().ready);
     }

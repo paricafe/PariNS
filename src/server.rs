@@ -21,7 +21,7 @@ use crate::{
     metrics::{Counter, Metrics},
     protocol,
     resolver::{ForcedShutdown, Resolver},
-    transport::{tcp, udp},
+    transport::{accept, tcp, udp},
 };
 
 pub struct Server {
@@ -95,8 +95,14 @@ impl ReloadHandle {
             None => crate::policy::LocalPolicySource::Inline(self.local_policy.clone()),
         };
         let candidate = filters
-            .prepare_config_from_source(self.filter_settings.clone(), local, revision)
+            .check_config_from_source(
+                self.filter_settings.clone(),
+                local,
+                revision,
+                Duration::from_secs(5),
+            )
             .await?;
+        let _serial = self.serial.lock().expect("reload lock poisoned");
         let closed = self
             .publication_closed
             .lock()
@@ -215,11 +221,15 @@ impl Listeners {
             .clone()
     }
     pub fn serving(&self, kind: ListenerKind) -> bool {
+        self.running_address(kind).is_some()
+    }
+    fn running_address(&self, kind: ListenerKind) -> Option<SocketAddr> {
         self.status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|l| l.kind == kind && l.state == ListenerState::Running)
+            .find(|l| l.kind == kind && l.state == ListenerState::Running)
+            .map(|l| l.address)
     }
     pub fn all_running(&self) -> bool {
         self.status
@@ -294,7 +304,7 @@ struct ListenerTls {
     doh3: Option<Arc<rustls::ServerConfig>>,
     doq: Option<Arc<rustls::ServerConfig>>,
     max_streams: usize,
-    h3_port: Option<u16>,
+    doh_port: tokio::sync::Mutex<u16>,
 }
 
 enum Bound {
@@ -317,8 +327,23 @@ struct Slot {
     bound: Option<Bound>,
 }
 
-async fn bind_slot(kind: ListenerKind, address: SocketAddr, tls: &ListenerTls) -> Result<Bound> {
+async fn bind_slot(
+    kind: ListenerKind,
+    configured: &mut SocketAddr,
+    tls: &ListenerTls,
+) -> Result<Bound> {
     use crate::quic::Protocol;
+    let shared_port = if configured.port() == 0
+        && tls.doh3.is_some()
+        && matches!(kind, ListenerKind::Doh | ListenerKind::Doh3)
+    {
+        let port = tls.doh_port.lock().await;
+        configured.set_port(*port);
+        Some(port)
+    } else {
+        None
+    };
+    let address = *configured;
     let quic = |config: &Option<Arc<rustls::ServerConfig>>, protocol| {
         crate::quic::bind(
             address,
@@ -327,16 +352,24 @@ async fn bind_slot(kind: ListenerKind, address: SocketAddr, tls: &ListenerTls) -
             protocol,
         )
     };
-    Ok(match kind {
+    let bound = match kind {
         ListenerKind::Dns => {
-            let tcp = TcpListener::bind(address)
-                .await
-                .with_context(|| format!("bind DNS TCP {address}"))?;
-            let actual = tcp.local_addr()?;
-            let udp = udp::Socket::bind(actual)
-                .await
-                .with_context(|| format!("bind DNS UDP {actual}"))?;
-            Bound::Dns(tcp, Arc::new(udp))
+            let mut retries = if address.port() == 0 { 15 } else { 0 };
+            loop {
+                let tcp = TcpListener::bind(address)
+                    .await
+                    .with_context(|| format!("bind DNS TCP {address}"))?;
+                let actual = tcp.local_addr()?;
+                match udp::Socket::bind(actual).await {
+                    Ok(udp) => break Bound::Dns(tcp, Arc::new(udp)),
+                    Err(error) if retries > 0 && error.kind() == std::io::ErrorKind::AddrInUse => {
+                        retries -= 1;
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| format!("bind DNS UDP {actual}"));
+                    }
+                }
+            }
         }
         ListenerKind::Admin | ListenerKind::Dot | ListenerKind::Doh => Bound::Tcp(
             TcpListener::bind(address)
@@ -350,7 +383,12 @@ async fn bind_slot(kind: ListenerKind, address: SocketAddr, tls: &ListenerTls) -
         ListenerKind::Doq => Bound::Quic(
             quic(&tls.doq, Protocol::Doq).with_context(|| format!("bind DoQ {address}"))?,
         ),
-    })
+    };
+    *configured = bound.local_addr()?;
+    if let Some(mut port) = shared_port {
+        *port = configured.port();
+    }
+    Ok(bound)
 }
 
 async fn serve_bound(
@@ -368,10 +406,14 @@ async fn serve_bound(
             crate::tls::serve(listener, tls.dot.clone().expect("DoT identity"), ingress).await
         }
         (_, Bound::Tcp(listener)) => {
-            let h3_port = tls.h3_port.map(|port| {
+            let h3_port = tls.doh3.as_ref().map(|_| {
                 let listeners = listeners.clone();
-                Arc::new(move || listeners.serving(ListenerKind::Doh3).then_some(port))
-                    as crate::doh::H3Port
+                Arc::new(move || {
+                    listeners
+                        .running_address(ListenerKind::Doh3)
+                        .map(|address| address.port())
+                        .filter(|port| *port != 0)
+                }) as crate::doh::H3Port
             });
             crate::doh::serve(
                 listener,
@@ -410,7 +452,7 @@ async fn supervise(
                 if *stop.borrow() {
                     return Ok(());
                 }
-                match bind_slot(slot.kind, slot.address, &tls).await {
+                match bind_slot(slot.kind, &mut slot.address, &tls).await {
                     Ok(bound) => bound,
                     Err(error) => {
                         failures = failures.saturating_add(1);
@@ -420,7 +462,7 @@ async fn supervise(
                 }
             }
         };
-        let address = bound.local_addr()?;
+        let address = slot.address;
         if let Bound::Quic(listener) = &bound {
             runtimes.lock().expect("QUIC runtimes")[index] = Some(listener.runtime());
         }
@@ -518,7 +560,7 @@ impl Server {
                 .map(|_| certificates.server_config(Role::Doq, &[b"doq"]))
                 .transpose()?,
             max_streams: config.max_inflight.min(1024),
-            h3_port: None,
+            doh_port: tokio::sync::Mutex::new(0),
         };
         let mut planned = vec![(ListenerKind::Dns, config.listen)];
         planned.extend(config.admin_listen.map(|a| (ListenerKind::Admin, a)));
@@ -533,18 +575,9 @@ impl Server {
         let mut slots = Vec::with_capacity(planned.len());
         let mut status = Vec::with_capacity(planned.len());
         let mut unbound = Vec::new();
-        let mut doh_actual = None;
         for (kind, mut address) in planned {
-            if kind == ListenerKind::Doh3
-                && let Some(actual) = doh_actual
-            {
-                address = actual;
-            }
-            let bound = match bind_slot(kind, address, &tls).await {
-                Ok(bound) => {
-                    address = bound.local_addr()?;
-                    Some(bound)
-                }
+            let bound = match bind_slot(kind, &mut address, &tls).await {
+                Ok(bound) => Some(bound),
                 Err(error) => {
                     unbound.push((status.len(), error));
                     None
@@ -556,7 +589,6 @@ impl Server {
                 ListenerKind::Dot => config.dot.as_mut().expect("DoT").listen = address,
                 ListenerKind::Doh => {
                     config.doh.as_mut().expect("DoH").listen = address;
-                    doh_actual = Some(address);
                 }
                 ListenerKind::Doh3 => {}
                 ListenerKind::Doq => config.doq.as_mut().expect("DoQ").listen = address,
@@ -577,14 +609,6 @@ impl Server {
                 bound,
             });
         }
-        let tls = ListenerTls {
-            h3_port: config
-                .doh
-                .as_ref()
-                .filter(|d| d.http3)
-                .map(|d| d.listen.port()),
-            ..tls
-        };
         let resolver = Arc::new(Resolver::with_services_and_policy(
             &config,
             services.clone(),
@@ -749,7 +773,9 @@ impl Server {
         self.reload.close();
         let _ = stopping.send(true);
         let drained = timeout(
-            Duration::from_millis(self.config.shutdown_grace_ms),
+            ingress
+                .shutdown_grace
+                .saturating_add(Duration::from_millis(500)),
             async {
                 let mut first = Ok(());
                 while let Some(result) = supervisors.join_next().await {
@@ -793,6 +819,8 @@ async fn serve_plain(
     let metrics = resolver.metrics().clone();
     let mut tasks = JoinSet::new();
     let mut buffer = vec![0; protocol::MAX_MESSAGE];
+    let mut udp_retry_at = None;
+    let mut accepting = accept::Acceptor::new(&tcp);
     let mut next_rejection_log = tokio::time::Instant::now();
     let outcome: Result<()> = loop {
         if *ingress.stop.borrow() {
@@ -801,7 +829,7 @@ async fn serve_plain(
         tokio::select! {
             _ = ingress.stop.changed() => break Ok(()),
             Some(result) = tasks.join_next(), if !tasks.is_empty() => ingress.settle("plain DNS", result),
-            accepted = crate::transport::accept::accept(&tcp) => {
+            accepted = accepting.accept() => {
                 let (stream, peer) = match accepted { Ok(value) => value, Err(error) => break Err(error.into()) };
                 let Ok(permit) = ingress.connections.clone().try_acquire_owned() else {
                     metrics.inc(Counter::ConnectionsRejected);
@@ -818,8 +846,25 @@ async fn serve_plain(
                     serve_tcp(stream, peer.ip(), context).await;
                 });
             }
-            received = udp.recv(&mut buffer) => {
-                let received = match received { Ok(value) => value, Err(error) => break Err(error.into()) };
+            received = async {
+                if let Some(resume) = udp_retry_at {
+                    tokio::time::sleep_until(resume).await;
+                }
+                udp.recv(&mut buffer).await
+            } => {
+                udp_retry_at = None;
+                let received = match received {
+                    Ok(value) => value,
+                    Err(error) => match accept::recovery(&error) {
+                        accept::Recovery::Retry => continue,
+                        accept::Recovery::Pause => {
+                            accept::log_exhausted("DNS UDP receive", &error);
+                            udp_retry_at = Some(tokio::time::Instant::now() + accept::EXHAUSTED_PAUSE);
+                            continue;
+                        }
+                        accept::Recovery::Fatal => break Err(error.into()),
+                    },
+                };
                 metrics.inc(Counter::UdpReceived);
                 let Some((length, peer, source_address)) = received else {
                     metrics.inc(Counter::UdpDropped);
@@ -891,14 +936,15 @@ async fn serve_tcp(
         };
         let Ok(Ok(bytes)) = frame else { return };
         resolver.metrics().inc(Counter::TcpReceived);
-        let source = ingress.admit_query(peer);
-        let permit = ingress.queries.clone().try_acquire_owned();
-        let (response, delivery) = match (source.as_ref(), &permit) {
-            (Some(_), Ok(_)) => {
+        let admitted = ingress
+            .admit_query(peer)
+            .and_then(|source| Some((source, ingress.queries.clone().try_acquire_owned().ok()?)));
+        let (response, delivery) = match admitted {
+            Some((_source, _permit)) => {
                 let (reply, delivery) = resolver.resolve_for_delivery(&bytes, peer, "tcp").await;
                 (reply.map(|reply| reply.message), Some(delivery))
             }
-            _ => {
+            None => {
                 resolver.metrics().inc(Counter::TcpRejected);
                 let reply = crate::ingress::rejected_response(&bytes).map(|(reply, _)| reply);
                 let delivery = resolver.rejected_for_delivery(&bytes, peer, "tcp", reply.as_ref());
@@ -937,7 +983,14 @@ mod tests {
         };
         use tokio::io::AsyncWriteExt;
 
-        for (admitted, delivered) in [(true, true), (true, false), (false, true), (false, false)] {
+        for (admitted, delivered, source_rejected) in [
+            (true, true, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+            (false, true, true),
+            (false, false, true),
+        ] {
             let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
             config.query_log.enabled = true;
             config.filter = toml::from_str("enabled=true\nblock_exact=['delivery.test']").unwrap();
@@ -947,18 +1000,26 @@ mod tests {
             let resolver = Arc::new(Resolver::with_services(&config, services.clone()).unwrap());
             let metrics = resolver.metrics().clone();
             let (_stop, stopped) = watch::channel(false);
+            let source_limits = Arc::new(crate::limits::Limiter::new(&crate::limits::Settings {
+                enabled: source_rejected,
+                max_inflight: 1,
+                ..Default::default()
+            }));
+            let peer = "127.0.0.1".parse().unwrap();
+            let _source = source_rejected.then(|| source_limits.try_query(peer).unwrap());
+            let queries = Arc::new(Semaphore::new(usize::from(admitted || source_rejected)));
             let ingress = crate::ingress::Ingress {
                 resolver,
-                queries: Arc::new(Semaphore::new(usize::from(admitted))),
+                queries: queries.clone(),
                 connections: Arc::new(Semaphore::new(1)),
-                source_limits: Arc::new(crate::limits::Limiter::new(&Default::default())),
+                source_limits,
                 stop: stopped,
                 io_timeout: Duration::from_secs(5),
                 shutdown_grace: Duration::from_millis(100),
                 max_streams: 1,
             };
             let (mut client, server) = tokio::io::duplex(1);
-            let task = tokio::spawn(serve_tcp(server, "127.0.0.1".parse().unwrap(), ingress));
+            let task = tokio::spawn(serve_tcp(server, peer, ingress));
             let mut query = hickory_proto::op::Message::new(
                 7,
                 hickory_proto::op::MessageType::Query,
@@ -986,6 +1047,10 @@ mod tests {
             })
             .await
             .unwrap();
+            if source_rejected {
+                assert_eq!(metrics.snapshot().counters["source_queries_rejected"], 1);
+                assert!(queries.try_acquire().is_ok());
+            }
             assert_eq!(metrics.snapshot().counters["completed"], 0);
             services.storage.flush().await.unwrap();
             assert!(
@@ -1032,6 +1097,57 @@ mod tests {
             );
             assert_eq!(page.entries[0].name, "delivery.test.");
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn transient_udp_receive_error_preserves_plain_tcp_listener() {
+        let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+        config.listen = "127.0.0.1:0".parse().unwrap();
+        let server = Server::bind(config).await.unwrap();
+        let address = server.local_addr();
+        let Some(Bound::Dns(_, udp)) = &server.slots[0].bound else {
+            panic!("plain DNS sockets required");
+        };
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_address = peer.local_addr().unwrap();
+        udp.socket().connect(peer_address).await.unwrap();
+        drop(peer);
+        udp.socket().send(b"probe").await.unwrap();
+        timeout(Duration::from_secs(2), udp.socket().readable())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let listeners = server.listeners();
+        let metrics = server.metrics().clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(server.run(async {
+            let _ = stopped.await;
+        }));
+        let peer = tokio::net::UdpSocket::bind(peer_address).await.unwrap();
+        let empty_query = [0; 12];
+        peer.send_to(&empty_query, address).await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            while metrics.snapshot().counters["udp_received"] == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        tcp::write_frame(&mut client, &empty_query).await.unwrap();
+        let reply = timeout(Duration::from_secs(2), tcp::read_frame(&mut client))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            protocol::decode(&reply).unwrap().response_code,
+            hickory_proto::op::ResponseCode::FormErr
+        );
+        assert_eq!(listeners.snapshot()[0].failures, 0);
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

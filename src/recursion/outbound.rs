@@ -16,12 +16,13 @@ use hickory_resolver::{
     net::{NetError, runtime::TokioRuntimeProvider, udp::UdpClientStream},
 };
 use tokio::{
-    sync::Semaphore,
+    sync::{Semaphore, watch},
     time::{Instant, sleep_until},
 };
 
 pub struct Bounds {
     inflight: Arc<Semaphore>,
+    closed: watch::Sender<()>,
     rate: f64,
     bucket: Mutex<(f64, Instant)>,
     pub(super) sent: AtomicU64,
@@ -35,6 +36,7 @@ impl Bounds {
         let rate = f64::from(per_second);
         Arc::new(Self {
             inflight: Arc::new(Semaphore::new(inflight)),
+            closed: watch::Sender::new(()),
             rate,
             bucket: Mutex::new((rate, Instant::now())),
             sent: AtomicU64::new(0),
@@ -46,6 +48,7 @@ impl Bounds {
 
     pub fn close(&self) {
         self.inflight.close();
+        self.closed.send_replace(());
     }
 
     pub fn inflight(&self, limit: usize) -> usize {
@@ -54,6 +57,7 @@ impl Bounds {
 
     async fn take(&self) -> bool {
         let started = Instant::now();
+        let mut closed = self.closed.subscribe();
         let mut waited = false;
         loop {
             if self.inflight.is_closed() {
@@ -83,20 +87,25 @@ impl Bounds {
                 return true;
             };
             waited = true;
-            sleep_until(Instant::now() + wait).await;
+            tokio::select! {
+                _ = closed.changed() => return false,
+                _ = sleep_until(Instant::now() + wait) => {}
+            }
         }
     }
 }
 
 #[derive(Clone)]
 pub struct Provider {
+    ipv6: bool,
     runtime: TokioRuntimeProvider,
     bounds: Arc<Bounds>,
 }
 
 impl Provider {
-    pub fn new(bounds: Arc<Bounds>) -> Self {
+    pub fn new(bounds: Arc<Bounds>, ipv6: bool) -> Self {
         Self {
+            ipv6,
             runtime: TokioRuntimeProvider::default(),
             bounds,
         }
@@ -114,6 +123,9 @@ impl ConnectionProvider for Provider {
         config: &ConnectionConfig,
         cx: &PoolContext,
     ) -> Result<Self::FutureConn, NetError> {
+        if matches!(ip, IpAddr::V6(v6) if !self.ipv6 || v6.to_ipv4_mapped().is_some()) {
+            return Err(NetError::from("disallowed IPv6 authority address"));
+        }
         if matches!(config.protocol, ProtocolConfig::Udp) {
             let stream =
                 UdpClientStream::builder(SocketAddr::new(ip, config.port), self.runtime.clone())
@@ -166,6 +178,27 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn disallowed_ipv6_authorities_are_rejected_before_connection() {
+        let context = PoolContext::new(ResolverOpts::default(), TlsConfig::new().unwrap());
+        for (address, ipv6) in [
+            ("::ffff:93.184.216.34", false),
+            ("::ffff:93.184.216.34", true),
+            ("2001:db8::1", false),
+        ] {
+            let provider = Provider::new(Bounds::new(1, 1), ipv6);
+            let error = provider
+                .new_connection(address.parse().unwrap(), &ConnectionConfig::udp(), &context)
+                .err()
+                .expect("disallowed address");
+            assert!(
+                error
+                    .to_string()
+                    .contains("disallowed IPv6 authority address")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn each_udp_send_uses_one_admission() {
         let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = server.local_addr().unwrap();
@@ -179,7 +212,7 @@ mod tests {
         let pool = NameServerPool::from_config(
             [config],
             Arc::new(PoolContext::new(options, TlsConfig::new().unwrap())),
-            Provider::new(bounds.clone()),
+            Provider::new(bounds.clone(), false),
         );
         let lookups: Vec<_> = ["first.example.", "second.example."]
             .into_iter()
@@ -268,7 +301,10 @@ mod tests {
             async move { bounds.take().await }
         });
         tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        let start = Instant::now();
         bounds.close();
         assert!(!waiter.await.unwrap());
+        assert_eq!(Instant::now(), start);
     }
 }

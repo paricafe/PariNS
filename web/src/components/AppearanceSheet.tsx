@@ -28,7 +28,7 @@ export function AppearanceSheet({ appearance }: { appearance: Appearance }) {
   const t = (key: string, params?: Record<string, string | number>) => translate(`appearance.${key}`, language, params);
   const option = (id: BackgroundId) => <Swatch key={id} id={id} name={name} checked={background === id} label={t(`bg_${id}`)} onSelect={() => appearance.changeBackground(id)} />;
   const upload = async (picked: File | undefined) => {
-    if (!picked) return;
+    if (!picked || busy) return;
     setBusy(true); setMessage(null);
     try {
       const { saved } = await appearance.uploadImage(picked);
@@ -39,6 +39,12 @@ export function AppearanceSheet({ appearance }: { appearance: Appearance }) {
       setBusy(false);
       if (file.current) file.current.value = '';
     }
+  };
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true); setMessage(null);
+    try { await appearance.removeImage(); }
+    finally { setBusy(false); }
   };
   return <>
     <button type="button" className="icon-button" aria-label={t('open')} title={t('open')} onClick={() => setOpen(true)}><Palette size={18} strokeWidth={1.9} aria-hidden="true" /></button>
@@ -52,14 +58,14 @@ export function AppearanceSheet({ appearance }: { appearance: Appearance }) {
         <legend className="group-title">{t('patternGroup')}</legend>
         <div className="bg-options">{PATTERN_BACKGROUNDS.map(option)}</div>
       </fieldset>
-      <fieldset className="appearance-section">
+      <fieldset className="appearance-section" disabled={busy}>
         <legend className="group-title">{t('customGroup')}</legend>
         {image && <div className="bg-options"><Swatch id="custom" name={name} checked={background === 'custom'} label={t('bg_custom')} image={image.url} onSelect={() => appearance.changeBackground('custom')} /></div>}
         <p className="muted small">{t('uploadHelp')}</p>
         <input ref={file} type="file" className="sr-only" tabIndex={-1} aria-hidden="true" accept={ACCEPTED_TYPES.join(',')} onChange={(event) => void upload(event.target.files?.[0])} />
         <div className="button-group">
           <button type="button" className="button secondary" disabled={busy} onClick={() => file.current?.click()}><ImagePlus size={16} aria-hidden="true" />{busy ? t('preparing') : t(image ? 'replace' : 'choose')}</button>
-          {image && <button type="button" className="button quiet" disabled={busy} onClick={() => { setMessage(null); void appearance.removeImage(); }}><Trash2 size={16} aria-hidden="true" />{t('remove')}</button>}
+          {image && <button type="button" className="button quiet" disabled={busy} onClick={() => void remove()}><Trash2 size={16} aria-hidden="true" />{t('remove')}</button>}
         </div>
         {message && <p className={message.tone === 'error' ? 'notice error' : 'notice'} role={message.tone === 'error' ? 'alert' : 'status'}>{t(message.key)}</p>}
         {image && background === 'custom' && <label className="overlay-control">

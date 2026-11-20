@@ -64,9 +64,11 @@ export class ApiClient {
     }
     const controller = new AbortController();
     this.pending.add(controller);
+    let response: Response;
+    let data: unknown;
     try {
       const query = options?.query ? new URLSearchParams(options.query).toString() : '';
-      const response = await this.fetcher(`/api/${path}${query ? `?${query}` : ''}`, {
+      response = await this.fetcher(`/api/${path}${query ? `?${query}` : ''}`, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -76,20 +78,9 @@ export class ApiClient {
         signal: controller.signal,
       });
       this.ensureCurrent(owner);
-      let data: unknown;
       try { data = await response.json(); }
       catch { throw new ApiError(response.status, 'BAD_RESPONSE', 'Invalid server response'); }
       this.ensureCurrent(owner);
-      if (!response.ok) {
-        const detail = data && typeof data === 'object' && 'error' in data && data.error && typeof data.error === 'object'
-          ? data.error as { code?: unknown; message?: unknown } : {};
-        const code = typeof detail.code === 'string' ? detail.code : 'HTTP';
-        if (response.status === 401 && binding) this.onAuthEvent?.('unauthorized');
-        if (response.status === 409 && code === 'SESSION_CHANGED') this.onAuthEvent?.('session-changed');
-        if (response.status === 409 && code === 'TRANSPORT_CHANGED') this.onAuthEvent?.('transport-changed');
-        throw new ApiError(response.status, code, typeof detail.message === 'string' ? detail.message : `HTTP ${response.status}`);
-      }
-      return data as T;
     } catch (error) {
       this.ensureCurrent(owner);
       if (error instanceof ApiError) throw error;
@@ -97,6 +88,17 @@ export class ApiClient {
     } finally {
       this.pending.delete(controller);
     }
+    if (!response.ok) {
+      const detail = data && typeof data === 'object' && 'error' in data && data.error && typeof data.error === 'object'
+        ? data.error as { code?: unknown; message?: unknown } : {};
+      const code = typeof detail.code === 'string' ? detail.code : 'HTTP';
+      const error = new ApiError(response.status, code, typeof detail.message === 'string' ? detail.message : `HTTP ${response.status}`);
+      if (response.status === 401 && binding) this.onAuthEvent?.('unauthorized');
+      if (response.status === 409 && code === 'SESSION_CHANGED') this.onAuthEvent?.('session-changed');
+      if (response.status === 409 && code === 'TRANSPORT_CHANGED') this.onAuthEvent?.('transport-changed');
+      throw error;
+    }
+    return data as T;
   }
 
   session(): Promise<SessionView> {

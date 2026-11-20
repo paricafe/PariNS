@@ -20,7 +20,6 @@ export function StorageTools({ language }: { language: Language }) {
   const [stats, setStats] = useState<StatsView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | ApiError | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [unknown, setUnknown] = useState<{ action: StorageAction; epoch: number } | null>(null);
   const requestId = useRef(0);
   const t = (key: string) => translate(`storage.${key}`, language);
@@ -46,10 +45,10 @@ export function StorageTools({ language }: { language: Language }) {
     const spec = storageActions[action];
     const epoch = view.storage[spec.epoch];
     if (!await confirm(t(spec.confirm), `storage.${spec.label}`, trigger)) return;
-    setBusy(true); setError(null); setNotice(null);
+    setBusy(true); setError(null);
     try {
       await api.request(spec.path, 'POST', { [spec.epoch]: epoch });
-      setNotice('actionDone'); banner(t('actionDone'));
+      banner(t('actionDone'));
       void load(action === 'totals').catch(fail);
     } catch (reason) {
       if (!(reason instanceof StaleRequest)) {
@@ -62,7 +61,7 @@ export function StorageTools({ language }: { language: Language }) {
     if (!unknown) return undefined;
     const current = await load(unknown.action === 'totals');
     return current.storage[storageActions[unknown.action].epoch] > unknown.epoch ? true : undefined;
-  }, () => { setUnknown(null); setNotice('actionDone'); banner(t('actionDone')); });
+  }, () => { setUnknown(null); banner(t('actionDone')); });
   return <div className="settings-stack">
     {view && <StorageStatusPanel status={view.storage} language={language} />}
     <section className="settings-group" aria-labelledby="storage-clear-title"><h2 id="storage-clear-title" className="group-title">{t('clearTitle')}</h2>
@@ -71,7 +70,6 @@ export function StorageTools({ language }: { language: Language }) {
       {stats && <p className="group-footer">{translate('storage.totalsSince', language, { time: formatDate(stats.totals.since_ms, language, { dateStyle: 'medium', timeStyle: 'short' }) })}</p>}
       {unknown && <p className="notice" role="status">{confirmation.state === 'failed' ? t('actionUnknown') : confirmation.state === 'unresolved' ? t('stillUnknown') : translate('shell.confirming', language)}</p>}
       {unknown && (confirmation.state === 'failed' || confirmation.state === 'unresolved') && <Button variant="secondary" disabled={busy} onClick={confirmation.check}>{t('checkResult')}</Button>}
-      {notice && notice !== 'actionDone' && <p className="notice" role="status">{t(notice)}</p>}
       {error && <p className="notice error" role="alert">{presentIssue(error, language)}</p>}
     </section>
   </div>;

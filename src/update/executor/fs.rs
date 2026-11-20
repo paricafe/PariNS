@@ -183,16 +183,24 @@ fn boundary() -> Result<()> {
     })
 }
 
-pub fn sha256(mut file: File) -> Result<String> {
+pub fn sha256(file: File) -> Result<String> {
+    let limit = super::MAX_BINARY_BYTES;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= limit,
+        "invalid binary file"
+    );
+    let mut input = file.take(limit + 1);
     let mut digest = Sha256::new();
     let mut chunk = [0; 65536];
     loop {
-        let size = file.read(&mut chunk)?;
+        let size = input.read(&mut chunk)?;
         if size == 0 {
             break;
         }
         digest.update(&chunk[..size]);
     }
+    ensure!(input.limit() != 0, "binary exceeds size limit");
     Ok(format!("{:x}", digest.finalize()))
 }
 

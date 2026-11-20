@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { ApiError, type ApiClient } from '../session/client';
-import { ConfigProvider, toConfigIssue, useConfig } from './context';
+import { ApiClient, ApiError, StaleRequest } from '../session/client';
+import { ConfigProvider, needsFormFlush, toConfigIssue, useConfig } from './context';
+import { cacheRuleDraft, defaultCacheRule } from '../model';
+import { subscriptionDraft, type SubscriptionSource } from '../model/subscriptions';
 import { presentIssue } from '../i18n';
 
 const original = 'max_inflight = 10\n';
@@ -26,6 +28,161 @@ function mount(api: ApiClient, refreshSession: () => Promise<void> = async () =>
 }
 
 describe('single configuration draft', () => {
+  it('keeps disabled and conditional raw fields without counting or previewing them', async () => {
+    const settings = { ...baseSettings, filter: { block_response: 'nodata', block_ipv4: null } };
+    const { api, request } = fixture(async (path) => {
+      if (path === 'config') return { toml: original, revision: 1, has_backup: false };
+      if (path === 'config/parse') return { toml: original, settings };
+      throw new Error(path);
+    });
+    const hook = mount(api);
+    await waitFor(() => expect(hook.result.current.draft).not.toBeNull());
+    const listen = { address: '127.0.0.1', port: '' };
+    act(() => {
+      hook.result.current.setOptional('dot', true);
+      hook.result.current.updateField('dot.listen', listen);
+      hook.result.current.updateField('filter.block_response', 'custom_ip');
+      hook.result.current.updateField('filter.block_ipv4', '192.0.2.4');
+    });
+    expect(hook.result.current.changes).toBeGreaterThan(0);
+    act(() => {
+      hook.result.current.setOptional('dot', false);
+      hook.result.current.updateField('filter.block_response', 'nodata');
+    });
+    expect(hook.result.current.changes).toBe(0);
+    await act(async () => { expect(await hook.result.current.preview()).toBe(original); });
+    expect(request.mock.calls.some(([path]) => path === 'config/preview')).toBe(false);
+    expect(hook.result.current.draft?.fields).toEqual({ 'dot.listen': listen, 'filter.block_ipv4': '192.0.2.4' });
+    act(() => hook.result.current.setOptional('dot', true));
+    expect(hook.result.current.changes).toBe(2);
+  });
+
+  it.each([[401, 'UNAUTHORIZED'], [409, 'SESSION_CHANGED'], [409, 'TRANSPORT_CHANGED']] as const)(
+    'unlocks a configuration write rejected with %s %s after the binding is cleared', async (status, code) => {
+      const api = new ApiClient(vi.fn(async (url: string, init?: RequestInit) => {
+        const respond = (value: unknown, responseStatus = 200) => new Response(JSON.stringify(value), { status: responseStatus });
+        if (url === '/api/config' && init?.method === 'PUT') return respond({ error: { code, message: 'Rejected' } }, status);
+        if (url === '/api/config') return respond({ toml: original, revision: 1, has_backup: false });
+        if (url === '/api/config/parse') return respond({ toml: original, settings: baseSettings });
+        if (url === '/api/config/preview') return respond({ toml: edited, settings: { ...baseSettings, max_inflight: 11 } });
+        if (url === '/api/config/validate') return respond({ restart_required: false, transport_change: null });
+        throw new Error(url);
+      }) as typeof fetch);
+      api.replaceBinding('binding');
+      api.setAuthEventHandler(() => api.replaceBinding(null));
+      const hook = mount(api);
+      await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+      act(() => hook.result.current.updateField('max_inflight', '11'));
+      await act(async () => {
+        const prepared = await hook.result.current.prepareSave();
+        await expect(hook.result.current.commitPrepared(prepared)).rejects.toMatchObject({ status, code });
+      });
+      expect(api.currentBinding).toBeNull();
+      expect(hook.result.current.locked).toBe(false);
+      expect(hook.result.current.draft?.unknownApply).toBe(false);
+    });
+
+  it('merges edits made during the reactivation read and ignores a stale session read', async () => {
+    const remote = { toml: 'remote', revision: 2, has_backup: true };
+    const remoteSettings = { ...baseSettings, max_tcp_connections: 5 };
+    let nextRead: Promise<unknown> | undefined;
+    const { api, request } = fixture(async (path, _method, body) => {
+      if (path === 'config') return nextRead ?? { toml: original, revision: 1, has_backup: false };
+      if (path === 'config/parse') {
+        const { toml } = body as { toml: string };
+        return { toml, settings: toml === remote.toml ? remoteSettings : baseSettings };
+      }
+      if (path === 'config/preview') {
+        const { toml, changes } = body as { toml: string; changes: object };
+        return { toml: toml === remote.toml ? 'merged' : edited, settings: { ...(toml === remote.toml ? remoteSettings : baseSettings), ...changes } };
+      }
+      throw new Error(path);
+    });
+    let active = true;
+    const hook = renderHook(useConfig, { wrapper: ({ children }) => <ConfigProvider api={api} active={active} refreshSession={async () => {}}>{children}</ConfigProvider> });
+    await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+    const reactivate = () => { active = false; hook.rerender(); active = true; hook.rerender(); };
+    let resolve!: (value: unknown) => void;
+    nextRead = new Promise((done) => { resolve = done; });
+    reactivate();
+    expect(request.mock.calls.filter(([path]) => path === 'config')).toHaveLength(2);
+    act(() => hook.result.current.updateField('max_inflight', '11'));
+    await act(async () => resolve(remote));
+    expect(hook.result.current.draft).toMatchObject({ revision: 2, merged: true, settings: { max_inflight: 11, max_tcp_connections: 5 } });
+    expect(request.mock.calls.filter(([path]) => path === 'config')).toHaveLength(2);
+    let reject!: (reason: unknown) => void;
+    nextRead = new Promise((_resolve, fail) => { reject = fail; });
+    reactivate();
+    await act(async () => reject(new StaleRequest()));
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.draft?.settings.max_inflight).toBe(11);
+  });
+
+  it('counts only changed listeners, normalized cache rules and subscription sources', async () => {
+    const rule = { ...defaultCacheRule(), name: 'example.test' };
+    const source: SubscriptionSource = { id: 'a', name: 'A', url: 'https://example.test/list', format: 'domain_list', enabled: true, auto_update: true, update_interval_hours: 24 };
+    const settings = { ...baseSettings, cache: { rules: [rule] }, filter_subscriptions: { sources: [source] } };
+    const { api } = fixture(async (path) => {
+      if (path === 'config') return { toml: original, revision: 1, has_backup: false };
+      if (path === 'config/parse') return { toml: original, settings };
+      throw new Error(path);
+    });
+    const hook = mount(api);
+    await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+    act(() => hook.result.current.setOptional('dot', true));
+    expect(hook.result.current.changes).toBe(1);
+    act(() => {
+      hook.result.current.setOptional('dot', false);
+      hook.result.current.setRules([{ ...cacheRuleDraft(rule), name: ' example.test ' }]);
+      hook.result.current.setSources([{ ...subscriptionDraft(source), update_interval_hours: '024' }]);
+    });
+    expect(hook.result.current.dirty).toBe(false);
+    expect(needsFormFlush(hook.result.current.draft)).toBe(true);
+    act(() => hook.result.current.setSources([{ ...subscriptionDraft(source), update_interval_hours: '' }]));
+    expect(hook.result.current.changes).toBe(1);
+  });
+
+  it('restores the saved TOML after reverting a previewed field', async () => {
+    const { api } = fixture();
+    const hook = mount(api);
+    await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+    act(() => hook.result.current.updateField('max_inflight', '11'));
+    await act(async () => { expect(await hook.result.current.preview()).toBe(edited); });
+    expect(hook.result.current.dirty).toBe(true);
+    act(() => hook.result.current.updateField('max_inflight', '10'));
+    await act(async () => { expect(await hook.result.current.preview()).toBe(original); });
+    expect(hook.result.current.dirty).toBe(false);
+    expect(hook.result.current.draft?.settings).toBe(hook.result.current.draft?.base);
+  });
+
+  it('stops subscription downloads when the draft is discarded', async () => {
+    const source: SubscriptionSource = { id: 'a', name: 'A', url: 'https://example.test/a', format: 'domain_list', enabled: true, auto_update: false, update_interval_hours: 24 };
+    const sources = [source, { ...source, id: 'b', url: 'https://example.test/b' }];
+    let finish!: (result: unknown) => void;
+    const status = new Promise((resolve) => { finish = resolve; });
+    const { api, request } = fixture(async (path) => {
+      if (path === 'config') return { toml: original, revision: 1, has_backup: false };
+      if (path === 'config/parse') return { toml: original, settings: { ...baseSettings, filter_subscriptions: { enabled: true, sources: [] } } };
+      if (path === 'config/preview') return { toml: edited, settings: { ...baseSettings, filter_subscriptions: { enabled: true, sources } } };
+      if (path === 'filter/subscriptions/prepare') return { operation_id: 'first' };
+      if (path === 'filter/subscriptions') return status;
+      throw new Error(path);
+    });
+    const hook = mount(api);
+    await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+    act(() => hook.result.current.setSources(sources.map((item) => subscriptionDraft(item))));
+    let pending!: Promise<unknown>;
+    await act(async () => { pending = hook.result.current.prepareSave(); });
+    expect(request.mock.calls.at(-1)?.[0]).toBe('filter/subscriptions');
+    act(() => hook.result.current.discard());
+    await act(async () => {
+      finish({ recent_operation: { id: 'first', status: 'succeeded' } });
+      await expect(pending).rejects.toThrow('app.draftChanged');
+    });
+    expect(request.mock.calls.filter(([path]) => path === 'filter/subscriptions/prepare')).toHaveLength(1);
+    expect(request.mock.calls.filter(([path]) => path === 'config/validate')).toHaveLength(0);
+  });
+
   it('shares update settings and prevents new edits while an installation is active', async () => {
     const { api, request } = fixture();
     const hook = mount(api);
@@ -446,6 +603,48 @@ describe('single configuration draft', () => {
       await act(async () => { await hook.result.current.resolveConflict('theirs'); });
       expect(hook.result.current.draft).toMatchObject({ revision: 2, original: remoteToml, toml: remoteToml, conflict: null });
       expect(hook.result.current.dirty).toBe(false);
+    });
+
+    it.each(['mine', 'theirs'] as const)('recovers from a cross-field merge rejection by keeping %s', async (choice) => {
+      const local = { ...baseSettings, storage: { max_database_bytes: 40_000_000 }, query_log: { max_bytes: 18_000_000 } };
+      const remoteSettings = { ...local, query_log: { max_bytes: 32_000_000 } };
+      const issue = new ApiError(422, 'INVALID_CONFIG', 'query_log.max_bytes exceeds storage.max_database_bytes');
+      let remote = false;
+      const { api, request } = fixture(async (path, method, body) => {
+        if (path === 'config' && method === 'GET') return { toml: remote ? remoteToml : original, revision: remote ? 2 : 1, has_backup: remote };
+        if (path === 'config/parse') return { toml: (body as { toml: string }).toml, settings: remote ? remoteSettings : local };
+        if (path === 'config/preview') {
+          const { toml, changes } = body as { toml: string; changes: { storage: typeof local.storage } };
+          if (toml === remoteToml && changes.storage.max_database_bytes < remoteSettings.query_log.max_bytes) throw issue;
+          const settings = { ...(toml === remoteToml ? remoteSettings : local), ...changes };
+          return { toml: toml === remoteToml ? 'merged' : edited, settings };
+        }
+        if (path === 'config/validate') return { transport_change: null, restart_required: false };
+        if (path === 'config' && method === 'PUT') { remote = true; throw new ApiError(409, 'REVISION', 'Changed'); }
+        throw new Error(path);
+      });
+      const hook = mount(api);
+      await waitFor(() => expect(hook.result.current.draft?.revision).toBe(1));
+      act(() => hook.result.current.updateField('storage.max_database_bytes', '24000000'));
+      await act(async () => {
+        const prepared = await hook.result.current.prepareSave();
+        expect((await hook.result.current.commitPrepared(prepared)).reconciled).toBe('conflict');
+      });
+      expect(hook.result.current.draft).toMatchObject({
+        revision: 1, settings: { storage: { max_database_bytes: 24_000_000 } },
+        conflict: { issue, paths: [], remote: { revision: 2 }, remoteSettings },
+      });
+      if (choice === 'mine') {
+        await act(async () => { await expect(hook.result.current.resolveConflict('mine')).rejects.toBe(issue); });
+        act(() => hook.result.current.updateField('storage.max_database_bytes', '36000000'));
+      }
+      await act(async () => hook.result.current.resolveConflict(choice));
+      expect(hook.result.current.draft).toMatchObject({ revision: 2, conflict: null, settings: {
+        storage: { max_database_bytes: choice === 'mine' ? 36_000_000 : 40_000_000 }, query_log: remoteSettings.query_log,
+      } });
+      if (choice === 'mine') expect(request.mock.calls.at(-1)).toEqual(['config/preview', 'POST', {
+        toml: remoteToml, changes: { storage: { max_database_bytes: 36_000_000 } },
+      }]);
     });
   });
 });

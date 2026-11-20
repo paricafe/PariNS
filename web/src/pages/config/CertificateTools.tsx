@@ -42,8 +42,11 @@ export function CertificateTools({ language, view, readFailure, read, hold, publ
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const confirmation = useAutoConfirm(unknown !== null, async () => {
     const last = (await read()).certificates.last_reload;
-    return last && last.attempt_id > (unknown ?? 0) ? last.outcome : 'notRun';
+    return last && last.attempt_id > (unknown ?? 0) ? last.outcome : undefined;
   }, (outcome) => { setUnknown(null); setNotice(outcome); });
+  useEffect(() => {
+    if (unknown !== null && confirmation.state === 'unresolved') { setUnknown(null); setNotice('notRun'); }
+  }, [unknown, confirmation.state]);
   const reload = async () => {
     if (!view || mutation.current || unknown !== null || locked || configBusy) return;
     const before = view.certificates.last_reload?.attempt_id ?? 0;

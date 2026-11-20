@@ -1,4 +1,4 @@
-//! Shared admission and DNS handling for encrypted transport adapters.
+//! Admission, DNS request handling and bounded task draining for encrypted listeners.
 use crate::limits::{Denied, Limiter, Permit};
 use crate::{
     metrics::{Counter, Diagnostic},
@@ -57,7 +57,7 @@ impl Ingress {
         let _ = stop.wait_for(|stopping| *stopping).await;
     }
 
-    pub async fn drain(&self, tasks: &mut JoinSet<()>, cause: ForcedShutdown) {
+    pub async fn drain<T: 'static>(&self, tasks: &mut JoinSet<T>, cause: ForcedShutdown) {
         if timeout(self.shutdown_grace, async {
             while tasks.join_next().await.is_some() {}
         })
@@ -200,7 +200,7 @@ mod tests {
         for stopping in [false, true] {
             let (_stop, ingress) = ingress(stopping);
             let mut tasks = JoinSet::new();
-            tasks.spawn(std::future::pending());
+            tasks.spawn(std::future::pending::<()>());
             ingress.drain(&mut tasks, ForcedShutdown::QuicDrain).await;
             assert!(tasks.is_empty());
             assert_eq!(

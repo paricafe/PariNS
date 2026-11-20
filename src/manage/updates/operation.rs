@@ -170,9 +170,21 @@ pub(in crate::manage) async fn accept(shared: &Shared, input: Apply) -> Result<S
         .await
 }
 
-pub(in crate::manage) async fn run(
+pub(in crate::manage) async fn run(shared: Arc<Shared>, stop: tokio::sync::watch::Receiver<bool>) {
+    run_loop(
+        shared,
+        stop,
+        ipc::read_public_status,
+        std::path::Path::new("/run/parins-managed"),
+    )
+    .await;
+}
+
+async fn run_loop(
     shared: Arc<Shared>,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    read_status: impl Fn() -> Result<ipc::PublicStatus> + Clone + Send + 'static,
+    runtime_dir: &std::path::Path,
 ) {
     let coordinator = shared.manager.lock().await.updates.clone();
     let mut launched = None;
@@ -186,7 +198,7 @@ pub(in crate::manage) async fn run(
             break;
         }
         let status = if coordinator.helper_scoped {
-            tokio::task::spawn_blocking(ipc::read_public_status)
+            tokio::task::spawn_blocking(read_status.clone())
                 .await
                 .ok()
                 .and_then(Result::ok)
@@ -206,7 +218,7 @@ pub(in crate::manage) async fn run(
             && last_receipt
                 .is_none_or(|at: std::time::Instant| at.elapsed() >= Duration::from_secs(1))
         {
-            let result = heartbeat(&shared, &coordinator, status, &mut sequence).await;
+            let result = heartbeat(&shared, &coordinator, status, &mut sequence, runtime_dir).await;
             log_change("launch health receipt", &mut heartbeat_error, result);
             last_receipt = Some(std::time::Instant::now());
         }
@@ -226,19 +238,31 @@ pub(in crate::manage) async fn run(
             && let Some(op) = op
             && launched.as_ref() != Some(&op.operation_id)
         {
-            launched = Some(op.operation_id.clone());
-            if op.invocation_id == coordinator.invocation.as_deref().unwrap_or("")
+            let same_invocation = coordinator.invocation.as_deref() == Some(&op.invocation_id);
+            if same_invocation
                 && op.phase == "accepted"
+                && !coordinator.frozen.load(Ordering::Acquire)
             {
+                launched = Some(op.operation_id.clone());
                 let shared = shared.clone();
                 let coordinator = coordinator.clone();
                 let stopping = stop.clone();
                 job = Some(tokio::spawn(async move {
                     execute(shared, coordinator, op, stopping).await;
                 }));
-            } else if op.invocation_id != coordinator.invocation.as_deref().unwrap_or("")
-                || !coordinator.frozen.load(Ordering::Acquire)
+            } else if (!same_invocation || !coordinator.frozen.load(Ordering::Acquire))
+                && status.as_ref().is_some_and(|root| {
+                    root.pending_launch.is_none()
+                        && root.capability.reason.as_deref() != Some("installation_pending")
+                        && !super::manual_recovery(root)
+                        && root.active_operation.as_ref().is_some_and(|active| {
+                            active.operation_id == op.operation_id
+                                && active.phase_nonce == op.phase_nonce
+                                && active.phase.precommit()
+                        })
+                })
             {
+                launched = Some(op.operation_id.clone());
                 coordinator.abort_before_commit(&op, "interrupted").await;
             }
         }
@@ -267,6 +291,9 @@ async fn reconcile(coordinator: &Coordinator, root: Option<&ipc::PublicStatus>) 
     let Some(root) = root else {
         return Ok(());
     };
+    if coordinator.unavailable.is_some() || super::manual_recovery(root) {
+        return Ok(());
+    }
     let op = coordinator.state.lock().unwrap().operation.clone();
     if op.as_ref().is_none_or(|op| op.finished)
         && coordinator.state.lock().unwrap().commit_intent.is_none()
@@ -359,6 +386,7 @@ async fn heartbeat(
     coordinator: &Coordinator,
     root: &ipc::PublicStatus,
     sequence: &mut u64,
+    runtime_dir: &std::path::Path,
 ) -> Result<()> {
     let Some(pending) = &root.pending_launch else {
         return Ok(());
@@ -395,9 +423,10 @@ async fn heartbeat(
     };
     drop(manager);
     let bytes = serde_json::to_vec(&receipt)?;
+    let runtime_dir = runtime_dir.to_owned();
     tokio::task::spawn_blocking(move || {
         state::atomic(
-            std::path::Path::new("/run/parins-managed"),
+            &runtime_dir,
             "update-health.json",
             ".update-health.json.tmp",
             &bytes,
@@ -437,7 +466,7 @@ async fn execute(
     op: Operation,
     stop: tokio::sync::watch::Receiver<bool>,
 ) {
-    if let Err(reason) = stage_and_commit(&shared, &coordinator, &op, &stop).await {
+    if let Err(reason) = stage_and_commit(&shared, &coordinator, &op, stop).await {
         coordinator.abort_before_commit(&op, reason).await;
     }
 }
@@ -446,7 +475,7 @@ async fn stage_and_commit(
     shared: &Shared,
     coordinator: &Coordinator,
     op: &Operation,
-    stop: &tokio::sync::watch::Receiver<bool>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), &'static str> {
     let identity = coordinator
         .identity
@@ -499,12 +528,18 @@ async fn stage_and_commit(
         .set_phase(op, "preflight", None)
         .await
         .map_err(|_| "update_state_unavailable")?;
-    let baseline = read_material(coordinator, shared.address)
-        .await
-        .map_err(|_| preflight_failed("this version's check did not complete"))?;
-    let checked = candidate_check(coordinator, shared.address, op)
-        .await
-        .map_err(|_| preflight_failed("the candidate's check did not complete"))?;
+    let baseline = tokio::select! {
+        biased;
+        _ = stop.changed() => return Err("interrupted"),
+        result = read_material(coordinator, shared.address) =>
+            result.map_err(|_| preflight_failed("this version's check did not complete"))?,
+    };
+    let checked = tokio::select! {
+        biased;
+        _ = stop.changed() => return Err("interrupted"),
+        result = candidate_check(coordinator, shared.address, op) =>
+            result.map_err(|_| preflight_failed("the candidate's check did not complete"))?,
+    };
     let mut differences = baseline.differences(&checked.check);
     if !op.manifest.matches_build(&checked.build_info) {
         differences.push("build");
@@ -543,11 +578,12 @@ async fn stage_and_commit(
     {
         return Err("verification_failed");
     }
-    if read_material(coordinator, shared.address)
-        .await
-        .map_err(|_| "preflight_failed")?
-        != baseline
-    {
+    let current_material = tokio::select! {
+        biased;
+        _ = stop.changed() => return Err("interrupted"),
+        result = read_material(coordinator, shared.address) => result.map_err(|_| "preflight_failed")?,
+    };
+    if current_material != baseline {
         return Err("config_changed");
     }
     let manager = shared.manager.lock().await;
@@ -1242,20 +1278,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restarted_intent_drives_root_abort_without_replaying_commit() {
+    async fn restarted_intent_follows_root_phase_without_replaying_commit() {
         use crate::manage::{Active, Snapshot, auth_budget, runtime::Manager, store::Store};
-        use std::sync::Mutex;
-        for phase in [ipc::Phase::Staged, ipc::Phase::Committing] {
+        use std::sync::{Mutex, atomic::AtomicUsize};
+        for phase in [
+            ipc::Phase::Staged,
+            ipc::Phase::Committing,
+            ipc::Phase::AwaitingReadiness,
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let (original, op, mut root) = fixture(dir.path());
             original.change(|_| Ok(())).await.unwrap();
             let mut restarted = Coordinator::open(dir.path());
             restarted.identity = original.identity.clone();
             restarted.invocation = original.invocation.clone();
+            restarted.helper_scoped = true;
             assert!(restarted.frozen.load(Ordering::Acquire));
             root.active_operation = root.last_operation.take();
             root.active_operation.as_mut().unwrap().phase = phase;
-            assert!(!dir.path().join(ipc::INBOX_NAME).exists());
+            if phase == ipc::Phase::AwaitingReadiness {
+                root.pending_launch = Some(ipc::PendingLaunch {
+                    operation_id: op.operation_id.clone(),
+                    launch_nonce: "1".repeat(32),
+                    identity: root.installed.clone(),
+                    skip_cache_restore: true,
+                    phase,
+                    phase_nonce: op.phase_nonce.clone(),
+                    initialized: true,
+                });
+            }
+            let inbox_path = dir.path().join(ipc::INBOX_NAME);
             let coordinator = Arc::new(restarted);
             let active = Arc::new(Mutex::new(Active {
                 snapshot: Arc::new(Snapshot::initial()),
@@ -1281,9 +1333,33 @@ mod tests {
                 address,
             });
             let (stop, stopping) = tokio::sync::watch::channel(false);
-            let task = tokio::spawn(run(shared.clone(), stopping));
-            let generated = tokio::time::timeout(Duration::from_secs(2), async {
-                while !dir.path().join(ipc::INBOX_NAME).exists() {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let read_status = {
+                let root = root.clone();
+                let inbox_path = inbox_path.clone();
+                move || match reads.fetch_add(1, Ordering::Relaxed) {
+                    0 => anyhow::bail!("root status temporarily unavailable"),
+                    1 => {
+                        ensure!(
+                            !inbox_path.exists(),
+                            "unknown root state triggered an inbox write"
+                        );
+                        Ok(root.clone())
+                    }
+                    _ => Ok(root.clone()),
+                }
+            };
+            let task = tokio::spawn({
+                let shared = shared.clone();
+                let runtime_dir = dir.path().to_owned();
+                async move { run_loop(shared, stopping, read_status, &runtime_dir).await }
+            });
+            let observed = tokio::time::timeout(Duration::from_secs(5), async {
+                while if phase == ipc::Phase::Committing {
+                    coordinator.root.lock().unwrap().is_none()
+                } else {
+                    !inbox_path.exists()
+                } {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
@@ -1292,62 +1368,100 @@ mod tests {
             task.await.unwrap();
             shared.manager.lock().await.stop().await;
             assert!(
-                generated.is_ok(),
-                "restarted frozen intent never requested root arbitration"
+                observed.is_ok(),
+                "restarted operation did not observe {phase:?}"
             );
-            let inbox = std::fs::read(dir.path().join(ipc::INBOX_NAME)).unwrap();
+            assert!(coordinator.frozen.load(Ordering::Acquire));
+            let saved = state::read(dir.path()).unwrap().unwrap();
+            assert!(saved.commit_intent.is_some());
+            if phase == ipc::Phase::Committing {
+                assert!(!inbox_path.exists());
+                assert_eq!(saved.operation.unwrap().phase, "committing");
+                continue;
+            }
+            let inbox = std::fs::read(inbox_path).unwrap();
             let request = ipc::Inbox::parse(&inbox).unwrap();
-            assert!(matches!(request.request, ipc::Request::Abort {}));
             assert_eq!(request.operation_id, op.operation_id);
             assert_eq!(request.phase_nonce, op.phase_nonce);
-            assert!(coordinator.frozen.load(Ordering::Acquire));
-            assert!(
-                state::read(dir.path())
-                    .unwrap()
-                    .unwrap()
-                    .commit_intent
-                    .is_some()
-            );
+            if phase == ipc::Phase::AwaitingReadiness {
+                assert!(matches!(request.request, ipc::Request::VerifyRecovery {}));
+                assert_eq!(saved.operation.unwrap().phase, "committing");
+                continue;
+            }
+            assert!(matches!(request.request, ipc::Request::Abort {}));
 
             let root_dir = tempfile::tempdir().unwrap();
             let mut fence =
                 crate::update::executor::consume_abort_fixture(root_dir.path(), &root, &inbox)
                     .unwrap();
-            if phase == ipc::Phase::Committing {
-                assert_eq!(fence.active_operation.as_ref().unwrap().phase, phase);
-                assert!(fence.last_operation.is_none());
-                reconcile(&coordinator, Some(&fence)).await.unwrap();
-                assert!(coordinator.frozen.load(Ordering::Acquire));
-                assert!(
-                    state::read(dir.path())
-                        .unwrap()
-                        .unwrap()
-                        .commit_intent
-                        .is_some()
-                );
-            } else {
-                assert_eq!(
-                    fence.last_operation.as_ref().unwrap().phase,
-                    ipc::Phase::Aborted
-                );
-                assert_eq!(
-                    fence.last_operation.as_ref().unwrap().reason.as_deref(),
-                    Some("aborted")
-                );
-                fence.installed.sha256 = "0".repeat(64);
-                reconcile(&coordinator, Some(&fence)).await.unwrap();
-                assert!(coordinator.frozen.load(Ordering::Acquire));
-                fence.installed = coordinator.identity.clone().unwrap();
-                reconcile(&coordinator, Some(&fence)).await.unwrap();
-                assert!(!coordinator.frozen.load(Ordering::Acquire));
-                let saved = state::read(dir.path()).unwrap().unwrap();
-                assert!(saved.commit_intent.is_none());
-                let operation = saved.operation.unwrap();
-                assert!(operation.finished);
-                assert_eq!(operation.phase, "aborted");
-                assert_eq!(operation.reason.as_deref(), Some("interrupted"));
-            }
+            let terminal = fence.last_operation.as_ref().unwrap();
+            assert_eq!(terminal.phase, ipc::Phase::Aborted);
+            assert_eq!(terminal.reason.as_deref(), Some("aborted"));
+            fence.installed.sha256 = "0".repeat(64);
+            reconcile(&coordinator, Some(&fence)).await.unwrap();
+            assert!(coordinator.frozen.load(Ordering::Acquire));
+            fence.installed = coordinator.identity.clone().unwrap();
+            reconcile(&coordinator, Some(&fence)).await.unwrap();
+            assert!(!coordinator.frozen.load(Ordering::Acquire));
+            let saved = state::read(dir.path()).unwrap().unwrap();
+            assert!(saved.commit_intent.is_none());
+            let operation = saved.operation.unwrap();
+            assert!(operation.finished);
+            assert_eq!(operation.phase, "aborted");
+            assert_eq!(operation.reason.as_deref(), Some("interrupted"));
         }
+    }
+
+    #[tokio::test]
+    async fn frozen_open_preserves_candidate_and_check_state_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coordinator, _, _) = fixture(dir.path());
+        let (mut candidate, _) = super::super::tests::candidate();
+        candidate.version = crate::update::build_info::BuildInfo::current().version;
+        candidate.tag = format!("v{}", candidate.version);
+        coordinator
+            .change(|state| {
+                state.candidate = Some(candidate);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let state_path = dir.path().join("update-state.json");
+        let saved = std::fs::read(&state_path).unwrap();
+
+        let restarted = Coordinator::open(dir.path());
+        assert!(restarted.frozen.load(Ordering::Acquire));
+        assert!(restarted.view()["candidate"].is_null());
+        assert_eq!(std::fs::read(&state_path).unwrap(), saved);
+        assert!(!restarted.due(true));
+        assert_eq!(
+            restarted.request_check().await,
+            Err(("update_in_progress", 0))
+        );
+        assert_eq!(std::fs::read(state_path).unwrap(), saved);
+    }
+
+    #[test]
+    fn manual_recovery_is_terminal_in_the_view_while_remaining_frozen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coordinator, op, mut root) = fixture(dir.path());
+        root.last_operation.as_mut().unwrap().phase = ipc::Phase::ManualRequired;
+        *coordinator.root.lock().unwrap() = Some(root);
+        let view = coordinator.view();
+        assert!(view["active_operation"].is_null());
+        assert_eq!(view["last_operation"]["phase"], "manual_required");
+        assert_eq!(view["last_operation"]["operation_id"], op.operation_id);
+        assert_eq!(view["frozen"], true);
+        assert!(
+            !coordinator
+                .state
+                .lock()
+                .unwrap()
+                .operation
+                .as_ref()
+                .unwrap()
+                .finished
+        );
     }
 
     #[tokio::test]

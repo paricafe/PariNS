@@ -20,7 +20,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 use super::{TlsFiles, validate_management_identity, validate_pem_identity};
 
-pub(super) const MAX_PEM_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_PEM_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -466,6 +466,37 @@ struct ManagedChild(std::process::Child);
 
 #[cfg(unix)]
 impl ManagedChild {
+    async fn start(directory: &Path, address: SocketAddr) -> Self {
+        let mut child = Self(
+            std::process::Command::new(env!("CARGO_BIN_EXE_parins"))
+                .arg("--manage")
+                .arg("--state-dir")
+                .arg(directory)
+                .arg("--web-listen")
+                .arg(address.to_string())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        timeout(DEADLINE, async {
+            loop {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "managed startup failed"
+                );
+                if TcpStream::connect(address).await.is_ok() {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        child
+    }
+
     fn signal(&mut self, signal: &str, repeats: usize) {
         assert!(
             self.0.try_wait().unwrap().is_none(),
@@ -536,33 +567,7 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
         .expect(200);
     setup_server.finish().await;
 
-    let mut child = ManagedChild(
-        std::process::Command::new(env!("CARGO_BIN_EXE_parins"))
-            .arg("--manage")
-            .arg("--state-dir")
-            .arg(&directory)
-            .arg("--web-listen")
-            .arg(address.to_string())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
-    timeout(DEADLINE, async {
-        loop {
-            assert!(
-                child.0.try_wait().unwrap().is_none(),
-                "managed startup failed"
-            );
-            if TcpStream::connect(address).await.is_ok() {
-                break;
-            }
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let mut child = ManagedChild::start(&directory, address).await;
     let server = Management {
         address,
         stop: None,
@@ -659,4 +664,82 @@ async fn managed_child_sighup_rotates_web_certificate_without_restarting_dns_and
         exited.success(),
         "managed child exited unsuccessfully: {exited}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_child_sighup_recovers_dns_after_the_saved_dot_identity_returns() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let setup_server = Management::start(&directory).await;
+    let address = setup_server.address;
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    let cert = temporary.path().join("dot-cert.pem");
+    let key = temporary.path().join("dot-key.pem");
+    write_identity(&cert, &key, &identity);
+    let candidate = format!(
+        "{}\n[dot]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+        configuration(),
+        json!(cert),
+        json!(key)
+    );
+    setup_server.setup(&directory, &candidate).await;
+    setup_server.finish().await;
+    std::fs::rename(&cert, cert.with_extension("missing")).unwrap();
+
+    let mut child = ManagedChild::start(&directory, address).await;
+    let server = Management {
+        address,
+        stop: None,
+        task: None,
+    };
+    let login = server
+        .request(
+            "POST",
+            "/api/login",
+            None,
+            Some(json!({"username":"admin","password":PASSWORD})),
+        )
+        .await;
+    login.expect(200);
+    let auth = login.auth();
+    let before = server
+        .request("GET", "/api/status", Some(&auth), None)
+        .await
+        .expect(200);
+    assert_eq!(before["dns_health"]["code"], "startup_failed");
+
+    std::fs::rename(cert.with_extension("missing"), &cert).unwrap();
+    child.signal("-HUP", 1);
+    let after = timeout(DEADLINE, async {
+        loop {
+            let status = server
+                .request("GET", "/api/status", Some(&auth), None)
+                .await
+                .expect(200);
+            if status["certificates"]["last_reload"]["source"] == "signal" {
+                break status;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(after["certificates"]["last_reload"]["outcome"], "applied");
+    assert_eq!(after["running"], true);
+    assert_eq!(after["generation"], 1);
+    assert_eq!(after["revision"], before["revision"]);
+    assert_dns(server.dns(&auth).await).await;
+    child.signal("-TERM", 1);
+    timeout(DEADLINE, async {
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(status.success(), "{status}");
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
 }

@@ -70,7 +70,7 @@ jobs:
       - name: Installer fixture tests
         if: runner.os == 'Linux'
         run: |
-          for script in scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/test-udp.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh; do
+          for script in scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/test-systemd-readiness.sh scripts/test-udp.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh; do
             sh -n "$script"
           done
           sh scripts/test-install.sh

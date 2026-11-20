@@ -229,7 +229,7 @@ impl Cache {
                     .filter(|e| e.failure.is_none()),
             );
         }
-        entries.sort_by_cached_key(|e| std::cmp::Reverse(e.accessed.load(Ordering::Relaxed)));
+        entries.sort_unstable_by_key(|e| std::cmp::Reverse(e.accessed.load(Ordering::Relaxed)));
         let total = entries.len();
         for (position, entry) in entries.into_iter().enumerate() {
             cancelled(cancel)?;
@@ -359,15 +359,11 @@ impl Cache {
         );
         reader.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
         let records = header.records as u64;
-        let floors: Vec<u64> = self
-            .shards
-            .iter()
-            .map(|shard| {
-                let mut shard = shard.lock().expect("cache shard poisoned");
-                shard.clock = shard.clock.max(records);
-                shard.clock
-            })
-            .collect();
+        let floor = self
+            .clock
+            .0
+            .fetch_max(records, Ordering::Relaxed)
+            .max(records);
         let mut position = 0;
         let admitted = scan(reader, header.records, length, deadline, cancel, |line| {
             let accessed = records - position;
@@ -397,15 +393,15 @@ impl Cache {
             }
             Ok(())
         })
-        .inspect_err(|_| self.unload(&floors))?;
+        .inspect_err(|_| self.unload(floor))?;
         if let Some(processed) = admitted {
             stopped(processed, &mut report);
         }
         Ok(report)
     }
 
-    fn unload(&self, floors: &[u64]) {
-        for (shard, &floor) in self.shards.iter().zip(floors) {
+    fn unload(&self, floor: u64) {
+        for shard in &self.shards {
             let mut shard = shard.lock().expect("cache shard poisoned");
             let loaded: Vec<_> = shard
                 .partitions

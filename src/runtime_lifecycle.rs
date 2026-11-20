@@ -1,4 +1,5 @@
 //! Shared startup/terminal boundaries for file and managed processes.
+//! A terminal cache save retains the runtime directory lock through its final filesystem operation.
 use crate::{
     cache::{
         Cache,
@@ -70,6 +71,7 @@ pub async fn terminal(
 ) -> SnapshotReport {
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = cancelled.clone();
+    let lock_lease = services.storage.lock_lease();
     let save = async move {
         let mut report = SnapshotReport {
             reason: Some("shutdown_not_quiescent".into()),
@@ -89,6 +91,7 @@ pub async fn terminal(
                 Ok(fingerprint) => {
                     let cache = resolver.cache();
                     tokio::task::spawn_blocking(move || {
+                        let _lock_lease = lock_lease;
                         persistence.save_terminal(
                             &cache,
                             &fingerprint,
@@ -140,21 +143,18 @@ pub async fn terminal(
     };
     let drain = tokio::time::timeout(TERMINAL_BUDGET, services.storage.flush());
     let (report, drained) = tokio::join!(save, drain);
-    let Some(report) = report else {
-        match drained {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => eprintln!("runtime data flush incomplete: {error}"),
-            Err(_) => eprintln!("runtime data flush exceeded 10 seconds"),
-        }
-        return SnapshotReport {
-            reason: Some("terminal_persistence_timeout".into()),
-            ..Default::default()
-        };
-    };
-    match tokio::time::timeout(CLOSE_BUDGET, services.storage.shutdown()).await {
+    match drained {
         Ok(Ok(())) => {}
         Ok(Err(error)) => eprintln!("runtime data flush incomplete: {error}"),
+        Err(_) => eprintln!("runtime data flush exceeded 10 seconds"),
+    }
+    match tokio::time::timeout(CLOSE_BUDGET, services.storage.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("runtime data close incomplete: {error}"),
         Err(_) => eprintln!("runtime data close exceeded 2 seconds; persistence incomplete"),
     }
-    report
+    report.unwrap_or_else(|| SnapshotReport {
+        reason: Some("terminal_persistence_timeout".into()),
+        ..Default::default()
+    })
 }

@@ -22,6 +22,7 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+pub(crate) use material::policy_limits;
 pub use material::{Material, read_only, selected_content};
 pub(crate) use operations::WorkRequest;
 
@@ -46,6 +47,9 @@ impl Failure {
     pub fn from_error(error: &anyhow::Error) -> Self {
         if let Some(failure) = error.downcast_ref::<Self>() {
             return failure.clone();
+        }
+        if super::store::is_disk_limit(error) {
+            return Self::new("subscription_disk_limit");
         }
         if let Some(parse) = error.downcast_ref::<crate::policy::canonical::Error>() {
             use crate::policy::canonical::ErrorKind;
@@ -172,6 +176,8 @@ pub struct ConfigCandidate {
     expected_revision: u64,
     input_rules: usize,
     material: Material,
+    reused_material: bool,
+    store_open: bool,
     pins: Vec<WorkPin>,
 }
 
@@ -192,8 +198,8 @@ impl Service {
             if frozen {
                 return Ok(None);
             }
-            let mut store = Store::open(&store_path, quota)?;
-            store.set_references(current, previous_open)?;
+            let mut store = Store::open_preserving(&store_path, quota, &current, &previous_open)?;
+            store.set_config(current, previous_open, quota)?;
             Ok::<_, anyhow::Error>(Some(store))
         })
         .await?;
@@ -282,7 +288,9 @@ impl Service {
                 service.handle.publish(material.policy);
                 state.input_digest = Some(material.material_digest);
                 state.index_pin = material.index_pin;
-                state.unavailable = frozen.then(|| "update_in_progress".into());
+                if frozen {
+                    state.unavailable = Some("update_in_progress".into());
+                }
             }
             Err(error) => {
                 service.state.lock().unwrap().unavailable = Some(Failure::from_error(&error).code);
@@ -324,10 +332,11 @@ impl Service {
                 state.settings.max_disk_bytes,
             )
         };
-        let opened = Store::open(&self.path, quota).and_then(|mut store| {
-            store.set_references(current, previous)?;
-            Ok(store)
-        });
+        let opened =
+            Store::open_preserving(&self.path, quota, &current, &previous).and_then(|mut store| {
+                store.set_config(current, previous, quota)?;
+                Ok(store)
+            });
         let store = match opened {
             Ok(store) => store,
             Err(error) => {
@@ -367,8 +376,10 @@ impl Service {
     pub fn ready(&self) -> bool {
         self.state.lock().unwrap().ready_policy
     }
-    pub fn set_revision(&self, revision: u64) {
-        self.state.lock().unwrap().revision = revision;
+    pub(crate) fn sync_updates_only(&self, revision: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.previous = state.settings.fingerprints().expect("validated settings");
+        state.revision = revision;
     }
     pub fn request_close(&self) {
         self.closed.store(true, Ordering::Release);
@@ -496,15 +507,10 @@ impl Service {
                 .prepare_config_owned(settings, local, expected_revision, lease)
                 .await;
         }
-        let limits = crate::policy::canonical::Limits {
-            max_rules: settings.max_rules,
-            max_memory_bytes: settings.max_memory_bytes,
-            retained_bytes: self
-                .handle
-                .retained_bytes_with_locals(&[&old_local])
-                .checked_add(material::COORDINATOR_BYTES)
-                .context(Failure::new("subscription_memory_limit"))?,
-        };
+        let limits = policy_limits(
+            &settings,
+            self.handle.retained_bytes_with_locals(&[&old_local]),
+        )?;
         let local = tokio::task::spawn_blocking(move || {
             let _keep = keep;
             owner.check_revision(expected_revision)?;
@@ -529,9 +535,16 @@ impl Service {
             let mut locked = owner.store.lock().unwrap();
             let mut pins = Vec::new();
             let mut preserved_input_rules = None;
+            let retained = owner.live_bytes(&local);
+            policy_limits(&settings, retained)?;
             let material = if let Some(store) = locked.as_mut() {
+                let previous = owner.state.lock().unwrap().settings.fingerprints()?;
                 ensure!(
-                    store.disk_bytes()? <= settings.max_disk_bytes,
+                    store.quota_fits(
+                        settings.fingerprints()?,
+                        previous,
+                        settings.max_disk_bytes
+                    )?,
                     Failure::new("subscription_disk_limit")
                 );
                 for source in settings.effective() {
@@ -545,10 +558,6 @@ impl Service {
                 if same {
                     preserved_input_rules = Some(owner.state.lock().unwrap().input_rules);
                     let current = owner.handle.snapshot();
-                    ensure!(
-                        owner.live_bytes(&local) <= settings.max_memory_bytes,
-                        Failure::new("subscription_memory_limit")
-                    );
                     Material {
                         policy: current.policy.clone(),
                         material_digest: identity,
@@ -556,27 +565,18 @@ impl Service {
                         content_revision: store.revision(),
                     }
                 } else {
-                    material::compile(
-                        store,
-                        &settings,
-                        &local,
-                        &[],
-                        owner.live_bytes(&local),
-                        false,
-                        || owner.check_open(),
-                    )?
+                    material::compile(store, &settings, &local, &[], retained, false, || {
+                        owner.check_open()
+                    })?
                 }
             } else {
                 ensure!(
                     settings.effective().next().is_none(),
                     Failure::new("subscription_storage_unavailable")
                 );
-                ensure!(
-                    owner.live_bytes(&local) <= settings.max_memory_bytes,
-                    Failure::new("subscription_memory_limit")
-                );
                 material::local_material(&local, &settings)?
             };
+            let store_open = locked.is_some();
             drop(locked);
             if owner.handle.snapshot().policy.publication_digest()
                 != material.policy.publication_digest()
@@ -596,6 +596,8 @@ impl Service {
                 expected_revision,
                 input_rules,
                 material,
+                reused_material: preserved_input_rules.is_some(),
+                store_open,
                 pins,
             })
         })
@@ -619,7 +621,9 @@ impl Service {
             self.handle.publish(candidate.material.policy);
         }
         state.input_digest = Some(candidate.material.material_digest);
-        state.unavailable = None;
+        if candidate.store_open && !self.deferred.load(Ordering::Acquire) {
+            state.unavailable = None;
+        }
         let settings = state.settings.clone();
         for source in settings
             .sources
@@ -646,7 +650,7 @@ impl Service {
                 ));
             }
         }
-        if candidate.material.index_pin.is_some() {
+        if !candidate.reused_material {
             state.index_pin = candidate.material.index_pin;
         }
         drop((candidate.lease, candidate.pins));
@@ -680,7 +684,7 @@ impl Service {
             .map_err(|_| Failure::new("busy"))?;
         Ok(Arc::new(Lease { _permit: permit }))
     }
-    fn sync_roots(&self, store: &mut Store) -> Result<()> {
+    fn sync_roots(&self, store: &mut Store, prepare: Option<&str>) -> Result<()> {
         let (current, previous, quota, statuses) = {
             let state = self.state.lock().unwrap();
             (
@@ -691,8 +695,15 @@ impl Service {
             )
         };
         store.reconcile_sync()?;
-        store.set_references(current, previous)?;
-        store.set_quota(quota)?;
+        match store.set_config(current.clone(), previous.clone(), quota) {
+            Err(error) if super::store::is_disk_limit(&error) => {
+                store.reclaim_expired(&current, &previous, prepare)?;
+                store.set_config(current, previous, quota)?;
+            }
+            result => {
+                result?;
+            }
+        }
         for record in statuses {
             if store
                 .record(&record.fingerprint)
@@ -715,7 +726,12 @@ impl Service {
         state.records = records;
         state.ready = ready;
         match disk_bytes {
-            Ok(bytes) => state.disk_bytes = bytes,
+            Ok(bytes) => {
+                state.disk_bytes = bytes;
+                if state.ready_policy && !self.deferred.load(Ordering::Acquire) {
+                    state.unavailable = None;
+                }
+            }
             Err(_) => state.unavailable = Some("subscription_storage_unavailable".into()),
         };
         state.content_revision = store.revision();
@@ -725,6 +741,7 @@ impl Service {
 pub fn error_code(error: &anyhow::Error) -> &'static str {
     match Failure::from_error(error).code.as_str() {
         "busy" => "busy",
+        "update_in_progress" => "update_in_progress",
         "revision_conflict" => "revision_conflict",
         "subscription_material_missing" => "subscription_material_missing",
         "subscription_active_source" => "subscription_active_source",

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfirmProvider } from '../../components/ConfirmProvider';
 import { SessionProvider, useSession } from '../../session/context';
 import { LoginPage } from '../../AuthPages';
 import { AccountControls } from './AccountControls';
+import { TurnstileWidget } from './Turnstile';
 import type { TurnstileView } from './TurnstilePanel';
 
 const reload = vi.hoisted(() => vi.fn());
@@ -50,6 +51,58 @@ async function password() {
   await waitFor(() => expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
 }
+
+it.each(['broadcast', 'login fast-path', 'no widget required'] as const)('reloads the permissive document after authentication via %s', async (flow) => {
+  documentPolicy(true);
+  let broadcast: ((event: { data: string }) => void) | null = null;
+  vi.stubGlobal('BroadcastChannel', class {
+    set onmessage(callback: typeof broadcast) { broadcast = callback; }
+    postMessage() {}
+    close() {}
+  });
+  let authenticated = false;
+  const sent = serve({
+    '/api/session': () => json(authenticated ? signedIn : signedOut),
+    '/api/login/options': () => json({ ...noOptions, turnstile_skipped: true }),
+    '/api/login': () => { authenticated = true; return json(signedIn); },
+  });
+  const bindings: (string | null)[] = [];
+  function Observe() {
+    bindings.push(useSession().api.currentBinding);
+    return <Harness />;
+  }
+  render(<SessionProvider><Observe /></SessionProvider>);
+  await screen.findByRole('heading', { name: 'Sign in to PariNS' });
+  if (flow !== 'no widget required') authenticated = true;
+  if (flow === 'broadcast') act(() => broadcast?.({ data: 'changed' }));
+  else await password();
+  await waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  expect(screen.queryByText('READY')).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Sign in to PariNS' })).toBeNull();
+  expect(bindings.every((binding) => binding === null)).toBe(true);
+  expect(sent('/api/login')).toHaveLength(flow === 'no widget required' ? 1 : 0);
+});
+
+it('allows another widget to load after a script reports success without the Turnstile API', async () => {
+  const widget = <TurnstileWidget siteKey="key" action="login" language="en" resetSignal={0} onToken={vi.fn()} />;
+  const script = () => document.head.querySelector('script[src*="turnstile"]')!;
+  const first = render(widget);
+  const broken = script();
+  fireEvent.load(broken);
+  await screen.findByRole('alert');
+  expect(broken.isConnected).toBe(false);
+  first.unmount();
+  const next = render(widget);
+  const retry = script();
+  expect(retry).toBeTruthy();
+  const api = { render: vi.fn(() => 'widget'), reset: vi.fn(), remove: vi.fn() };
+  window.turnstile = api;
+  try {
+    fireEvent.load(retry);
+    await waitFor(() => expect(api.render).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('alert')).toBeNull();
+  } finally { next.unmount(); retry.remove(); }
+});
 
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };

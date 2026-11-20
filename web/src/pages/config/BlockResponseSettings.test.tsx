@@ -14,8 +14,8 @@ const settings = {
 };
 vi.mock('../../session/context', () => ({ useSession: () => ({ state: {}, transportChanged: vi.fn() }) }));
 vi.mock('../../features/subscriptions/SubscriptionsPanel', () => ({ SubscriptionsPanel: () => null }));
-vi.mock('../../config/context', () => ({
-  toConfigIssue: (reason: unknown) => reason,
+vi.mock('../../config/context', async (original) => ({
+  ...await original<typeof import('../../config/context')>(),
   useConfig: () => ({
     draft: { settings, fields: mocks.fields, optional: {}, rules: null, sources: null, stale: false, hasBackup: false },
     locked: false, busy: false, dirty: Object.keys(mocks.fields).length > 0, error: null,

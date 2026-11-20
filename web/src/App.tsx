@@ -7,7 +7,7 @@ import { Activity, BookOpenText, CircleArrowUp, Database, FileCode2, Filter, Loc
 import { LoginPage, SetupPage } from './AuthPages';
 import { translate, presentIssue, type Language } from './i18n';
 import { useAppearance, type Appearance } from './appearance/useAppearance';
-import { ConfigProvider, toConfigIssue, useConfig, type ConfigIssue } from './config/context';
+import { ConfigProvider, needsFormFlush, toConfigIssue, useConfig, type ConfigIssue } from './config/context';
 import { SettingsPage } from './pages/config/SettingsPage';
 import { OverviewPage, LogsPage } from './pages/observability';
 import { SessionProvider, useSession } from './session/context';
@@ -87,7 +87,8 @@ export function SaveBar({ language }: { language: Language }) {
   const status = draft.unknownApply ? t(changedElsewhere ? 'api.REVISION' : confirmation.state === 'unresolved' ? 'app.saveStillUnknown' : confirmation.state === 'failed'
     ? draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown' : 'shell.confirming')
     : conflict ? t('app.changedElsewhere') : progress ? t(progress) : changes === 1 ? t('shell.unsavedOne') : translate('shell.unsavedMany', language, { count: changes });
-  const detail = conflict ? conflict.paths.length ? translate('app.conflictFields', language, { fields: conflict.paths.join(', ') }) : t('app.conflictToml')
+  const detail = conflict ? conflict.issue ? presentIssue(conflict.issue, language)
+    : conflict.paths.length ? translate('app.conflictFields', language, { fields: conflict.paths.join(', ') }) : t('app.conflictToml')
     : draft.merged && !draft.unknownApply ? t('app.mergedElsewhere') : null;
   return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 40, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={reduced ? { duration: 0 } : SPRING_IOS}>
     <div className="save-bar-content"><div><strong role={conflict || draft.merged || progress || draft.unknownApply ? 'status' : undefined}>{status}</strong>
@@ -177,7 +178,7 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
         onPointerEnter={(event) => showNavigationHint(event.currentTarget, t(item.key))}
         onPointerLeave={(event) => { if (document.activeElement !== event.currentTarget) hideNavigationHint(); }} onClick={(event) => {
         const draft = config.draft;
-        if (item.path === '/advanced' && draft && (Object.keys(draft.fields).length || Object.keys(draft.optional).length || draft.rules !== null)) {
+        if (item.path === '/advanced' && needsFormFlush(draft)) {
           event.preventDefault();
           void config.preview().then(() => { setMobileOpen(false); navigate('/advanced'); }).catch(() => {});
           return;
@@ -204,11 +205,10 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
       <motion.span className="topbar-title" style={{ opacity: titleOpacity }}>{current ? t(current.key) : t('overview')}</motion.span><span className="spacer" />
       <Preferences appearance={appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
     </header><main id="main-content" tabIndex={-1} className="main-content">
-      <a className="skip-target sr-only" id="main-content-start" href="#main-content">{t('skip')}</a>
       {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <ConfigErrorNotice error={config.error} language={language} onDismiss={() => config.setError(null)} />}
       <div ref={routeContent} className="route-content"><Routes>
-        <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} upstreamCount={upstreamServers(config.draft?.settings)} /></>} />
+        <Route path="/overview" element={<><UpdateHint language={language} /><OverviewPage api={api} language={language} onOpenDns={() => navigate('/dns')} upstreamCount={upstreamServers(config.draft?.base)} /></>} />
         <Route path="/logs" element={<LogsPage api={api} language={language} onOpenSettings={() => navigate('/storage')} sourceNames={Object.fromEntries((config.draft?.savedSources ?? []).map((source) => [source.id, source.name]))} />} />
         {(['dns', 'cache', 'filters', 'security', 'storage', 'runtime', 'updates', 'advanced'] as const).map((pageId) => <Route key={pageId} path={`/${pageId}`} element={<SettingsPage pageId={pageId} language={language} />} />)}
         <Route path="*" element={<Navigate to="/overview" replace />} />

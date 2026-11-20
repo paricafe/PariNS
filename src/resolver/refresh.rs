@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicU64, Ordering::Relaxed},
     },
     time::{Duration, Instant},
@@ -120,18 +120,27 @@ impl Refresh {
         state.active.insert(key.clone());
         state.starts.push_back(now);
         self.scheduled.fetch_add(1, Relaxed);
-        let done = Completion {
+        drop(state);
+        let done = Arc::new(Completion {
             owner: Arc::downgrade(self),
             key,
             backoff: Duration::from_secs(config.backoff_secs),
             capacity: config.max_inflight.saturating_mul(8).clamp(64, 4096),
-            result: None,
-        };
-        let work = work();
-        state.tasks.spawn(async move {
-            let mut done = done;
-            done.result = Some(work.await);
+            result: OnceLock::new(),
         });
+        let work = work();
+        let runtime = tokio::runtime::Handle::current();
+        let mut state = self.state.lock().expect("refresh state poisoned");
+        if !state.closed {
+            let completion = Arc::clone(&done);
+            state.tasks.spawn_on(
+                async move {
+                    let _ = completion.result.set(work.await);
+                },
+                &runtime,
+            );
+        }
+        drop(state);
     }
 
     pub(super) fn cancel(&self) {
@@ -156,7 +165,7 @@ struct Completion {
     key: Vec<u8>,
     backoff: Duration,
     capacity: usize,
-    result: Option<bool>,
+    result: OnceLock<bool>,
 }
 
 impl Drop for Completion {
@@ -166,7 +175,7 @@ impl Drop for Completion {
         };
         let mut state = owner.state.lock().expect("refresh state poisoned");
         state.active.remove(&self.key);
-        match self.result {
+        match self.result.get().copied() {
             Some(true) => {
                 owner.success.fetch_add(1, Relaxed);
             }
@@ -266,6 +275,60 @@ mod tests {
         refresh.schedule(&query("b.test."), 0, &config, Purpose::Prefetch, refused);
         assert_eq!(counts(&refresh), [0, 0, 1, 0]);
         refresh.cancel();
+    }
+
+    #[tokio::test]
+    async fn panicking_work_factory_releases_its_admission() {
+        let refresh = Arc::new(Refresh::default());
+        let config = PrefetchConfig::default();
+        let query = query("panic.test.");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            refresh.schedule(
+                &query,
+                0,
+                &config,
+                Purpose::Prefetch,
+                || -> std::future::Pending<bool> {
+                    assert_eq!(refresh.snapshot().active, 1);
+                    panic!("work factory failed");
+                },
+            );
+        }));
+        assert!(panic.is_err());
+        assert_eq!(refresh.snapshot().active, 0);
+        assert_eq!(refresh.snapshot().failure, 0);
+        refresh.schedule(&query, 0, &config, Purpose::Prefetch, || async { true });
+        tokio::task::yield_now().await;
+        assert_eq!(refresh.snapshot().success, 1);
+    }
+
+    #[test]
+    fn runtime_shutdown_drops_an_unpolled_task_and_releases_admission() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let _entered = handle.enter();
+        let refresh = Arc::new(Refresh::default());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(dropped.clone());
+        refresh.schedule(
+            &query("unpolled.test."),
+            0,
+            &PrefetchConfig::default(),
+            Purpose::Prefetch,
+            || async move {
+                drop(guard);
+                panic!("a closed runtime must not poll the future");
+            },
+        );
+        assert!(dropped.load(Relaxed));
+        let snapshot = refresh.snapshot();
+        assert_eq!(
+            (snapshot.active, snapshot.scheduled, snapshot.failure),
+            (0, 1, 0)
+        );
     }
 
     #[tokio::test]

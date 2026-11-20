@@ -44,7 +44,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const applySession = useCallback((view: SessionView) => {
     if (!mounted.current) return;
-    if (!view.authenticated && updateRestart.current && !logoutIntent.current) {
+    if ((view.authenticated && documentTurnstile.current)
+      || (!view.authenticated && updateRestart.current && !logoutIntent.current)) {
       updateRestart.current = false;
       api.replaceBinding(null);
       setState({ phase: 'checking' });
@@ -143,7 +144,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [api, applySession]);
 
   const finishSignIn = useCallback(async (reload: boolean) => {
-    if (!reload) { await confirmLogin(); return; }
+    if (!reload || documentTurnstile.current) { await confirmLogin(); return; }
     const view = await api.session();
     if (!view.authenticated || !view.session) throw new CookieUnavailable();
     announce();
@@ -240,7 +241,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         announce();
       });
     } catch (error) {
-      if (!(error instanceof ApiError && error.code === 'SESSION_CHANGED')) setState({ phase: 'logout-unknown', logout: 'unconfirmed' });
+      if (!(error instanceof ApiError && ['SESSION_CHANGED', 'TRANSPORT_CHANGED'].includes(error.code))) setState({ phase: 'logout-unknown', logout: 'unconfirmed' });
       throw error;
     }
   }, [api, applySession, authAction]);

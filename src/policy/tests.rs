@@ -59,6 +59,40 @@ fn any_matching_allow_wins_for_that_name() {
 }
 
 #[test]
+fn conflicting_canonical_duplicates_in_local_block_lists_are_rejected() {
+    for list in ["block_exact", "block_suffix"] {
+        for first in ["EXAMPLE.test.", "EXAMPLE.test. refused"] {
+            let rules = format!("{list} = ['{first}', 'example.TEST nxdomain']");
+            let error = toml::from_str::<LocalRules>(&rules).unwrap_err();
+            assert!(error.message().contains(&format!("filter.{list}[1]")));
+            assert!(error.message().contains("conflicting block method"));
+        }
+    }
+}
+
+#[test]
+fn equivalent_canonical_duplicates_compile_into_one_block_rule() {
+    for list in ["block_exact", "block_suffix"] {
+        for methods in [
+            ["Example.test.", "example.TEST", "example.test nodata"],
+            [
+                "Example.test. nxdomain",
+                "example.TEST nxdomain",
+                "example.test nxdomain",
+            ],
+        ] {
+            let p = policy(&format!(
+                "block_response = 'nodata'\n{list} = {:?}",
+                methods
+            ));
+            assert_eq!(p.index_rules(), 1);
+            let name = Name::from_ascii("example.test.").unwrap();
+            assert!(p.blocks(&name));
+        }
+    }
+}
+
+#[test]
 fn disabled_policy_is_noop_but_still_validates_rules() {
     let p: Policy = toml::from_str("block_suffix = ['test']").unwrap();
     assert!(!blocked(&p, "ads.test"));
@@ -707,4 +741,27 @@ fn derived_index_with_kept_covered_rules_round_trips() {
         (trace.rule.as_str(), trace.response.as_str()),
         ("b.test", "nxdomain")
     );
+}
+
+#[test]
+fn exact_block_uses_ancestor_method_over_a_different_local_suffix() {
+    let policy = policy("block_suffix = ['test', 'b.test nxdomain']\nblock_exact = ['b.test']");
+    let ids = policy.aggregate_ids([]);
+    let mut bytes = Vec::new();
+    policy.write_index(&mut bytes, [7; 32]).unwrap();
+    let index =
+        radix::Index::read_from(bytes.as_slice(), [7; 32], &ids, Limits::default()).unwrap();
+    let restored = policy.aggregate(index, ids, []);
+    for p in [&policy, &restored] {
+        for (name, method) in [
+            ("b.test", "nodata"),
+            ("x.b.test", "nxdomain"),
+            ("x.test", "nodata"),
+        ] {
+            let (_, trace) = p
+                .block_query(&question(name, RecordType::A, false))
+                .unwrap();
+            assert_eq!(trace.response, method);
+        }
+    }
 }

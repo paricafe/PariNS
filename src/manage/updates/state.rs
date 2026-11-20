@@ -14,6 +14,8 @@ pub(super) static FAIL_DIRECTORY_SYNC: Mutex<Option<PathBuf>> = Mutex::new(None)
 pub(super) struct CheckState {
     pub validated: bool,
     pub etag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_version: Option<String>,
     pub last_check_at_ms: Option<u64>,
     pub last_success_at_ms: Option<u64>,
     pub next_check_at_ms: u64,
@@ -21,6 +23,16 @@ pub(super) struct CheckState {
     pub failures: u32,
     pub error: Option<String>,
     pub manual: bool,
+}
+
+impl CheckState {
+    pub fn validated_for(&self, version: &str) -> bool {
+        self.validated && self.checked_version.as_deref() == Some(version)
+    }
+
+    pub fn conditional_etag(&self, version: &str) -> Option<&str> {
+        self.etag.as_deref().filter(|_| self.validated_for(version))
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

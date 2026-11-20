@@ -13,7 +13,10 @@ use hickory_proto::{
 };
 use ipnet::IpNet;
 
-use crate::{config::EcsConfig, protocol::MAX_UDP_PAYLOAD};
+use crate::{
+    config::EcsConfig,
+    protocol::{self, MAX_UDP_PAYLOAD},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -27,6 +30,7 @@ pub enum Scope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResponseScope {
     pub cache: Option<Scope>,
+    pub supersede: Option<Scope>,
     pub reply: Option<u8>,
 }
 
@@ -34,6 +38,10 @@ pub struct ResponseScope {
 pub struct Context {
     pub outgoing: Option<ClientSubnet>,
     incoming: Option<ClientSubnet>,
+}
+
+fn max_prefix(addr: IpAddr) -> u8 {
+    if addr.is_ipv4() { 32 } else { 128 }
 }
 
 pub fn subnet(message: &Message) -> Option<ClientSubnet> {
@@ -68,8 +76,9 @@ impl Context {
             return Err(ResponseCode::FormErr);
         }
         let mut outgoing_query = query.clone();
+        protocol::normalize_query_flags(&mut outgoing_query);
         if let Some(edns) = &mut outgoing_query.edns {
-            edns.set_max_payload(edns.max_payload().min(MAX_UDP_PAYLOAD));
+            edns.set_max_payload(MAX_UDP_PAYLOAD);
         }
         if !config.enabled || query.queries[0].query_class() != DNSClass::IN {
             set_subnet(&mut outgoing_query, None);
@@ -134,33 +143,52 @@ impl Context {
     }
 
     pub fn response_scope(&self, response: &Message) -> ResponseScope {
-        let received = subnet(response);
-        let cache = match (self.outgoing, received) {
-            (_, None) => self.source_scope(),
-            (Some(sent), Some(received))
-                if received.addr() == sent.addr()
-                    && received.source_prefix() == sent.source_prefix()
-                    && received.scope_prefix() <= sent.source_prefix() =>
-            {
-                if sent.source_prefix() == 0 {
-                    Some(Scope::Privacy {
-                        ipv4: sent.addr().is_ipv4(),
-                    })
-                } else {
-                    IpNet::new(sent.addr(), received.scope_prefix())
-                        .ok()
-                        .map(|network| Scope::Network(network.trunc()))
-                }
-            }
-            _ => None,
+        let Some(received) = subnet(response) else {
+            let cache = self.source_scope();
+            return ResponseScope {
+                cache,
+                supersede: None,
+                reply: cache.and_then(|scope| scope.reply_scope(self.outgoing)),
+            };
         };
-        let reply = cache
-            .and_then(|scope| scope.reply_scope(self.outgoing))
-            .or_else(|| received.map(|ecs| ecs.scope_prefix()));
-        ResponseScope { cache, reply }
+        let Some(sent) = self.outgoing.filter(|sent| {
+            received.addr() == sent.addr()
+                && received.source_prefix() == sent.source_prefix()
+                && received.scope_prefix() <= max_prefix(sent.addr())
+        }) else {
+            return ResponseScope {
+                cache: None,
+                supersede: None,
+                reply: None,
+            };
+        };
+        let prefix = received.scope_prefix();
+        if prefix > sent.source_prefix() {
+            return ResponseScope {
+                cache: None,
+                supersede: self.source_scope(),
+                reply: Some(prefix),
+            };
+        }
+        let cache = if sent.source_prefix() == 0 {
+            self.source_scope()
+        } else {
+            IpNet::new(sent.addr(), prefix)
+                .ok()
+                .map(|network| Scope::Network(network.trunc()))
+        };
+        ResponseScope {
+            cache,
+            supersede: None,
+            reply: Some(prefix),
+        }
     }
 
     pub fn finish(&self, query: &Message, response: &mut Message, scope: Option<u8>) {
+        if query.edns.is_none() && u16::from(response.metadata.response_code) > 15 {
+            *response = protocol::error_response(query, ResponseCode::ServFail);
+            return;
+        }
         response.metadata.id = query.id;
         response.metadata.recursion_desired = query.recursion_desired;
         response.metadata.checking_disabled = query.checking_disabled;
@@ -169,7 +197,9 @@ impl Context {
         set_subnet(response, None);
         if let Some(client_edns) = &query.edns {
             let edns = response.edns.get_or_insert_with(Edns::new);
-            edns.set_max_payload(MAX_UDP_PAYLOAD)
+            edns.flags_mut().z = 0;
+            edns.set_version(0)
+                .set_max_payload(MAX_UDP_PAYLOAD)
                 .set_dnssec_ok(client_edns.flags().dnssec_ok);
             let cookie = EdnsCode::from(10);
             if client_edns.option(cookie).is_none() {
@@ -182,7 +212,9 @@ impl Context {
             let echoed = ClientSubnet::new(
                 original.addr(),
                 original.source_prefix(),
-                scope.unwrap_or(original.source_prefix()),
+                scope
+                    .unwrap_or(original.source_prefix())
+                    .min(max_prefix(original.addr())),
             );
             set_subnet(response, Some(echoed));
         }

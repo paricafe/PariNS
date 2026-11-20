@@ -1,4 +1,5 @@
 //! Verified TLS configuration and DNS-over-TLS adapters (RFC 7858 / RFC 8310).
+//! A reused connection can retry a closure only until the first response byte arrives.
 
 use std::{
     fmt,
@@ -17,7 +18,7 @@ use rustls::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinSet,
     time::timeout,
@@ -30,6 +31,7 @@ use crate::{ingress::Ingress, metrics::Counter, protocol, transport::tcp, upstre
 mod pool;
 pub use pool::PoolSettings;
 mod certificates;
+pub(crate) use certificates::MAX_PEM_BYTES;
 pub use certificates::{CertificateRole, CertificateSet, CertificateSources};
 type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 
@@ -243,9 +245,7 @@ impl Upstream {
             };
             client_stage(&mut attempt, Stage::Wait);
             let mut slot = pool.checkout(address).await;
-            let cached = slot.take().filter(|idle| {
-                idle.address == address && idle.returned.elapsed() < pool.idle_timeout
-            });
+            let cached = slot.take();
             let reused = cached.is_some();
             mark(
                 &mut attempt,
@@ -264,7 +264,7 @@ impl Upstream {
             };
             let response = match transaction(&mut stream, query, &mut attempt).await {
                 Ok(response) => response,
-                Err(error) if reused && closed_connection(&error) => {
+                Err(error) if reused && error.is::<ClosedBeforeResponse>() => {
                     drop(stream);
                     if let Some(attempt) = &mut attempt {
                         attempt.finish(&Err::<(), _>(error));
@@ -320,14 +320,25 @@ impl Upstream {
     }
 }
 
-fn closed_connection(error: &anyhow::Error) -> bool {
+#[derive(Debug)]
+struct ClosedBeforeResponse;
+
+impl fmt::Display for ClosedBeforeResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DoT connection closed before the first response byte")
+    }
+}
+
+fn before_response(error: std::io::Error) -> anyhow::Error {
     use std::io::ErrorKind::*;
-    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
-        matches!(
-            error.kind(),
-            UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected
-        )
-    })
+    if matches!(
+        error.kind(),
+        UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected
+    ) {
+        anyhow::Error::new(error).context(ClosedBeforeResponse)
+    } else {
+        error.into()
+    }
 }
 
 fn client_stage(
@@ -348,10 +359,14 @@ async fn transaction(
     let mut outbound = query.clone();
     outbound.metadata.id = rand::random();
     client_stage(attempt, Stage::RequestWrite);
-    tcp::write_frame(stream, &protocol::encode_upstream(&outbound, true)?).await?;
-    stream.flush().await?;
+    tcp::write_frame(stream, &protocol::encode_upstream(&outbound, true)?)
+        .await
+        .map_err(before_response)?;
+    stream.flush().await.map_err(before_response)?;
     client_stage(attempt, Stage::ResponseRead);
-    let wire = tcp::read_frame(stream).await?;
+    let high = stream.read_u8().await.map_err(before_response)?;
+    let length = u16::from_be_bytes([high, stream.read_u8().await?]);
+    let wire = tcp::read_frame_body(stream, length).await?;
     client_stage(attempt, Stage::Decode);
     let mut response = protocol::decode(&wire)?;
     client_stage(attempt, Stage::Validate);
@@ -371,6 +386,7 @@ pub async fn serve(
 ) -> Result<()> {
     let acceptor = TlsAcceptor::from(tls);
     let mut tasks = JoinSet::new();
+    let mut accepting = crate::transport::accept::Acceptor::new(&listener);
     let outcome = loop {
         if *ingress.stop.borrow() {
             break Ok(());
@@ -378,7 +394,7 @@ pub async fn serve(
         tokio::select! {
             _ = ingress.stop.changed() => break Ok(()),
             Some(result) = tasks.join_next(), if !tasks.is_empty() => ingress.settle("DoT", result),
-            accepted = crate::transport::accept::accept(&listener) => {
+            accepted = accepting.accept() => {
                 let (stream, peer) = match accepted {
                     Ok(value) => value,
                     Err(error) => break Err(error.into()),

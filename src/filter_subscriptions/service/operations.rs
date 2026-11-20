@@ -42,7 +42,7 @@ fn check_work(service: &Service, deadline: tokio::time::Instant) -> Result<()> {
     service.check_open()?;
     ensure!(
         tokio::time::Instant::now() < deadline,
-        Failure::new("subscription_cancelled")
+        Failure::new("subscription_download")
     );
     Ok(())
 }
@@ -163,13 +163,24 @@ impl Service {
         {
             let mut locked = self.store.lock().unwrap();
             if locked.is_none() {
-                let quota = self.state.lock().unwrap().settings.max_disk_bytes;
-                *locked = Some(Store::open(&self.path, quota)?);
+                ensure!(
+                    !self.deferred.load(Ordering::Acquire),
+                    Failure::new("update_in_progress")
+                );
+                let state = self.state.lock().unwrap();
+                let quota = state.settings.max_disk_bytes;
+                let mut current = state.settings.fingerprints()?;
+                let previous = state.previous.clone();
+                drop(state);
+                current.extend(fingerprint.iter().cloned());
+                *locked = Some(Store::open_preserving(
+                    &self.path, quota, &current, &previous,
+                )?);
             }
             let store = locked
                 .as_mut()
                 .context(Failure::new("subscription_storage_unavailable"))?;
-            self.sync_roots(store)?;
+            self.sync_roots(store, fingerprint.as_deref())?;
             let collected_at = unix_secs();
             let needs_download = match &request {
                 WorkRequest::Prepare { source, .. } => store
@@ -194,7 +205,11 @@ impl Service {
                     })
                 }
             };
-            store.collect_for_download(collected_at, bootstrap_download || needs_download)?;
+            store.collect_for_download(
+                collected_at,
+                bootstrap_download || needs_download,
+                fingerprint.as_deref(),
+            )?;
             self.observe_store(store);
         }
         let mut state = self.state.lock().unwrap();
@@ -263,9 +278,7 @@ impl Service {
         let mut failures = Vec::new();
         for (source, interval) in sources {
             self.check_revision(work.request.revision())?;
-            if tokio::time::Instant::now() >= work.deadline {
-                anyhow::bail!(Failure::new("subscription_download"));
-            }
+            check_work(self, work.deadline)?;
             let prepared = matches!(work.request, WorkRequest::Prepare { .. });
             match self.fetch_source(&work, &source, interval, prepared).await {
                 Ok((record, pin)) => {
@@ -274,6 +287,12 @@ impl Service {
                 }
                 Err(error) => {
                     let failure = Failure::from_error(&error);
+                    if matches!(
+                        failure.code.as_str(),
+                        "subscription_cancelled" | "revision_conflict"
+                    ) {
+                        return Err(error);
+                    }
                     let count = self
                         .state
                         .lock()
@@ -306,6 +325,7 @@ impl Service {
             }
         }
         self.check_revision(work.request.revision())?;
+        check_work(self, work.deadline)?;
         let material = if !records.is_empty() && matches!(work.request, WorkRequest::Refresh { .. })
         {
             let owner = self.clone();
@@ -402,12 +422,14 @@ impl Service {
         let cancel = self.cancel.notified();
         tokio::pin!(cancel);
         cancel.as_mut().enable();
-        self.check_open()?;
-        let result = tokio::select! {
-            result=tokio::time::timeout_at(work.deadline,self.download_source(&source,old.as_ref(),&mut writer))=>match result {
-                Ok(value)=>value.map_err(anyhow::Error::from), Err(_)=>Err(Failure::new("subscription_download").into()),
+        let result = match check_work(self, work.deadline) {
+            Err(error) => Err(error),
+            Ok(()) => tokio::select! {
+                result=tokio::time::timeout_at(work.deadline,self.download_source(&source,old.as_ref(),&mut writer))=>match result {
+                    Ok(value)=>value.map_err(anyhow::Error::from), Err(_)=>Err(Failure::new("subscription_download").into()),
+                },
+                _=cancel=>Err(Failure::new("subscription_cancelled").into()),
             },
-            _=cancel=>Err(Failure::new("subscription_cancelled").into()),
         };
         let file = writer.finish().await;
         let owner = self.clone();
@@ -425,12 +447,13 @@ impl Service {
                 .as_mut()
                 .context(Failure::new("subscription_storage_unavailable"))?;
             let accepted = (|| -> Result<_> {
-                check_work(&owner, deadline)?;
-                let mut file = file?;
+                owner.check_open()?;
                 let outcome = result?;
+                check_work(&owner, deadline)?;
                 match outcome {
                     DownloadOutcome::NotModified => Ok(None),
                     DownloadOutcome::Downloaded(downloaded) => {
+                        let mut file = file?;
                         file.rewind()?;
                         let mut builder = Builder::new(limits)?;
                         let parsed = builder.parse_source(
@@ -570,18 +593,27 @@ impl Service {
             .operation
             .as_ref()
             .is_some_and(|operation| operation.id == id)
-            && let Some(WorkRequest::Refresh { source_id, .. }) = state.active_request.clone()
+            && !matches!(
+                failure.code.as_str(),
+                "subscription_cancelled" | "revision_conflict"
+            )
+            && let Some(WorkRequest::Refresh {
+                source_id,
+                automatic,
+                ..
+            }) = state.active_request.clone()
         {
             let targets: Vec<_> = state
                 .settings
                 .sources
                 .iter()
                 .filter(|source| {
-                    source_id
-                        .as_ref()
-                        .map_or(state.settings.enabled && source.enabled, |id| {
-                            id == &source.id
-                        })
+                    source_id.as_ref().map_or(
+                        state.settings.enabled
+                            && source.enabled
+                            && (!automatic || source.auto_update),
+                        |id| id == &source.id,
+                    )
                 })
                 .map(|source| {
                     (
@@ -602,11 +634,23 @@ impl Service {
                 }
             }
         }
+        Self::finish_failure(&mut state, id, failure, None);
+    }
+
+    fn finish_failure(
+        state: &mut State,
+        id: &str,
+        failure: Failure,
+        failed_source: Option<String>,
+    ) {
         if let Some(operation) = state
             .operation
             .as_mut()
             .filter(|operation| operation.id == id)
         {
+            if failed_source.is_some() {
+                operation.source_id = failed_source;
+            }
             operation.status = if failure.code == "subscription_cancelled" {
                 "cancelled"
             } else {
@@ -776,6 +820,7 @@ impl Service {
                 anyhow::bail!(Failure::new("busy"));
             };
             work.deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let mut failed_source = None;
             let result = async {
                 let mut records = Vec::new();
                 let mut pins = Vec::new();
@@ -787,7 +832,10 @@ impl Service {
                             source.update_interval_hours,
                             false,
                         )
-                        .await?;
+                        .await
+                        .inspect_err(|_| {
+                            failed_source = Some(source.id);
+                        })?;
                     records.push(record);
                     pins.push(pin);
                 }
@@ -825,7 +873,12 @@ impl Service {
             }
             .await;
             if let Err(error) = result {
-                self.fail(&begin.operation_id, &error);
+                Self::finish_failure(
+                    &mut self.state.lock().unwrap(),
+                    &begin.operation_id,
+                    Failure::from_error(&error),
+                    failed_source,
+                );
                 return Err(error);
             }
         }

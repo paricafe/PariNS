@@ -48,13 +48,16 @@ describe('cache inspection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
     expect(await screen.findByText('Different request flags: EDNS')).toBeTruthy();
     expect(screen.getByText('EDNS=0 · DO=0 · CD=0 · RD=1')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('DO'));
     fireEvent.click(screen.getByLabelText('EDNS'));
+    expect(screen.getByLabelText('DO')).toHaveProperty('checked', false);
+    expect(screen.getByLabelText('DO')).toHaveProperty('disabled', true);
     expect(screen.getByText('EDNS=1 · DO=0 · CD=0 · RD=1')).toBeTruthy();
     expect(screen.getByText('Different request flags: EDNS')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
     await waitFor(() => expect(screen.queryByText('Different request flags: EDNS')).toBeNull());
     expect(screen.getByText('Miss: this query must ask an upstream.')).toBeTruthy();
-    expect(mocks.request).toHaveBeenLastCalledWith('cache/inspect', 'POST', expect.objectContaining({ edns: false }));
+    expect(mocks.request).toHaveBeenLastCalledWith('cache/inspect', 'POST', expect.objectContaining({ edns: false, dnssec_ok: false }));
   });
   it('explains a cached DNSSEC failure without suggesting another upstream request', async () => {
     mocks.request.mockResolvedValue({ cache_token: 'cache:1',

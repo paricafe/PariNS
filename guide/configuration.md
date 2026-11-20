@@ -75,11 +75,13 @@ Behavior:
   exception. A hostname endpoint moves to its next bootstrap address only when
   nothing was sent (connect, TLS or QUIC handshake, or stream open failed). The
   exception: when a reused DoT pool connection turns out to have been closed by the
-  server (end of stream, reset, aborted, broken pipe or not connected), the query is
+  server before the first response byte (end of stream, reset, aborted, broken pipe
+  or not connected), the query is
   retried once on a new connection within its deadline. Every other sent query
   fails without a resend.
-- **HTTP/3** (`prefer_h3`): connecting and sending over HTTP/3 has a budget of
-  250 ms, or half the remaining query time if that is shorter. A failure before the
+- **HTTP/3** (`prefer_h3`): opening the connection and sending request headers has a budget of
+  250 ms, or half the remaining query time if that is shorter. The request body and
+  response use the remaining resolver deadline. A failure before the
   query was sent falls back to verified HTTP/2. A failure after sending is that
   query's upstream failure, with no HTTP/2 resend. Only a connection failure or a
   failure before sending pauses HTTP/3 for that endpoint: 2 seconds at first,
@@ -88,8 +90,9 @@ Behavior:
   pause other requests. A definite refusal such as 405 stops HTTP/3 for
   that endpoint until the upstream pool is rebuilt by the next DNS restart. Alternate
   ports from Alt-Svc or HTTPS/SVCB records are not used.
-- DoH sends RFC 8484 GET requests. An unusually large query can exceed an upstream's
-  URL or header limits and fail with 414 or 431; that affects only that query.
+- DoH uses RFC 8484 GET when the encoded query fits in the client URI and POST
+  otherwise. An upstream can still reject a GET with 414 or 431 if it has a lower
+  URL or header limit.
 - Queries to upstreams advertise an EDNS UDP size of at most 1232 bytes. The EDNS TCP
   keepalive option is removed from client queries and from upstream answers on every
   transport. Encrypted hops add EDNS padding when the client asked for it (128-byte
@@ -482,7 +485,7 @@ Global limits and timeouts are top-level keys (all required):
 | Key | Example value | Range | Meaning |
 | --- | --- | --- | --- |
 | `query_timeout_ms` | `2000` | 1–60000 | Deadline of one query, including all upstream or recursive work. |
-| `tcp_io_timeout_ms` | `5000` | 1–60000 | Limit for each TCP frame read or write, idle time, and encrypted handshakes and requests. |
+| `tcp_io_timeout_ms` | `5000` | 1–60000 | Limit for transport reads, writes, idle connections and encrypted handshakes. DNS resolution uses `query_timeout_ms`. |
 | `shutdown_grace_ms` | `3000` | 1–60000 | Time active queries get to finish when DNS stops. |
 | `max_inflight` | `256` | 1–65536 | Queries in progress across all transports. At the limit, UDP queries are dropped and TCP queries get SERVFAIL. |
 | `max_tcp_connections` | `64` | 1–65536 | TCP, DoT, DoH and QUIC connections, including handshakes. |
@@ -533,7 +536,7 @@ PariNS keeps statistics and the optional query log in a private SQLite database
 | --- | --- | --- | --- |
 | `enabled` | `false` | | Record each query (client address, name, result, timing, upstream). |
 | `max_entries` | `100000` | 1–1000000 | Records kept. |
-| `max_bytes` | `67108864` (64 MiB) | 1 MiB–512 MiB, at most `max_database_bytes` | Space for records. |
+| `max_bytes` | `67108864` (64 MiB) | 1 MiB–2 GiB, at most `max_database_bytes` | Space for records. |
 | `retention_secs` | `86400` | 60–2592000 | Maximum record age. |
 
 `[statistics]`:

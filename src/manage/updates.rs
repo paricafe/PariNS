@@ -125,27 +125,20 @@ fn revalidate_cached_candidate(
     Ok(Some(candidate))
 }
 
+fn manual_recovery(root: &ipc::PublicStatus) -> bool {
+    root.capability.reason.as_deref() == Some("manual_recovery_required")
+        || root
+            .last_operation
+            .as_ref()
+            .is_some_and(|op| op.phase == ipc::Phase::ManualRequired)
+}
+
 impl Coordinator {
     pub fn open(dir: &Path) -> Self {
         let (mut state, unavailable) = match state::read(dir) {
             Ok(value) => (value.unwrap_or_default(), None),
             Err(_) => (AppState::default(), Some("update_state_unavailable")),
         };
-        if state
-            .candidate
-            .as_ref()
-            .is_some_and(|candidate| not_newer(candidate, &BuildInfo::current()))
-        {
-            state.candidate = None;
-            state.plan = None;
-            if unavailable.is_none() {
-                let _ = state::write(dir, &state);
-            }
-        }
-        if state.check.next_check_at_ms <= unix_ms() {
-            state.check.next_check_at_ms =
-                unix_ms().saturating_add((60 + rand::random::<u64>() % 241) * 1000);
-        }
         let invocation = std::env::var("INVOCATION_ID")
             .ok()
             .filter(|v| ipc::valid_id(v));
@@ -160,7 +153,33 @@ impl Coordinator {
             .then(ipc::read_public_status)
             .and_then(Result::ok);
         let frozen = state.commit_intent.is_some()
-            || root.as_ref().is_some_and(|s| s.pending_launch.is_some());
+            || helper_scoped
+                && (unavailable.is_some()
+                    || root.as_ref().is_none_or(|status| {
+                        status.pending_launch.is_some()
+                            || status.capability.reason.as_deref() == Some("installation_pending")
+                            || manual_recovery(status)
+                            || status
+                                .active_operation
+                                .as_ref()
+                                .is_some_and(|op| !op.phase.precommit())
+                    }));
+        if !frozen
+            && state
+                .candidate
+                .as_ref()
+                .is_some_and(|candidate| not_newer(candidate, &BuildInfo::current()))
+        {
+            state.candidate = None;
+            state.plan = None;
+            if unavailable.is_none() {
+                let _ = state::write(dir, &state);
+            }
+        }
+        if state.check.next_check_at_ms <= unix_ms() {
+            state.check.next_check_at_ms =
+                unix_ms().saturating_add((60 + rand::random::<u64>() % 241) * 1000);
+        }
         let identity = helper_scoped.then(state::own_identity).and_then(Result::ok);
         Self {
             dir: dir.into(),
@@ -221,18 +240,23 @@ impl Coordinator {
         let reason = self.supported().err();
         let root = self.root.lock().unwrap().clone();
         let state = self.state.lock().unwrap().clone();
+        let current = BuildInfo::current();
         let offered = state
             .candidate
             .as_ref()
-            .filter(|candidate| !not_newer(candidate, &BuildInfo::current()));
+            .filter(|candidate| !not_newer(candidate, &current));
         let candidate = offered.map(|candidate| {
             let plan = state.plan.as_ref();
             json!({"version":candidate.version,"tag":candidate.tag,"published_at":candidate.published_at,
                 "notes":candidate.notes,"manual_reason":candidate.manual_reason,
                 "plan_id":plan.map(|p| &p.plan_id),"expires_at_ms":plan.map(|p|p.expires_at_ms)})
         });
-        let active = state.operation.as_ref().filter(|o| !o.finished).map(|op| {
-            root.as_ref().and_then(|r|r.active_operation.as_ref()).filter(|o|o.operation_id==op.operation_id)
+        let terminal = state.operation.as_ref().and_then(|op| {
+            root.as_ref()?
+                .terminal_for(&op.operation_id, &op.phase_nonce)
+        });
+        let active = state.operation.as_ref().filter(|o| !o.finished && terminal.is_none()).map(|op| {
+            root.as_ref().and_then(|r|r.active_operation.as_ref()).filter(|o|o.operation_id==op.operation_id && o.phase_nonce==op.phase_nonce)
                 .map(|o| {
                     let mut view=serde_json::to_value(o).expect("operation status");
                     if o.phase == ipc::Phase::Staged && matches!(op.phase.as_str(), "preflight" | "committing" | "aborting") {
@@ -244,7 +268,7 @@ impl Coordinator {
                     "reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
         }).or_else(||root.as_ref().and_then(|r|r.active_operation.as_ref()).map(|o|json!(o)));
         let last = state.operation.as_ref().filter(|o| o.finished).map(|op| {
-            root.as_ref().and_then(|r| r.terminal_for(&op.operation_id, &op.phase_nonce))
+            terminal
                 .map(|r| {
                     let mut view = json!(r);
                     view["version"] = json!(op.expected_version);
@@ -252,9 +276,9 @@ impl Coordinator {
                     view
                 })
                 .unwrap_or_else(|| json!({"operation_id":op.operation_id,"phase":op.phase,"version":op.expected_version,"reason":op.reason,"downloaded_bytes":0,"total_bytes":op.download.size}))
-        }).or_else(|| root.as_ref().and_then(|r|r.last_operation.as_ref()).map(|o|json!(o)));
-        json!({"current":BuildInfo::current(),"capability":{"available":reason.is_none(),"reason":reason},
-            "check":{"state":if self.checking.load(Ordering::Acquire){"checking"}else if state.check.error.is_some(){"failed"}else if !state.check.validated{"unchecked"}else if offered.is_some(){"available"}else{"up_to_date"},
+        }).or_else(||terminal.map(|o|json!(o))).or_else(|| root.as_ref().and_then(|r|r.last_operation.as_ref()).map(|o|json!(o)));
+        json!({"current":current,"capability":{"available":reason.is_none(),"reason":reason},
+            "check":{"state":if self.checking.load(Ordering::Acquire){"checking"}else if state.check.error.is_some(){"failed"}else if offered.is_some(){"available"}else if state.check.validated_for(&current.version){"up_to_date"}else{"unchecked"},
                 "last_check_at_ms":state.check.last_check_at_ms,"last_success_at_ms":state.check.last_success_at_ms,
                 "next_check_at_ms":state.check.next_check_at_ms,"retry_at_ms":state.check.retry_at_ms,"error":state.check.error},
             "candidate":candidate,"active_operation":active,"last_operation":last,
@@ -294,7 +318,10 @@ impl Coordinator {
     }
 
     pub fn due(&self, auto_check: bool) -> bool {
-        if self.unavailable.is_some() || self.checking.load(Ordering::Acquire) {
+        if self.unavailable.is_some()
+            || self.frozen.load(Ordering::Acquire)
+            || self.checking.load(Ordering::Acquire)
+        {
             return false;
         }
         let state = self.state.lock().unwrap();
@@ -308,6 +335,9 @@ impl Coordinator {
             return Err((reason, 0));
         }
         let _writer = self.writing.lock().await;
+        if self.frozen.load(Ordering::Acquire) {
+            return Err(("update_in_progress", 0));
+        }
         if self.checking.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -331,12 +361,7 @@ impl Coordinator {
 
     pub(super) async fn perform_check(&self, revision: u64, settings: &UpdatesConfig) {
         self.perform_check_with(revision, settings, |old| async move {
-            self.fetch_candidate(
-                old.check.etag.as_deref(),
-                old.check.validated,
-                old.candidate.clone(),
-            )
-            .await
+            self.fetch_candidate(old).await
         })
         .await;
     }
@@ -369,6 +394,9 @@ impl Coordinator {
         let supported = self.supported().is_ok();
         let current_sha = self.identity.as_ref().map(|i| i.sha256.clone());
         let _writer = self.writing.lock().await;
+        if self.frozen.load(Ordering::Acquire) {
+            return;
+        }
         let mut next = self.state.lock().unwrap().clone();
         {
             let s = &mut next;
@@ -377,6 +405,7 @@ impl Coordinator {
                     s.candidate = candidate;
                     s.check.etag = etag;
                     s.check.validated = true;
+                    s.check.checked_version = Some(BuildInfo::current().version);
                     s.check.error = None;
                     s.check.failures = 0;
                     s.check.last_success_at_ms = Some(unix_ms());
@@ -412,13 +441,13 @@ impl Coordinator {
 
     async fn fetch_candidate(
         &self,
-        etag: Option<&str>,
-        validated: bool,
-        old: Option<Candidate>,
+        old: AppState,
     ) -> Result<(Option<Candidate>, Option<String>), ReaderError> {
+        let current = BuildInfo::current();
+        let etag = old.check.conditional_etag(&current.version);
         let modified = self.reader.latest(etag).await?;
         let Latest::Modified { release, etag } = modified else {
-            return if validated {
+            return if etag.is_some() {
                 let helper = self
                     .root
                     .lock()
@@ -426,7 +455,7 @@ impl Coordinator {
                     .as_ref()
                     .map_or(0, |r| r.capability.helper_protocol);
                 Ok((
-                    revalidate_cached_candidate(old, &BuildInfo::current(), helper)?,
+                    revalidate_cached_candidate(old.candidate, &current, helper)?,
                     etag.map(str::to_owned),
                 ))
             } else {
@@ -436,8 +465,7 @@ impl Coordinator {
                 })
             };
         };
-        if Version::parse_tag(&release.tag_name)? <= Version::parse(&BuildInfo::current().version)?
-        {
+        if Version::parse_tag(&release.tag_name)? <= Version::parse(&current.version)? {
             return Ok((None, etag));
         }
         let mut candidate = Candidate {
@@ -459,7 +487,6 @@ impl Coordinator {
         }
         let document = self.reader.manifest(&release.tag_name).await?;
         document.validate_release(&release)?;
-        let current = BuildInfo::current();
         let helper = self
             .root
             .lock()
@@ -616,6 +643,7 @@ mod tests {
             ..Default::default()
         };
         state.check.validated = true;
+        state.check.checked_version = Some(current.version);
         state::write(dir.path(), &state).unwrap();
         let coordinator = Coordinator::open(dir.path());
         let view = coordinator.view();
@@ -671,6 +699,41 @@ mod tests {
             revalidate_cached_candidate(Some(candidate), &build, helper)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn downgrade_rechecks_latest_without_the_newer_versions_etag() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = BuildInfo::current();
+        let newer_version = "999.0.0";
+        let mut saved = AppState::default();
+        saved.check.validated = true;
+        saved.check.checked_version = Some(newer_version.into());
+        saved.check.etag = Some("\"latest\"".into());
+        assert_eq!(
+            saved.check.conditional_etag(newer_version),
+            Some("\"latest\"")
+        );
+        state::write(dir.path(), &saved).unwrap();
+        let coordinator = Coordinator::open(dir.path());
+        assert_eq!(coordinator.view()["check"]["state"], "unchecked");
+        coordinator.request_check().await.unwrap();
+        let version = current.version.as_str();
+        coordinator
+            .perform_check_with(1, &UpdatesConfig::default(), |old| async move {
+                assert!(old.check.conditional_etag(version).is_none());
+                let mut candidate = candidate().0;
+                candidate.version = newer_version.into();
+                candidate.tag = format!("v{newer_version}");
+                Ok((Some(candidate), Some("\"latest\"".into())))
+            })
+            .await;
+        assert_eq!(coordinator.view()["candidate"]["version"], newer_version);
+        let saved = state::read(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            saved.check.conditional_etag(&current.version),
+            Some("\"latest\"")
         );
     }
 

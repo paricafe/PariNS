@@ -773,3 +773,89 @@ async fn h2_source_limits_cover_pre_tls_admission_and_ignore_forwarded_identity(
     drop(client);
     let _ = timeout(Duration::from_secs(2), driver).await.unwrap();
 }
+
+#[tokio::test]
+async fn h2_sibling_resolutions_run_until_the_query_deadline() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let resolver = Arc::new(common::resolver(
+        upstream.local_addr().unwrap(),
+        Duration::from_secs(1),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = watch::channel(false);
+    let ingress = Ingress {
+        resolver,
+        source_limits: Arc::new(parins::limits::Limiter::new(&Default::default())),
+        queries: Arc::new(Semaphore::new(2)),
+        connections: Arc::new(Semaphore::new(1)),
+        stop: stopped,
+        io_timeout: Duration::from_millis(100),
+        shutdown_grace: Duration::from_millis(300),
+        max_streams: 2,
+    };
+    let (server_tls, client_tls) = certificates();
+    let server = tokio::spawn(doh::serve(listener, server_tls, ingress, None));
+    let tls = TlsConnector::from(client_tls)
+        .connect(
+            "localhost".try_into().unwrap(),
+            TcpStream::connect(address).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let (client, connection) = h2::client::handshake(tls).await.unwrap();
+    let driver = tokio::spawn(connection);
+    let exchange = |name| {
+        let mut client = client.clone();
+        async move {
+            let mut message = protocol::decode(&query()).unwrap();
+            message.queries[0].set_name(Name::from_ascii(name).unwrap());
+            let request = http::Request::builder()
+                .uri(format!(
+                    "https://localhost/dns-query?dns={}",
+                    URL_SAFE_NO_PAD.encode(message.to_vec().unwrap())
+                ))
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(request, true).unwrap();
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), 200);
+            let mut body = response.into_body();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.data().await {
+                bytes.extend_from_slice(&chunk.unwrap());
+            }
+            protocol::decode(&bytes).unwrap().response_code
+        }
+    };
+    let answer = async {
+        let mut buffer = [0; 4096];
+        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let query = protocol::decode(&buffer[..length]).unwrap();
+        upstream
+            .send_to(
+                &protocol::error_response(&query, ResponseCode::NoError)
+                    .to_vec()
+                    .unwrap(),
+                peer,
+            )
+            .await
+            .unwrap();
+    };
+    let (one, two, ()) = timeout(Duration::from_secs(3), async {
+        tokio::join!(exchange("first.test."), exchange("second.test."), answer)
+    })
+    .await
+    .unwrap();
+    assert!([one, two].contains(&ResponseCode::NoError));
+    assert!([one, two].contains(&ResponseCode::ServFail));
+    stop.send(true).unwrap();
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(client);
+    let _ = driver.await.unwrap();
+}

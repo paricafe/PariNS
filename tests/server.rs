@@ -340,6 +340,7 @@ async fn metrics_count_entry_budgets_filtering_and_shutdown_cancellation() {
     cfg.shutdown_grace_ms = 30;
     cfg.filter = toml::from_str("enabled=true\nblock_exact=['blocked.test']").unwrap();
     let server = Server::bind(cfg).await.unwrap();
+    let resolver = server.resolver().clone();
     let metrics = server.metrics().clone();
     let address = server.local_addr();
     let (stop, stopped) = oneshot::channel();
@@ -380,6 +381,10 @@ async fn metrics_count_entry_budgets_filtering_and_shutdown_cancellation() {
             .is_err()
     );
     finish(stop, task).await;
+    assert_eq!(
+        resolver.forced_shutdown(),
+        Some(parins::resolver::ForcedShutdown::ListenerDrain)
+    );
     let stats = metrics.snapshot();
     for (name, value) in [
         ("requests", 3),

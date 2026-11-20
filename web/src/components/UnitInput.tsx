@@ -7,7 +7,7 @@ export { unitFamily, type UnitFamily };
 
 function initial(family: UnitFamily, raw: string): { factor: number; text: string } {
   const base = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : null;
-  if (base === null || base === 0) return { factor: 1, text: raw };
+  if (base === null || base === 0 || !Number.isSafeInteger(base)) return { factor: 1, text: raw };
   const [, factor] = exactUnit(family, base);
   return { factor, text: String(base / factor) };
 }
@@ -19,8 +19,7 @@ function toBase(text: string, factor: number): string {
   const scaled = BigInt(match[1] + fraction) * BigInt(factor);
   const divisor = 10n ** BigInt(fraction.length);
   if (scaled % divisor !== 0n) return text;
-  const base = scaled / divisor;
-  return base <= BigInt(Number.MAX_SAFE_INTEGER) ? String(base) : text;
+  return String(scaled / divisor);
 }
 
 function offeredUnits(family: UnitFamily, max: number | undefined, current: number) {

@@ -1,8 +1,13 @@
 #!/bin/sh
 # Host-native development packages, or checked Linux release packages.
 set -eu
+export COPYFILE_DISABLE=1 LC_ALL=C
 cd "$(dirname "$0")/.."
 fail() { printf 'PariNS package: %s\n' "$*" >&2; exit 1; }
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"
+    else shasum -a 256 "$@"; fi
+}
 version= target=
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -65,6 +70,7 @@ else
 fi
 "./$binary" --config parins.example.toml --check
 staging=$(mktemp -d "${TMPDIR:-/tmp}/parins-package.XXXXXX")
+trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/$archive" target/packages
 cp "$binary" "$helper" parins.example.toml LICENSE README.md CHANGELOG.md "$staging/$archive/"
 "./$binary" --build-info=json > "$staging/$archive/install-build-info.json"
@@ -73,13 +79,32 @@ cp scripts/install.sh "$staging/$archive/"
 mkdir "$staging/$archive/deploy"
 units='parins.service parins-managed.service parins-updater.service parins-updater.path parins-update-recovery.service'
 for unit in $units; do cp "deploy/$unit" "$staging/$archive/deploy/$unit"; done
-(cd "$staging/$archive" && shasum -a 256 parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/parins.service deploy/parins-managed.service deploy/parins-updater.service deploy/parins-updater.path deploy/parins-update-recovery.service) > "$staging/$archive/SHA256SUMS"
+(
+    cd "$staging/$archive"
+    chmod 0755 . deploy parins parins-updater install.sh
+    chmod 0644 parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md install-build-info.json deploy/*
+    sha256_file parins parins-updater install-build-info.json install.sh parins.example.toml LICENSE LICENSE.beui README.md CHANGELOG.md deploy/* > SHA256SUMS
+    chmod 0644 SHA256SUMS
+)
 if [ "$release_mode" = true ]; then
     cp "$binary" "target/packages/$archive.bin"
     cp "$staging/$archive/install-build-info.json" "target/packages/$archive.build-info.json"
     cmp "$staging/$archive/parins" "target/packages/$archive.bin" || fail 'raw and package binary mismatch'
 fi
-tar -czf "target/packages/$archive.tar.gz" -C "$staging" "$archive"
-(cd target/packages && shasum -a 256 "$archive.tar.gz") > "target/packages/$archive.tar.gz.sha256"
+(
+    cd "$staging"
+    find "$archive" -exec env TZ=UTC touch -t 197001010000.00 {} +
+    find "$archive" -print | sort > members
+    if tar --version | grep -q 'GNU tar'; then
+        set -- --owner=0 --group=0 --numeric-owner
+    else
+        set -- --uid 0 --gid 0 --uname '' --gname ''
+        if tar --no-mac-metadata -cf /dev/null -T /dev/null 2>/dev/null; then
+            set -- "$@" --no-mac-metadata
+        fi
+    fi
+    tar "$@" --format ustar --no-recursion -cf package.tar -T members
+)
+gzip -n -c "$staging/package.tar" > "target/packages/$archive.tar.gz"
+(cd target/packages && sha256_file "$archive.tar.gz") > "target/packages/$archive.tar.gz.sha256"
 printf 'Package: target/packages/%s.tar.gz\nChecksum: target/packages/%s.tar.gz.sha256\n' "$archive" "$archive"
-printf 'Staging: %s\n' "$staging"

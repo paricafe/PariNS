@@ -353,3 +353,29 @@ fn bounded_explicit_frames_handle_deep_byte_branching() {
         .collect();
     compare(&rules, &queries);
 }
+
+#[test]
+fn derived_rejects_exact_repeating_the_same_nodes_block_suffix() {
+    let mut builder = Builder::new(Limits::default()).unwrap();
+    builder.local_slots = 2;
+    builder.set_classes(vec![0, 1]);
+    builder.add("test", Group::BlockSuffix, 0).unwrap();
+    builder.add("b.test", Group::BlockSuffix, 1).unwrap();
+    builder.add("b.test", Group::BlockExact, 0).unwrap();
+    let index = builder.prepare().unwrap().finish_radix().unwrap();
+    let node = index
+        .nodes
+        .iter()
+        .position(|n| n.sources == [NONE, NONE, 1, 0])
+        .unwrap();
+    let ids = [String::new(), String::new()];
+    let mut bytes = Vec::new();
+    index.write_to(&mut bytes, [42; 32], &ids).unwrap();
+    let exact_slot = 98 + ids.len() + node * 20 + 18;
+    bytes[exact_slot..exact_slot + 2].copy_from_slice(&1u16.to_be_bytes());
+    checksum(&mut bytes);
+    let error = Index::read_from(bytes.as_slice(), [42; 32], &ids, Limits::default())
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "derived index redundant exact");
+}

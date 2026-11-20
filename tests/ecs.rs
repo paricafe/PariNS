@@ -1,19 +1,24 @@
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hickory_proto::{
     op::{Edns, Message, ResponseCode},
     rr::{
-        RecordType,
+        RData, Record, RecordType,
+        rdata::A,
         rdata::opt::{ClientSubnet, EdnsOption},
     },
 };
 use parins::{
+    cache::{DecisionReason, StoreOutcome},
     config::{Config, EcsConfig},
     ecs::{self, Context, Scope},
     protocol,
+    query_log::ListOptions,
     resolver::Resolver,
+    runtime_services::RuntimeServices,
+    storage::RuntimeSettings,
 };
 use tokio::net::UdpSocket;
 
@@ -191,9 +196,200 @@ fn mismatched_responses_and_ambiguous_cache_scopes_are_distinct() {
     );
     assert!(ecs::response_matches(&out, &response));
     assert!(context.response_scope(&response).cache.is_none());
+    assert_eq!(context.response_scope(&response).reply, Some(28));
+    assert_eq!(
+        context.response_scope(&response).supersede,
+        Some(Scope::ExactSource("192.0.2.0/24".parse().unwrap()))
+    );
     ecs::set_subnet(&mut response, Some("198.51.100.0/24".parse().unwrap()));
     assert!(!ecs::response_matches(&out, &response));
     assert!(context.response_scope(&response).cache.is_none());
+    assert!(context.response_scope(&response).reply.is_none());
+    assert!(context.response_scope(&response).supersede.is_none());
+}
+
+#[tokio::test]
+async fn narrower_upstream_scope_revokes_sharing_and_supersedes_stale_answer() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+    config.upstreams.servers = vec![upstream.local_addr().unwrap().to_string()];
+    config.ecs.enabled = true;
+    config.cache.ecs_sharing.enabled = true;
+    config.cache.stale.enabled = true;
+    config.query_log.enabled = true;
+    let services = RuntimeServices::ephemeral(RuntimeSettings::from_config(&config));
+    let resolver = Resolver::with_services(&config, services.clone()).unwrap();
+    let cache = resolver.cache();
+    let input = query(Some("192.0.2.123/32"));
+    let mut cached = protocol::error_response(&input, ResponseCode::NoError);
+    cached.add_answer(Record::from_rdata(
+        input.queries[0].name().clone(),
+        1,
+        RData::A(A::new(192, 0, 2, 1)),
+    ));
+    let learned_at = Instant::now() - Duration::from_secs(2);
+    let networks = ["192.0.2.0/24", "192.0.3.0/24", "198.51.100.0/24"];
+    for network in networks {
+        assert!(
+            cache
+                .insert_decision_if_epoch(
+                    &input,
+                    &cached,
+                    Scope::ExactSource(network.parse().unwrap()),
+                    learned_at,
+                    cache.epoch(),
+                )
+                .admitted()
+        );
+    }
+    assert_eq!(cache.snapshot()["ecs_shared_entries"], 1);
+
+    let mock = tokio::spawn(async move {
+        let mut bytes = [0; 4096];
+        let (n, peer) = upstream.recv_from(&mut bytes).await.unwrap();
+        let request = protocol::decode(&bytes[..n]).unwrap();
+        let sent = ecs::subnet(&request).unwrap();
+        assert_eq!(sent.source_prefix(), 24);
+        let mut reply = protocol::error_response(&request, ResponseCode::NoError);
+        reply.add_answer(Record::from_rdata(
+            request.queries[0].name().clone(),
+            60,
+            RData::A(A::new(192, 0, 2, 2)),
+        ));
+        ecs::set_subnet(
+            &mut reply,
+            Some(ClientSubnet::new(sent.addr(), sent.source_prefix(), 28)),
+        );
+        upstream
+            .send_to(&reply.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    });
+    let reply = resolver
+        .resolve(&input.to_vec().unwrap(), "192.0.2.123".parse().unwrap())
+        .await
+        .unwrap();
+    mock.await.unwrap();
+    let response = protocol::decode(&reply.message.to_vec().unwrap()).unwrap();
+    assert_eq!(ecs::subnet(&response).unwrap().scope_prefix(), 28);
+    assert_eq!(response.answers[0].data, RData::A(A::new(192, 0, 2, 2)));
+    assert_eq!(cache.snapshot()["entries"], 0);
+    assert_eq!(cache.snapshot()["ecs_sharing_revocations"], 1);
+    assert_eq!(
+        resolver.metrics().snapshot().counters["cache_store_superseded_only"],
+        1
+    );
+    services.storage.flush().await.unwrap();
+    let page = services
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    let store = page.entries[0].cache_store.unwrap();
+    assert_eq!(store.outcome, StoreOutcome::SupersededOnly);
+    assert_eq!(store.reason, Some(DecisionReason::EcsUnusable));
+
+    let now = Instant::now();
+    for network in networks {
+        cache.insert_decision_if_epoch(
+            &input,
+            &cached,
+            Scope::ExactSource(network.parse().unwrap()),
+            now,
+            cache.epoch(),
+        );
+    }
+    assert_eq!(
+        cache.inspect(input.queries[0].name(), None, now)["ecs_sharing"],
+        "revoked"
+    );
+    assert_eq!(cache.snapshot()["ecs_shared_entries"], 0);
+}
+
+#[tokio::test]
+async fn extended_upstream_rcodes_are_servfail_for_clients_without_edns() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+    config.upstreams.servers = vec![upstream.local_addr().unwrap().to_string()];
+    config.ecs.enabled = true;
+    config.query_log.enabled = true;
+    let services = RuntimeServices::ephemeral(RuntimeSettings::from_config(&config));
+    let resolver = Resolver::with_services(&config, services.clone()).unwrap();
+    let mock = tokio::spawn(async move {
+        let mut bytes = [0; 4096];
+        for code in [ResponseCode::BADVERS, ResponseCode::BADCOOKIE] {
+            let (n, peer) = upstream.recv_from(&mut bytes).await.unwrap();
+            let request = protocol::decode(&bytes[..n]).unwrap();
+            assert!(ecs::subnet(&request).is_some());
+            let mut response = protocol::error_response(&request, code);
+            response.metadata.authentic_data = true;
+            let record = Record::from_rdata(
+                request.queries[0].name().clone(),
+                60,
+                RData::A(A::new(192, 0, 2, 1)),
+            );
+            response.add_answer(record.clone());
+            response.add_authority(record.clone());
+            response.add_additional(record);
+            let wire = response.to_vec().unwrap();
+            assert_eq!(
+                u16::from(protocol::decode(&wire).unwrap().response_code),
+                u16::from(code)
+            );
+            upstream.send_to(&wire, peer).await.unwrap();
+        }
+    });
+    let mut input = query(None);
+    input.metadata.authentic_data = true;
+    for _ in 0..2 {
+        let reply = resolver
+            .resolve(&input.to_vec().unwrap(), "192.0.2.123".parse().unwrap())
+            .await
+            .unwrap();
+        let wire = protocol::encode_udp(&reply.message, reply.udp_limit).unwrap();
+        let response = protocol::decode(&wire).unwrap();
+        assert_eq!(response.response_code, ResponseCode::ServFail);
+        assert!(!response.authentic_data);
+        assert!(response.edns.is_none());
+        assert!(
+            response.answers.is_empty()
+                && response.authorities.is_empty()
+                && response.additionals.is_empty()
+        );
+    }
+    mock.await.unwrap();
+    assert_eq!(
+        resolver.metrics().snapshot().counters["responses_servfail"],
+        2
+    );
+    services.storage.flush().await.unwrap();
+    let page = services
+        .storage
+        .list_logs(ListOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 2);
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.rcode.as_deref() == Some("SERVFAIL"))
+    );
+}
+
+#[test]
+fn echoed_scope_cannot_exceed_the_address_family_width() {
+    for (subnet, peer, bits) in [
+        ("192.0.2.0/24", "192.0.2.1", 32),
+        ("2001:db8::/56", "2001:db8::1", 128),
+    ] {
+        let input = query(Some(subnet));
+        let (out, context) = Context::prepare(&input, peer.parse().unwrap(), &enabled()).unwrap();
+        let mut response = protocol::error_response(&out, ResponseCode::NoError);
+        context.finish(&input, &mut response, Some(200));
+        let decoded = protocol::decode(&response.to_vec().unwrap()).unwrap();
+        assert_eq!(ecs::subnet(&decoded).unwrap().scope_prefix(), bits);
+    }
 }
 
 #[test]
@@ -298,7 +494,7 @@ async fn refused_nonzero_ecs_retries_anonymously_once() {
 }
 
 #[tokio::test]
-async fn tcp_keepalive_is_hop_local_and_upstream_udp_size_is_capped() {
+async fn tcp_keepalive_is_hop_local_and_upstream_udp_size_is_normalized() {
     use hickory_proto::rr::{
         RData, Record,
         rdata::{A, opt::EdnsCode},
@@ -309,7 +505,7 @@ async fn tcp_keepalive_is_hop_local_and_upstream_udp_size_is_capped() {
     let resolver = Resolver::from_config(&config);
     let mut input = query(None);
     let mut edns = Edns::new();
-    edns.set_max_payload(4096);
+    edns.set_max_payload(512);
     edns.options_mut()
         .insert(EdnsOption::Unknown(11, vec![0, 100]));
     input.edns = Some(edns);
@@ -344,13 +540,15 @@ async fn tcp_keepalive_is_hop_local_and_upstream_udp_size_is_capped() {
     });
     let peer = "192.0.2.123".parse().unwrap();
     let wire = input.to_vec().unwrap();
-    let first = resolver.resolve(&wire, peer).await.unwrap().message;
+    let first = resolver.resolve(&wire, peer).await.unwrap();
     let upstream = mock.await.unwrap();
-    let second = resolver.resolve(&wire, peer).await.unwrap().message;
-    for reply in [&first, &second] {
-        assert_eq!(reply.answers.len(), 1);
+    let second = resolver.resolve(&wire, peer).await.unwrap();
+    for reply in [first, second] {
+        assert_eq!(reply.udp_limit, 512);
+        assert_eq!(reply.message.answers.len(), 1);
         assert!(
             reply
+                .message
                 .edns
                 .as_ref()
                 .unwrap()

@@ -1,4 +1,5 @@
-//! Authenticated management plane.
+//! Authenticated management plane. Same-site and cross-site fetches require console navigation.
+//! A configuration PUT with the current revision and identical text keeps the saved revision and rollback copy.
 mod account;
 mod assets;
 mod auth_budget;
@@ -203,7 +204,9 @@ fn storage_error(err: crate::storage::Error) -> ApiError {
     use crate::storage::Error;
     let (status, code) = match &err {
         Error::Conflict { .. } => (StatusCode::CONFLICT, "EPOCH"),
-        Error::StorageUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "STORAGE_UNAVAILABLE"),
+        Error::StorageUnavailable(_) | Error::DatabaseFull(_) => {
+            (StatusCode::SERVICE_UNAVAILABLE, "STORAGE_UNAVAILABLE")
+        }
         Error::Busy => (StatusCode::SERVICE_UNAVAILABLE, "STORAGE_BUSY"),
         Error::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
     };
@@ -386,11 +389,14 @@ fn current_realm(active: &Active, transport: &Snapshot) -> std::result::Result<(
 
 fn secret_matches(supplied: &str, expected: &str) -> bool {
     supplied.len() == expected.len()
-        && supplied
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-            == 0
+        && std::hint::black_box(
+            supplied
+                .bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |difference, (a, b)| {
+                    std::hint::black_box(difference | (a ^ b))
+                }),
+        ) == 0
 }
 
 fn invalid_setup_token() -> ApiError {
@@ -494,6 +500,12 @@ struct Revision {
     revision: u64,
     #[serde(default)]
     allow_http_downgrade: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollbackPreview {
+    revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -685,7 +697,12 @@ async fn api(
                 if manager.saved.is_some() {
                     return Err(already_setup());
                 }
-                let expected = manager.store.setup_token().map_err(|_| internal())?;
+                let store = manager.store.clone();
+                drop(manager);
+                let expected = tokio::task::spawn_blocking(move || store.setup_token())
+                    .await
+                    .map_err(|_| internal())?
+                    .map_err(|_| internal())?;
                 if !secret_matches(&supplied, &expected) {
                     return Err(invalid_setup_token());
                 }
@@ -695,6 +712,7 @@ async fn api(
                     .password_work(move || store::hash_password(&setup.password))
                     .await?
                     .map_err(invalid)?;
+                let manager = control.manager.lock().await;
                 let change = manager
                     .transport_change(&setup.toml, &host)
                     .map_err(invalid)?;
@@ -754,16 +772,14 @@ async fn api(
         ("POST", "/api/account/turnstile") => {
             turnstile::change(shared, transport, peer, headers, body).await
         }
-        ("GET", "/api/filter/subscriptions") => {
-            Ok(json!(shared.manager.lock().await.filters.snapshot()))
-        }
+        ("GET", "/api/filter/subscriptions") => Ok(json!(shared.observation.filters.snapshot())),
         (
             "POST",
             "/api/filter/subscriptions/prepare"
             | "/api/filter/subscriptions/refresh"
             | "/api/filter/check",
         ) => filters::api(shared, transport, headers, path, body).await,
-        ("GET", "/api/updates") => Ok(shared.manager.lock().await.updates.view()),
+        ("GET", "/api/updates") => Ok(shared.observation.updates.view()),
         ("POST", "/api/updates/apply") => {
             let input: updates::operation::Apply = decode(body)?;
             let permit =
@@ -860,8 +876,9 @@ async fn api(
                 .await?;
             tokio::spawn(async move {
                 let _permit = permit;
-                let mut manager = shared.manager.lock().await;
-                manager.reload_certificates("api").await.map_err(invalid)
+                Manager::reload_certificates(&shared.manager, "api")
+                    .await
+                    .map_err(invalid)
             })
             .await
             .map_err(|_| internal())?
@@ -888,9 +905,9 @@ async fn api(
         ("POST", "/api/cache/inspect") => {
             let input: cache::Inspect = decode(body)?;
             let (query, subnet) = input.prepare().map_err(invalid)?;
-            let manager = shared.manager.lock().await;
-            let resolver = manager
-                .resolver()
+            let resolver = shared
+                .observation
+                .running_resolver()
                 .ok_or_else(|| error(StatusCode::CONFLICT, "DNS_STOPPED", "DNS is not running"))?;
             let cache = resolver.cache();
             let now = Instant::now();
@@ -966,7 +983,7 @@ async fn api(
             Ok(json!({"valid":true,"restart_required":restart_required,"transport_change":change}))
         }
         ("POST", "/api/config/rollback/preview") => {
-            let input: Revision = decode(body)?;
+            let input: RollbackPreview = decode(body)?;
             let manager = shared.manager.lock().await;
             let saved = manager.saved.as_ref().ok_or_else(internal)?;
             if saved.revision != input.revision {
@@ -1008,6 +1025,9 @@ async fn api(
                         "REVISION",
                         "Configuration changed; reload before saving",
                     ));
+                }
+                if toml.as_ref() == Some(&saved.toml) {
+                    return Ok(json!({"revision":saved.revision,"restart_required":false,"transport_change":null}));
                 }
                 let toml = toml.or_else(|| saved.previous.clone()).ok_or_else(|| {
                     error(
@@ -1119,7 +1139,7 @@ async fn handle_inner(
             if unsafe_method {
                 site != "same-origin"
             } else {
-                site == "cross-site" && !document_navigation
+                site != "same-origin" && site != "none" && !document_navigation
             }
         })
     {
@@ -1160,10 +1180,13 @@ async fn handle_inner(
         return live::upgrade(&shared, &transport, parts).await;
     }
     if unsafe_method
-        && !parts
-            .headers
-            .get("content-type")
-            .is_some_and(|v| v.to_str().unwrap_or("").split(';').next() == Some("application/json"))
+        && !parts.headers.get("content-type").is_some_and(|v| {
+            v.to_str()
+                .unwrap_or("")
+                .split(';')
+                .next()
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
+        })
     {
         return Err(error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -1308,6 +1331,7 @@ pub async fn serve(
     let mut tasks = JoinSet::new();
     let mut reload_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut reload_pending = false;
+    let mut accepting = crate::transport::accept::Acceptor::new(&listener);
     tokio::pin!(shutdown);
     let result = loop {
         tokio::select! {
@@ -1322,7 +1346,7 @@ pub async fn serve(
                 if reload_pending { reload_pending = false; reload_task = Some(start_signal_reload(shared.clone())); }
             },
             _ = tasks.join_next(), if !tasks.is_empty() => {},
-            incoming = crate::transport::accept::accept(&listener) => {
+            incoming = accepting.accept() => {
                 let (stream,peer) = match incoming {
                     Ok(incoming) => incoming,
                     Err(error) => break Err(error.into()),
@@ -1350,7 +1374,7 @@ pub async fn serve(
     let mut live_tasks = shared.live.close();
     let _ = update_stop.send(true);
     filter_service.request_close();
-    let _transaction = timeout(Duration::from_secs(65), async {
+    let transaction = timeout(Duration::from_secs(65), async {
         let _ = tokio::task::spawn_blocking(move || filter_service.close()).await;
         tasks.shutdown().await;
         while live_tasks.join_next().await.is_some() {}
@@ -1372,8 +1396,17 @@ pub async fn serve(
         anyhow::anyhow!(
             "management transaction did not drain; shutting down without a clean cache snapshot"
         )
-    })??;
-    manager.lock().await.terminal_shutdown().await;
+    })
+    .and_then(|permit| permit.map_err(anyhow::Error::from));
+    if let Err(error) = &transaction {
+        eprintln!("{error}");
+    }
+    manager
+        .lock()
+        .await
+        .terminal_shutdown(transaction.is_ok())
+        .await;
+    let _transaction = transaction?;
     result
 }
 
@@ -1423,13 +1456,7 @@ fn start_signal_reload(shared: Arc<Shared>) -> tokio::task::JoinHandle<()> {
             eprintln!("PariNS certificate reload skipped: software update is in progress");
             return;
         }
-        match shared
-            .manager
-            .lock()
-            .await
-            .reload_certificates("signal")
-            .await
-        {
+        match Manager::reload_certificates(&shared.manager, "signal").await {
             Ok(result) => eprintln!("PariNS certificate reload: {}", result["outcome"]),
             Err(_) => eprintln!(
                 "PariNS certificate reload failed; previous identities retained (see authenticated status)"
@@ -1494,6 +1521,8 @@ mod tests {
             HeaderValue::from_str(&session.binding).unwrap(),
         );
         let mut cookie = None;
+        use futures_util::FutureExt;
+        let guard = manager.lock().await;
         let view = api(
             shared.clone(),
             transport,
@@ -1506,14 +1535,16 @@ mod tests {
             },
             &mut cookie,
         )
-        .await
+        .now_or_never()
+        .expect("update status bypasses Manager")
         .unwrap();
+        drop(guard);
         assert_eq!(view["frozen"], true);
         assert_eq!(view["check"]["state"], "unchecked");
         assert!(!temp.path().join("state/update-state.json").exists());
         assert!(cookie.is_none());
         let _shutdown = shared.mutation.acquire().await.unwrap();
-        manager.lock().await.terminal_shutdown().await;
+        manager.lock().await.terminal_shutdown(true).await;
     }
 
     #[tokio::test]
@@ -1792,7 +1823,7 @@ mod tests {
         ));
         assert!(!secret_matches(&token[..63], &token));
         let _shutdown = shared.mutation.acquire().await.unwrap();
-        manager.lock().await.terminal_shutdown().await;
+        manager.lock().await.terminal_shutdown(true).await;
     }
 
     #[test]

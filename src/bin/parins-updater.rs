@@ -55,6 +55,7 @@ fn install_preflight() -> anyhow::Result<()> {
         "privileged preflight identity"
     );
 
+    close_inherited_fds()?;
     let namespace = File::open(mount)?;
     setns(&namespace, CloneFlags::CLONE_NEWNS)?;
     drop(namespace);
@@ -97,4 +98,58 @@ fn install_preflight() -> anyhow::Result<()> {
             .exec()
             .into(),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn close_inherited_fds() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::os::fd::RawFd;
+
+    let fds = std::fs::read_dir("/proc/self/fd")?
+        .map(|entry| {
+            entry?
+                .file_name()
+                .to_str()
+                .context("invalid descriptor name")?
+                .parse::<RawFd>()
+                .context("invalid descriptor number")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for fd in fds.into_iter().filter(|&fd| fd >= 3) {
+        match nix::unistd::close(fd) {
+            Ok(()) | Err(nix::errno::Errno::EBADF) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn preflight_closes_inherited_descriptor() {
+        if std::env::var_os("PARINS_TEST_INHERITED_FD").is_some() {
+            let fd = "/proc/self/fd/7";
+            assert_eq!(
+                std::fs::read_link(fd).unwrap(),
+                std::path::Path::new("/dev/null")
+            );
+            super::close_inherited_fds().unwrap();
+            assert!(!std::path::Path::new(fd).exists());
+            return;
+        }
+        let output = std::process::Command::new("sh")
+            .args(["-c", "exec 7</dev/null; exec \"$@\"", "sh"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::preflight_closes_inherited_descriptor"])
+            .env("PARINS_TEST_INHERITED_FD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

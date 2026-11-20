@@ -1,4 +1,5 @@
 //! Fixed-purpose privileged updater and owner of the installation journal.
+//! Recovery verification publishes the rollback phase before waiting on the restored process.
 mod fs;
 mod journal;
 mod readiness;
@@ -85,8 +86,10 @@ pub async fn run_cli() -> Result<()> {
     match args[0].as_str() {
         "register" => executor.register().await,
         "run" => executor.run().await,
-        "recover" => executor.recover(false).await,
-        "boot-recover" => executor.recover(true).await,
+        "recover" | "boot-recover" => {
+            validate_units().await?;
+            executor.recover(args[0] == "boot-recover").await
+        }
         "install-check" => executor.install_check(),
         "install-restore" => executor.install_restore(),
         "install-verify" => executor.install_verify(&args[1]).await,
@@ -402,6 +405,9 @@ impl Executor {
             }
             Request::Abort {} => self.abort(journal, request).and(units),
             Request::VerifyRecovery {} => {
+                if terminal_fence(journal, request)? {
+                    return self.publish(journal);
+                }
                 let op = matching(journal, request)?;
                 ensure!(
                     op.status.phase == Phase::AwaitingReadiness,
@@ -411,6 +417,13 @@ impl Executor {
                     self.finish(journal, Phase::ManualRequired, Some("readiness_failed"))?;
                     return Err(error);
                 }
+                let op = journal.operation.as_mut().context("missing operation")?;
+                op.pending_launch
+                    .as_mut()
+                    .context("missing pending launch")?
+                    .phase = Phase::RollingBack;
+                op.rollback_started = true;
+                self.phase(journal, Phase::RollingBack)?;
                 if self.wait_ready(journal).await.is_ok() {
                     self.finish(journal, Phase::RolledBack, Some("interrupted"))
                 } else {
@@ -885,47 +898,49 @@ impl Executor {
         }
     }
     async fn recover(&mut self, boot: bool) -> Result<()> {
-        validate_units().await?;
         let mut journal = Journal::load(&self.private)?;
+        self.recover_journal(boot, &mut journal).await
+    }
+    async fn recover_journal(&mut self, boot: bool, journal: &mut Journal) -> Result<()> {
         if journal.installation_pending.is_some() {
             ensure!(
                 self.actual_hash()? == journal.installed.sha256,
                 "pending installation identity differs"
             );
-            return self.publish(&journal);
+            return self.publish(journal);
         }
         let Some(op) = &journal.operation else {
             ensure!(
                 self.actual_hash()? == journal.installed.sha256,
                 "unknown installed binary"
             );
-            return self.publish(&journal);
+            return self.publish(journal);
         };
         if op.status.phase.terminal() {
             ensure!(
                 self.actual_hash()? == journal.installed.sha256,
                 "unknown installed binary"
             );
-            return self.publish(&journal);
+            return self.publish(journal);
         }
-        if op.status.phase == Phase::Staged && !boot {
-            return self.publish(&journal);
+        if !boot && matches!(op.status.phase, Phase::Staged | Phase::AwaitingReadiness) {
+            return self.publish(journal);
         }
         if op.status.phase.precommit() {
-            return self.finish(&mut journal, Phase::Failed, Some("interrupted"));
+            return self.finish(journal, Phase::Failed, Some("interrupted"));
         }
         if !boot && !manager_running().await {
-            return self.phase(&mut journal, Phase::AwaitingBootRecovery);
+            return self.phase(journal, Phase::AwaitingBootRecovery);
         }
         if op.rollback_started && !boot {
             if self.actual_hash()? == op.old.sha256
                 && op.pending_launch.is_some()
-                && self.wait_ready(&journal).await.is_ok()
+                && self.wait_ready(journal).await.is_ok()
             {
-                return self.finish(&mut journal, Phase::RolledBack, Some("interrupted"));
+                return self.finish(journal, Phase::RolledBack, Some("interrupted"));
             }
             return self.finish(
-                &mut journal,
+                journal,
                 Phase::ManualRequired,
                 Some("manual_recovery_required"),
             );
@@ -937,18 +952,20 @@ impl Executor {
                 .await
                 .is_ok_and(|s| s.get("ActiveState").is_some_and(|v| v == "active"))
         {
-            self.launch(&mut journal, Phase::RollingBack)?;
-            if self.wait_ready(&journal).await.is_ok() {
-                return self.finish(&mut journal, Phase::RolledBack, Some("interrupted"));
+            journal
+                .operation
+                .as_mut()
+                .context("missing operation")?
+                .rollback_started = true;
+            self.launch(journal, Phase::RollingBack)?;
+            if self.wait_ready(journal).await.is_ok() {
+                return self.finish(journal, Phase::RolledBack, Some("interrupted"));
             }
+            return self.finish(journal, Phase::ManualRequired, Some("readiness_failed"));
         }
-        if self
-            .rollback(&mut journal, "interrupted", boot)
-            .await
-            .is_err()
-        {
+        if self.rollback(journal, "interrupted", boot).await.is_err() {
             self.finish(
-                &mut journal,
+                journal,
                 Phase::ManualRequired,
                 Some("manual_recovery_required"),
             )?;
@@ -1393,6 +1410,25 @@ mod tests {
                 "TimeoutStopSec="
             ) < STOP_WAIT_SECS
         );
+    }
+
+    #[test]
+    fn recovery_is_required_before_the_managed_service_and_updater() {
+        for unit in [
+            include_str!("../../../deploy/parins-managed.service"),
+            include_str!("../../../deploy/parins-updater.service"),
+        ] {
+            assert!(
+                unit.lines()
+                    .any(|line| line == "Requires=parins-update-recovery.service")
+            );
+            assert!(
+                unit.lines()
+                    .any(|line| line.strip_prefix("After=").is_some_and(|units| units
+                        .split_whitespace()
+                        .any(|u| u == "parins-update-recovery.service")))
+            );
+        }
     }
 
     fn stage_request() -> Inbox {
@@ -1841,6 +1877,16 @@ mod tests {
                 (recorded.phase, recorded.reason.as_deref()),
                 (terminal.0, Some(terminal.1))
             );
+            if matches!(inbox.request, Request::VerifyRecovery {}) {
+                executor
+                    .handle(&mut journal, &inbox, units())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(saved().status().last_operation).unwrap(),
+                    serde_json::to_value(status.last_operation).unwrap()
+                );
+            }
         }
     }
 
@@ -1952,6 +1998,32 @@ mod tests {
             assert!(pending.skip_cache_restore);
             assert_eq!(pending.identity, journal.installed);
         }
+    }
+
+    #[tokio::test]
+    async fn non_boot_recovery_preserves_the_restored_launch_awaiting_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut executor = Executor::fixture(dir.path()).unwrap();
+        let mut journal = previous_journal();
+        journal.last_operation = None;
+        executor
+            .launch(&mut journal, Phase::AwaitingReadiness)
+            .unwrap();
+        let journal_path = dir.path().join("journal.json");
+        let before = std::fs::read(&journal_path).unwrap();
+        let launch = journal.status().pending_launch.unwrap();
+
+        executor.recover_journal(false, &mut journal).await.unwrap();
+
+        assert_eq!(std::fs::read(journal_path).unwrap(), before);
+        let status: PublicStatus =
+            serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            status.active_operation.unwrap().phase,
+            Phase::AwaitingReadiness
+        );
+        assert_eq!(status.pending_launch, Some(launch));
     }
 
     #[test]

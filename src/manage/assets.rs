@@ -96,11 +96,12 @@ impl Asset {
     pub(super) fn response(&self, request: &Parts) -> Response {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(self.kind));
-        if request
-            .uri
-            .query()
-            .and_then(|query| query.strip_prefix("v="))
-            == Some(self.version())
+        if request.uri.path() != "/"
+            && request
+                .uri
+                .query()
+                .and_then(|query| query.strip_prefix("v="))
+                == Some(self.version())
         {
             headers.insert(
                 header::CACHE_CONTROL,
@@ -248,6 +249,14 @@ mod tests {
         let document = find("/").unwrap().response(&request("GET", "/", &all));
         assert!(!document.headers().contains_key(header::CACHE_CONTROL));
         assert!(!document.headers().contains_key(header::CONTENT_ENCODING));
+        let index = find("/").unwrap();
+        let versioned_index = format!("/?v={}", index.version());
+        let versioned_document = index.response(&request("GET", &versioned_index, &all));
+        assert!(
+            !versioned_document
+                .headers()
+                .contains_key(header::CACHE_CONTROL)
+        );
         for path in ["/theme-init.js", "/favicon.svg", "/assets/app.js"] {
             let asset = find(path).unwrap();
             let current = asset.response(&request("GET", &versioned(path), &all));

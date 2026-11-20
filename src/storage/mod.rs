@@ -18,14 +18,14 @@ use std::{
     fs::File,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -33,6 +33,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Conflict { current_epoch: u64 },
     StorageUnavailable(String),
+    DatabaseFull(String),
     Busy,
     Invalid(String),
 }
@@ -42,8 +43,10 @@ impl std::fmt::Display for Error {
             Self::Conflict { current_epoch } => {
                 write!(f, "storage epoch conflict; current epoch {current_epoch}")
             }
-            Self::StorageUnavailable(message) => write!(f, "STORAGE_UNAVAILABLE: {message}"),
-            Self::Busy => write!(f, "storage control queue is full"),
+            Self::StorageUnavailable(message) | Self::DatabaseFull(message) => {
+                write!(f, "STORAGE_UNAVAILABLE: {message}")
+            }
+            Self::Busy => write!(f, "storage is busy"),
             Self::Invalid(message) => f.write_str(message),
         }
     }
@@ -51,7 +54,11 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
-        Self::StorageUnavailable(error.to_string())
+        match error.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::OperationInterrupted) => Self::Busy,
+            Some(rusqlite::ErrorCode::DiskFull) => Self::DatabaseFull(error.to_string()),
+            _ => Self::StorageUnavailable(error.to_string()),
+        }
     }
 }
 impl From<serde_json::Error> for Error {
@@ -273,6 +280,7 @@ pub(super) struct LogItem {
     enqueued_at: Instant,
 }
 const PENDING_LOG_EPOCH: u64 = u64::MAX;
+const REQUEST_BUDGET: Duration = Duration::from_secs(10);
 type Reply<T> = oneshot::Sender<Result<T>>;
 #[cfg(test)]
 type Inspection = Box<dyn FnOnce(&mut rusqlite::Connection) -> Result<()> + Send>;
@@ -283,15 +291,44 @@ enum Command {
     Statistics(HistoryOptions, Reply<StatisticsView>),
     ResetTotals(u64, Reply<ClearResult>),
     ClearHistory(u64, Reply<ClearResult>),
-    Flush(Reply<()>),
-    Shutdown(Reply<()>),
     #[cfg(test)]
     Inspect(Inspection, Reply<()>),
 }
+impl Command {
+    fn is_read(&self) -> bool {
+        matches!(
+            self,
+            Self::List(..) | Self::Newer(..) | Self::Statistics(..)
+        )
+    }
+
+    fn cancelled(&self) -> bool {
+        match self {
+            Self::List(_, reply) => reply.is_closed(),
+            Self::Newer(_, _, reply) => reply.is_closed(),
+            Self::Statistics(_, reply) => reply.is_closed(),
+            _ => false,
+        }
+    }
+}
+enum Control {
+    Flush(Reply<()>),
+    Shutdown(Reply<()>),
+}
+pub(crate) struct RuntimeLock(File);
+impl Drop for RuntimeLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            eprintln!("release runtime directory lock: {error}");
+        }
+    }
+}
 struct Inner {
+    lock: Weak<RuntimeLock>,
     shared: Arc<Shared>,
     logs: mpsc::SyncSender<LogItem>,
-    controls: mpsc::SyncSender<Command>,
+    commands: async_mpsc::Sender<Command>,
+    controls: async_mpsc::Sender<Control>,
     worker: thread::Thread,
 }
 impl Drop for Inner {
@@ -338,20 +375,35 @@ impl Handle {
             metrics,
         });
         let (logs, incoming) = mpsc::sync_channel(65536);
-        let (controls, commands) = mpsc::sync_channel(16);
+        let (commands, requests) = async_mpsc::channel(16);
+        let (controls, priority) = async_mpsc::channel(2);
         let (ready, receive) = mpsc::sync_channel(1);
+        let directory = directory.map(|(dir, lock)| (dir, Arc::new(RuntimeLock(lock))));
+        let lock = directory
+            .as_ref()
+            .map(|(_, lock)| Arc::downgrade(lock))
+            .unwrap_or_default();
         let worker_shared = shared.clone();
         let join = thread::Builder::new()
             .name("parins-storage".into())
             .spawn(move || {
-                database::run(directory, worker_shared, incoming, commands, ready);
+                database::run(
+                    directory,
+                    worker_shared,
+                    incoming,
+                    requests,
+                    priority,
+                    ready,
+                );
             })?;
         receive
             .recv()
             .map_err(|_| anyhow::anyhow!("storage thread failed to initialize"))?;
         let handle = Self(Arc::new(Inner {
+            lock,
             shared: shared.clone(),
             logs,
+            commands,
             controls,
             worker: join.thread().clone(),
         }));
@@ -369,6 +421,9 @@ impl Handle {
                 }
             })?;
         Ok(handle)
+    }
+    pub(crate) fn lock_lease(&self) -> Option<Arc<RuntimeLock>> {
+        self.0.lock.upgrade()
     }
     pub fn publish_settings(&self, settings: RuntimeSettings, revision: u64) {
         let mut desired = self.0.shared.desired.lock().expect("storage settings");
@@ -402,7 +457,9 @@ impl Handle {
     }
     pub(crate) fn record_log(&self, epoch: u64, entry: Entry) {
         let s = &self.0.shared;
-        if !s.enabled.load(Ordering::Acquire) || epoch != s.log_epoch.load(Ordering::Acquire) {
+        if !s.enabled.load(Ordering::Acquire)
+            || (epoch != PENDING_LOG_EPOCH && epoch != s.log_epoch.load(Ordering::Acquire))
+        {
             return;
         }
         let charge = entry_charge(&entry);
@@ -463,14 +520,30 @@ impl Handle {
     }
     async fn request<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T> {
         let (send, receive) = oneshot::channel();
-        self.0.controls.try_send(make(send)).map_err(|e| match e {
-            mpsc::TrySendError::Full(_) => Error::Busy,
-            mpsc::TrySendError::Disconnected(_) => {
+        self.0.commands.try_send(make(send)).map_err(|e| match e {
+            async_mpsc::error::TrySendError::Full(_) => Error::Busy,
+            async_mpsc::error::TrySendError::Closed(_) => {
                 Error::StorageUnavailable("worker stopped".into())
             }
         })?;
         self.0.worker.unpark();
-        tokio::time::timeout(Duration::from_secs(10), receive)
+        Self::await_reply(receive, tokio::time::Instant::now() + REQUEST_BUDGET).await
+    }
+    async fn control(&self, make: impl FnOnce(Reply<()>) -> Control) -> Result<()> {
+        let (send, receive) = oneshot::channel();
+        let deadline = tokio::time::Instant::now() + REQUEST_BUDGET;
+        tokio::time::timeout_at(deadline, self.0.controls.send(make(send)))
+            .await
+            .map_err(|_| Error::StorageUnavailable("control queue timed out".into()))?
+            .map_err(|_| Error::StorageUnavailable("worker stopped".into()))?;
+        self.0.worker.unpark();
+        Self::await_reply(receive, deadline).await
+    }
+    async fn await_reply<T>(
+        receive: oneshot::Receiver<Result<T>>,
+        deadline: tokio::time::Instant,
+    ) -> Result<T> {
+        tokio::time::timeout_at(deadline, receive)
             .await
             .map_err(|_| {
                 Error::StorageUnavailable("operation timed out; outcome may be unknown".into())
@@ -486,6 +559,12 @@ impl Handle {
         self.request(|reply| Command::List(options, reply)).await
     }
     pub async fn newer_logs(&self, after_id: Option<u64>, filter: ListOptions) -> Result<Newer> {
+        filter
+            .validate()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        if after_id.is_some_and(|id| id > i64::MAX as u64) {
+            return Err(Error::Invalid("query log cursor is out of range".into()));
+        }
         self.request(|reply| Command::Newer(after_id, filter, reply))
             .await
     }
@@ -509,10 +588,10 @@ impl Handle {
         self.request(|r| Command::ClearHistory(epoch, r)).await
     }
     pub async fn flush(&self) -> Result<()> {
-        self.request(Command::Flush).await
+        self.control(Control::Flush).await
     }
     pub async fn shutdown(&self) -> Result<()> {
-        self.request(Command::Shutdown).await
+        self.control(Control::Shutdown).await
     }
 }
 

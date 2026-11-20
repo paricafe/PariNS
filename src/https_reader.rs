@@ -83,20 +83,7 @@ impl HttpsReader {
                 .take(17)
                 .collect();
             validate_addresses(&addresses)?;
-            let mut connected = None;
-            for address in addresses {
-                if let Ok(socket) = TcpStream::connect(address).await {
-                    verify_peer(
-                        address,
-                        socket
-                            .peer_addr()
-                            .map_err(|_| ReaderError::new("network_error"))?,
-                    )?;
-                    connected = Some(socket);
-                    break;
-                }
-            }
-            let socket = connected.ok_or_else(|| ReaderError::new("network_error"))?;
+            let socket = connect_addresses(addresses, TcpStream::connect).await?;
             let stream = self.tls_connect(host, socket).await?;
             exchange(stream, method, &uri, headers, body).await
         })
@@ -117,6 +104,24 @@ impl HttpsReader {
             .map_err(|_| ReaderError::new("tls_error"))
     }
 }
+async fn connect_addresses<F: Future<Output = std::io::Result<TcpStream>>>(
+    addresses: Vec<SocketAddr>,
+    mut connect: impl FnMut(SocketAddr) -> F,
+) -> Result<TcpStream, ReaderError> {
+    for address in addresses {
+        if let Ok(Ok(socket)) = timeout(Duration::from_secs(3), connect(address)).await {
+            verify_peer(
+                address,
+                socket
+                    .peer_addr()
+                    .map_err(|_| ReaderError::new("network_error"))?,
+            )?;
+            return Ok(socket);
+        }
+    }
+    Err(ReaderError::new("network_error"))
+}
+
 async fn exchange<S>(
     stream: S,
     method: http::Method,
@@ -324,6 +329,27 @@ mod tests {
         assert!(validate_addresses(&[public; 17]).is_err());
         assert!(verify_peer(public, public).is_ok());
         assert!(verify_peer(public, private).is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_address_leaves_time_to_connect_to_next_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reachable = listener.local_addr().unwrap();
+        let stalled = "192.0.2.1:443".parse().unwrap();
+        let socket = timeout(
+            CONNECT_TIMEOUT,
+            connect_addresses(vec![stalled, reachable], |address| async move {
+                if address == stalled {
+                    std::future::pending().await
+                } else {
+                    TcpStream::connect(address).await
+                }
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(socket.peer_addr().unwrap(), reachable);
     }
 
     #[test]

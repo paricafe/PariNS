@@ -1,5 +1,6 @@
 //! Read-only management observation, independent of the configuration mutex.
-use super::Active;
+use super::{Active, updates::Coordinator};
+use crate::filter_subscriptions::service::Service;
 use crate::{
     cache::persistence::SnapshotReport,
     resolver::Resolver,
@@ -35,6 +36,18 @@ pub(super) struct Metadata {
     pub running: Option<Running>,
 }
 
+impl Metadata {
+    fn resolver(&self, health: &crate::runtime_health::Snapshot) -> Option<Arc<Resolver>> {
+        self.running
+            .as_ref()
+            .filter(|_| {
+                health.generation == self.generation
+                    && (health.ready || health.state == HealthState::Degraded)
+            })
+            .and_then(|running| running.resolver.upgrade())
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Phase {
@@ -46,21 +59,35 @@ pub(super) enum Phase {
 
 pub(super) struct Observation {
     pub services: Arc<RuntimeServices>,
+    pub filters: Arc<Service>,
+    pub updates: Arc<Coordinator>,
     active: Arc<Mutex<Active>>,
     metadata: RwLock<Metadata>,
 }
 
 impl Observation {
-    pub fn new(services: Arc<RuntimeServices>, active: Arc<Mutex<Active>>) -> Arc<Self> {
+    pub fn new(
+        services: Arc<RuntimeServices>,
+        active: Arc<Mutex<Active>>,
+        filters: Arc<Service>,
+        updates: Arc<Coordinator>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             services,
             active,
+            filters,
+            updates,
             metadata: RwLock::new(Metadata::default()),
         })
     }
 
     pub fn publish(&self, metadata: Metadata) {
         *self.metadata.write().expect("management observation") = metadata;
+    }
+
+    pub fn running_resolver(&self) -> Option<Arc<Resolver>> {
+        let metadata = self.metadata.read().expect("management observation");
+        metadata.resolver(&self.services.health.snapshot())
     }
 
     pub fn status(&self) -> Value {
@@ -79,13 +106,8 @@ impl Observation {
         } else {
             metadata.phase
         };
-        let resolver = metadata.running.as_ref().and_then(|r| r.resolver.upgrade());
-        let running = metadata.running.as_ref().filter(|_| {
-            resolver.is_some()
-                && health.generation == metadata.generation
-                && (health.ready || health.state == HealthState::Degraded)
-        });
-        let resolver = resolver.filter(|_| running.is_some());
+        let resolver = metadata.resolver(&health);
+        let running = metadata.running.as_ref().filter(|_| resolver.is_some());
         let cache = resolver.as_ref().map(|r| r.cache());
         health.ready &= phase == Phase::Stable;
         let transport = self.active.lock().unwrap().snapshot.clone();

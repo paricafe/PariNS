@@ -24,6 +24,9 @@ pub(super) async fn run(shared: Arc<Shared>, mut stop: tokio::sync::watch::Recei
             continue;
         };
         let mut manager = shared.manager.lock().await;
+        if *stop.borrow() {
+            return;
+        }
         if due(&mut manager) {
             manager.retry_startup().await;
         }
@@ -102,6 +105,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        shared.manager.lock().await.terminal_shutdown().await;
+        shared.manager.lock().await.terminal_shutdown(true).await;
     }
 }

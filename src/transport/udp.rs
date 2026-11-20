@@ -28,6 +28,11 @@ impl Socket {
         Ok(Self(socket))
     }
 
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn socket(&self) -> &UdpSocket {
+        &self.0
+    }
+
     pub(crate) async fn recv(
         &self,
         bytes: &mut [u8],

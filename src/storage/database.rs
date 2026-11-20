@@ -39,6 +39,9 @@ struct Database {
 }
 
 const CHECK_PROGRESS_OPS: std::ffi::c_int = if cfg!(test) { 1 } else { 1000 };
+const EVICTION_BATCH: u64 = 256;
+const MAX_WRITE_EVICTION: u64 = 4 * EVICTION_BATCH;
+const FLUSH_BUDGET: Duration = Duration::from_secs(8);
 #[cfg(test)]
 pub(super) static CHECK_DELAYS: Mutex<Vec<(PathBuf, Duration)>> = Mutex::new(Vec::new());
 #[cfg(test)]
@@ -53,13 +56,14 @@ fn test_check_delay(directory: Option<&Path>) -> Option<Duration> {
 }
 
 pub(super) fn run(
-    directory: Option<(PathBuf, File)>,
+    directory: Option<(PathBuf, Arc<RuntimeLock>)>,
     shared: Arc<Shared>,
     logs: mpsc::Receiver<LogItem>,
-    commands: mpsc::Receiver<Command>,
+    mut commands: async_mpsc::Receiver<Command>,
+    mut controls: async_mpsc::Receiver<Control>,
     ready: mpsc::SyncSender<()>,
 ) {
-    let (directory, _lock) = match directory {
+    let (directory, lock) = match directory {
         Some((dir, lock)) => (Some(dir), Some(lock)),
         None => (None, None),
     };
@@ -91,16 +95,28 @@ pub(super) fn run(
         if let Some(join) = checking.take_if(|join| join.is_finished()) {
             database = finish_check(&shared, join);
         }
-        if let Ok(command) = commands.try_recv() {
-            if let Command::Shutdown(reply) = command {
+        match controls.try_recv() {
+            Ok(Control::Shutdown(reply)) => {
+                commands.close();
                 shared.stop.store(true, Ordering::Release);
                 if let Some(join) = checking.take() {
                     database = finish_check(&shared, join);
                 }
+                if let Some(db) = database.as_mut() {
+                    db.apply_desired(&shared);
+                }
+                while let Some(command) = commands.blocking_recv() {
+                    if command.is_read() {
+                        continue;
+                    }
+                    match database.as_mut() {
+                        Some(db) => db.command(command, &shared),
+                        None => reject(command, &shared),
+                    }
+                }
                 let result = if let Some(db) = database.as_mut() {
-                    let result = db
-                        .drain(&shared, &logs, Instant::now() + Duration::from_secs(8))
-                        .and_then(|()| db.checkpoint(true));
+                    let drained = db.drain(&shared, &logs, Instant::now() + FLUSH_BUDGET);
+                    let result = drained.and(db.checkpoint(true));
                     db.report_error(&shared, &result);
                     db.update_status(&shared);
                     result
@@ -108,21 +124,29 @@ pub(super) fn run(
                     Err(Error::StorageUnavailable("database unavailable".into()))
                 };
                 drop(database);
-                let unlocked = _lock
-                    .as_ref()
-                    .map_or(Ok(()), File::unlock)
-                    .map_err(|error| {
-                        Error::StorageUnavailable(format!(
-                            "release runtime directory lock: {error}"
-                        ))
-                    });
-                drop(_lock);
-                let _ = reply.send(result.and(unlocked));
+                drop(lock);
+                let _ = reply.send(result);
                 return;
             }
+            Ok(Control::Flush(reply)) => {
+                let result = database.as_mut().map_or_else(
+                    || Err(unavailable(&shared)),
+                    |db| {
+                        db.apply_desired(&shared);
+                        db.flush(&shared, &logs)
+                    },
+                );
+                let _ = reply.send(result);
+                continue;
+            }
+            Err(_) => {}
+        }
+        if let Ok(command) = commands.try_recv()
+            && !command.cancelled()
+        {
             if let Some(db) = database.as_mut() {
                 db.apply_desired(&shared);
-                db.command(command, &shared, &logs);
+                db.command(command, &shared);
             } else {
                 reject(command, &shared);
             }
@@ -135,7 +159,7 @@ pub(super) fn run(
             if last_flush.elapsed() >= Duration::from_millis(db.settings.storage.flush_interval_ms)
                 || shared.queue_entries.load(Ordering::Relaxed) >= 256
             {
-                let result = db.flush_batch(&shared, &logs);
+                let result = db.flush_batch(&shared, &logs, Instant::now() + FLUSH_BUDGET);
                 db.report_error(&shared, &result);
                 last_flush = Instant::now();
             }
@@ -267,17 +291,31 @@ fn record_cleanup(conn: &Connection, reason: CleanupReason, removed: u64, at: u6
     Ok(())
 }
 
+fn evict_database(conn: &Connection, limit: u64, now: u64) -> Result<()> {
+    let mut removed = conn
+        .prepare_cached(
+            "DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT ?)",
+        )?
+        .execute([limit])?;
+    if removed == 0 {
+        removed = conn.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY retention_ms, rowid LIMIT ?)")?.execute([limit])?;
+    }
+    record_cleanup(conn, CleanupReason::DatabaseLimit, removed as u64, now)
+}
+
+fn unavailable(shared: &Shared) -> Error {
+    let status = shared.status.lock().expect("storage status");
+    Error::StorageUnavailable(status.error.clone().unwrap_or_else(|| {
+        if status.health == "checking" {
+            "runtime database check in progress".into()
+        } else {
+            "database unavailable".into()
+        }
+    }))
+}
+
 fn reject(command: Command, shared: &Shared) {
-    let error = {
-        let status = shared.status.lock().expect("storage status");
-        Error::StorageUnavailable(status.error.clone().unwrap_or_else(|| {
-            if status.health == "checking" {
-                "runtime database check in progress".into()
-            } else {
-                "database unavailable".into()
-            }
-        }))
-    };
+    let error = unavailable(shared);
     match command {
         Command::List(_, r) => {
             let _ = r.send(Err(error));
@@ -289,9 +327,6 @@ fn reject(command: Command, shared: &Shared) {
             let _ = r.send(Err(error));
         }
         Command::Statistics(_, r) => {
-            let _ = r.send(Err(error));
-        }
-        Command::Flush(r) | Command::Shutdown(r) => {
             let _ = r.send(Err(error));
         }
         #[cfg(test)]
@@ -615,7 +650,7 @@ impl Database {
         }
         let points = epoch(&tx, "point_count")?;
         if points > self.settings.statistics.max_samples as u64 {
-            let removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT ?)")?.execute([(points - self.settings.statistics.max_samples as u64).min(256)])?;
+            let removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY retention_ms, rowid LIMIT ?)")?.execute([(points - self.settings.statistics.max_samples as u64).min(256)])?;
             record_cleanup(&tx, CleanupReason::EntryLimit, removed as u64, now)?;
         }
         tx.commit()?;
@@ -628,11 +663,7 @@ impl Database {
             / size;
         if pages.saturating_sub(free) + 32 >= cap {
             let tx = self.conn.transaction()?;
-            let mut removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT 256)")?.execute([])?;
-            if removed == 0 {
-                removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT 256)")?.execute([])?;
-            }
-            record_cleanup(&tx, CleanupReason::DatabaseLimit, removed as u64, now)?;
+            evict_database(&tx, EVICTION_BATCH, now)?;
             tx.commit()?;
         }
         self.checkpoint(true)?;
@@ -665,7 +696,7 @@ impl Database {
         record_cleanup(&tx, CleanupReason::Age, removed as u64, now)?;
         let points = epoch(&tx, "point_count")?;
         if points > self.settings.statistics.max_samples as u64 {
-            let removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT ?)")?.execute( [(points - self.settings.statistics.max_samples as u64).min(256)])?;
+            let removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY retention_ms, rowid LIMIT ?)")?.execute( [(points - self.settings.statistics.max_samples as u64).min(256)])?;
             record_cleanup(&tx, CleanupReason::EntryLimit, removed as u64, now)?;
         }
         tx.prepare_cached("UPDATE metadata SET value=? WHERE key='clock_lower_ms'")?
@@ -679,16 +710,17 @@ impl Database {
         self.age_pending = age_pending;
         self.conn.execute_batch("PRAGMA incremental_vacuum(256)")?;
         let (size, pages, free) = self.page_info()?;
-        let desired = self.settings.storage.max_database_bytes / size;
+        let desired = self
+            .settings
+            .storage
+            .max_database_bytes
+            .saturating_sub(1_048_576)
+            / size;
         if (pages > desired && free == 0)
             || (pages <= desired && pages.saturating_sub(free) + 32 >= desired && free < 32)
         {
             let tx = self.conn.transaction()?;
-            let mut removed = tx.prepare_cached("DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY id LIMIT 256)")?.execute( [])?;
-            if removed == 0 {
-                removed = tx.prepare_cached("DELETE FROM statistics_points WHERE rowid IN (SELECT rowid FROM statistics_points ORDER BY time_ms LIMIT 256)")?.execute( [])?;
-            }
-            record_cleanup(&tx, CleanupReason::DatabaseLimit, removed as u64, now)?;
+            evict_database(&tx, EVICTION_BATCH, now)?;
             tx.commit()?;
         }
         self.conn.execute_batch("PRAGMA incremental_vacuum(256)")?;
@@ -696,7 +728,12 @@ impl Database {
         self.set_page_cap()?;
         Ok(())
     }
-    fn flush_batch(&mut self, shared: &Shared, logs: &mpsc::Receiver<LogItem>) -> Result<()> {
+    fn flush_batch(
+        &mut self,
+        shared: &Shared,
+        logs: &mpsc::Receiver<LogItem>,
+        deadline: Instant,
+    ) -> Result<()> {
         let mut batch = Vec::with_capacity(256);
         for _ in 0..256 {
             let Ok(item) = logs.try_recv() else {
@@ -711,14 +748,15 @@ impl Database {
         if batch.is_empty() && latest.is_none() && points.is_empty() {
             return Ok(());
         }
-        let result = self.write_batch(shared, &batch, latest.as_ref(), &points);
+        let (written, result) =
+            self.write_with_headroom(shared, &batch, latest.as_ref(), &points, deadline);
         for item in &batch {
             release(shared, item);
         }
         if result.is_err() {
             shared
                 .dropped
-                .record_many(&shared.dropped.io_failure, batch.len() as u64);
+                .record_many(&shared.dropped.io_failure, (batch.len() - written) as u64);
             let mut owner = shared.stats.lock().expect("statistics owner");
             if owner.latest.is_none() {
                 owner.latest = latest;
@@ -730,7 +768,8 @@ impl Database {
                     owner.dropped_points = owner.dropped_points.saturating_add(1);
                 }
             }
-        } else {
+        }
+        if written > 0 || result.is_ok() {
             self.refresh_log_state(shared)?;
             self.committed(shared);
         }
@@ -756,18 +795,89 @@ impl Database {
             >= limits.storage.max_database_bytes.saturating_sub(1_048_576) / size
             || self.disk_bytes()? > limits.storage.max_database_bytes)
     }
+    fn write_with_headroom(
+        &mut self,
+        shared: &Shared,
+        batch: &[LogItem],
+        latest: Option<&statistics::Checkpoint>,
+        points: &std::collections::VecDeque<Point>,
+        deadline: Instant,
+    ) -> (usize, Result<()>) {
+        let empty = std::collections::VecDeque::new();
+        let mut written = 0;
+        let mut chunk_size = batch.len();
+        loop {
+            let end = (written + chunk_size).min(batch.len());
+            let last = end == batch.len();
+            let result = self.write_chunk(
+                shared,
+                &batch[written..end],
+                latest.filter(|_| last),
+                if last { points } else { &empty },
+                deadline,
+            );
+            match result {
+                Ok(()) if last => return (end, Ok(())),
+                Ok(()) => written = end,
+                Err(Error::DatabaseFull(_)) if end - written > 1 => {
+                    chunk_size = (end - written) / 2;
+                }
+                Err(error) => return (written, Err(error)),
+            }
+        }
+    }
+    fn write_chunk(
+        &mut self,
+        shared: &Shared,
+        batch: &[LogItem],
+        latest: Option<&statistics::Checkpoint>,
+        points: &std::collections::VecDeque<Point>,
+        deadline: Instant,
+    ) -> Result<()> {
+        let (size, pages, free) = self.page_info()?;
+        let cap = self
+            .settings
+            .storage
+            .max_database_bytes
+            .saturating_sub(1_048_576)
+            / size;
+        let batch_bytes: u64 = batch.iter().map(|item| item.charge).sum();
+        let headroom = 32 + batch_bytes.div_ceil(size);
+        let mut evict = if cap.saturating_sub(pages) + free < headroom {
+            EVICTION_BATCH
+        } else {
+            0
+        };
+        loop {
+            if Instant::now() >= deadline {
+                return Err(Error::StorageUnavailable(
+                    "flush deadline exceeded while recovering database capacity".into(),
+                ));
+            }
+            let result = self.write_batch(shared, batch, latest, points, evict);
+            if !matches!(result, Err(Error::DatabaseFull(_))) || evict == MAX_WRITE_EVICTION {
+                return result;
+            }
+            evict = (evict * 2).max(EVICTION_BATCH);
+        }
+    }
     fn write_batch(
         &mut self,
         shared: &Shared,
         batch: &[LogItem],
         latest: Option<&statistics::Checkpoint>,
         points: &std::collections::VecDeque<Point>,
+        evict: u64,
     ) -> Result<()> {
         let retention_now = self.cleanup_now();
         let tx = self.conn.transaction()?;
         let log_epoch = epoch(&tx, "log_epoch")?;
         let history_epoch = epoch(&tx, "history_epoch")?;
+        if evict > 0 {
+            evict_database(&tx, evict, retention_now)?;
+        }
         let mut inserted = 0u64;
+        let mut oversized = 0u64;
         {
             let mut insert = tx.prepare_cached("INSERT INTO query_log(epoch,time_ms,retention_ms,name,client,qtype,upstream,status,cache,charge,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?;
             for item in batch {
@@ -779,7 +889,7 @@ impl Database {
                 let e = &item.entry;
                 let payload = serde_json::to_vec(e)?;
                 if payload.len() > 131072 {
-                    shared.dropped.record(&shared.dropped.entry_too_large);
+                    oversized += 1;
                     continue;
                 }
                 let retention_ms = retention_now
@@ -840,11 +950,14 @@ impl Database {
                 ])?;
         }
         tx.commit()?;
+        shared
+            .dropped
+            .record_many(&shared.dropped.entry_too_large, oversized);
         shared.log_epoch.store(log_epoch, Ordering::Release);
         Ok(())
     }
 
-    fn command(&mut self, command: Command, shared: &Shared, logs: &mpsc::Receiver<LogItem>) {
+    fn command(&mut self, command: Command, shared: &Shared) {
         match command {
             #[cfg(test)]
             Command::Inspect(action, reply) => {
@@ -883,31 +996,30 @@ impl Database {
                 self.update_status(shared);
                 let _ = reply.send(result);
             }
-            Command::Flush(reply) => {
-                let deadline = Instant::now() + Duration::from_secs(8);
-                let result = self.drain(shared, logs, deadline).and_then(|()| {
-                    loop {
-                        self.cleanup()?;
-                        if !self.age_pending {
-                            break;
-                        }
-                        if Instant::now() >= deadline {
-                            return Err(Error::StorageUnavailable(
-                                "flush deadline exceeded; expired records remain".into(),
-                            ));
-                        }
-                    }
-                    self.last_cleanup = Instant::now();
-                    Ok(())
-                });
-                self.report_error(shared, &result);
-                let refreshed = self.refresh_log_state(shared);
-                self.report_error(shared, &refreshed);
-                self.update_status(shared);
-                let _ = reply.send(result);
-            }
-            Command::Shutdown(_) => unreachable!("run handles shutdown"),
         }
+    }
+    fn flush(&mut self, shared: &Shared, logs: &mpsc::Receiver<LogItem>) -> Result<()> {
+        let deadline = Instant::now() + FLUSH_BUDGET;
+        let result = self.drain(shared, logs, deadline).and_then(|()| {
+            loop {
+                self.cleanup()?;
+                if !self.age_pending {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::StorageUnavailable(
+                        "flush deadline exceeded; expired records remain".into(),
+                    ));
+                }
+            }
+            self.last_cleanup = Instant::now();
+            Ok(())
+        });
+        self.report_error(shared, &result);
+        let refreshed = self.refresh_log_state(shared);
+        self.report_error(shared, &refreshed);
+        self.update_status(shared);
+        result
     }
     fn drain(
         &mut self,
@@ -921,7 +1033,7 @@ impl Database {
             .expect("statistics owner")
             .sample(&shared.metrics, true);
         loop {
-            self.flush_batch(shared, logs)?;
+            self.flush_batch(shared, logs, deadline)?;
             if shared.queue_entries.load(Ordering::Acquire) == 0 {
                 break;
             }
@@ -1009,17 +1121,7 @@ impl Database {
         let mut statement = self.conn.prepare_cached(&sql)?;
         let mut rows = statement.query(rusqlite::params_from_iter(values))?;
         let mut entries = Vec::with_capacity(limit + 1);
-        loop {
-            let row = match rows.next() {
-                Ok(Some(row)) => row,
-                Ok(None) => break,
-                Err(rusqlite::Error::SqliteFailure(code, _))
-                    if code.code == rusqlite::ErrorCode::OperationInterrupted =>
-                {
-                    return Err(Error::Busy);
-                }
-                Err(error) => return Err(error.into()),
-            };
+        while let Some(row) = rows.next()? {
             let id = row.get(0)?;
             let bytes: Vec<u8> = row.get(1)?;
             let mut entry: Entry = serde_json::from_slice(&bytes)?;
@@ -1220,7 +1322,7 @@ impl Database {
         })
     }
     fn report_error<T>(&self, shared: &Shared, result: &Result<T>) {
-        if let Err(Error::StorageUnavailable(error)) = result {
+        if let Err(Error::StorageUnavailable(error) | Error::DatabaseFull(error)) = result {
             let mut s = shared.status.lock().expect("storage status");
             s.health = "degraded".into();
             s.error = Some(error.clone());
@@ -1325,7 +1427,8 @@ impl Database {
 }
 
 fn oldest_log_count(conn: &Connection, excess_bytes: u64) -> Result<usize> {
-    let mut statement = conn.prepare("SELECT charge FROM query_log ORDER BY id LIMIT 256")?;
+    let mut statement =
+        conn.prepare_cached("SELECT charge FROM query_log ORDER BY id LIMIT 256")?;
     let mut rows = statement.query([])?;
     let mut removed_bytes = 0u64;
     let mut count = 0;

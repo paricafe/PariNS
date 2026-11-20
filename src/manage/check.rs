@@ -24,6 +24,7 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
     let config = Config::parse_in(&saved.toml, &dir)?;
     super::runtime::previous_fingerprints(&saved, &dir)?;
     let snapshot = Snapshot::prepare(&config, address)?;
+    store::check_rule_file(&dir, &config)?;
     config.check_non_identity_files()?;
     crate::filter_subscriptions::service::read_only(
         &dir.join("filter-subscriptions"),
@@ -87,6 +88,27 @@ pub fn managed(path: &Path, address: SocketAddr) -> Result<CheckReport> {
 mod tests {
     use super::*;
     use crate::manage::store::{Store, Stored};
+
+    #[test]
+    fn managed_preflight_accepts_a_small_local_only_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("managed");
+        let store = Store::open(&path).unwrap();
+        store.save(&Stored {
+            username: "admin".into(),
+            password_hash: store::hash_password("test-password").unwrap(),
+            toml: "listen='127.0.0.1:0'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=200\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n[filter]\nenabled=true\nblock_exact=['small.test']\n[filter_subscriptions]\nmax_memory_bytes=4194304\n".into(),
+            previous: None,
+            revision: 1,
+        }).unwrap();
+        assert_eq!(
+            managed(&path, "127.0.0.1:3000".parse().unwrap())
+                .unwrap()
+                .config_revision,
+            1
+        );
+        assert!(!path.join("filter-subscriptions").exists());
+    }
 
     #[test]
     fn preflight_ignores_live_lock_and_never_touches_runtime_or_cache() {

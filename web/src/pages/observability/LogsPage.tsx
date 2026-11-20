@@ -115,13 +115,14 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
   const [detail, setDetail] = useState<Detail | null>(null);
   const client = useRef<LiveLogClient | null>(null);
   const refreshRequested = useRef(false);
+  const filterPending = useRef(false);
   const known = useRef(0);
   const epoch = useRef<number | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const listTop = useRef<HTMLDivElement>(null);
   const reducedMotion = useReducedMotion();
 
-  const page = result?.page ?? null;
+  const page = filterPending.current ? null : result?.page ?? null;
   const entries = page?.entries ?? [];
   const detailEntry = detail ? entries.find((entry) => entry.id === detail.id) : undefined;
   const openId = detailEntry && detail?.anchor.isConnected ? detailEntry.id : null;
@@ -143,6 +144,7 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
         setResult(next); setUpdated(Date.now()); setAtHead(before === null); setEnterAfter(Infinity); setLiveLog(null);
         epoch.current = next.page.log_epoch;
         if (before === null) {
+          filterPending.current = false;
           known.current = newest(next.page.entries);
           setPending(noPending);
           client.current?.update(subscription());
@@ -180,12 +182,13 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
   useEffect(() => {
     const live = new LiveLogClient(() => api.currentBinding, {
       entries(incoming, more) {
+        if (filterPending.current) return;
         const forced = refreshRequested.current;
         refreshRequested.current = false;
         const fresh = incoming.filter((entry) => entry.id > known.current).sort((a, b) => b.id - a.id);
-        if (!fresh.length && !more) return;
-        known.current = Math.max(known.current, newest(fresh));
         const { atHead: head, paused: hold, pending: waiting } = view.current;
+        if (!fresh.length && !more && !(forced && head)) return;
+        known.current = Math.max(known.current, newest(fresh));
         if (head && (forced || !hold)) {
           if (more || waiting.overflow) void load(null, appliedRef.current);
           else insert([...fresh, ...waiting.entries]);
@@ -197,6 +200,7 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
         });
       },
       state(state) {
+        if (filterPending.current) return;
         setLiveLog(state);
         if (epoch.current !== null && state.log_epoch !== epoch.current) {
           epoch.current = state.log_epoch;
@@ -207,6 +211,7 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
         }
       },
       status(status) {
+        if (status !== 'open') refreshRequested.current = false;
         setLiveStatus(status);
         if (status === 'unauthorized') {
           setSuspended(true); setLiveStopped(true);
@@ -312,15 +317,25 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
 
   function submitFilter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const filter = { search: search.trim(), status: statusFilter || null, cache: applied.cache };
+    applyFilter({ search: search.trim(), status: statusFilter || null, cache: appliedRef.current.cache });
+  }
+
+  function applyFilter(filter: LogFilter) {
     appliedRef.current = filter;
     setApplied(filter);
+    setPending(noPending);
+    refreshRequested.current = false;
+    filterPending.current = true;
+    known.current = 0;
+    client.current?.update(subscription());
+    setLiveLog(null);
+    closeDetail(false);
     setNotice("");
     void load(null, filter);
   }
 
   function refreshNow() {
-    if (atHead && client.current?.refresh()) { refreshRequested.current = true; return; }
+    if (!filterPending.current && atHead && client.current?.refresh()) { refreshRequested.current = true; return; }
     void load(null, appliedRef.current);
   }
 
@@ -347,7 +362,7 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
       await api.request("query-log/clear", "POST", { log_epoch: listed });
       setDetail(null);
       setNotice("app.logsCleared");
-      await load(null, applied);
+      await load(null, appliedRef.current);
     } catch (error) {
       if (!(error instanceof StaleRequest)) {
         const unknown = isUnknownStorageMutation(error);
@@ -383,7 +398,9 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
       </form>
       <Segmented label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} options={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
         const filter = { ...appliedRef.current, cache: cache === 'all' ? null : cache as CacheFilter };
-        appliedRef.current = filter; setApplied(filter); setNotice(''); setDetail(null); void load(null, filter);
+        setSearch(filter.search);
+        setStatusFilter(filter.status ?? '');
+        applyFilter(filter);
       }} />
     </div>
     {disabled && <p className="notice">{translate('app.logsDisabled', language)}</p>}
@@ -436,7 +453,7 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
               </tr>)}</tbody></table>
           </div>
         </>}
-    <AnimatePresence>{detail && detailEntry && openId !== null && <DetailPopover key={detail.id} id={detailId(detail.id)} label={translate("views.queryDetails", language)} anchor={detail.anchor} focus={detail.keyboard}
+    <AnimatePresence>{detail && detailEntry && openId !== null && <DetailPopover key={detail.id} id={detailId(detail.id)} label={translate("views.queryDetails", language)} anchor={detail.anchor} focus={detail.keyboard} onClose={() => closeDetail(false)}
       onPointerEnter={(event) => { if (event.pointerType === 'mouse') cancelTimer(); }} onPointerLeave={hoverClose}
       onPointerDown={() => setDetail((current) => current && { ...current, pinned: true })} onKeyDown={cardKey}>
       <LogDetail entry={detailEntry} language={language} sourceNames={sourceNames} />

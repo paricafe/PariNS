@@ -369,8 +369,10 @@ impl Config {
     }
 
     pub fn load_policy(&self) -> Result<crate::policy::Policy> {
-        self.local_policy_source()
-            .compile(crate::policy::canonical::Limits::default(), || Ok(()))
+        self.local_policy_source().compile(
+            crate::filter_subscriptions::service::policy_limits(&self.filter_subscriptions, 0)?,
+            || Ok(()),
+        )
     }
     pub fn local_policy_source(&self) -> crate::policy::LocalPolicySource {
         match &self.filter_file {
@@ -755,5 +757,33 @@ mod tests {
         }
         let cache = crate::cache::Cache::new(largest.cache.clone());
         assert_eq!(cache.snapshot()["shards"], 256);
+    }
+    #[test]
+    fn file_preflight_accepts_small_local_budget_and_classifies_active_budget_failure() {
+        let text = "listen='127.0.0.1:0'\nquery_timeout_ms=200\ntcp_io_timeout_ms=500\nshutdown_grace_ms=200\nmax_inflight=16\nmax_tcp_connections=8\n[upstreams]\nservers=['127.0.0.1:9']\n[filter]\nenabled=true\nblock_exact=['small.test']\n[filter_subscriptions]\nmax_memory_bytes=1048576\n";
+        let root = tempfile::tempdir().unwrap();
+        let config = Config::parse(text).unwrap();
+        config.check_files().unwrap();
+        let policy = config.load_policy().unwrap();
+        let material = crate::filter_subscriptions::service::read_only(
+            &root.path().join("filter-subscriptions"),
+            &config.filter_subscriptions,
+            &policy,
+        )
+        .unwrap();
+        assert!(
+            material
+                .policy
+                .blocks(&hickory_proto::rr::Name::from_ascii("small.test").unwrap())
+        );
+        let active = format!(
+            "{text}\n[[filter_subscriptions.sources]]\nid='one'\nname='One'\nurl='https://example.com/one'\nformat='domain_list'\n"
+        );
+        let error = Config::parse(&active).unwrap().load_policy().unwrap_err();
+        assert_eq!(
+            crate::filter_subscriptions::service::error_code(&error),
+            "subscription_memory_limit"
+        );
+        assert!(!root.path().join("filter-subscriptions").exists());
     }
 }

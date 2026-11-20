@@ -23,8 +23,9 @@ function place(card: HTMLElement, anchor: HTMLElement) {
   });
 }
 
-export function DetailPopover({ id, label, anchor, focus, onPointerEnter, onPointerLeave, onPointerDown, onKeyDown, children }: {
+export function DetailPopover({ id, label, anchor, focus, onClose, onPointerEnter, onPointerLeave, onPointerDown, onKeyDown, children }: {
   id: string; label: string; anchor: HTMLElement; focus: boolean; children: ReactNode;
+  onClose?: () => void;
   onPointerEnter(event: PointerEvent): void; onPointerLeave(event: PointerEvent): void; onPointerDown(): void; onKeyDown(event: KeyboardEvent<HTMLElement>): void;
 }) {
   const reduced = useReducedMotion();
@@ -33,11 +34,15 @@ export function DetailPopover({ id, label, anchor, focus, onPointerEnter, onPoin
   useLayoutEffect(() => { if (focus) body.current?.focus(); }, [focus]);
   useLayoutEffect(() => {
     const update = () => { if (card.current) place(card.current, anchor); };
+    const resize = () => {
+      if (anchor.getClientRects().length === 0) onClose?.();
+      else update();
+    };
     update();
     window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
-    return () => { window.removeEventListener('scroll', update, true); window.removeEventListener('resize', update); };
-  }, [anchor]);
+    window.addEventListener('resize', resize);
+    return () => { window.removeEventListener('scroll', update, true); window.removeEventListener('resize', resize); };
+  }, [anchor, onClose]);
   return createPortal(<motion.div ref={card} id={id} role="dialog" aria-label={label} className="popover log-popover"
     onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave} onPointerDown={onPointerDown} onKeyDown={onKeyDown}
     initial={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }}

@@ -952,39 +952,92 @@ fn learned_entries_round_trip_without_restoring_classification() {
 }
 
 #[test]
-fn snapshot_lists_records_most_recently_used_first_across_shards() {
-    let cache = Cache::new(CacheConfig::default());
+fn explicit_scope_revokes_snapshot_restored_sharing_once() {
+    let mut config = CacheConfig::default();
+    config.ecs_sharing.enabled = true;
+    let original = Cache::new(config.clone());
+    let q = query("restored-scope.test.");
+    let response = answer(&q, 60);
     let now = Instant::now();
-    for index in 0..16 {
-        let q = query(&format!("n{index}.test."));
-        insert(&cache, &q, &answer(&q, 60), Scope::NoEcs, now);
+    let networks = ["192.0.2.0/24", "192.0.3.0/24", "198.51.100.0/24"];
+    for network in networks {
+        insert(
+            &original,
+            &q,
+            &response,
+            Scope::ExactSource(network.parse().unwrap()),
+            now,
+        );
     }
-    let mut used = HashMap::new();
-    let mut populated = 0;
-    for shard in &cache.shards {
-        let shard = shard.lock().unwrap();
-        populated += usize::from(!shard.partitions[0].lru.is_empty());
-        for (_, entry) in shard.partitions[0].lru.iter() {
-            let clock = used.len() as u64 + 1;
-            entry.accessed.store(clock, Ordering::Relaxed);
-            used.insert(entry.key.name.clone(), clock);
-        }
+    let restored = Cache::new(config);
+    assert_eq!(
+        restore(&restored, encode(&original, now), 0, now)
+            .unwrap()
+            .restored,
+        1
+    );
+    let state = || restored.inspect(q.queries[0].name(), None, now)["ecs_sharing"].clone();
+    assert_eq!(state(), Value::Null);
+    let explicit = Scope::Network("203.0.113.0/24".parse().unwrap());
+    for _ in 0..2 {
+        insert(&restored, &q, &response, explicit, now);
+        assert_eq!(state(), "revoked");
+        assert_eq!(restored.snapshot()["ecs_sharing_revocations"], 1);
+        assert_eq!(restored.snapshot()["ecs_shared_entries"], 0);
     }
-    assert!(populated > 1, "the keys span several shards");
+    for network in networks {
+        insert(
+            &restored,
+            &q,
+            &response,
+            Scope::ExactSource(network.parse().unwrap()),
+            now,
+        );
+    }
+    assert_eq!(state(), "revoked");
+    assert_eq!(restored.snapshot()["ecs_shared_entries"], 0);
+    assert_eq!(restored.snapshot()["ecs_sharing_revocations"], 1);
+}
+
+#[test]
+fn snapshot_lists_records_most_recently_used_first_across_shards() {
+    let cache = Cache::new(CacheConfig {
+        shards: 2,
+        ..Default::default()
+    });
+    let now = Instant::now();
+    let cold = query("cold.test.");
+    let busy_shard = cache.shard(&Key::of(&cold).unwrap());
+    let hot = (0..1000)
+        .map(|i| query(&format!("hot-{i}.test.")))
+        .find(|q| cache.shard(&Key::of(q).unwrap()) != busy_shard)
+        .unwrap();
+    for q in [&hot, &cold] {
+        insert(&cache, q, &answer(q, 60), Scope::NoEcs, now);
+    }
+    for _ in 0..20 {
+        assert!(cache.lookup(&cold, None, now, false).is_some());
+    }
+    assert!(cache.lookup(&hot, None, now, false).is_some());
     let bytes = encode(&cache, now);
-    let order: Vec<u64> = bytes[HEADER_BYTES..]
+    let order: Vec<_> = bytes[HEADER_BYTES..]
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .map(|line| {
-            let (query, _, _) = serde_json::from_slice::<Record>(line)
+            let (q, _, _) = serde_json::from_slice::<Record>(line)
                 .unwrap()
                 .decode()
                 .unwrap();
-            used[&key_name(query.queries[0].name())]
+            q.queries[0].name().to_ascii()
         })
         .collect();
-    assert_eq!(order.len(), 16);
-    assert!(order.windows(2).all(|pair| pair[0] > pair[1]), "{order:?}");
+    assert_eq!(
+        order,
+        [
+            hot.queries[0].name().to_ascii(),
+            cold.queries[0].name().to_ascii()
+        ]
+    );
 }
 
 struct SlowWriter(Cursor<Vec<u8>>);

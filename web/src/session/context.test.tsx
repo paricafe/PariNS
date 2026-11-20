@@ -2,6 +2,9 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionProvider, useSession } from './context';
+import { ConfigProvider } from '../config/context';
+import { UpdatesProvider, useUpdates } from '../features/updates/context';
+import type { UpdatesView } from '../features/updates/types';
 const updateReload = vi.hoisted(() => vi.fn());
 vi.mock('../features/updates/reload', () => ({ reloadConsole: updateReload }));
 
@@ -12,6 +15,59 @@ const jsonResponse = (value: unknown) => ({ ok: true, status: 200, json: async (
 afterEach(() => { vi.unstubAllGlobals(); updateReload.mockClear(); });
 
 describe('session transition', () => {
+  it('reloads the console on 401 after observing another tab’s active update', async () => {
+    let offline = false;
+    const view: UpdatesView = {
+      current: { version: '0.1.4', target: 'aarch64-unknown-linux-musl', official_release: true },
+      capability: { available: true, reason: null },
+      check: { state: 'unchecked', last_check_at_ms: null, last_success_at_ms: null, next_check_at_ms: 0, retry_at_ms: 0, error: null },
+      candidate: null, frozen: true, last_operation: null,
+      active_operation: { operation_id: 'another-tab', phase: 'committing', version: '0.1.5', reason: null, downloaded_bytes: 100, total_bytes: 100 },
+    };
+    const fetcher = vi.fn(async (url: string) => {
+      if (url === '/api/session') return jsonResponse(session);
+      if (url === '/api/updates') {
+        if (offline) throw new Error('Service restarting');
+        return jsonResponse(view);
+      }
+      if (url === '/api/status') return new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED' } }), { status: 401 });
+      throw new Error(url);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    function Providers({ children }: { children: React.ReactNode }) {
+      const { api, state, recheck } = useSession();
+      return <ConfigProvider api={api} active={false} refreshSession={recheck}>
+        <UpdatesProvider active={state.phase === 'ready'}>{children}</UpdatesProvider>
+      </ConfigProvider>;
+    }
+    const hook = renderHook(() => ({ session: useSession(), updates: useUpdates() }), {
+      wrapper: ({ children }) => <SessionProvider><Providers>{children}</Providers></SessionProvider>,
+    });
+    await waitFor(() => expect(hook.result.current.updates.view?.active_operation?.operation_id).toBe('another-tab'));
+    offline = true;
+    await act(async () => { await hook.result.current.updates.refresh(); });
+    expect(hook.result.current.updates.disconnected).toBe(true);
+    await act(async () => { await expect(hook.result.current.session.api.request('status')).rejects.toMatchObject({ code: 'UNAUTHORIZED' }); });
+    expect(hook.result.current.session.state.phase).toBe('checking');
+    expect(updateReload).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls.some(([url]) => url === '/api/updates/apply')).toBe(false);
+    hook.unmount();
+  });
+
+  it('keeps the transport-change screen when logout crosses a transport change', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/session') return jsonResponse(session);
+      if (url === '/api/logout') return new Response(JSON.stringify({ error: { code: 'TRANSPORT_CHANGED' } }), { status: 409 });
+      throw new Error(url);
+    }));
+    const hook = renderHook(useSession, { wrapper: SessionProvider });
+    await waitFor(() => expect(hook.result.current.state.phase).toBe('ready'));
+    await act(async () => { await expect(hook.result.current.logout()).rejects.toMatchObject({ code: 'TRANSPORT_CHANGED' }); });
+    expect(hook.result.current.state.phase).toBe('transport-change');
+    expect(hook.result.current.api.currentBinding).toBeNull();
+    hook.unmount();
+  });
+
   it('rotates with the exact payload, clears only the local binding and requires an explicit new login', async () => {
     const messages: unknown[] = [];
     vi.stubGlobal('BroadcastChannel', class {

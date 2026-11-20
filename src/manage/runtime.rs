@@ -1,4 +1,4 @@
-//! Managed DNS lifecycle and configuration transactions.
+//! Managed DNS lifecycle and configuration transactions. Certificate reload can recover a failed DNS startup.
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
@@ -325,7 +325,13 @@ impl Manager {
             .as_ref()
             .map(|c| c.filter_subscriptions.clone())
             .unwrap_or_default();
-        let local = config.as_ref().map(Config::load_policy).transpose();
+        let local = config
+            .as_ref()
+            .map(|config| {
+                super::store::check_rule_file(&store.dir, config)?;
+                config.load_policy()
+            })
+            .transpose();
         let local_error = local.as_ref().err().map(ToString::to_string);
         let (previous, rollback_error) = match saved
             .as_ref()
@@ -395,7 +401,12 @@ impl Manager {
             .map_err(|error| anyhow!("management TLS stage failed: {error:#}"))?;
             active.lock().unwrap().snapshot = Arc::new(snapshot);
         }
-        let observation = super::observation::Observation::new(services.clone(), active.clone());
+        let observation = super::observation::Observation::new(
+            services.clone(),
+            active.clone(),
+            filters.clone(),
+            updates.clone(),
+        );
         let mut this = Self {
             observation,
             filters,
@@ -471,20 +482,40 @@ impl Manager {
         value
     }
 
-    pub async fn reload_certificates(&mut self, source: &'static str) -> Result<Value> {
-        self.reload_attempt = self.reload_attempt.saturating_add(1);
+    pub async fn reload_certificates(
+        manager: &tokio::sync::Mutex<Self>,
+        source: &'static str,
+    ) -> Result<Value> {
         let started = crate::clock::unix_ms();
-        let certificates = self.active.lock().unwrap().snapshot.certificates.clone();
-        let result = if let Some(certificates) = certificates {
-            let prepare = certificates.clone();
-            match tokio::task::spawn_blocking(move || prepare.prepare_reload()).await {
-                Ok(Ok(prepared)) => certificates.publish(prepared),
-                Ok(Err(error)) => Err(error),
-                Err(_) => Err(anyhow!("certificate preparation worker failed")),
-            }
-        } else {
-            Ok(false)
+        let (current, revision, recovery) = {
+            let state = manager.lock().await;
+            let current = state.active.lock().unwrap().snapshot.clone();
+            let revision = state.saved.as_ref().map(|saved| saved.revision);
+            let recovery = state
+                .saved
+                .as_ref()
+                .filter(|_| current.certificates.is_none())
+                .map(|saved| (saved.toml.clone(), state.store.dir.clone(), state.address));
+            (current, revision, recovery)
         };
+        let result = async {
+            if let Some(certificates) = current.certificates.clone() {
+                let prepare = certificates.clone();
+                let prepared = tokio::task::spawn_blocking(move || prepare.prepare_reload())
+                    .await
+                    .map_err(|_| anyhow!("certificate preparation worker failed"))??;
+                let state = manager.lock().await;
+                state.check_reload_target(&current, revision)?;
+                certificates.publish(prepared)
+            } else if let Some((toml, dir, address)) = recovery {
+                Self::recover_certificates(manager, &current, revision, toml, dir, address).await
+            } else {
+                Ok(false)
+            }
+        }
+        .await;
+        let mut state = manager.lock().await;
+        state.reload_attempt = state.reload_attempt.saturating_add(1);
         let outcome = match &result {
             Ok(true) => "applied",
             Ok(false) => "unchanged",
@@ -497,21 +528,76 @@ impl Manager {
                 "CERTIFICATE_INVALID"
             }
         });
-        self.last_reload = Some(
-            serde_json::json!({"attempt_id":self.reload_attempt,"source":source,"started_at_ms":started,"completed_at_ms":crate::clock::unix_ms(),"outcome":outcome,"error_code":error_code}),
+        state.last_reload = Some(
+            serde_json::json!({"attempt_id":state.reload_attempt,"source":source,"started_at_ms":started,"completed_at_ms":crate::clock::unix_ms(),"outcome":outcome,"error_code":error_code}),
         );
-        self.publish_observation();
+        state.publish_observation();
         result.map_err(|error| {
-            if error.is::<crate::tls::ManagementNameMismatch>() {
+            if error.is::<crate::tls::ManagementNameMismatch>()
+                || error.is::<super::transport::CertificateInvalid>()
+            {
                 error
             } else {
                 super::transport::CertificateInvalid(error).into()
             }
         })?;
-        let status = self.certificate_status();
+        let status = state.certificate_status();
         Ok(
             serde_json::json!({"outcome":outcome,"certificate_generation":status["certificate_generation"],"certificates":status}),
         )
+    }
+
+    fn check_reload_target(&self, current: &Arc<Snapshot>, revision: Option<u64>) -> Result<()> {
+        ensure!(
+            self.saved.as_ref().map(|saved| saved.revision) == revision
+                && Arc::ptr_eq(&self.active.lock().unwrap().snapshot, current),
+            RevisionChanged
+        );
+        Ok(())
+    }
+
+    async fn recover_certificates(
+        manager: &tokio::sync::Mutex<Self>,
+        current: &Arc<Snapshot>,
+        revision: Option<u64>,
+        toml: String,
+        dir: PathBuf,
+        address: SocketAddr,
+    ) -> Result<bool> {
+        let recovered = tokio::task::spawn_blocking(move || {
+            let config = Config::parse_in(&toml, &dir)?;
+            if config.dot.is_none() && config.doq.is_none() {
+                return Ok::<_, anyhow::Error>(None);
+            }
+            let snapshot = Snapshot::prepare(&config, address)?;
+            Ok(Some((config, snapshot)))
+        })
+        .await??;
+        let Some((config, snapshot)) = recovered else {
+            return Ok(false);
+        };
+        let certificates = snapshot.certificates.clone();
+        let mut state = manager.lock().await;
+        state.check_reload_target(current, revision)?;
+        state.publish(snapshot);
+        if state.running.is_some() || !state.begin_restore() {
+            return Ok(true);
+        }
+        let current = state.active.lock().unwrap().snapshot.clone();
+        let ready = state.restore_ready();
+        let services = state.services.clone();
+        let policy = state.filters.handle();
+        drop(state);
+        let result = match ready {
+            Ok(()) => Server::bind_with_policy(config.clone(), certificates, services, policy)
+                .await
+                .map(|server| (server, config, None)),
+            Err(error) => Err(error),
+        };
+        let mut state = manager.lock().await;
+        state.check_reload_target(&current, revision)?;
+        state.finish_restore(result);
+        Ok(true)
     }
 
     pub fn resolver(&self) -> Option<&Arc<crate::resolver::Resolver>> {
@@ -525,15 +611,11 @@ impl Manager {
         let Some(saved) = &self.saved else {
             return Ok(false);
         };
-        let stripped = |text: &str| -> Result<toml::Value> {
-            let mut value: toml::Value = toml::from_str(text)?;
-            value
-                .as_table_mut()
-                .expect("configuration table")
-                .remove("updates");
-            Ok(value)
-        };
-        Ok(saved.toml != next && stripped(&saved.toml)? == stripped(next)?)
+        let mut original: toml::Table = toml::from_str(&saved.toml)?;
+        let mut candidate: toml::Table = toml::from_str(next)?;
+        original.remove("updates");
+        candidate.remove("updates");
+        Ok(original == candidate)
     }
 
     pub fn change_impact(&self, next: &str) -> Result<ChangeImpact> {
@@ -549,39 +631,29 @@ impl Manager {
     fn hot_change(&self, next: &str, next_cache: &CacheConfig) -> Option<ChangeImpact> {
         let running = self.running.as_ref().filter(|r| !r.task.is_finished())?;
         let previous = self.saved.as_ref()?;
-        let split =
-            |text: &str, cache: &CacheConfig| -> Option<(toml::Value, Value, toml::Value)> {
-                let mut value: toml::Value = toml::from_str(text).ok()?;
-                let original = value.clone();
-                for field in [
-                    "storage",
-                    "query_log",
-                    "statistics",
-                    "updates",
-                    "filter",
-                    "filter_file",
-                    "filter_subscriptions",
-                    "cache",
-                ] {
-                    value.as_table_mut()?.remove(field);
-                }
-                let mut cache = serde_json::to_value(cache).ok()?;
-                cache.as_object_mut()?.remove("persistence");
-                Some((value, cache, original))
-            };
-        match (
-            split(&previous.toml, &running.config.cache),
-            split(next, next_cache),
-        ) {
-            (Some((a, old, original)), Some((b, new, candidate)))
-                if a == b && original != candidate =>
-            {
-                Some(ChangeImpact::Hot {
-                    replace_cache: old != new,
-                })
+        let split = |text: &str, cache: &CacheConfig| -> Option<(toml::Table, Value)> {
+            let mut table: toml::Table = toml::from_str(text).ok()?;
+            for field in [
+                "storage",
+                "query_log",
+                "statistics",
+                "updates",
+                "filter",
+                "filter_file",
+                "filter_subscriptions",
+                "cache",
+            ] {
+                table.remove(field);
             }
-            _ => None,
-        }
+            let mut cache = serde_json::to_value(cache).ok()?;
+            cache.as_object_mut()?.remove("persistence");
+            Some((table, cache))
+        };
+        let (original, old) = split(&previous.toml, &running.config.cache)?;
+        let (candidate, new) = split(next, next_cache)?;
+        (original == candidate).then_some(ChangeImpact::Hot {
+            replace_cache: old != new,
+        })
     }
 
     pub fn validation(&self, toml: &str) -> Result<Validation> {
@@ -595,24 +667,41 @@ impl Manager {
         })
     }
 
-    async fn restore(&mut self, toml: &str, snapshot: Option<ConsumedSnapshot>) {
+    fn begin_restore(&mut self) -> bool {
         if let Some(error) = &self.local_error {
             self.last_error = Some(format!("DNS unavailable: {error}"));
+            self.services.set_dns_health(
+                HealthState::Failed,
+                self.generation,
+                Some("local_filter_invalid"),
+            );
             self.publish_observation();
-            return;
+            return false;
         }
         self.phase = Phase::Starting;
         self.publish_observation();
+        true
+    }
+
+    fn restore_ready(&self) -> Result<()> {
+        ensure!(
+            self.cache_ready,
+            "cannot start DNS before clean snapshot is durably consumed"
+        );
+        ensure!(
+            self.filters.ready(),
+            "subscription_material_missing: DNS policy unavailable"
+        );
+        Ok(())
+    }
+
+    async fn restore(&mut self, toml: &str, snapshot: Option<ConsumedSnapshot>) {
+        if !self.begin_restore() {
+            return;
+        }
         let result = async {
-            ensure!(
-                self.cache_ready,
-                "cannot start DNS before clean snapshot is durably consumed"
-            );
             let config = Config::parse_in(toml, &self.store.dir)?;
-            ensure!(
-                self.filters.ready(),
-                "subscription_material_missing: DNS policy unavailable"
-            );
+            self.restore_ready()?;
             let current = self.active.lock().unwrap().snapshot.clone();
             let candidate = if current.certificates.is_none() {
                 let config = config.clone();
@@ -641,22 +730,24 @@ impl Manager {
                 self.cache_report =
                     crate::runtime_lifecycle::restore(snapshot, cache, fingerprint).await?;
             }
-            let listen = server.local_addr();
-            self.generation = self.generation.saturating_add(1);
-            Ok::<_, anyhow::Error>((
-                Running::start(
+            Ok((server, config, candidate))
+        }
+        .await;
+        self.finish_restore(result);
+    }
+
+    fn finish_restore(&mut self, result: Result<(Server, Config, Option<Snapshot>)>) {
+        match result {
+            Ok((server, config, candidate)) => {
+                let listen = server.local_addr();
+                self.generation = self.generation.saturating_add(1);
+                let running = Running::start(
                     server,
                     config,
                     listen,
                     self.services.clone(),
                     self.generation,
-                ),
-                candidate,
-            ))
-        }
-        .await;
-        match result {
-            Ok((running, candidate)) => {
+                );
                 if let Some(candidate) = candidate {
                     self.publish(candidate);
                 }
@@ -785,7 +876,7 @@ impl Manager {
             if let Some(running) = &mut self.running {
                 running.config.updates = config.updates;
             }
-            self.filters.set_revision(next.revision);
+            self.filters.sync_updates_only(next.revision);
             self.saved = Some(next);
             self.rollback_error = None;
             self.publish_observation();
@@ -896,10 +987,13 @@ impl Manager {
         self.publish_observation();
     }
 
-    pub async fn terminal_shutdown(&mut self) {
+    pub async fn terminal_shutdown(&mut self, allow_quiescent: bool) {
         self.filters.close();
         let stopped = match self.running.take() {
-            Some(running) => Some(running.stop().await),
+            Some(running) => {
+                let (resolver, config, drained) = running.stop().await;
+                Some((resolver, config, allow_quiescent && drained))
+            }
             None => None,
         };
         self.services.set_dns_state(false, self.generation);

@@ -72,6 +72,24 @@ describe('security runtime status and certificate reload ownership', () => {
     expect(mocks.request.mock.calls.filter(([path]) => path === 'certificates/reload')).toHaveLength(1);
   });
 
+  it('waits for a delayed reload when the first confirmation read still shows the previous attempt', async () => {
+    vi.useFakeTimers();
+    try {
+      const last = { attempt_id: 1, source: 'api', started_at_ms: 1, completed_at_ms: 2, outcome: 'unchanged', error_code: null };
+      mocks.request.mockResolvedValueOnce({ certificates: { ...base, last_reload: last } })
+        .mockRejectedValueOnce(new ApiError(0, 'NETWORK', 'lost'))
+        .mockResolvedValueOnce({ certificates: { ...base, last_reload: last } })
+        .mockResolvedValueOnce({ certificates: { ...base, last_reload: { ...last, attempt_id: 2, outcome: 'applied' } } });
+      render(<SecurityRuntime language="en" />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reload certificates' })); });
+      expect(screen.getByText(/Confirming the result/)).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.getByText('Certificates updated.')).toBeTruthy();
+      expect(mocks.request.mock.calls.filter(([path]) => path === 'certificates/reload')).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('reports a lost reload that did not run, and offers a manual check only when reading fails', async () => {
     let offline = false;
     mocks.request.mockImplementation(async (path) => {

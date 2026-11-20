@@ -3,7 +3,11 @@
 
 # Rust build output.
 /target/
-/artifacts/filter-subscriptions/
+/artifacts/
+
+# Python bytecode.
+__pycache__/
+*.py[cod]
 
 # Built management console and installed frontend dependencies.
 /web/dist/
@@ -18,5 +22,6 @@
 *.key
 /parins.toml
 /parins-state/
+/parins-data/
 .env
 .env.*.local

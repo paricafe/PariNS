@@ -161,19 +161,38 @@ fn current_previous_and_work_pins_survive_expiry_and_pressure() {
 }
 
 #[test]
+fn lowering_quota_reserves_catalog_space_and_gc_can_shrink_a_full_store() {
+    let (_dir, mut store) = store();
+    let hash = prepare(&mut store, "old", b"old.test\n", 100);
+    store.set_references(vec![digest(b"old")], vec![]).unwrap();
+    let used = store.disk_bytes().unwrap();
+    assert!(store.set_quota(used + MAX_CATALOG - 1).is_err());
+    store.set_quota(used + MAX_CATALOG).unwrap();
+
+    let path = store.dir.clone();
+    drop(store);
+    let mut store = Store::open(&path, used).unwrap();
+    store.set_references(vec![], vec![]).unwrap();
+    store.collect(101, true).unwrap();
+    assert!(store.catalog.records.is_empty());
+    assert!(!store.object_path(&hash).exists());
+    assert!(store.disk_bytes().unwrap() < used);
+}
+
+#[test]
 fn download_admission_stops_on_pressure_catalog_directory_sync_uncertainty() {
     let (_dir, mut store) = store();
     let hash = prepare(&mut store, "unused", b"unused.test\n", 100);
     store.set_quota(MAX_OBJECT + MAX_CATALOG).unwrap();
     store.fault = Some("directory_sync");
-    assert!(store.collect_for_download(101, true).is_err());
+    assert!(store.collect_for_download(101, true, None).is_err());
     assert!(store.catalog.records.is_empty());
     assert!(store.object_path(&hash).exists());
     assert!(store.begin_staging(MAX_OBJECT).is_err());
     assert!(!*store.staging.lock().unwrap());
     store.fault = None;
     store.reconcile_sync().unwrap();
-    store.collect_for_download(101, true).unwrap();
+    store.collect_for_download(101, true, None).unwrap();
     assert!(!store.object_path(&hash).exists());
 }
 
@@ -336,7 +355,7 @@ fn selected_corrupt_object_can_be_repaired_but_unknown_hash_name_cannot() {
     let (_dir, mut store) = store();
     let hash = prepare(&mut store, "one", b"one.test\n", 100);
     fs::write(store.object_path(&hash), b"corrupt").unwrap();
-    assert!(store.read_prepared(&digest(b"one"), 100).is_err());
+    assert!(store.read_prepared(&digest(b"one"), 100).unwrap().is_none());
     prepare(&mut store, "one", b"one.test\n", 101);
     assert!(store.read_prepared(&digest(b"one"), 101).unwrap().is_some());
     let unknown = store.object_path(&digest(b"other.test\n"));
@@ -486,6 +505,39 @@ fn reopen_waits_for_authoritative_config_roots_before_expiring_preparations() {
 }
 
 #[test]
+fn reduced_quota_reclaims_expired_and_verified_orphan_objects_before_rejecting() {
+    let (_dir, mut store) = store();
+    let current = prepare(&mut store, "current", b"current.test\n", 100);
+    let previous = prepare(&mut store, "previous", b"previous.test\n", 100);
+    let pending = prepare(&mut store, "pending", b"pending.test\n", 100);
+    store
+        .set_references(vec![digest(b"current")], vec![digest(b"previous")])
+        .unwrap();
+    let quota = store.disk_bytes().unwrap();
+    let expired = prepare(&mut store, "expired", b"expired.test\n", 100);
+    let orphan = store.object_path(&digest(b"orphan.test\n"));
+    create_private(&orphan)
+        .unwrap()
+        .write_all(b"orphan.test\n")
+        .unwrap();
+    let path = store.dir.clone();
+    assert!(store.disk_bytes().unwrap() > quota);
+    drop(store);
+    let reopened = Store::open_preserving(&path, quota, &[digest(b"pending")], &[]).unwrap();
+    for hash in [current, previous, pending] {
+        assert!(reopened.object_path(&hash).exists());
+    }
+    assert!(!reopened.object_path(&expired).exists());
+    assert!(!orphan.exists());
+    drop(reopened);
+    let error = match Store::open_preserving(&path, quota - 1, &[digest(b"pending")], &[]) {
+        Ok(_) => panic!("retained catalog and objects exceed quota"),
+        Err(error) => error,
+    };
+    assert!(is_disk_limit(&error));
+}
+
+#[test]
 fn read_only_does_not_create_lock_or_change_authority_even_with_writer_present() {
     let (dir, mut store) = store();
     assert!(Store::read_only(&dir.path().join("missing")).is_err());
@@ -597,7 +649,7 @@ fn derived_index_stream_is_bounded_atomic_and_repairable_without_catalog_mutatio
     assert_eq!(fs::read(&path).unwrap(), first);
     assert_eq!(fs::read_dir(store.dir.join("staging")).unwrap().count(), 0);
     fs::write(&path, b"damaged derived index").unwrap();
-    assert!(store.read_index(&input, 1024).is_err());
+    assert!(store.read_index(&input, 1024).unwrap().is_none());
     store
         .write_index(&input, first.len() as u64, |out| {
             out.write_all(&first)?;

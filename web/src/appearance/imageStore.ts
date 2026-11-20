@@ -1,5 +1,7 @@
 // Stores the custom console background image in IndexedDB.
 
+import { MAX_BYTES } from './image';
+
 const DATABASE = 'parins-appearance';
 const STORE = 'background';
 const KEY = 'image';
@@ -33,7 +35,9 @@ export async function loadImage(): Promise<StoredImage | null> {
   try {
     const value = await run<unknown>('readonly', (store) => store.get(KEY));
     const record = value as Partial<StoredImage> | undefined;
-    return record?.blob instanceof Blob && typeof record.luminance === 'number' ? { blob: record.blob, luminance: record.luminance } : null;
+    if (!(record?.blob instanceof Blob) || !record.blob.size || record.blob.size > MAX_BYTES
+      || typeof record.luminance !== 'number' || !Number.isFinite(record.luminance)) return null;
+    return { blob: record.blob, luminance: record.luminance };
   } catch { return null; }
 }
 

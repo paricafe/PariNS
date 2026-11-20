@@ -3,12 +3,15 @@ import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ThemeButton } from '../components/ThemeButton';
+import { AppearanceSheet } from '../components/AppearanceSheet';
 import { Backdrop } from '../components/Backdrop';
 import { useAppearance, type Appearance } from './useAppearance';
 import {
   STORAGE_KEYS, effectiveOverlay, saveBackground, saveOverlay, storedBackground, storedOverlay, storedTheme, writePreference,
 } from './preferences';
 import { clearImage, loadImage, saveImage } from './imageStore';
+import * as imageStore from './imageStore';
+import * as imageTools from './image';
 import { ImageError, MAX_BYTES, fitWithin, headerSize, prepareImage } from './image';
 
 function installFakeIndexedDB() {
@@ -188,6 +191,89 @@ describe('custom image storage', () => {
     expect(stores.get('background')?.size).toBe(0);
   });
 
+  it('restores the saved image while keeping the selected preset', async () => {
+    installFakeIndexedDB();
+    await saveImage({ blob: new Blob(['pixels']), luminance: 0.4 });
+    saveBackground('mist');
+    render(<Harness />);
+    await waitFor(() => expect(appearance.image?.luminance).toBe(0.4));
+    expect(appearance.background).toBe('mist');
+    act(() => appearance.changeBackground('custom'));
+    expect(document.documentElement.dataset.backdrop).toBe('image');
+  });
+
+  it('ignores a startup image loaded after a newer upload', async () => {
+    let finishLoad!: (record: imageStore.StoredImage) => void;
+    vi.spyOn(imageStore, 'loadImage').mockReturnValue(new Promise((resolve) => { finishLoad = resolve; }));
+    vi.spyOn(imageStore, 'saveImage').mockResolvedValue(true);
+    const prepared = { blob: new Blob(['new']), luminance: 0.7 };
+    vi.spyOn(imageTools, 'prepareImage').mockResolvedValue(prepared);
+    render(<Harness />);
+    await act(async () => { await appearance.uploadImage(new Blob(['upload'])); });
+    await act(async () => finishLoad({ blob: new Blob(['old']), luminance: 0.2 }));
+    expect(appearance.image?.luminance).toBe(0.7);
+    expect(URL.createObjectURL).toHaveBeenCalledExactlyOnceWith(prepared.blob);
+  });
+
+  it('disables custom image actions during removal and keeps a preset selected meanwhile', async () => {
+    writePreference(STORAGE_KEYS.language, 'en');
+    saveBackground('custom');
+    vi.spyOn(imageStore, 'loadImage').mockResolvedValue({ blob: new Blob(['old']), luminance: 0.2 });
+    let finishClear!: () => void;
+    const clear = vi.spyOn(imageStore, 'clearImage').mockReturnValue(new Promise((resolve) => { finishClear = resolve; }));
+    const save = vi.spyOn(imageStore, 'saveImage');
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+    HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+    function Sheet() { return <AppearanceSheet appearance={useAppearance()} />; }
+    render(<Sheet />);
+    fireEvent.click(screen.getByRole('button', { name: 'Appearance' }));
+    const remove = await screen.findByRole<HTMLButtonElement>('button', { name: /remove/i });
+    fireEvent.click(remove);
+    await waitFor(() => expect(clear).toHaveBeenCalledOnce());
+    expect(remove.disabled).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('input[type="file"]')?.matches(':disabled')).toBe(true);
+    fireEvent.click(remove);
+    fireEvent.click(screen.getByRole('radio', { name: /mist/i }));
+    await act(async () => finishClear());
+    expect(storedBackground()).toBe('mist');
+    expect(document.documentElement.dataset.bg).toBe('mist');
+    expect(clear).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
+    expect(URL.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:background');
+  });
+
+  it.each(['load', 'save'] as const)('releases the visible URL and ignores a pending %s after unmount', async (phase) => {
+    const stored = { blob: new Blob(['old']), luminance: 0.2 };
+    let finishLoad!: (value: imageStore.StoredImage) => void;
+    const load = vi.spyOn(imageStore, 'loadImage');
+    let finishSave!: (saved: boolean) => void;
+    const save = vi.spyOn(imageStore, 'saveImage').mockReturnValue(new Promise((resolve) => { finishSave = resolve; }));
+    vi.spyOn(imageTools, 'prepareImage').mockResolvedValue({ blob: new Blob(['new']), luminance: 0.8 });
+    if (phase === 'load') load.mockReturnValue(new Promise((resolve) => { finishLoad = resolve; }));
+    else load.mockResolvedValue(stored);
+    const view = render(<Harness />);
+    let uploading: ReturnType<Appearance['uploadImage']> | undefined;
+    if (phase === 'save') {
+      await waitFor(() => expect(appearance.image?.luminance).toBe(0.2));
+      act(() => { uploading = appearance.uploadImage(new Blob(['upload'])); });
+      await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    }
+    view.unmount();
+    if (phase === 'load') await act(async () => finishLoad(stored));
+    else await act(async () => { finishSave(true); await uploading; });
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(phase === 'load' ? 0 : 1);
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(phase === 'load' ? 0 : 1);
+    expect(storedBackground()).toBe('neutral');
+  });
+
+  it('rejects empty or oversized stored images and non-finite luminance', async () => {
+    installFakeIndexedDB();
+    for (const [size, luminance] of [[0, 0.4], [MAX_BYTES + 1, 0.4], [1, NaN], [1, Infinity]]) {
+      expect(await saveImage({ blob: new Blob([new Uint8Array(size)]), luminance })).toBe(true);
+      expect(await loadImage()).toBeNull();
+    }
+  });
+
   it('falls back to the default when the stored image is gone', async () => {
     installFakeIndexedDB();
     localStorage.setItem(STORAGE_KEYS.background, 'custom');
@@ -243,8 +329,12 @@ describe('image preparation', () => {
 
   it('reads image sizes from headers and refuses huge images before decoding', async () => {
     expect(headerSize(png(5120, 2880))).toEqual({ width: 5120, height: 2880 });
-    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x0b, 0xb8, 0x0f, 0xa0, 3]);
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x0b, 0xb8, 0x0f, 0xa0, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
     expect(headerSize(jpeg)).toEqual({ width: 4000, height: 3000 });
+    const markers = [0xff, 0xff, 0xd3, 0xff, 0x01, 0xff];
+    expect(headerSize(new Uint8Array([...jpeg.slice(0, 2), ...markers, ...jpeg.slice(2)]))).toEqual({ width: 4000, height: 3000 });
+    expect(headerSize(jpeg.slice(0, -1))).toBeNull();
+    expect(headerSize(new Uint8Array([0xff, 0xd8, 0xff, 0xda, ...jpeg.slice(2)]))).toBeNull();
     expect(headerSize(new Uint8Array([1, 2, 3]))).toBeNull();
     const decode = vi.fn(async () => ({ width: 1, height: 1 }));
     vi.stubGlobal('createImageBitmap', decode);

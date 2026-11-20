@@ -1,7 +1,7 @@
-//! Bounded DNS cache for upstream answers, failure responses, and cache diagnostics.
+//! Bounded DNS cache with global recency and separate positive and negative budgets.
 
 use std::{
-    collections::{HashMap, hash_map::RandomState},
+    collections::{BTreeMap, HashMap, hash_map::RandomState},
     hash::BuildHasher,
     sync::{
         Arc, Mutex,
@@ -11,6 +11,7 @@ use std::{
 };
 
 use hickory_proto::{
+    dnssec::rdata::DNSSECRData,
     op::{Edns, Message, Query, ResponseCode},
     rr::{
         DNSClass, Name, RData, RecordType,
@@ -147,6 +148,23 @@ impl Partition {
             evictions: self.evictions.snapshot(),
         }
     }
+
+    fn fits_after_eviction(&self, charge: usize) -> bool {
+        let mut needed =
+            (self.charged.load(Ordering::Relaxed) + charge).saturating_sub(self.max_bytes);
+        if needed == 0 {
+            return true;
+        }
+        for (_, entry) in self.lru.iter().rev() {
+            if Arc::strong_count(entry) == 2 {
+                needed = needed.saturating_sub(entry.charge);
+                if needed == 0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 #[derive(Default)]
@@ -164,7 +182,6 @@ struct Counts {
 struct Shard {
     buckets: HashMap<Arc<Key>, Vec<Arc<Entry>>>,
     partitions: [Partition; 2],
-    clock: u64,
     counts: Counts,
     sharing: sharing::Table,
     learned: usize,
@@ -230,17 +247,28 @@ pub struct Hit {
     pub failure: Option<Failure>,
 }
 
+#[repr(align(128))]
+struct CacheClock(AtomicU64);
+
 pub struct Cache {
     identity: u128,
     config: CacheConfig,
     shards: Vec<Mutex<Shard>>,
     hasher: RandomState,
     rules: Vec<Rule>,
+    clock: CacheClock,
     epoch: AtomicU64,
     bypasses: AtomicU64,
     refresh_useful: AtomicU64,
     refresh_unused: AtomicU64,
     diagnostics: decision::Diagnostics,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    Observe,
+    HitOnly,
+    Peek,
 }
 
 impl Cache {
@@ -277,7 +305,6 @@ impl Cache {
                         Partition::new(portion(positive_entries, i), portion(positive_bytes, i)),
                         Partition::new(portion(negative_entries, i), portion(negative_bytes, i)),
                     ],
-                    clock: 0,
                     counts: Counts::default(),
                     sharing: sharing::Table::new(sharing::capacity(config.max_entries, count)),
                     learned: 0,
@@ -314,6 +341,7 @@ impl Cache {
             shards,
             hasher: RandomState::new(),
             rules,
+            clock: CacheClock(AtomicU64::new(0)),
             epoch: AtomicU64::new(0),
             bypasses: AtomicU64::new(0),
             refresh_useful: AtomicU64::new(0),
@@ -435,7 +463,7 @@ impl Cache {
         now: Instant,
         allow_stale: bool,
     ) -> LookupResult {
-        let result = self.lookup_inner(query, outgoing, now, allow_stale, true);
+        let result = self.lookup_inner(query, outgoing, now, allow_stale, Lookup::Observe);
         self.diagnostics.lookup(result.decision);
         result
     }
@@ -497,8 +525,21 @@ impl Cache {
         now: Instant,
         allow_stale: bool,
     ) -> Option<Hit> {
-        self.lookup_inner(query, outgoing, now, allow_stale, false)
+        self.lookup_inner(query, outgoing, now, allow_stale, Lookup::Peek)
             .hit
+    }
+
+    pub(crate) fn lookup_after_miss(
+        &self,
+        query: &Message,
+        outgoing: Option<ClientSubnet>,
+        now: Instant,
+    ) -> LookupResult {
+        let result = self.lookup_inner(query, outgoing, now, false, Lookup::HitOnly);
+        if result.hit.is_some() {
+            self.diagnostics.lookup(result.decision);
+        }
+        result
     }
 
     fn lookup_inner(
@@ -507,16 +548,16 @@ impl Cache {
         outgoing: Option<ClientSubnet>,
         now: Instant,
         allow_stale: bool,
-        observe: bool,
+        lookup: Lookup,
     ) -> LookupResult {
         let Some(key) = Key::of(query) else {
-            if observe && !allow_stale {
+            if lookup == Lookup::Observe && !allow_stale {
                 self.bypasses.fetch_add(1, Ordering::Relaxed);
             }
             return LookupResult::empty(LookupOutcome::Bypass, Some(query_rejection(query)));
         };
         if self.policy(&key, query.queries[0].name()).bypass {
-            if observe && !allow_stale {
+            if lookup == Lookup::Observe && !allow_stale {
                 self.bypasses.fetch_add(1, Ordering::Relaxed);
             }
             return LookupResult::empty(
@@ -533,7 +574,7 @@ impl Cache {
                 .lock()
                 .expect("cache shard poisoned");
             let Some((part, id)) = shard.select(&key, outgoing, now, allow_stale) else {
-                if observe {
+                if lookup == Lookup::Observe {
                     self.prune(&mut shard, &key, now);
                     if !allow_stale {
                         shard.counts.misses += 1;
@@ -541,9 +582,8 @@ impl Cache {
                 }
                 return LookupResult::empty(LookupOutcome::Miss, None);
             };
-            if observe {
-                shard.clock += 1;
-                let clock = shard.clock;
+            if lookup != Lookup::Peek {
+                let clock = self.clock.0.fetch_add(1, Ordering::Relaxed) + 1;
                 let entry = Arc::clone(shard.partitions[part].lru.get(&id).unwrap());
                 entry.accessed.store(clock, Ordering::Relaxed);
                 let fresh = now.saturating_duration_since(entry.inserted) < entry.lifetime;
@@ -568,7 +608,7 @@ impl Cache {
         };
         let age = now.saturating_duration_since(entry.inserted);
         let stale = age >= entry.lifetime;
-        let hits = if observe {
+        let hits = if lookup != Lookup::Peek {
             entry.hits.fetch_add(1, Ordering::Relaxed) + 1
         } else {
             entry.hits.load(Ordering::Relaxed)
@@ -608,6 +648,8 @@ impl Cache {
                 }
             }
             message.edns = Some(response_edns);
+        } else {
+            message.edns = None;
         }
         LookupResult {
             hit: Some(Hit {
@@ -668,6 +710,19 @@ impl Cache {
         decision
     }
 
+    pub(crate) fn supersede_narrower_if_epoch(
+        &self,
+        query: &Message,
+        response: &Message,
+        scope: Scope,
+        now: Instant,
+        epoch: u64,
+    ) -> StoreDecision {
+        let decision = self.admit(query, response, scope, now, epoch, Origin::Narrower);
+        self.diagnostics.store(decision);
+        decision
+    }
+
     fn admit(
         &self,
         query: &Message,
@@ -679,9 +734,10 @@ impl Cache {
     ) -> StoreDecision {
         let restore = match origin {
             Origin::Restore(restore) => Some(restore),
-            Origin::Answer | Origin::Refresh => None,
+            Origin::Answer | Origin::Refresh | Origin::Narrower => None,
         };
         let restoring = restore.is_some();
+        let narrower = matches!(origin, Origin::Narrower);
         let Some(key) = Key::of(query) else {
             return StoreDecision::skipped(query_rejection(query));
         };
@@ -701,7 +757,9 @@ impl Cache {
         {
             return StoreDecision::skipped(DecisionReason::UncacheableResponse);
         }
-        let prepared =
+        let prepared = if narrower {
+            Err(DecisionReason::EcsUnusable)
+        } else {
             prepare_response(query, response, &policy).and_then(|(stored, lifetime, negative)| {
                 let lifetime = restore.map_or(lifetime, |restore| lifetime.min(restore.remaining));
                 if lifetime == 0 {
@@ -711,9 +769,16 @@ impl Cache {
                     .to_vec()
                     .map(|wire| (wire, lifetime, negative))
                     .map_err(|_| DecisionReason::UncacheableResponse)
-            });
+            })
+        };
         let learning = self.config.ecs_sharing.enabled && !restoring;
-        let fingerprint = (learning && matches!(scope, Scope::ExactSource(_)))
+        let explicit_family = match scope {
+            Scope::Network(network) if network.prefix_len() > 0 => Some(network.addr().is_ipv4()),
+            Scope::ExactSource(network) if narrower => Some(network.addr().is_ipv4()),
+            _ => None,
+        }
+        .filter(|_| learning);
+        let fingerprint = (learning && !narrower && matches!(scope, Scope::ExactSource(_)))
             .then(|| sharing::fingerprint(&query.queries[0], response))
             .flatten();
         let mut shard = self.shards[self.shard(&key)]
@@ -724,7 +789,13 @@ impl Cache {
             return StoreDecision::skipped(DecisionReason::EpochChanged);
         }
         self.prune(&mut shard, &key, now);
-        let scope = if learning {
+        let mut revoked = false;
+        let scope = if let Some(ipv4) = explicit_family {
+            revoked = shard
+                .sharing
+                .revoke(&key, ipv4, now, &self.config.ecs_sharing);
+            scope
+        } else if learning && !narrower {
             let lifetime = prepared
                 .as_ref()
                 .ok()
@@ -737,7 +808,7 @@ impl Cache {
                 now,
                 &self.config.ecs_sharing,
             );
-            shard.counts.revocations += u64::from(observation.revoked);
+            revoked = observation.revoked;
             observation.scope
         } else {
             scope
@@ -766,12 +837,14 @@ impl Cache {
             .into_iter()
             .flatten()
             .filter(|e| scopes_overlap(e.scope, scope))
-            .map(|e| (usize::from(e.negative), e.id))
+            .map(|e| (usize::from(e.negative), e.id, e.scope))
             .collect();
         let superseded = !replaced.is_empty();
-        for (p, id) in replaced {
+        for (p, id, old_scope) in replaced {
+            revoked |= explicit_family.is_some() && matches!(old_scope, Scope::Learned { .. });
             self.remove(&mut shard, p, id);
         }
+        shard.counts.revocations += u64::from(revoked);
         let (wire, lifetime, negative) = match prepared {
             Ok(prepared) => prepared,
             Err(reason) => return StoreDecision::rejected(reason, superseded),
@@ -928,7 +1001,11 @@ impl Cache {
         } = stored;
         let charge = charge(&wire, &key);
         let part = usize::from(negative);
-        if charge > shard.partitions[part].max_bytes || shard.partitions[part].max_entries == 0 {
+        let partition = &shard.partitions[part];
+        if charge > partition.max_bytes
+            || partition.max_entries == 0
+            || !partition.fits_after_eviction(charge)
+        {
             shard.counts.rejections += 1;
             return StoreDecision::rejected(DecisionReason::Capacity, superseded);
         }
@@ -937,8 +1014,8 @@ impl Cache {
         {
             let Some(entry) = ids
                 .iter()
-                .filter(|e| e.negative == negative)
-                .min_by_key(|e| e.accessed.load(Ordering::Relaxed))
+                .filter(|e| e.negative || !negative)
+                .min_by_key(|e| (!e.negative, e.accessed.load(Ordering::Relaxed)))
             else {
                 shard.counts.rejections += 1;
                 return StoreDecision::rejected(DecisionReason::VariantLimit, superseded);
@@ -964,8 +1041,7 @@ impl Cache {
             };
             self.evict(shard, part, id, now, reason);
         }
-        shard.clock += 1;
-        let id = shard.clock;
+        let id = self.clock.0.fetch_add(1, Ordering::Relaxed) + 1;
         let key = Arc::new(key);
         let charged = Arc::clone(&shard.partitions[part].charged);
         charged.fetch_add(charge, Ordering::Relaxed);
@@ -1008,6 +1084,35 @@ impl Cache {
         }
     }
 
+    fn target_shards(
+        &self,
+        name: Option<&Name>,
+        kind: Option<RecordType>,
+    ) -> BTreeMap<usize, Vec<Key>> {
+        let mut targets: BTreeMap<usize, Vec<Key>> = BTreeMap::new();
+        if let (Some(name), Some(kind)) = (name, kind) {
+            for (edns, dnssec_ok) in [(false, false), (true, false), (true, true)] {
+                for checking_disabled in [false, true] {
+                    for recursion_desired in [false, true] {
+                        let key = Key {
+                            name: name.clone(),
+                            kind,
+                            class: DNSClass::IN,
+                            edns,
+                            dnssec_ok,
+                            checking_disabled,
+                            recursion_desired,
+                        };
+                        targets.entry(self.shard(&key)).or_default().push(key);
+                    }
+                }
+            }
+        } else {
+            targets.extend((0..self.shards.len()).map(|i| (i, Vec::new())));
+        }
+        targets
+    }
+
     pub fn invalidate(
         &self,
         name: Option<&Name>,
@@ -1015,29 +1120,40 @@ impl Cache {
         scope: Option<Scope>,
     ) -> usize {
         let name = name.map(key_name);
-        let mut shards: Vec<_> = self
-            .shards
-            .iter()
-            .map(|s| s.lock().expect("cache shard poisoned"))
+        let targets = self.target_shards(name.as_ref(), kind);
+        let mut shards: Vec<_> = targets
+            .into_iter()
+            .map(|(i, keys)| (self.shards[i].lock().expect("cache shard poisoned"), keys))
             .collect();
         self.epoch.fetch_add(1, Ordering::AcqRel);
         let mut removed = 0;
-        for shard in &mut shards {
-            let matches: Vec<_> = shard
-                .partitions
-                .iter()
-                .enumerate()
-                .flat_map(|(part, p)| {
-                    p.lru
+        for (shard, keys) in &mut shards {
+            let mut matches = Vec::new();
+            let mut collect = |entries: &[Arc<Entry>]| {
+                matches.extend(
+                    entries
                         .iter()
-                        .filter(|(_, e)| {
-                            name.as_ref().is_none_or(|n| &e.key.name == n)
-                                && kind.is_none_or(|k| e.key.kind == k)
-                                && scope.is_none_or(|s| e.scope == s || learned_serves(e.scope, s))
+                        .filter(|e| {
+                            scope.is_none_or(|s| e.scope == s || learned_serves(e.scope, s))
                         })
-                        .map(move |(&id, _)| (part, id))
-                })
-                .collect();
+                        .map(|e| (usize::from(e.negative), e.id)),
+                );
+            };
+            if keys.is_empty() {
+                for (key, entries) in &shard.buckets {
+                    if name.as_ref().is_none_or(|n| &key.name == n)
+                        && kind.is_none_or(|k| key.kind == k)
+                    {
+                        collect(entries);
+                    }
+                }
+            } else {
+                for key in keys {
+                    if let Some(entries) = shard.buckets.get(key) {
+                        collect(entries);
+                    }
+                }
+            }
             removed += matches.len();
             for (part, id) in matches {
                 self.remove(shard, part, id);
@@ -1089,22 +1205,32 @@ impl Cache {
         let mut entries = Vec::new();
         let mut truncated = false;
         let mut sharing = None;
-        for shard in &self.shards {
-            let shard = shard.lock().expect("cache shard poisoned");
+        for (index, keys) in self.target_shards(Some(&name), kind) {
+            if truncated && !self.config.ecs_sharing.enabled {
+                break;
+            }
+            let shard = self.shards[index].lock().expect("cache shard poisoned");
             if self.config.ecs_sharing.enabled {
                 sharing = shard.sharing.states(&name, kind, now).chain(sharing).max();
             }
-            for p in &shard.partitions {
-                for (_, e) in &p.lru {
-                    if e.key.name == name && kind.is_none_or(|k| e.key.kind == k) {
-                        if entries.len() == 256 {
-                            truncated = true;
-                            break;
-                        }
-                        entries.push(Arc::clone(e));
-                    }
-                }
+            if truncated {
+                continue;
             }
+            let mut append_bucket = |bucket: &Vec<Arc<Entry>>| {
+                let available = 256 - entries.len();
+                entries.extend(bucket.iter().take(available).cloned());
+                bucket.len() > available
+            };
+            truncated = if kind.is_some() {
+                keys.iter()
+                    .filter_map(|key| shard.buckets.get(key))
+                    .any(append_bucket)
+            } else {
+                shard
+                    .buckets
+                    .iter()
+                    .any(|(key, bucket)| key.name == name && append_bucket(bucket))
+            };
         }
         let variants: Vec<_> = entries.iter().map(|e| {
             let age = now.saturating_duration_since(e.inserted);
@@ -1202,6 +1328,7 @@ struct Stored {
 enum Origin {
     Answer,
     Refresh,
+    Narrower,
     Restore(Restore),
 }
 
@@ -1251,7 +1378,15 @@ fn prepare_response(
             if question.query_type() == RecordType::CNAME {
                 return Err(DecisionReason::UncacheableResponse);
             }
-            cname_negative_ttl(question.name(), question.query_class(), response)?
+            cname_negative_ttl(
+                question.name(),
+                question.query_class(),
+                response,
+                query
+                    .edns
+                    .as_ref()
+                    .is_some_and(|edns| edns.flags().dnssec_ok),
+            )?
         };
         lifetime = lifetime.min(config.negative_ttl_cap_secs).min(negative_ttl);
     }
@@ -1285,19 +1420,33 @@ fn cname_negative_ttl(
     name: &Name,
     class: DNSClass,
     response: &Message,
+    dnssec_ok: bool,
 ) -> Result<u32, DecisionReason> {
     let mut targets = HashMap::with_capacity(response.answers.len());
     for rr in &response.answers {
-        let RData::CNAME(target) = &rr.data else {
-            return Err(DecisionReason::UncacheableResponse);
-        };
-        if rr.dns_class != class
-            || targets
-                .insert(&rr.name, &target.0)
-                .is_some_and(|previous| previous != &target.0)
-        {
+        if rr.dns_class != class {
             return Err(DecisionReason::UncacheableResponse);
         }
+        match &rr.data {
+            RData::CNAME(target) => {
+                if targets
+                    .insert(&rr.name, &target.0)
+                    .is_some_and(|previous| previous != &target.0)
+                {
+                    return Err(DecisionReason::UncacheableResponse);
+                }
+            }
+            RData::DNSSEC(DNSSECRData::RRSIG(sig))
+                if dnssec_ok && sig.input().type_covered == RecordType::CNAME => {}
+            _ => return Err(DecisionReason::UncacheableResponse),
+        }
+    }
+    if response
+        .answers
+        .iter()
+        .any(|rr| rr.record_type() == RecordType::RRSIG && !targets.contains_key(&rr.name))
+    {
+        return Err(DecisionReason::UncacheableResponse);
     }
     let mut terminal = name;
     for _ in 0..targets.len() {

@@ -199,6 +199,26 @@ fn a_failure_keeps_its_extended_errors_and_is_never_saved() {
         hit.message.edns.unwrap().option(EdnsCode::Unknown(15)),
         Some(&EdnsOption::Unknown(15, vec![0, 6]))
     );
+    q.edns = None;
+    assert!(
+        cache
+            .insert_failure_if_epoch(
+                &q,
+                &response,
+                Scope::NoEcs,
+                now,
+                cache.epoch(),
+                Failure::Final
+            )
+            .admitted()
+    );
+    assert!(
+        lookup(&cache, &q, None, now)
+            .unwrap()
+            .message
+            .edns
+            .is_none()
+    );
     let mut file = std::io::Cursor::new(Vec::new());
     let report = cache
         .write_clean_snapshot(

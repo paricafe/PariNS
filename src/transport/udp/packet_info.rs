@@ -5,6 +5,7 @@ use std::{
 };
 
 use nix::{
+    errno::Errno,
     libc::{cmsghdr, in_pktinfo, in6_pktinfo},
     sys::socket::{
         ControlMessage, ControlMessageOwned, MsgFlags, SockaddrStorage, cmsg_space, recvmsg,
@@ -44,12 +45,17 @@ pub(super) async fn recv(
                 bytes: [0; cmsg_space::<in_pktinfo>() + cmsg_space::<in6_pktinfo>()],
             };
             let mut buffers = [IoSliceMut::new(bytes)];
-            let message = recvmsg::<SockaddrStorage>(
-                socket.as_raw_fd(),
-                &mut buffers,
-                Some(&mut control.bytes),
-                MsgFlags::empty(),
-            )?;
+            let message = loop {
+                match recvmsg::<SockaddrStorage>(
+                    socket.as_raw_fd(),
+                    &mut buffers,
+                    Some(&mut control.bytes),
+                    MsgFlags::empty(),
+                ) {
+                    Err(Errno::EINTR) => continue,
+                    result => break result?,
+                }
+            };
             if message
                 .flags
                 .intersects(MsgFlags::MSG_TRUNC | MsgFlags::MSG_CTRUNC)
@@ -102,14 +108,18 @@ pub(super) async fn send(
     };
     socket
         .async_io(Interest::WRITABLE, || {
-            sendmsg(
-                socket.as_raw_fd(),
-                &[IoSlice::new(bytes)],
-                &[control],
-                MsgFlags::empty(),
-                Some(&destination),
-            )
-            .map_err(Into::into)
+            loop {
+                match sendmsg(
+                    socket.as_raw_fd(),
+                    &[IoSlice::new(bytes)],
+                    &[control],
+                    MsgFlags::empty(),
+                    Some(&destination),
+                ) {
+                    Err(Errno::EINTR) => continue,
+                    result => return result.map_err(Into::into),
+                }
+            }
         })
         .await
 }

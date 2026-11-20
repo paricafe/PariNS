@@ -142,7 +142,7 @@ impl Source {
                 config,
             )?)),
             ResolutionMode::Recursive => Self::Recursive(Box::new(
-                crate::recursion::Recursion::new(&config.recursion)?,
+                crate::recursion::Recursion::new(&config.recursion, config.listen)?,
             )),
         })
     }
@@ -341,7 +341,7 @@ impl Resolver {
         );
         self.upstream.shutdown();
     }
-    pub(crate) fn forced_shutdown(&self) -> Option<ForcedShutdown> {
+    pub fn forced_shutdown(&self) -> Option<ForcedShutdown> {
         ForcedShutdown::from_u8(self.shutdown_forced.load(Ordering::Acquire))
     }
     pub fn upstream_diagnostics(&self) -> Option<serde_json::Value> {
@@ -539,6 +539,15 @@ impl Resolver {
                 });
             }
         };
+        if self.resolution_mode() == ResolutionMode::Recursive && !query.recursion_desired {
+            let mut message = protocol::error_response(&query, ResponseCode::Refused);
+            context.finish(&query, &mut message, None);
+            return Some(Reply {
+                message,
+                udp_limit,
+                padding,
+            });
+        }
         if let Some((mut message, block)) = policy.block_query(&query) {
             trace.cache = Some("blocked");
             trace.block = Some(block);
@@ -734,7 +743,8 @@ impl Resolver {
             authentic = false;
         }
         context.finish(&query, &mut message, scope);
-        message.metadata.authentic_data = authentic;
+        message.metadata.authentic_data =
+            authentic && message.response_code != ResponseCode::ServFail;
         Some(Reply {
             message,
             udp_limit,
@@ -802,8 +812,8 @@ impl Waiting<'_> {
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         if let (Some(hold), Some(fill)) = (self.hold.take(), self.fill.take())
-            && self.sent.load(Ordering::Acquire)
             && let Some(mut hold) = hold.leave()
+            && self.sent.load(Ordering::Acquire)
         {
             fill.refresh.schedule(
                 fill.query,
@@ -818,11 +828,22 @@ impl Drop for Waiting<'_> {
 
 impl Exchange {
     async fn run(mut self, refreshing: bool) -> Answer {
-        if let Some(hit) =
+        let now = Instant::now();
+        let hit = if refreshing {
             self.cache
-                .peek(&self.query, self.context.outgoing, Instant::now(), false)
-            && (!refreshing || !hit.refresh)
-        {
+                .peek(&self.query, self.context.outgoing, now, false)
+                .filter(|hit| !hit.refresh)
+        } else {
+            let result = self
+                .cache
+                .lookup_after_miss(&self.query, self.context.outgoing, now);
+            if result.hit.is_some() {
+                self.metrics.record_cache_lookup(result.decision);
+                self.metrics.inc(Counter::CacheHits);
+            }
+            result.hit
+        };
+        if let Some(hit) = hit {
             let mut message = hit.message;
             message.metadata.authentic_data = hit.authentic;
             return Answer {
@@ -921,7 +942,9 @@ impl Exchange {
                 let decision = self.context.response_scope(&response);
                 let servfail = response.response_code == ResponseCode::ServFail;
                 let store = (!retried).then(|| {
-                    let scope = if servfail {
+                    let scope = if decision.supersede.is_some() {
+                        decision.supersede.filter(|_| !servfail)
+                    } else if servfail {
                         self.context.source_scope()
                     } else {
                         decision.cache
@@ -941,6 +964,14 @@ impl Exchange {
                                     } else {
                                         Failure::StaleFallback
                                     },
+                                )
+                            } else if decision.supersede.is_some() {
+                                self.cache.supersede_narrower_if_epoch(
+                                    &self.query,
+                                    &response,
+                                    scope,
+                                    Instant::now(),
+                                    self.epoch,
                                 )
                             } else if refreshing {
                                 self.cache.insert_refresh_if_epoch(
@@ -1000,5 +1031,111 @@ impl Exchange {
                 prefetch: refreshing,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hickory_proto::{
+        op::Query,
+        rr::{Name, RData, Record, RecordType, rdata::A},
+    };
+
+    fn query() -> Message {
+        let mut query = Message::query();
+        query.add_query(Query::query(
+            Name::from_ascii("race.test.").unwrap(),
+            RecordType::A,
+        ));
+        query
+    }
+
+    #[tokio::test]
+    async fn last_waiter_reads_sent_after_the_other_hold_leaves() {
+        let query = query();
+        let sent = Arc::new(AtomicBool::new(false));
+        let refresh = Arc::new(refresh::Refresh::default());
+        let flights = Flights::new(CoalescingConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let work = || std::future::pending::<Answer>().boxed();
+        let (other, ..) = flights.join(&query, work(), sent.clone()).unwrap();
+        let (mut last, ..) = flights.join(&query, work(), sent.clone()).unwrap();
+        let sender = sent.clone();
+        last.before_leave = Some(Box::new(move || {
+            sender.store(true, Ordering::Release);
+            assert!(other.leave().is_none());
+        }));
+        drop(Waiting {
+            hold: Some(last),
+            sent,
+            fill: Some(Fill {
+                refresh: &refresh,
+                query: &query,
+                epoch: 0,
+                config: &Default::default(),
+            }),
+        });
+        assert_eq!(refresh.snapshot().scheduled, 1);
+        let (_, role, _) = flights.join(&query, work(), Arc::default()).unwrap();
+        assert!(matches!(role, Role::Joined));
+        refresh.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn foreground_recheck_settles_refresh_without_a_second_miss() {
+        use crate::ecs::Scope;
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
+        config.upstreams.servers = vec![socket.local_addr().unwrap().to_string()];
+        let resolver = Resolver::from_config(&config);
+        let cache = resolver.cache();
+        let query = query();
+        let make_exchange = || {
+            let (outbound, context) =
+                Context::prepare(&query, "127.0.0.1".parse().unwrap(), &EcsConfig::default())
+                    .unwrap();
+            Exchange {
+                upstream: resolver.upstream.clone(),
+                timeout: Duration::from_millis(50),
+                cache: cache.clone(),
+                query: query.clone(),
+                context,
+                outbound,
+                epoch: cache.epoch(),
+                metrics: resolver.metrics.clone(),
+                trace_enabled: false,
+                sent: Arc::default(),
+            }
+        };
+        let now = Instant::now();
+        assert!(
+            cache
+                .lookup_with_decision(&query, None, now, false)
+                .hit
+                .is_none()
+        );
+        assert!(!make_exchange().run(false).await.cached);
+        assert_eq!(cache.snapshot()["misses"], 1);
+        let pending = make_exchange();
+        let mut response = protocol::error_response(&query, ResponseCode::NoError);
+        response.add_answer(Record::from_rdata(
+            query.queries[0].name().clone(),
+            60,
+            RData::A(A::new(192, 0, 2, 1)),
+        ));
+        assert!(
+            cache
+                .insert_refresh_if_epoch(&query, &response, Scope::NoEcs, now, cache.epoch())
+                .admitted()
+        );
+        assert!(make_exchange().run(true).await.cached);
+        assert_eq!(cache.refresh_outcomes(), (0, 0));
+        assert!(pending.run(false).await.cached);
+        assert_eq!(cache.refresh_outcomes(), (1, 0));
+        assert_eq!(cache.snapshot()["hits"], 1);
+        assert_eq!(cache.snapshot()["misses"], 1);
     }
 }

@@ -15,8 +15,8 @@ const settings = {
   upstreams: { servers: ['udp://192.0.2.53:53'], mode: 'weighted', prefer_h3: false, bootstrap: [], max_parallel: 2, max_extra_inflight: 64, ca_file: null, dot_pool: { enabled: true, max_connections: 4, idle_timeout_ms: 30000 } },
 };
 vi.mock('../../session/context', () => ({ useSession: () => ({ state: {}, transportChanged: vi.fn() }) }));
-vi.mock('../../config/context', () => ({
-  toConfigIssue: (reason: unknown) => reason,
+vi.mock('../../config/context', async (original) => ({
+  ...await original<typeof import('../../config/context')>(),
   useConfig: () => ({
     draft: { settings, fields: mocks.fields, optional: {}, rules: null, sources: null, stale: false, hasBackup: false },
     locked: false, busy: false, dirty: Object.keys(mocks.fields).length > 0, error: mocks.error,

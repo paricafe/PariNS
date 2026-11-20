@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../session/client';
 import { ApiError, StaleRequest } from '../../session/client';
-import { translate, type Language } from '../../i18n';
-import type { CheckResult, Failure } from './types';
-import { failureText } from './SourceCard';
+import { presentIssue, translate, type Language } from '../../i18n';
+import type { CheckResult } from './types';
 
 export function DomainCheck({ api, language, names }: { api: ApiClient; language: Language; names: Record<string, string> }) {
   const [name, setName] = useState('');
   const [result, setResult] = useState<CheckResult | null>(null);
-  const [error, setError] = useState<Failure | null>(null);
+  const [error, setError] = useState<ApiError | string | null>(null);
   const [working, setWorking] = useState(false);
   const owner = useRef(0);
   const edit = useRef(0);
@@ -19,11 +18,11 @@ export function DomainCheck({ api, language, names }: { api: ApiClient; language
       event.preventDefault(); if (working) return;
       const token = owner.current; const input = edit.current; setWorking(true); setError(null); setResult(null);
       try { const checked = await api.request<CheckResult>('filter/check', 'POST', { name: name.trim() }); if (token === owner.current && input === edit.current) setResult(checked); }
-      catch (reason) { if (token === owner.current && !(reason instanceof StaleRequest)) setError({ code: reason instanceof ApiError ? reason.code : 'error', line: null }); }
+      catch (reason) { if (token === owner.current && !(reason instanceof StaleRequest)) setError(reason instanceof ApiError ? reason : 'subscriptions.error'); }
       finally { if (token === owner.current) setWorking(false); }
     }}><label className="field">{t('domain')}<input value={name} required spellCheck={false} onChange={(event) => { edit.current += 1; setName(event.target.value); setResult(null); }} /></label>
       <button type="submit" className="button secondary" disabled={working}>{t(working ? 'running' : 'check')}</button></form>
-    {error && <p role="alert" className="error">{failureText(error, language)}</p>}
+    {error && <p role="alert" className="error">{presentIssue(error, language)}</p>}
     {result && <div className="inspection-result" role="status"><h3>{t(result.decision)}</h3>
       {result.witness && <p>{t('witness')}: <code>{result.witness.rule}</code> · {t(result.witness.scope)} · {result.witness.source_id === null ? t('local') : names[result.witness.source_id] || result.witness.source_id}</p>}
     </div>}

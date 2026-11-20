@@ -41,7 +41,7 @@ export function LoginPage({ language }: { language: Language }) {
     event.preventDefault(); setBusy(true); setError(null);
     try {
       if (turnstile && !token) throw new ApiError(403, 'TURNSTILE_REQUIRED', 'Complete the human verification');
-      await login(username.trim(), password, { turnstileToken: token, reload: Boolean(turnstile) });
+      await login(username.trim(), password, { turnstileToken: token, reload: Boolean(turnstile) || turnstileAllowed() });
       setPassword('');
     } catch (reason) { setError(present(reason, language)); }
     finally {

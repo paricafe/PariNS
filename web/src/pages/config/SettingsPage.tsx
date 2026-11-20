@@ -5,7 +5,7 @@ import { SPRING_IOS } from '../../components/beui/motion';
 import { useNavigate } from 'react-router-dom';
 import { cacheRuleDraft, configList, defaultCacheRule, fieldDisplayValue, getPath, settingPages, ModelError, type CacheRuleDraft, type RawFieldValue, type SettingField, type SettingPageId } from '../../model';
 import { formatBytes, formatNumber, hasTranslation, presentIssue, translate, type Language } from '../../i18n';
-import { toConfigIssue, useConfig, type ConfigIssue } from '../../config/context';
+import { needsFormFlush, toConfigIssue, useConfig, type ConfigIssue } from '../../config/context';
 import { useSession } from '../../session/context';
 import { ApiError, StaleRequest } from '../../session/client';
 import { Switch, Tabs, Drawer } from '../../components/beui';
@@ -82,7 +82,8 @@ function FieldRow({ field, language, value, onChange, disabled, issue }: { field
 }
 
 function GenericSettings({ pageId, language }: { pageId: SettingPageId; language: Language }) {
-  const { draft, locked, updateField, setOptional, error } = useConfig();
+  const { draft, busy, locked, updateField, setOptional, error } = useConfig();
+  const controlsLocked = busy || locked;
   const [moreOpen, setMoreOpen] = useState<ReadonlySet<string>>(new Set());
   const focusedError = useRef<ConfigIssue | null>(null);
   const page = settingPages[pageId];
@@ -114,7 +115,7 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
     if (!shown(group.when) && !group.fields.some(hasError)) return null;
     const enabled = group.optional ? draft.optional[group.optional] ?? getPath(draft.settings, group.optional) !== null : true;
     const filterExternal = group.id === 'filterRules' && Boolean(draft.fields.filter_file ?? getPath(draft.settings, 'filter_file'));
-    const disabled = locked || !enabled || filterExternal;
+    const disabled = controlsLocked || !enabled || filterExternal;
     const visible = group.fields.filter((field) => shown(field.when) || hasError(field));
     const main = visible.filter((field) => !field.advanced);
     const more = visible.filter((field) => field.advanced);
@@ -125,7 +126,7 @@ function GenericSettings({ pageId, language }: { pageId: SettingPageId; language
       <h2 id={headingId} className="group-title">{t(group.titleKey)}</h2>
       <div className="grouped">
         {group.optional && <div className="row" data-layout="inline"><div className="row-label"><label htmlFor={`enable-${group.id}`}>{t(group.enableKey)}</label></div>
-          <div className="row-control"><Switch id={`enable-${group.id}`} checked={enabled} disabled={locked} onCheckedChange={(next) => setOptional(group.optional!, next)} /></div></div>}
+          <div className="row-control"><Switch id={`enable-${group.id}`} checked={enabled} disabled={controlsLocked} onCheckedChange={(next) => setOptional(group.optional!, next)} /></div></div>}
         {group.id === 'doh' && <DohRuntimeRow language={language} />}
         <div className="settings-expand" data-open={enabled} inert={!enabled}><div>
           {rows(main)}
@@ -156,7 +157,8 @@ function TomlChanges({ language }: { language: Language }) {
 }
 
 export function CacheRules({ language }: { language: Language }) {
-  const { draft, locked, setRules, error } = useConfig();
+  const { draft, busy, locked, setRules, error } = useConfig();
+  const controlsLocked = busy || locked;
   const reduced = useReducedMotion();
   const keys = useRef<number[]>([]);
   const serial = useRef(0);
@@ -185,19 +187,19 @@ export function CacheRules({ language }: { language: Language }) {
   };
   return <section className="panel">
     <div className="heading-row"><div className="row-label"><h2>{t('rules')}</h2><InfoTip text={t('rulesHelp')} label={translate('shell.about', language, { label: t('rules') })} /></div>
-      <button type="button" className="button secondary" disabled={locked || rules.length >= 4096} onClick={() => { keys.current = [...keys.current, serial.current++]; setRules([...rules, cacheRuleDraft(defaultCacheRule())]); }}>{t('addRule')}</button></div>
+      <button type="button" className="button secondary" disabled={controlsLocked || rules.length >= 4096} onClick={() => { keys.current = [...keys.current, serial.current++]; setRules([...rules, cacheRuleDraft(defaultCacheRule())]); }}>{t('addRule')}</button></div>
     {rules.length === 0 && <p className="muted">{t('noRules')}</p>}
-    <div className="rule-list"><AnimatePresence initial={false}>{rules.map((rule, index) => { const id = keys.current[index]; const number = { number: index + 1 }; return <motion.fieldset className="rule-row" disabled={locked} key={id}
+    <div className="rule-list"><AnimatePresence initial={false}>{rules.map((rule, index) => { const id = keys.current[index]; const number = { number: index + 1 }; return <motion.fieldset className="rule-row" disabled={controlsLocked} key={id}
       initial={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} animate={{ opacity: 1, height: 'auto', transitionEnd: { overflow: 'visible' } }} exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><legend>{translate('views.rule', language, number)}</legend>
       <div className="fields-grid">{cacheRuleFields.map(([key, label]) => { const inputId = `rule-${id}-${key}`; const issue = matchesFieldError(error, `cache.rules.${index}.${key}`) ? error : null; return <div className="field" key={key}>
         <label htmlFor={inputId}>{t(label)}</label>
-        {choices[key] ? <Segmented id={inputId} label={t(label)} value={rule[key]} disabled={locked} onChange={(value) => update(index, key, value)} options={choices[key]!.map(([value, option]) => ({ value, label: t(option) }))} />
+        {choices[key] ? <Segmented id={inputId} label={t(label)} value={rule[key]} disabled={controlsLocked} onChange={(value) => update(index, key, value)} options={choices[key]!.map(([value, option]) => ({ value, label: t(option) }))} />
           : <input id={inputId} value={rule[key]} inputMode={key.endsWith('_secs') ? 'numeric' : undefined} spellCheck={false} autoComplete="off" aria-invalid={issue ? true : undefined} aria-describedby={issue ? `${inputId}-error` : undefined} onChange={(event) => update(index, key, event.target.value)} />}
         {issue && <small id={`${inputId}-error`} className="field-error">{presentIssue(issue, language)}</small>}
       </div>; })}</div>
-      <div className="rule-actions"><button type="button" className="button quiet" aria-label={translate('views.moveRuleUp', language, number)} disabled={locked || index === 0} onClick={() => move(index, index - 1)}>↑</button>
-        <button type="button" className="button quiet" aria-label={translate('views.moveRuleDown', language, number)} disabled={locked || index === rules.length - 1} onClick={() => move(index, index + 1)}>↓</button>
-        <button type="button" className="button quiet" disabled={locked} onClick={() => { keys.current = keys.current.filter((_, at) => at !== index); setRules(rules.filter((_, at) => at !== index)); }}>{t('removeRule')}</button></div>
+      <div className="rule-actions"><button type="button" className="button quiet" aria-label={translate('views.moveRuleUp', language, number)} disabled={controlsLocked || index === 0} onClick={() => move(index, index - 1)}>↑</button>
+        <button type="button" className="button quiet" aria-label={translate('views.moveRuleDown', language, number)} disabled={controlsLocked || index === rules.length - 1} onClick={() => move(index, index + 1)}>↓</button>
+        <button type="button" className="button quiet" disabled={controlsLocked} onClick={() => { keys.current = keys.current.filter((_, at) => at !== index); setRules(rules.filter((_, at) => at !== index)); }}>{t('removeRule')}</button></div>
     </motion.fieldset>; })}</AnimatePresence></div>
   </section>;
 }
@@ -307,14 +309,18 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
       <label className="field">{t('inspectQtype')}<input value={qtype} onChange={(event) => setQtype(event.target.value)} required spellCheck={false} /></label>
       <label className="field">{t('subnet')}<input value={subnet} onChange={(event) => setSubnet(event.target.value)} spellCheck={false} /></label>
       <details className="more-options wide"><summary>{translate('shell.moreOptions', language)}</summary>
-        <div className="checkbox-row">{[['EDNS', edns, setEdns], ['DO', dnssec, setDnssec], ['CD', cd, setCd], ['RD', rd, setRd]].map(([label, checked, setter]) =>
-          <label key={label as string}><input type="checkbox" checked={checked as boolean} onChange={(event) => (setter as (value: boolean) => void)(event.target.checked)} />{label as string}</label>)}</div>
+        <div className="checkbox-row">
+          <label><input type="checkbox" checked={edns} onChange={({ target }) => { setEdns(target.checked); if (!target.checked) setDnssec(false); }} />EDNS</label>
+          <label><input type="checkbox" checked={dnssec} disabled={!edns} onChange={({ target }) => setDnssec(target.checked)} />DO</label>
+          <label><input type="checkbox" checked={cd} onChange={({ target }) => setCd(target.checked)} />CD</label>
+          <label><input type="checkbox" checked={rd} onChange={({ target }) => setRd(target.checked)} />RD</label>
+        </div>
       </details>
       <button className="button primary" disabled={working} type="submit">{t('inspect')}</button>
     </form>
     {error && <p className="error" role="alert">{presentIssue(error, language)}</p>}
     {result && <div className="inspection-result"><h3>{t(`explain${result.explanation.state[0].toUpperCase()}${result.explanation.state.slice(1)}`)}</h3>
-      <p>{t('explanation').replace('{reason}', t(result.explanation.reason)).replace('{scope}', (result.explanation.scope === null ? t('none') : hasTranslation(`views.${result.explanation.scope}`) ? t(result.explanation.scope) : result.explanation.scope))}</p>
+      <p>{t('explanation').replace('{reason}', t(result.explanation.reason)).replace('{scope}', result.explanation.scope === null ? t('none') : scopeNote(result.explanation.scope, language))}</p>
       <p className="small">{t('inspectionFlags')} <span className="mono">{flagSummary(result.flags)}</span></p>
       {result.inspection.ecs_sharing && <p>{t(`ecsSharing${result.inspection.ecs_sharing[0].toUpperCase()}${result.inspection.ecs_sharing.slice(1)}`)}</p>}
       <p className="muted small">{t('variants')}: {variants.length}</p>
@@ -384,12 +390,12 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   const navigate = useNavigate();
   const [cacheTab, setCacheTab] = useState<CacheTab>('usage');
   const [notice, setNotice] = useState<string | null>(null);
-  const needsFormFlush = Boolean(draft && (Object.keys(draft.fields).length || Object.keys(draft.optional).length || draft.rules !== null || draft.sources !== null));
+  const formPending = needsFormFlush(draft);
   const needsParse = Boolean(draft?.stale);
   useEffect(() => {
-    if (pageId === 'advanced' && needsFormFlush) void preview().catch(() => {});
+    if (pageId === 'advanced' && formPending) void preview().catch(() => {});
     if (pageId !== 'advanced' && needsParse) void ensureParsed().catch((reason) => setError(toConfigIssue(reason)));
-  }, [pageId, needsFormFlush, needsParse]);
+  }, [pageId, formPending, needsParse]);
   useEffect(() => {
     if (!(error instanceof ModelError) || !error.path || pageId === 'advanced') return;
     const target = fieldErrorTarget(error.path);
@@ -436,7 +442,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
       <Menu label={t('shell.more')} icon={<Ellipsis size={17} aria-hidden="true" />} actions={actions} /></header>
     {error && <ConfigErrorNotice error={error} language={language} onDismiss={() => setError(null)} />}
     {notice && <div className="notice" role="status">{notice}<button type="button" onClick={() => setNotice(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
-    {pageId === 'advanced' ? needsFormFlush ? <div className="notice"><p>{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate(`/${errorPage}`)}>{t('app.returnToEdit')}</button></div> : <section className="panel"><div className="toml-tools button-group"><button type="button" className="button secondary" disabled={!draft || busy} onClick={check}>{t('ui.validate')}</button><TomlChanges language={language} /></div><label htmlFor="advanced-toml" className="sr-only">TOML</label><textarea id="advanced-toml" className="toml-editor" value={draft?.toml ?? ''} disabled={busy || draft?.unknownApply} spellCheck={false} onChange={(event) => setToml(event.target.value)} /></section>
+    {pageId === 'advanced' ? formPending ? <div className="notice"><p>{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate(`/${errorPage}`)}>{t('app.returnToEdit')}</button></div> : <section className="panel"><div className="toml-tools button-group"><button type="button" className="button secondary" disabled={!draft || busy} onClick={check}>{t('ui.validate')}</button><TomlChanges language={language} /></div><label htmlFor="advanced-toml" className="sr-only">TOML</label><textarea id="advanced-toml" className="toml-editor" value={draft?.toml ?? ''} disabled={busy || draft?.unknownApply} spellCheck={false} onChange={(event) => setToml(event.target.value)} /></section>
       : pageId === 'cache' ? <>
         <Tabs label={title} items={cacheTabs.map((tab) => ({ value: tab, label: t(`views.cacheTab${tab[0].toUpperCase()}${tab.slice(1)}`) }))} value={cacheTab} onChange={(value) => setCacheTab(value as CacheTab)} />
         {cacheTab === 'usage' && <CacheUsage language={language} />}

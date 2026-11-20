@@ -139,10 +139,12 @@ async fn serve_endpoint(endpoint: &Endpoint, protocol: Protocol, ingress: Ingres
             }
         }
     }
-    let close_by = Instant::now() + ingress.shutdown_grace / 2;
+    let stop_at = Instant::now();
     ingress
         .drain(&mut connections, ForcedShutdown::QuicDrain)
         .await;
+    let close_by =
+        (Instant::now() + ingress.shutdown_grace / 2).min(stop_at + ingress.shutdown_grace);
     endpoint.close(VarInt::from_u32(0), b"shutdown");
     let _ = timeout_at(close_by, endpoint.wait_idle()).await;
     Ok(())
@@ -162,14 +164,13 @@ async fn doq_connection(connection: Connection, ingress: Ingress) {
                 let connection = connection.clone();
                 streams.spawn(async move {
                     let mut guard = Guard::new(context.resolver.metrics().clone(),Protocol::Doq,context.stop.clone(),true);
-                    let mut stage = 0;
-                    match timeout(context.io_timeout, doq_request(send, recv, &context, peer, &mut guard, &mut stage)).await {
-                        Ok(Ok(())) => {},
-                        Ok(Err(error)) if error.is::<quinn::WriteError>() || error.is::<quinn::ClosedStream>() => {guard.finish(diagnostics::write_error(&error));},
-                        failure => {
-                            guard.finish(if failure.is_err() {match stage {0=>Event::StreamReadDeadline,1=>Event::StreamRequestDeadline,_=>Event::StreamWriteDeadline}} else {Event::StreamProtocolInvalid});
-                            connection.close(VarInt::from_u32(2), b"invalid or incomplete DoQ request");
-                        },
+                    if let Err(error) = doq_request(send, recv, &context, peer, &mut guard).await {
+                        guard.finish(if error.is::<tokio::time::error::Elapsed>() {
+                            Event::StreamReadDeadline
+                        } else {
+                            Event::StreamProtocolInvalid
+                        });
+                        connection.close(VarInt::from_u32(2), b"invalid or incomplete DoQ request");
                     }
                 });
             }
@@ -187,17 +188,29 @@ async fn drain_streams(ingress: &Ingress, streams: &mut JoinSet<()>) {
     }
 }
 
+struct DoqResponse<'a> {
+    stream: &'a mut quinn::SendStream,
+    finished: bool,
+}
+
+impl Drop for DoqResponse<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.stream.reset(DOQ_REQUEST_CANCELLED);
+        }
+    }
+}
+
 async fn doq_request(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     ingress: &Ingress,
     peer: std::net::IpAddr,
     guard: &mut Guard,
-    stage: &mut u8,
 ) -> Result<()> {
     let read = tokio::select! {
         biased;
-        read = recv.read_to_end(65537) => read,
+        read = timeout(ingress.io_timeout, recv.read_to_end(65537)) => read?,
         () = ingress.stopped() => {
             let _ = recv.stop(DOQ_REQUEST_CANCELLED);
             let _ = send.reset(DOQ_REQUEST_CANCELLED);
@@ -214,7 +227,11 @@ async fn doq_request(
             guard.finish(Event::StreamConnectionLost);
             return Ok(());
         }
-        Err(error) => return Err(error.into()),
+        Err(error @ quinn::ReadToEndError::TooLong) => return Err(error.into()),
+        Err(quinn::ReadToEndError::Read(_)) => {
+            guard.finish(Event::StreamCancelled);
+            return Ok(());
+        }
     };
     ensure!(frame.len() >= 14, "short DoQ frame");
     ensure!(
@@ -224,36 +241,59 @@ async fn doq_request(
     ensure!(frame[2..4] == [0, 0], "DoQ ID must be zero");
     ensure_no_keepalive(&frame[2..])?;
     guard.event(Event::StreamFullFrame);
-    *stage = 1;
     let (response, delivery) = tokio::select! {
         response = ingress.handle_for_delivery(&frame[2..], peer, "doq") => response,
         _ = send.stopped() => {guard.finish(Event::StreamPeerCancelled);return Ok(());},
     };
-    *stage = 2;
     if let Some(mut response) = response {
         response[..2].copy_from_slice(&[0, 0]);
-        send.write_all(&(response.len() as u16).to_be_bytes())
-            .await?;
-        send.write_all(&response).await?;
-        send.finish()?;
+        let mut writer = DoqResponse {
+            stream: &mut send,
+            finished: false,
+        };
+        let write = timeout(ingress.io_timeout, async {
+            writer
+                .stream
+                .write_all(&(response.len() as u16).to_be_bytes())
+                .await?;
+            writer.stream.write_all(&response).await?;
+            writer.stream.finish()?;
+            anyhow::Ok(writer.stream.stopped().await)
+        })
+        .await;
+        match write {
+            Ok(Ok(Ok(None))) => writer.finished = true,
+            Ok(Ok(Ok(Some(_)))) => {
+                guard.finish(Event::StreamPeerCancelled);
+                return Ok(());
+            }
+            Ok(Ok(Err(_))) => {
+                guard.finish(Event::StreamConnectionLost);
+                return Ok(());
+            }
+            Ok(Err(error)) => {
+                guard.finish(diagnostics::write_error(&error));
+                return Ok(());
+            }
+            Err(_) => {
+                guard.finish(Event::StreamWriteDeadline);
+                return Ok(());
+            }
+        }
         if let Some(delivery) = delivery {
             delivery.delivered();
         }
         guard.finish(Event::StreamResponseHandedToTransport);
     } else {
-        send.reset(VarInt::from_u32(2))?;
+        let _ = send.reset(VarInt::from_u32(2));
         guard.finish(Event::StreamNoResponse);
     }
     Ok(())
 }
 
 fn ensure_no_keepalive(bytes: &[u8]) -> Result<()> {
-    let message = crate::protocol::decode(bytes)?;
     ensure!(
-        !message.edns.as_ref().is_some_and(|edns| edns
-            .options()
-            .get(hickory_proto::rr::rdata::opt::EdnsCode::Keepalive)
-            .is_some()),
+        !crate::protocol::has_tcp_keepalive(bytes),
         "TCP Keepalive is forbidden on DoQ"
     );
     Ok(())
@@ -275,31 +315,73 @@ async fn h3_connection(connection: Connection, ingress: Ingress, local_port: u16
         return;
     };
     let mut streams = JoinSet::new();
+    let mut last_response = None;
     while !*stop.borrow() {
         tokio::select! {
             _ = stop.changed() => break,
-            Some(result) = streams.join_next(), if !streams.is_empty() => ingress.settle("DoH3", result),
+            Some(result) = streams.join_next(), if !streams.is_empty() => {
+                if let Ok(Some(sent)) = result {
+                    last_response = Some(last_response.map_or(sent, |last: Instant| last.max(sent)));
+                }
+                ingress.settle("DoH3", result);
+            },
             request = h3.accept(), if streams.len() < ingress.max_streams => {
                 let Ok(Some(request)) = request else { break };
                 let context = ingress.clone();
                 let connection = connection.clone();
                 streams.spawn(async move {
                     let mut guard = Guard::new(context.resolver.metrics().clone(),Protocol::H3,context.stop.clone(),true);
-                    match timeout(context.io_timeout, h3_request(request, &context, peer, &connection, local_port)).await {
-                        Ok(Ok(H3Outcome::Status(status))) => {
+                    match h3_request(request, &context, peer, &connection, local_port).await {
+                        Ok(H3Outcome::Status(status)) => {
                             guard.event(match status { 200..=299=>Event::HttpResponse2xx,400..=499=>Event::HttpResponse4xx,_=>Event::HttpResponse5xx });
                             guard.finish(Event::StreamResponseHandedToTransport);
+                            return Some(Instant::now());
                         }
-                        Ok(Ok(H3Outcome::ConnectionLost)) => guard.finish(Event::StreamConnectionLost),
-                        Ok(Ok(H3Outcome::Shutdown)) => {},
-                        Ok(Err(error)) => guard.finish(diagnostics::h3_error(&error)),
-                        Err(_) => guard.finish(Event::HttpRequestDeadline),
+                        Ok(H3Outcome::ConnectionLost) => guard.finish(Event::StreamConnectionLost),
+                        Ok(H3Outcome::Shutdown) => {},
+                        Err(error) if error.is::<tokio::time::error::Elapsed>() => guard.finish(Event::HttpRequestDeadline),
+                        Err(error) => guard.finish(diagnostics::h3_error(&error)),
                     }
+                    None
                 });
             }
         }
     }
-    drain_streams(&ingress, &mut streams).await;
+    if *stop.borrow() {
+        let stop_at = Instant::now();
+        let deadline = stop_at + ingress.shutdown_grace;
+        let half_grace = ingress.shutdown_grace / 2;
+        let goaway_deadline = if streams.is_empty() {
+            stop_at + half_grace
+        } else {
+            deadline
+        };
+        let mut driving = matches!(
+            timeout_at(goaway_deadline, h3.shutdown(0)).await,
+            Ok(Ok(()))
+        );
+        while !streams.is_empty() {
+            tokio::select! {
+                Some(result) = streams.join_next() => {
+                    if let Ok(Some(sent)) = result {
+                        last_response = Some(last_response.map_or(sent, |last: Instant| last.max(sent)));
+                    }
+                    ingress.settle("DoH3", result);
+                }
+                result = h3.accept(), if driving => driving = matches!(result, Ok(Some(_))),
+            }
+        }
+        if let Some(sent) = last_response {
+            let now = Instant::now();
+            let close_at =
+                (sent + half_grace).min(now + deadline.saturating_duration_since(now) / 2);
+            if close_at > now {
+                let _ = timeout_at(close_at, connection.closed()).await;
+            }
+        }
+    } else {
+        ingress.drain(&mut streams, ForcedShutdown::QuicDrain).await;
+    }
     connection.close(VarInt::from_u32(0x100), b"closed");
 }
 
@@ -320,40 +402,29 @@ async fn h3_request(
 ) -> Result<H3Outcome> {
     let (request, mut stream) = tokio::select! {
         biased;
-        resolved = resolver.resolve_request() => resolved?,
+        resolved = timeout(ingress.io_timeout, resolver.resolve_request()) => resolved??,
         () = ingress.stopped() => return Ok(H3Outcome::Shutdown),
     };
     let body = tokio::select! {
         biased;
-        body = h3_body(&mut stream) => body?,
+        body = timeout(ingress.io_timeout, h3_body(&mut stream)) => body??,
         () = ingress.stopped() => {
             stream.stop_sending(h3::error::Code::H3_REQUEST_REJECTED);
             stream.stop_stream(h3::error::Code::H3_REQUEST_REJECTED);
             return Ok(H3Outcome::Shutdown);
         }
     };
-    let Some(body) = body else {
-        stream
-            .send_response(
-                http::Response::builder()
-                    .status(413)
-                    .header("cache-control", "no-store")
-                    .header("alt-svc", crate::doh::alt_svc(Some(local_port)))
-                    .body(())?,
-            )
-            .await?;
-        stream.finish().await?;
-        return Ok(H3Outcome::Status(413));
-    };
-    let parsed = crate::doh::request_bytes(
-        request.method().as_str(),
-        request.uri().path_and_query().map_or("/", |p| p.as_str()),
-        request
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
-        &body,
-    );
+    let parsed = body.ok_or(413u16).and_then(|body| {
+        crate::doh::request_bytes(
+            request.method().as_str(),
+            request.uri().path_and_query().map_or("/", |p| p.as_str()),
+            request
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            &body,
+        )
+    });
     let (status, response, delivery) = match parsed {
         Ok(query) => match tokio::select! {
             handled = ingress.handle_for_delivery(&query, peer, "doh3") => handled,
@@ -371,11 +442,18 @@ async fn h3_request(
     if status == 200 {
         headers = headers.header("content-type", "application/dns-message");
     }
-    stream.send_response(headers.body(())?).await?;
-    if !response.is_empty() {
-        stream.send_data(Bytes::from(response)).await?;
+    if status == 405 {
+        headers = headers.header("allow", "GET, POST");
     }
-    stream.finish().await?;
+    timeout(ingress.io_timeout, async {
+        stream.send_response(headers.body(())?).await?;
+        if !response.is_empty() {
+            stream.send_data(Bytes::from(response)).await?;
+        }
+        stream.finish().await?;
+        anyhow::Ok(())
+    })
+    .await??;
     if let Some(delivery) = delivery {
         delivery.delivered();
     }

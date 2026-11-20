@@ -57,6 +57,7 @@ enum Action {
     WrongId,
     Truncated,
     Partial(oneshot::Sender<()>),
+    CloseMidFrame(usize),
     CloseAfterReply(oneshot::Sender<()>),
     SilentAfterReply(oneshot::Sender<()>),
 }
@@ -114,6 +115,12 @@ impl Peer {
                                     response.metadata.truncation = true;
                                 }
                                 let wire = response.to_vec().unwrap();
+                                if let Action::CloseMidFrame(bytes) = action {
+                                    let frame = [&(wire.len() as u16).to_be_bytes()[..], &wire].concat();
+                                    stream.write_all(&frame[..bytes]).await.unwrap();
+                                    stream.shutdown().await.unwrap();
+                                    return;
+                                }
                                 if stream.write_u16(wire.len() as u16).await.is_err() { return; }
                                 if let Action::Partial(sent) = action {
                                     if stream.write_all(&wire[..5]).await.is_err() { return; }
@@ -382,6 +389,27 @@ async fn idle_peer_close_reconnects_once_but_invalid_dns_never_retries() {
         peer.reply(Action::Reply).await;
         success(next, id + 1).await;
         assert_eq!(peer.count(), previous + 1, "invalid stream was retained");
+    }
+}
+
+#[tokio::test]
+async fn reused_connection_closing_mid_response_never_replays_query() {
+    let cert = certificate();
+    for bytes in [1, 2, 7] {
+        let mut peer = Peer::new(&cert).await;
+        let upstream = upstream(&cert, 1);
+        let warm = exchange(&upstream, peer.address, 76);
+        peer.reply(Action::Reply).await;
+        success(warm, 76).await;
+
+        let interrupted = exchange(&upstream, peer.address, 77);
+        assert_eq!(peer.reply(Action::CloseMidFrame(bytes)).await, 1);
+        assert!(interrupted.await.unwrap().is_err());
+        assert_eq!(peer.count(), 1);
+
+        let next = exchange(&upstream, peer.address, 78);
+        assert_eq!(peer.reply(Action::Reply).await, 2);
+        success(next, 78).await;
     }
 }
 

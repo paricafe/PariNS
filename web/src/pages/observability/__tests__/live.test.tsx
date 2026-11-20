@@ -244,6 +244,70 @@ describe('LogsPage live updates', () => {
   beforeEach(() => localStorage.setItem(STORAGE_KEYS.logRefresh, '3'));
   afterEach(() => localStorage.clear());
 
+  it.each(['search', 'cache'] as const)('fences old live rows when changing the %s filter, including a failed list request', async (kind) => {
+    const { api, socket } = await mount();
+    fireEvent.click(detailButton('example.test'));
+    act(() => socket.push({ type: 'entries', entries: [row(43, 'buffered.test')], cursor: 43, more: false }));
+    expect(screen.getByRole('button', { name: '1 new queries' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    let reject!: (reason: Error) => void;
+    api.request.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    socket.answerSubscribes = false;
+    if (kind === 'search') {
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'new.test' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
+    } else fireEvent.click(screen.getByRole('radio', { name: 'Stale hit' }));
+    expect(socket.ofType('subscribe').at(-1)).toMatchObject({ cursor: null, filter: kind === 'search' ? { search: 'new.test' } : { cache: 'stale' } });
+    expect(screen.queryByRole('button', { name: /new queries/ })).toBeNull();
+    act(() => socket.push({ type: 'entries', entries: [row(44, 'old-filter.test')], cursor: 44, more: false }));
+    await act(async () => reject(new Error('List failed')));
+    expect(screen.getByRole('alert').textContent).toBe('List failed');
+    act(() => {
+      socket.push({ type: 'subscribed', log: 'ok', log_epoch: 3 });
+      socket.push({ type: 'entries', entries: [row(45, 'too-early.test')], cursor: 45, more: false });
+    });
+    expect(tableRow('old-filter.test')).toBeUndefined();
+    expect(tableRow('too-early.test')).toBeUndefined();
+    expect(screen.queryByRole('button', { name: /new queries/ })).toBeNull();
+    api.request.mockResolvedValueOnce(page([row(46, 'new.test')]));
+    socket.answerSubscribes = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(tableRow('new.test')).toBeTruthy());
+  });
+
+  it('shows waiting rows and advances the timestamp when live manual refresh returns an empty batch', async () => {
+    const { api, socket } = await mount();
+    fireEvent.click(detailButton('example.test'));
+    const status = screen.getAllByRole('status')[0];
+    const previous = status.textContent;
+    act(() => socket.push({ type: 'entries', entries: [row(43, 'waiting.test')], cursor: 43, more: false }));
+    expect(tableRow('waiting.test')).toBeUndefined();
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    act(() => socket.push({ type: 'entries', entries: [], cursor: 43, more: false }));
+    expect(tableRow('waiting.test')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /new queries/ })).toBeNull();
+    expect(status.textContent).not.toBe(previous);
+    expect(api.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('reloads the current filter after a clear that finishes after a filter change', async () => {
+    const { api, socket } = await mount();
+    let finish!: (value: object) => void;
+    api.request.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear log…' }));
+    const confirm = screen.getByRole('dialog').querySelector<HTMLButtonElement>('.danger')!;
+    fireEvent.click(confirm);
+    expect(api.request).toHaveBeenLastCalledWith('query-log/clear', 'POST', { log_epoch: 3 });
+    fireEvent.click(screen.getByRole('radio', { name: 'Stale hit' }));
+    await waitFor(() => expect(tableRow('example.test')).toBeTruthy());
+    api.request.mockResolvedValueOnce(page([], 4));
+    socket.state = { type: 'state', log: 'ok', log_epoch: 4 };
+    await act(async () => finish({}));
+    expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', expect.objectContaining({ cache: 'stale', before_id: null }));
+    expect(tableRow('example.test')).toBeUndefined();
+  });
+
   it('subscribes with the stored 3 s interval, resubscribes on change and inserts batches at the head', async () => {
     const { api, socket } = await mount();
     expect(socket.sent[0]).toEqual({ type: 'auth', binding: BINDING });

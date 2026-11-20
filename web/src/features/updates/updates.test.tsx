@@ -3,6 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../session/client';
+import { translate } from '../../i18n';
 import { UpdatesProvider } from './context';
 import { UpdatePanel, UpdateHint } from './UpdatePanel';
 import { canApply, pollDelay, type UpdatesView } from './types';
@@ -39,6 +40,35 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('software update presentation', () => {
+  it.each([['BUSY', 'en'], ['NETWORK', 'zh-CN']] as const)('localizes %s through the API dictionary in %s', async (code, language) => {
+    const current = fixture();
+    mocks.request.mockImplementation(async (path) => {
+      if (path === 'updates/check') throw new ApiError(409, code, 'Raw server message');
+      return current;
+    });
+    mount(language);
+    fireEvent.click(await screen.findByRole('button', { name: translate('updates.checkNow', language) }));
+    await screen.findByText(translate(`api.${code}`, language));
+  });
+
+  it.each(['failed', 'aborted', 'succeeded', 'disappeared'])('keeps restart expected across disconnection until the observed operation is %s', async (outcome) => {
+    let current = fixture();
+    const operation = { operation_id: 'other-tab', phase: 'committing', version: '0.1.5', reason: null, downloaded_bytes: 100, total_bytes: 100 };
+    current.active_operation = operation;
+    mocks.request.mockImplementation(async () => current);
+    mount();
+    await screen.findByText('Preparing to replace the program');
+    expect(mocks.expectRestart).toHaveBeenCalledExactlyOnceWith(true);
+    mocks.request.mockRejectedValueOnce(new ApiError(0, 'NETWORK', 'Restarting'));
+    const refresh = () => fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
+    refresh();
+    await screen.findByText(/Waiting for the service to come back/);
+    expect(mocks.expectRestart).toHaveBeenLastCalledWith(true);
+    current = { ...fixture(), last_operation: outcome === 'disappeared' ? null : { ...operation, phase: outcome } };
+    refresh();
+    await waitFor(() => expect(mocks.expectRestart).toHaveBeenLastCalledWith(false));
+    expect(mocks.reloadPage).not.toHaveBeenCalled();
+  });
   it('reads cached status only, renders release text safely and switches language', async () => {
     const current = fixture(); mocks.request.mockResolvedValue(current);
     const view = mount();
@@ -80,14 +110,30 @@ describe('software update presentation', () => {
     await screen.findByText(/update request couldn't be confirmed/);
     expect(mocks.expectRestart).toHaveBeenCalledWith(true);
     expect(mocks.config.setUpdateLocked).toHaveBeenCalledWith(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
-    await waitFor(() => expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1));
+    expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1);
     expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull();
     current.last_operation = { operation_id: 'op-1', phase: 'failed', version: '0.1.5', reason: 'preflight_failed', downloaded_bytes: 0, total_bytes: 100 };
     fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
     await screen.findByText("The update didn't finish");
     await waitFor(() => expect(mocks.expectRestart).toHaveBeenLastCalledWith(false));
     expect(mocks.reloadPage).not.toHaveBeenCalled();
+  });
+
+  it('unlocks after two idle reads following a lost apply response', async () => {
+    const current = fixture();
+    mocks.request.mockImplementation(async (path) => {
+      if (path === 'updates/apply') throw new ApiError(0, 'NETWORK', 'lost');
+      return current;
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Update now' }));
+    await screen.findByText(/update request couldn't be confirmed/);
+    expect(mocks.config.setUpdateLocked).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh update status' }));
+    await screen.findByText(/No record of this update was found/);
+    expect(mocks.config.setUpdateLocked).toHaveBeenLastCalledWith(false);
+    expect(mocks.expectRestart).toHaveBeenLastCalledWith(false);
+    expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1);
   });
 
   it('keeps a check failure distinct from stale available results and shows rate limits', async () => {
@@ -143,13 +189,16 @@ describe('software update presentation', () => {
     expect(mocks.request.mock.calls.filter(([path]) => path === 'updates/apply')).toHaveLength(1);
   });
 
-  it('disarms restart and releases the local editing lock after a definite rejection', async () => {
+  it.each([
+    [409, 'config_changed', 'The configuration changed. Check again, then confirm.'],
+    [503, 'update_state_unavailable', "Update progress can't be saved reliably. Check the disk that holds the data directory."],
+  ] as const)('disarms restart and releases the local editing lock after %s %s', async (status, code, message) => {
     const current = fixture();
-    mocks.request.mockImplementation(async (path) => { if (path === 'updates/apply') throw new ApiError(409, 'config_changed', 'changed'); return current; });
+    mocks.request.mockImplementation(async (path) => { if (path === 'updates/apply') throw new ApiError(status, code, 'rejected'); return current; });
     mount();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Update now' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    await screen.findByText('The configuration changed. Check again, then confirm.');
+    await screen.findByText(message);
     expect(mocks.expectRestart).toHaveBeenLastCalledWith(false);
     expect(mocks.config.setUpdateLocked).toHaveBeenLastCalledWith(false);
     expect(screen.queryByText(/update request couldn't be confirmed/)).toBeNull();

@@ -39,8 +39,10 @@ password and a [backup](#backups-and-the-state-directory) safe.
 
 **Language and appearance.** Chinese and English, and light, dark or system
 appearance, can be switched on every page, including sign-in and setup. The browser
-remembers only these two choices; credentials, drafts and logs are never stored in
-the browser.
+remembers your language, theme, background selection, overlay darkness and query
+log refresh interval. A saved custom background image stays in IndexedDB until you
+remove it, even when you select a preset. The console never saves credentials,
+session bindings, PEM keys, configuration drafts or query logs in browser storage.
 
 **Applying configuration.** Settings pages and **Advanced (TOML)** edit one draft.
 **Save** validates and applies it at once, then says whether DNS restarted. It asks
@@ -142,7 +144,7 @@ the installer**; run the [install command](deployment.md#install) again. Automat
 rollback restores the program, not data: it never restores an old database or
 removes new history.
 
-The Unreleased installer preflight requires helper protocol 6. Upgrade older
+Update recovery and installer preflight require helper protocol 7. Upgrade older
 helpers with the complete installer; it replaces the program, helper and service
 files. A program-only online update cannot upgrade the helper. During installer
 rollback the packaged helper waits for storage without completing the installation;
@@ -173,8 +175,8 @@ or start an older program by hand. Fix the stated cause, then run the
 [install command](deployment.md#install) for the current or a newer release. When
 that installation passes its readiness check, the unfinished update is closed as
 superseded and settings unlock without a restart. The installer refuses if the
-installed program is not the one the updater recorded; that case needs a restore
-from backup.
+installed program differs from the recorded digest. Follow the identity check below
+before retrying the installation.
 
 **The update stays in progress.** If the updater cannot read its journal when it
 receives a request, it cannot record an outcome. The console then shows the update
@@ -185,7 +187,7 @@ this. The service log shows `PariNS updater: journal unreadable`. To recover:
    `sudo journalctl -u parins-updater.service | grep 'journal unreadable'`.
 2. Correct the cause, for example a full disk or wrong permissions on
    `/var/lib/parins-updater`.
-3. Do not edit or delete `/var/lib/parins-updater/journal.json`.
+3. Do not edit or delete `/var/lib/parins-updater/private/journal.json`.
 4. Run the [install command](deployment.md#install) for the current or a newer
    release.
 
@@ -193,42 +195,33 @@ When that installation passes its readiness check, the update is closed and
 settings unlock. If the installer also cannot read the journal, restore
 `/var/lib/parins-updater` from a backup.
 
-**The service does not start after a restart.** This occurs when an update stops in
-manual recovery after it replaced the program. The updater records the previous
-program, but `/opt/parins-managed/parins` is the new program. At each start,
-`parins-update-recovery.service` fails with `unknown installed binary`, and
-`parins-managed.service` does not start. The installer also refuses this state. The
-updater keeps a verified copy of the recorded program. To start the service again,
-put that copy back:
+**The service does not start after a restart.** Check the recovery service log
+and the phase in `/var/lib/parins-updater/status.json` before replacing any file.
 
-1. Show the status with `sudo cat /var/lib/parins-updater/status.json`.
-2. Make sure that `capability.reason` is `manual_recovery_required`.
-3. Write down `last_operation.operation_id` (the ID) and `installed.sha256` (the
-   recorded digest).
-4. Calculate the digest of the copy. Replace `ID` with the ID:
+- A non-terminal `staged` operation has downloaded the candidate. Boot recovery
+  marks the operation interrupted and starts the recorded installed program.
+  Let `parins-update-recovery.service` finish before starting the managed service.
+- A recorded `manual_required` operation is terminal. Recovery checks the live
+  binary against `installed.sha256`. If it matches, fix the reported cause and
+  run the complete installer as described above.
+- If recovery reports `unknown installed binary`, restore the exact recorded
+  program. When an operation ID is available, check its saved copy with
+  `sudo sha256sum /opt/parins-managed/.update/ID/previous`, replacing `ID`
+  with `last_operation.operation_id`. Use this copy only if its digest equals
+  `installed.sha256`. A terminal operation may have no usable copy. In that
+  case restore a binary with that digest from your backup.
 
-   ```sh
-   sudo sha256sum /opt/parins-managed/.update/ID/previous
-   ```
+To restore a verified `previous` copy and run the service checks:
 
-5. If the file does not exist or the digest is different, stop. Restore the program
-   from your backup.
-6. Put the copy in place:
+```sh
+sudo install -m 0755 /opt/parins-managed/.update/ID/previous /opt/parins-managed/.parins.restore
+sudo mv -f /opt/parins-managed/.parins.restore /opt/parins-managed/parins
+sudo systemctl restart parins-update-recovery.service
+sudo systemctl start parins-managed.service
+```
 
-   ```sh
-   sudo install -m 0755 /opt/parins-managed/.update/ID/previous /opt/parins-managed/.parins.restore
-   sudo mv -f /opt/parins-managed/.parins.restore /opt/parins-managed/parins
-   ```
-
-7. Start the recovery check and the service:
-
-   ```sh
-   sudo systemctl restart parins-update-recovery.service
-   sudo systemctl start parins-managed.service
-   ```
-
-8. Do the manual recovery above: run the install command for the current or a newer
-   release.
+If the journal already records `manual_required`, restoring the program lets it
+start. Run the complete installer to close the operation and unlock settings.
 
 The installer pauses the update request path while it runs. If it reports that the
 program is installed but the request path is not enabled, the installation is

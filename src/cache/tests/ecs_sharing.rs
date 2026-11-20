@@ -99,6 +99,121 @@ fn fingerprint_ignores_ttl_and_order_but_keeps_data_chain_and_negative_identity(
 }
 
 #[test]
+fn differing_glue_or_authority_records_prevent_learning() {
+    use hickory_proto::rr::rdata::NS;
+
+    let q = query("sections.test.");
+    let now = Instant::now();
+    for additional in [true, false] {
+        let response = |target: u8| {
+            let mut response = answer(&q, 1, 60);
+            if additional {
+                response.add_additional(Record::from_rdata(
+                    name("ns.test."),
+                    60,
+                    RData::A(A::new(192, 0, 2, target)),
+                ));
+            } else {
+                response.add_authority(Record::from_rdata(
+                    name("test."),
+                    60,
+                    RData::NS(NS(name(&format!("ns{target}.test.")))),
+                ));
+            }
+            response
+        };
+        let cache = Cache::new(sharing_config(3));
+        for (network, target) in LEARNING.into_iter().zip([1, 1, 2]) {
+            store(&cache, &q, &response(target), exact(network), now);
+        }
+        assert_eq!(state(&cache, &q, now), "revoked");
+        assert_eq!(cache.snapshot()["ecs_shared_entries"], 0);
+    }
+}
+
+#[test]
+fn different_denial_proofs_or_soa_identity_revoke_learned_sharing() {
+    use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+    let mut q = query("proof.test.");
+    q.edns.get_or_insert_with(Edns::new).set_dnssec_ok(true);
+    let now = Instant::now();
+    let differs = |base: &Message, other: &Message| {
+        let cache = Cache::new(sharing_config(3));
+        assert_ne!(
+            sharing::fingerprint(&q.queries[0], base),
+            sharing::fingerprint(&q.queries[0], other)
+        );
+        learn(&cache, &q, base, now);
+        assert_eq!(state(&cache, &q, now), "shared");
+        store(&cache, &q, other, exact("203.0.113.0/24"), now);
+        assert_eq!(state(&cache, &q, now), "revoked");
+        assert!(cache.lookup(&q, ecs("172.16.0.0/16"), now, false).is_none());
+    };
+    let negative = negative_answer(&q);
+    for field in ["mname", "rname", "minimum"] {
+        let mut other = negative.clone();
+        let RData::SOA(soa) = &mut other.authorities[0].data else {
+            unreachable!()
+        };
+        match field {
+            "mname" => soa.mname = name("other.test."),
+            "rname" => soa.rname = name("admin.test."),
+            _ => soa.minimum += 1,
+        }
+        differs(&negative, &other);
+    }
+    let mut aged = negative.clone();
+    let RData::SOA(soa) = &mut aged.authorities[0].data else {
+        unreachable!()
+    };
+    soa.serial += 1;
+    soa.mname = soa.mname.to_ascii().to_uppercase().parse().unwrap();
+    assert_eq!(
+        sharing::fingerprint(&q.queries[0], &negative),
+        sharing::fingerprint(&q.queries[0], &aged)
+    );
+    for base in [negative, answer(&q, 1, 30)] {
+        for (kind, bytes) in [
+            (RecordType::NSEC, vec![0, 0, 1, 0x40]),
+            (
+                RecordType::NSEC3,
+                vec![1, 0, 0, 0, 0, 20]
+                    .into_iter()
+                    .chain([1; 20])
+                    .chain([0, 1, 0x40])
+                    .collect(),
+            ),
+            (
+                RecordType::RRSIG,
+                signature("test.", RecordType::NSEC)
+                    .data
+                    .to_bytes()
+                    .unwrap(),
+            ),
+        ] {
+            let raw = Record::from_rdata(
+                name("test."),
+                30,
+                RData::Unknown {
+                    code: kind,
+                    rdata: NULL::with(bytes),
+                },
+            );
+            let typed = Record::from_bytes(&raw.to_bytes().unwrap()).unwrap();
+            assert!(matches!(typed.data, RData::DNSSEC(_)));
+            for proof in [raw, typed] {
+                let mut signed = base.clone();
+                signed.add_authority(proof);
+                differs(&signed, &base);
+                let mut different = signed.clone();
+                different.authorities.last_mut().unwrap().name = name("other.test.");
+                differs(&signed, &different);
+            }
+        }
+    }
+}
+
+#[test]
 fn promotion_needs_k_distinct_networks_across_two_wide_prefixes() {
     let cache = Cache::new(sharing_config(3));
     let q = query("Shared.Test.");
@@ -297,6 +412,67 @@ fn explicit_response_scope_revokes_but_scope_zero_does_not() {
     store(&cache, &q, &answer(&q, 1, 60), network("192.0.2.0/24"), now);
     assert_eq!(state(&cache, &q, now), "revoked");
     assert_eq!(scopes(&cache, &q, now), ["192.0.2.0/24"]);
+}
+
+#[test]
+fn narrower_scope_from_a_stale_epoch_cannot_revoke_or_supersede() {
+    let cache = Cache::new(sharing_config(3));
+    let q = query("narrow.test.");
+    let response = answer(&q, 1, 60);
+    let now = Instant::now();
+    let epoch = cache.epoch();
+    cache.invalidate(Some(&name("other.test.")), None, None);
+    assert_ne!(cache.epoch(), epoch);
+    learn(&cache, &q, &response, now);
+    let decision = cache.supersede_narrower_if_epoch(&q, &response, exact(LEARNING[0]), now, epoch);
+    assert_eq!(
+        decision,
+        StoreDecision::skipped(DecisionReason::EpochChanged)
+    );
+    assert_eq!(state(&cache, &q, now), "shared");
+    assert_eq!(scopes(&cache, &q, now), ["learned_v4"]);
+    assert_eq!(cache.snapshot()["ecs_sharing_revocations"], 0);
+}
+
+#[test]
+fn narrower_scope_supersedes_only_overlapping_networks() {
+    let cache = Cache::new(sharing_config(3));
+    let q = query("overlap.test.");
+    let response = answer(&q, 1, 60);
+    let now = Instant::now();
+    for scope in [
+        network("192.0.2.0/24"),
+        exact(LEARNING[2]),
+        exact("2001:db8::/56"),
+    ] {
+        store(&cache, &q, &response, scope, now);
+    }
+    let decision =
+        cache.supersede_narrower_if_epoch(&q, &response, exact(LEARNING[0]), now, cache.epoch());
+    assert_eq!(decision.outcome, StoreOutcome::SupersededOnly);
+    assert_eq!(decision.reason, Some(DecisionReason::EcsUnusable));
+    assert_eq!(
+        scopes(&cache, &q, now),
+        ["exact_ecs:198.51.100.0/24", "exact_ecs:2001:db8::/56"]
+    );
+    assert_eq!(cache.snapshot()["ecs_sharing_revocations"], 0);
+}
+
+#[test]
+fn first_nonzero_scope_starts_cooldown_without_a_revocation() {
+    let cache = Cache::new(sharing_config(3));
+    let q = query("first-scope.test.");
+    let response = answer(&q, 1, 60);
+    let now = Instant::now();
+    store(&cache, &q, &response, network("203.0.113.0/24"), now);
+    assert_eq!(state(&cache, &q, now), "revoked");
+    learn(&cache, &q, &response, now);
+    assert_eq!(cache.snapshot()["ecs_shared_entries"], 0);
+    assert_eq!(cache.snapshot()["ecs_sharing_revocations"], 0);
+    let after = now + Duration::from_secs(601);
+    store(&cache, &q, &response, network("203.0.113.0/24"), after);
+    assert_eq!(state(&cache, &q, after), "revoked");
+    assert_eq!(cache.snapshot()["ecs_sharing_revocations"], 0);
 }
 
 #[test]

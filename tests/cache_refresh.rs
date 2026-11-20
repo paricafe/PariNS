@@ -343,11 +343,14 @@ async fn failed_prefetch_backs_off_and_limits_are_bounded() {
     let upstream = Upstream::start().await;
     upstream.mode.store(1, SeqCst);
     let resolver = Resolver::from_config(&upstream.config());
-    let query = query("backoff.test.");
+    let mut query = query("backoff.test.");
+    query.edns = Some(Edns::new());
     fill(&resolver, &query, 59);
     resolve(&resolver, &query).await;
     until(|| resolver.refresh_snapshot().failure == 1).await;
-    for _ in 0..10 {
+    for bits in 1..=10 {
+        query.metadata.authentic_data = bits % 2 == 1;
+        query.edns.as_mut().unwrap().flags_mut().z = bits;
         resolve(&resolver, &query).await;
     }
     assert_eq!(resolver.refresh_snapshot().scheduled, 1);
@@ -356,12 +359,20 @@ async fn failed_prefetch_backs_off_and_limits_are_bounded() {
 
     let mut config = upstream.config();
     config.cache.prefetch.max_inflight = 1;
+    config.query_timeout_ms = 2000;
     upstream.mode.store(3, SeqCst);
     let resolver = Resolver::from_config(&config);
     for index in 0..10 {
-        let query = query_for_index(index);
+        let mut query = query_for_index(index);
+        query.edns = Some(Edns::new());
         fill(&resolver, &query, 59);
         resolve(&resolver, &query).await;
+        if index == 0 {
+            query.metadata.authentic_data = true;
+            query.edns.as_mut().unwrap().flags_mut().z = 42;
+            resolve(&resolver, &query).await;
+            assert_eq!(resolver.refresh_snapshot().rejected_duplicate, 1);
+        }
     }
     assert_eq!(resolver.refresh_snapshot().scheduled, 1);
     assert_eq!(resolver.refresh_snapshot().active, 1);

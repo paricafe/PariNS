@@ -72,11 +72,18 @@ async fn respond(socket: &UdpSocket, q: &Message, peer: std::net::SocketAddr) {
 async fn identical_outbound_work_is_shared_and_client_identity_is_restored() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let resolver = Resolver::from_config(&config(&socket));
-    let a = query(1, "192.0.2.10");
+    let mut a = protocol::decode(&query(1, "192.0.2.10")).unwrap();
+    a.metadata.authoritative = true;
+    a.metadata.recursion_available = true;
+    a.metadata.authentic_data = true;
+    a.edns.as_mut().unwrap().flags_mut().z = 0x1234;
+    let a = a.to_vec().unwrap();
     let b = query(2, "192.0.2.11");
     let mut first = Box::pin(resolver.resolve(&a, "192.0.2.10".parse().unwrap()));
     assert!(poll!(&mut first).is_pending());
     let (out, peer) = receive_while(&socket, &mut first).await;
+    assert!(!out.authoritative && !out.recursion_available && !out.authentic_data);
+    assert_eq!(out.edns.as_ref().unwrap().flags().z, 0);
     let mut second = Box::pin(resolver.resolve(&b, "192.0.2.11".parse().unwrap()));
     assert!(poll!(&mut second).is_pending());
     assert_eq!(resolver.metrics().snapshot().counters["flight_joined"], 1);
@@ -105,6 +112,42 @@ async fn identical_outbound_work_is_shared_and_client_identity_is_restored() {
     assert_eq!(metrics.counters["cache_hits"], 1);
     assert_eq!(metrics.counters["completed"], 3);
     assert_eq!(metrics.request_inflight, 0);
+}
+
+#[tokio::test]
+async fn different_client_udp_sizes_share_upstream_work_and_keep_reply_limits() {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let resolver = Resolver::from_config(&config(&socket));
+    let peer = "192.0.2.10".parse().unwrap();
+    let mut query = protocol::decode(&query(2, "192.0.2.10")).unwrap();
+    query.edns.as_mut().unwrap().set_max_payload(512);
+    let small = query.to_vec().unwrap();
+    query.metadata.id = 3;
+    query.edns.as_mut().unwrap().set_max_payload(4096);
+    let large = query.to_vec().unwrap();
+
+    let mut first = Box::pin(resolver.resolve(&small, peer));
+    assert!(poll!(&mut first).is_pending());
+    let (out, upstream_peer) = receive_while(&socket, &mut first).await;
+    let mut second = Box::pin(resolver.resolve(&large, peer));
+    assert!(poll!(&mut second).is_pending());
+    assert_eq!(resolver.metrics().snapshot().counters["flight_joined"], 1);
+    assert_eq!(
+        out.edns.as_ref().unwrap().max_payload(),
+        protocol::MAX_UDP_PAYLOAD
+    );
+
+    respond(&socket, &out, upstream_peer).await;
+    let (first, second) = tokio::join!(first, second);
+    for (reply, limit) in [(first, 512), (second, 1232)] {
+        let reply = reply.unwrap();
+        assert_eq!(reply.message.answers.len(), 1);
+        assert_eq!(reply.udp_limit, limit);
+    }
+    assert_eq!(
+        resolver.metrics().snapshot().counters["upstream_operations"],
+        1
+    );
 }
 
 #[tokio::test]

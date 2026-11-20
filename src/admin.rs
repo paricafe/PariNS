@@ -86,6 +86,7 @@ pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut stop = ingress.stop.clone();
     let mut tasks = JoinSet::new();
+    let mut accepting = crate::transport::accept::Acceptor::new(&listener);
     let outcome = loop {
         if *stop.borrow() {
             break Ok(());
@@ -93,7 +94,7 @@ pub async fn serve(listener: TcpListener, ingress: Ingress) -> Result<()> {
         tokio::select! {
             _ = stop.changed() => break Ok(()),
             Some(result) = tasks.join_next(), if !tasks.is_empty() => ingress.settle("admin", result),
-            accepted = crate::transport::accept::accept(&listener) => {
+            accepted = accepting.accept() => {
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error.into()),

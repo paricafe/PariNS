@@ -32,6 +32,8 @@ type Group = (WeakShared<Work>, Arc<AtomicBool>, Arc<AtomicUsize>);
 pub struct Hold {
     work: Option<Shared<Work>>,
     holds: Arc<AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) before_leave: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Hold {
@@ -40,6 +42,8 @@ impl Hold {
         Self {
             work: Some(work),
             holds,
+            #[cfg(test)]
+            before_leave: None,
         }
     }
 
@@ -48,6 +52,10 @@ impl Hold {
     }
 
     pub fn leave(mut self) -> Option<Self> {
+        #[cfg(test)]
+        if let Some(before_leave) = self.before_leave.take() {
+            before_leave();
+        }
         let last = self
             .holds
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |holds| {

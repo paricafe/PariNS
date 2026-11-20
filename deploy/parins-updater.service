@@ -1,6 +1,8 @@
 # PariNS updater contract v1
 [Unit]
 Description=PariNS restricted update transaction
+After=parins-update-recovery.service
+Requires=parins-update-recovery.service
 StartLimitIntervalSec=60
 StartLimitBurst=8
 

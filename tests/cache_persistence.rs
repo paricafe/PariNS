@@ -351,16 +351,6 @@ mod process {
     }
 
     async fn start(directory: &Path, config: &Path, generation: usize) -> (ChildGuard, SocketAddr) {
-        let listen = (0..16)
-            .find_map(|_| {
-                let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                let address = tcp.local_addr().unwrap();
-                std::net::UdpSocket::bind(address).ok().map(|_| address)
-            })
-            .expect("no loopback port free for both UDP and TCP");
-        let mut parsed = parins::config::Config::load(config).unwrap();
-        parsed.listen = listen;
-        fs::write(config, toml::to_string(&parsed).unwrap()).unwrap();
         let stderr_path = directory.join(format!("stderr-{generation}.txt"));
         let mut child = ChildGuard(
             Command::new(env!("CARGO_BIN_EXE_parins"))
@@ -449,6 +439,7 @@ mod process {
         let mock = upstream(60).await;
         let config = configuration(directory.path(), mock.address, false);
         let (mut first, endpoint) = start(directory.path(), &config, 1).await;
+        tokio::net::TcpStream::connect(endpoint).await.unwrap();
         let initial = request(endpoint).await;
         assert_eq!(address(&initial), 1);
         assert_eq!(mock.requests.load(Ordering::Acquire), 1);

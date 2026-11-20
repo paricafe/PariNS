@@ -14,6 +14,7 @@ export interface ConfigConflict {
   remote: ConfigResponse;
   remoteSettings: SettingsObject;
   paths: string[];
+  issue?: ConfigIssue;
 }
 
 export interface ConfigDraft {
@@ -82,13 +83,37 @@ const fieldByPath = new Map(Object.values(settingPages).flatMap((page) => page.g
 const conditionalFields = [...fieldByPath.values()].filter((field) => field.when);
 const EMPTY_LISTENER = { listen: '', cert_file: '', key_file: '' };
 
+export const needsFormFlush = (draft: ConfigDraft | null) => Boolean(draft && (
+  Object.keys(draft.fields).length || Object.keys(draft.optional).length || draft.rules !== null || draft.sources !== null
+));
+
+function listChanged<T>(pending: T[] | null, saved: unknown, decode: (item: T, index: number) => unknown): boolean {
+  if (!pending) return false;
+  try { return Object.hasOwn(diffSettings({ list: saved }, { list: pending.map(decode) }), 'list'); }
+  catch (reason) {
+    if (reason instanceof ModelError) return true;
+    throw reason;
+  }
+}
+
+function fieldActive(path: string, draft: ConfigDraft, settings: SettingsObject): boolean {
+  const protocol = path.split('.')[0];
+  if (['dot', 'doh', 'doq'].includes(protocol) && !(draft.optional[protocol] ?? getPath(settings, protocol) !== null)) return false;
+  const when = fieldByPath.get(path)?.when;
+  return !when || (draft.fields[when.path] ?? getPath(settings, when.path)) === when.value;
+}
+
 function changeCount(draft: ConfigDraft | null): number {
   if (!draft) return 0;
   const fields = Object.entries(draft.fields).filter(([path, raw]) => {
     const field = fieldByPath.get(path);
-    return field && JSON.stringify(raw) !== JSON.stringify(fieldDisplayValue(getPath(draft.settings, path), field));
+    return field && fieldActive(path, draft, draft.settings)
+      && JSON.stringify(raw) !== JSON.stringify(fieldDisplayValue(getPath(draft.settings, path), field));
   }).length;
-  const total = fields + Object.keys(draft.optional).length + (draft.rules !== null ? 1 : 0) + (draft.sources !== null ? 1 : 0);
+  const listeners = Object.entries(draft.optional).filter(([protocol, enabled]) => enabled !== (getPath(draft.settings, protocol) !== null)).length;
+  const rules = listChanged(draft.rules, configList(draft.settings, 'cache.rules'), decodeCacheRule);
+  const sources = listChanged(draft.sources, configList(draft.settings, 'filter_subscriptions.sources'), decodeSubscription);
+  const total = fields + listeners + Number(rules) + Number(sources);
   return total || (draft.toml !== draft.original ? 1 : 0);
 }
 
@@ -118,6 +143,8 @@ export function overlappingPaths(mine: SettingsObject, theirs: SettingsObject): 
 
 export function ConfigProvider({ api, active, refreshSession, children }: { api: ApiClient; active: boolean; refreshSession: () => Promise<void>; children: ReactNode }) {
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ConfigIssue | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -129,39 +156,46 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
   const setUpdateLocked = useCallback((locked: boolean) => { updateLock.current = locked; setUpdateLockedState(locked); }, []);
   const assertVersion = (expected: number) => { if (expected !== version.current) throw new Error('app.draftChanged'); };
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (saved?: ConfigResponse) => {
     const owner = version.current;
     setBusy(true); setError(null);
     try {
-      const config = await api.request<ConfigResponse>('config');
+      const config = saved ?? await api.request<ConfigResponse>('config');
       const parsed = await api.request<ParsedResponse>('config/parse', 'POST', { toml: config.toml });
       assertVersion(owner);
       version.current += 1;
       setDraft(createDraft(config, parsed));
       writeLock.current = false;
     } catch (reason) {
-      setError(toConfigIssue(reason));
+      if (!(reason instanceof StaleRequest)) setError(toConfigIssue(reason));
       throw reason;
     } finally { setBusy(false); }
   }, [api]);
 
-  const reconcile = useCallback(async (local: { base: SettingsObject; settings: SettingsObject }): Promise<'merged' | 'conflict'> => {
+  const reconcile = useCallback(async (local: { base: SettingsObject; settings: SettingsObject }, saved?: ConfigResponse): Promise<'merged' | 'conflict'> => {
     const owner = version.current;
-    const remote = await api.request<ConfigResponse>('config');
+    const remote = saved ?? await api.request<ConfigResponse>('config');
     const parsed = await api.request<ParsedResponse>('config/parse', 'POST', { toml: remote.toml });
     assertVersion(owner);
     const mine = diffSettings(local.base, local.settings);
     const paths = overlappingPaths(mine, diffSettings(local.base, parsed.settings));
+    let issue: ConfigIssue | undefined;
     if (Object.keys(mine).length && !paths.length) {
-      const merged = await api.request<ParsedResponse>('config/preview', 'POST', { toml: remote.toml, changes: mine });
-      assertVersion(owner);
-      version.current += 1;
-      setDraft({ ...createDraft(remote, parsed), toml: merged.toml, settings: merged.settings, merged: true });
-      writeLock.current = false;
-      return 'merged';
+      try {
+        const merged = await api.request<ParsedResponse>('config/preview', 'POST', { toml: remote.toml, changes: mine });
+        assertVersion(owner);
+        version.current += 1;
+        setDraft({ ...createDraft(remote, parsed), toml: merged.toml, settings: merged.settings, merged: true });
+        writeLock.current = false;
+        return 'merged';
+      } catch (reason) {
+        if (!(reason instanceof ApiError && reason.status === 422)) throw reason;
+        issue = reason;
+      }
     }
+    assertVersion(owner);
     version.current += 1;
-    setDraft((current) => current && ({ ...current, conflict: { base: local.base, remote, remoteSettings: parsed.settings, paths } }));
+    setDraft((current) => current && ({ ...current, conflict: { base: local.base, remote, remoteSettings: parsed.settings, paths, issue } }));
     return 'conflict';
   }, [api]);
 
@@ -215,7 +249,7 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     }
   }, [api, busy, draft]);
 
-  const flush = useCallback(async (): Promise<{ toml: string; settings: SettingsObject }> => {
+  const flush = useCallback(async (draft = draftRef.current, conflict?: ConfigConflict): Promise<{ toml: string; settings: SettingsObject }> => {
     if (!draft) throw new Error('Configuration not loaded');
     const owner = version.current;
     let baseline = draft.settings;
@@ -228,15 +262,14 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     for (const [protocol, enabled] of Object.entries(draft.optional)) {
       next = setPath(next, protocol, enabled ? (getPath(next, protocol) ?? { ...EMPTY_LISTENER }) : null);
     }
+    const hiddenFields: ConfigDraft['fields'] = {};
     for (const [path, raw] of Object.entries(draft.fields)) {
+      if (!fieldActive(path, draft, baseline)) { hiddenFields[path] = raw; continue; }
       if (path === 'web.public_host') {
         if (typeof raw !== 'string') throw new ModelError('settings.validation.check', path);
         next = setPath(next, 'web', raw === '' ? null : { public_host: raw });
         continue;
       }
-      const protocol = path.split('.')[0];
-      const enabled = draft.optional[protocol] ?? getPath(next, protocol) !== null;
-      if (['dot', 'doh', 'doq'].includes(protocol) && !enabled) continue;
       const field = fieldByPath.get(path)!;
       next = setPath(next, path, convertFieldValue(field, raw));
     }
@@ -253,43 +286,58 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       }));
     }
     if (draft.sources !== null) next = setPath(next, 'filter_subscriptions.sources', draft.sources.map(decodeSubscription));
-    const changes = diffSettings(baseline, next);
-    if (!Object.keys(changes).length) {
-      const candidate = draft.toml !== draft.original
-        ? await api.request<ParsedResponse>('config/preview', 'POST', { toml: draft.toml, changes: {} })
-        : null;
+    if (conflict) {
+      const changes = diffSettings(conflict.base, next);
+      const kept = Object.keys(changes).length
+        ? await api.request<ParsedResponse>('config/preview', 'POST', { toml: conflict.remote.toml, changes })
+        : { toml: conflict.remote.toml, settings: conflict.remoteSettings };
       assertVersion(owner);
       version.current += 1;
-      setDraft((current) => current && ({ ...current, toml: candidate?.toml ?? draft.toml, settings: candidate?.settings ?? baseline,
-        stale: false, fields: {}, optional: {}, rules: null, sources: null, previewTransportChange: candidate?.transport_change ?? null }));
-      return { toml: candidate?.toml ?? draft.toml, settings: candidate?.settings ?? baseline };
+      setDraft({ ...createDraft(conflict.remote, { toml: conflict.remote.toml, settings: conflict.remoteSettings }),
+        toml: kept.toml, settings: kept.settings, fields: hiddenFields, merged: true });
+      return kept;
     }
-    const preview = await api.request<ParsedResponse>('config/preview', 'POST', { toml: draft.toml, changes });
+    const changes = diffSettings(baseline, next);
+    let candidate: ParsedResponse = { toml: draft.toml, settings: baseline };
+    if (!draft.stale && needsFormFlush(draft) && !Object.keys(diffSettings(draft.base, next)).length) {
+      candidate = { toml: draft.original, settings: draft.base };
+    } else if (Object.keys(changes).length || draft.toml !== draft.original) {
+      candidate = await api.request<ParsedResponse>('config/preview', 'POST', { toml: draft.toml, changes });
+    }
     assertVersion(owner);
     version.current += 1;
-    setDraft((current) => current && ({ ...current, toml: preview.toml, settings: preview.settings, fields: {}, optional: {}, rules: null, sources: null, stale: false,
-      previewTransportChange: preview.transport_change ?? null }));
-    return { toml: preview.toml, settings: preview.settings };
-  }, [api, draft]);
+    setDraft((current) => current && ({ ...current, toml: candidate.toml, settings: candidate.settings, fields: hiddenFields, optional: {}, rules: null, sources: null, stale: false,
+      previewTransportChange: candidate.transport_change ?? null }));
+    return { toml: candidate.toml, settings: candidate.settings };
+  }, [api]);
 
-  const syncWithServer = useCallback(async (): Promise<Reconciled | null> => {
+  const syncWithServer = useCallback(async (saved?: ConfigResponse): Promise<Reconciled | null> => {
+    const draft = draftRef.current;
     if (!draft || draft.unknownApply) return null;
-    if (!changeCount(draft)) { await reload(); setError('app.reloadedElsewhere'); return 'reloaded'; }
+    if (!changeCount(draft)) { await reload(saved); setError('app.reloadedElsewhere'); return 'reloaded'; }
     const before = version.current;
-    const flushed = await flush();
+    const flushed = await flush(draft);
     assertVersion(before + 1);
-    return reconcile({ base: draft.base, settings: flushed.settings });
-  }, [draft, flush, reconcile, reload]);
+    return reconcile({ base: draft.base, settings: flushed.settings }, saved);
+  }, [flush, reconcile, reload]);
 
   useEffect(() => {
-    if (active && !wasActive.current) {
-      if (!draft) void reload().catch(() => {});
-      else void api.request<ConfigResponse>('config').then(async (current) => {
-        if (current.revision !== draft.revision) await syncWithServer();
-      }).catch((reason) => setError(toConfigIssue(reason)));
-    }
+    const reactivated = active && !wasActive.current;
     wasActive.current = active;
-  }, [active, api, draft, reload, syncWithServer]);
+    if (!reactivated) return;
+    if (!draftRef.current) { void reload().catch(() => {}); return; }
+    let cancelled = false;
+    const owner = version.current;
+    void api.request<ConfigResponse>('config').then(async (current) => {
+      const latest = draftRef.current;
+      if (cancelled || !latest || current.revision <= latest.revision || writeLock.current) return;
+      if (owner !== version.current && !changeCount(latest)) return;
+      await syncWithServer(current);
+    }).catch((reason) => {
+      if (!cancelled && !(reason instanceof StaleRequest)) setError(toConfigIssue(reason));
+    });
+    return () => { cancelled = true; wasActive.current = false; };
+  }, [active, api, reload, syncWithServer]);
 
   const preview = useCallback(async () => {
     setBusy(true); setError(null);
@@ -330,9 +378,9 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
       const { toml, settings } = await flush();
       assertVersion(before + 1);
       const owner = version.current;
-      if (newSources(settings, draft.savedSources).length) {
+      if (newSources(settings, draft.base).length) {
         setProgress('subscriptions.downloading');
-        try { await downloadNewSources(api, settings, draft.savedSources); } finally { setProgress(null); }
+        try { await downloadNewSources(api, settings, draft.base, () => assertVersion(owner)); } finally { setProgress(null); }
         assertVersion(owner);
       }
       const impact = await api.request<ValidationResponse>('config/validate', 'POST', { toml });
@@ -386,21 +434,16 @@ export function ConfigProvider({ api, active, refreshSession, children }: { api:
     if (!conflict || writeLock.current || updateLock.current) return;
     if (keep === 'theirs') { await reload(); return; }
     setBusy(true); setError(null);
-    const before = version.current;
     try {
-      const flushed = await flush();
-      assertVersion(before + 1);
-      const owner = version.current;
-      const mine = diffSettings(conflict.base, flushed.settings);
-      const kept = Object.keys(mine).length
-        ? await api.request<ParsedResponse>('config/preview', 'POST', { toml: conflict.remote.toml, changes: mine })
-        : flushed;
-      assertVersion(owner);
-      version.current += 1;
-      setDraft({ ...createDraft(conflict.remote, { toml: conflict.remote.toml, settings: conflict.remoteSettings }), toml: kept.toml, settings: kept.settings, merged: true });
-    } catch (reason) { setError(toConfigIssue(reason)); throw reason; }
+      await flush(draft, conflict);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 422) {
+        setDraft((current) => current?.conflict === conflict ? { ...current, conflict: { ...conflict, issue: reason } } : current);
+      } else setError(toConfigIssue(reason));
+      throw reason;
+    }
     finally { setBusy(false); }
-  }, [api, draft, flush, reload]);
+  }, [draft, flush, reload]);
 
   const resolveUnknown = useCallback(async (): Promise<'applied' | 'pending' | 'changed'> => {
     if (!draft?.unknownApply || (!draft.pendingApply && !draft.pendingRollback)) throw new Error('No unknown operation');

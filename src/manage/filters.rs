@@ -35,14 +35,22 @@ pub(super) async fn api(
     match path {
         "/api/filter/check" => {
             let input: Check = decode(body)?;
-            let name = hickory_proto::rr::Name::from_ascii(&input.name).map_err(|_| {
+            let invalid_name = || {
                 error(
                     StatusCode::BAD_REQUEST,
                     "INVALID_REQUEST",
                     "Invalid DNS name",
                 )
-            })?;
-            Ok(json!(shared.manager.lock().await.filters.explain(&name)))
+            };
+            if input.name.is_empty()
+                || input.name.trim() != input.name
+                || input.name.bytes().any(|byte| byte.is_ascii_control())
+            {
+                return Err(invalid_name());
+            }
+            let name =
+                hickory_proto::rr::Name::from_ascii(&input.name).map_err(|_| invalid_name())?;
+            Ok(json!(shared.observation.filters.explain(&name)))
         }
         "/api/filter/subscriptions/prepare" => {
             let input: Prepare = decode(body)?;
@@ -163,6 +171,7 @@ mod tests {
     use super::*;
     use crate::manage::{Active, ApiRequest, Snapshot, Store, api};
     use axum::http::{HeaderMap, HeaderValue, header};
+    use futures_util::FutureExt;
     use std::sync::Mutex;
     use tokio::{sync::Semaphore, task::JoinSet};
 
@@ -223,6 +232,7 @@ mod tests {
             "x-parins-session",
             HeaderValue::from_str(&session.binding).unwrap(),
         );
+        let guard = shared.manager.lock().await;
         let state = api(
             shared.clone(),
             transport.clone(),
@@ -235,7 +245,8 @@ mod tests {
             },
             &mut cookie,
         )
-        .await
+        .now_or_never()
+        .expect("subscription status bypasses Manager")
         .unwrap();
         assert_eq!(state["config_revision"], 0);
         assert_eq!(state["sources"], json!([]));
@@ -251,9 +262,45 @@ mod tests {
             },
             &mut cookie,
         )
-        .await
+        .now_or_never()
+        .expect("filter check bypasses Manager")
         .unwrap();
         assert_eq!(checked["decision"], "unmatched");
+        for (path, body, expected) in [
+            (
+                "/api/filter/check",
+                br#"{"name":""}"#.as_slice(),
+                "INVALID_REQUEST",
+            ),
+            (
+                "/api/filter/check",
+                br#"{"name":"test. "}"#.as_slice(),
+                "INVALID_REQUEST",
+            ),
+            (
+                "/api/cache/inspect",
+                br#"{"name":"sample.test"}"#.as_slice(),
+                "DNS_STOPPED",
+            ),
+        ] {
+            let error = api(
+                shared.clone(),
+                transport.clone(),
+                ApiRequest {
+                    peer: address,
+                    method: "POST",
+                    path,
+                    headers: &headers,
+                    body,
+                },
+                &mut cookie,
+            )
+            .now_or_never()
+            .expect("read bypasses Manager")
+            .unwrap_err();
+            assert_eq!(error.1, expected);
+        }
+        drop(guard);
         let input = br#"{"config_revision":0,"source":{"id":"example","url":"https://example.org/list","format":"domain_list"}}"#;
         let obsolete = api(
             shared.clone(),
@@ -409,6 +456,6 @@ mod tests {
                 .status,
             "succeeded"
         );
-        shared.manager.lock().await.terminal_shutdown().await;
+        shared.manager.lock().await.terminal_shutdown(true).await;
     }
 }

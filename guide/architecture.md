@@ -164,8 +164,8 @@ A clean cache snapshot is durably consumed before serving. Its contents are
 restored only when the configuration and policy fingerprint matches. Only the
 terminal shutdown owner may publish another clean snapshot, after DNS and
 background work are quiescent. Configuration apply and rollback do not save one.
-Cache save and storage flush have separate bounded budgets; storage releases its
-directory lock only after the save boundary.
+Cache save and storage drain run in parallel with separate bounded budgets. The
+runtime directory lock stays held until the storage worker and cache save finish.
 
 During listener shutdown, only streams that received a complete DNS query
 can force a stop. This requires the end of the request stream for DoH and FIN
@@ -202,9 +202,9 @@ holds its permit until the computation finishes. Credential changes
 preserve the saved configuration revision and revoke sessions at commit.
 
 Changing the management origin navigates to the new console document and revokes
-existing sessions. Cross-site entry permits only a top-level `GET /` navigation
+existing sessions. Same-site and cross-site entry permits only a top-level `GET /` navigation
 (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`) after Host/Origin checks.
-API, asset and embedded requests remain blocked across sites; the new document
+API, asset and embedded requests require same-origin access. The new document
 loads its assets and signs in through same-origin requests.
 
 The application update coordinator persists intent and uses the existing mutation

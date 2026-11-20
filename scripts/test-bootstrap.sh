@@ -39,12 +39,13 @@ case "$BOOTSTRAP_ARCH" in
 esac
 asset="parins-$BOOTSTRAP_VERSION-linux-$architecture.tar.gz"
 base_url="https://github.com/paricafe/PariNS/releases/download/$BOOTSTRAP_VERSION"
-output= url= protocol= redirect=
+output= url= protocol= redirect= max_filesize=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --output) output=$2; shift 2 ;;
         --proto) protocol=$2; shift 2 ;;
         --proto-redir) redirect=$2; shift 2 ;;
+        --max-filesize) max_filesize=$2; shift 2 ;;
         --connect-timeout|--max-time) shift 2 ;;
         --fail|--silent|--show-error|--location) shift ;;
         "$base_url/$asset"|"$base_url/$asset.sha256") url=$1; shift ;;
@@ -52,6 +53,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ "$protocol" = =https ] && [ "$redirect" = =https ] || exit 93
+[ "$max_filesize" = 536870912 ] || exit 93
 [ -n "$output" ] && [ -n "$url" ] || exit 92
 cp "$BOOTSTRAP_FIXTURE/downloads/${url##*/}" "$output"' > "$fixture/tools/curl"
 printf '%s\n' '#!/bin/sh

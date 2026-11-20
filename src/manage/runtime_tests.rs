@@ -118,7 +118,62 @@ async fn subscription_hot_apply_retains_runtime_and_offline_rules_allow_exceptio
     assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
     assert!(Arc::ptr_eq(&cache, &resolver.cache()));
     assert_eq!(manager.filters.snapshot().config_revision, 3);
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
+}
+
+#[tokio::test]
+async fn formatting_only_config_saves_preserve_running_and_stopped_dns() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    let original = Stored {
+        username: "admin".into(),
+        password_hash: super::super::store::hash_password("local-test-password").unwrap(),
+        toml: config(),
+        previous: None,
+        revision: 1,
+    };
+    store.save(&original).unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: vec![],
+    }));
+    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active.clone())
+        .await
+        .unwrap();
+    let resolver = manager.resolver().unwrap().clone();
+    let cache = resolver.cache();
+    let services = manager.services.clone();
+    let snapshot = active.lock().unwrap().snapshot.clone();
+    let generation = manager.generation;
+    let mut next = original.clone();
+    next.toml = format!("# local settings\n\n{}", original.toml);
+    next.previous = Some(original.toml);
+    next.revision += 1;
+    assert_eq!(
+        manager.change_impact(&next.toml).unwrap(),
+        ChangeImpact::UpdatesOnly
+    );
+    assert!(!manager.apply(next.clone()).await.unwrap());
+    assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
+    assert!(Arc::ptr_eq(&cache, &resolver.cache()));
+    assert!(Arc::ptr_eq(&services, &manager.services));
+    assert!(Arc::ptr_eq(&snapshot, &active.lock().unwrap().snapshot));
+    assert_eq!(manager.generation, generation);
+
+    manager.stop().await;
+    next.previous = Some(next.toml.clone());
+    next.toml = next.toml.replace("max_inflight=16", "max_inflight = 16");
+    next.revision += 1;
+    assert!(!manager.apply(next.clone()).await.unwrap());
+    assert!(manager.resolver().is_none());
+    assert_eq!(manager.generation, generation);
+    assert_eq!(
+        manager.services.health.snapshot().state,
+        HealthState::Stopped
+    );
+    let stored = manager.store.read().unwrap().unwrap();
+    assert_eq!((stored.revision, stored.toml), (next.revision, next.toml));
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -143,11 +198,12 @@ async fn subscriptions_missing_material_keep_console_and_disable_recovers_local_
         .unwrap();
     assert!(manager.resolver().is_none());
     assert!(manager.last_error.is_some());
+    let changed = subscription_config(true).replace("max_inflight=16", "max_inflight=17");
     assert!(
         manager
-            .validation(&subscription_config(true))
+            .validation(&changed)
             .unwrap()
-            .run(subscription_config(true))
+            .run(changed)
             .await
             .is_err()
     );
@@ -157,7 +213,7 @@ async fn subscriptions_missing_material_keep_console_and_disable_recovers_local_
     manager.apply(next).await.unwrap();
     assert!(manager.resolver().is_some());
     assert_eq!(manager.saved.as_ref().unwrap().revision, 2);
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -283,7 +339,7 @@ async fn local_policy_retirement_is_checked_before_managed_config_and_certificat
         );
         let web = active.lock().unwrap().snapshot.tls.clone().unwrap();
         assert_web_identity(web, &replacement).await;
-        manager.terminal_shutdown().await;
+        manager.terminal_shutdown(true).await;
     }
 }
 
@@ -381,21 +437,28 @@ async fn certificate_reload_retains_cache_owner_and_updates_web_identity_while_d
         snapshot: Arc::new(Snapshot::initial()),
         sessions: Vec::new(),
     }));
-    let mut manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active.clone())
+    let manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active.clone())
         .await
         .unwrap();
-    let resolver = manager.resolver().unwrap().clone();
+    let mut manager = tokio::sync::Mutex::new(manager);
+    let resolver = manager.get_mut().resolver().unwrap().clone();
     let cache = resolver.cache();
-    let generation = manager.generation;
+    let generation = manager.get_mut().generation;
     let web = active.lock().unwrap().snapshot.tls.clone().unwrap();
     write(&second);
     assert_eq!(
-        manager.reload_certificates("api").await.unwrap()["outcome"],
+        Manager::reload_certificates(&manager, "api").await.unwrap()["outcome"],
         "applied"
     );
-    assert!(Arc::ptr_eq(&resolver, manager.resolver().unwrap()));
-    assert!(Arc::ptr_eq(&cache, &manager.resolver().unwrap().cache()));
-    assert_eq!(manager.generation, generation);
+    assert!(Arc::ptr_eq(
+        &resolver,
+        manager.get_mut().resolver().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &cache,
+        &manager.get_mut().resolver().unwrap().cache()
+    ));
+    assert_eq!(manager.get_mut().generation, generation);
     assert_web_identity(web.clone(), &second).await;
 
     let before_rejected = active
@@ -407,7 +470,9 @@ async fn certificate_reload_retains_cache_owner_and_updates_web_identity_while_d
         .unwrap()
         .summary();
     write(&client_only);
-    let error = manager.reload_certificates("api").await.unwrap_err();
+    let error = Manager::reload_certificates(&manager, "api")
+        .await
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("server authentication"),
         "{error:#}"
@@ -425,23 +490,82 @@ async fn certificate_reload_retains_cache_owner_and_updates_web_identity_while_d
     );
     assert_web_identity(web.clone(), &second).await;
 
-    manager.stop().await;
-    assert!(manager.resolver().is_none());
+    manager.get_mut().stop().await;
+    assert!(manager.get_mut().resolver().is_none());
     assert_eq!(
-        manager.services.health.snapshot().state,
+        manager.get_mut().services.health.snapshot().state,
         HealthState::Stopped
     );
     write(&third);
     assert_eq!(
-        manager.reload_certificates("api").await.unwrap()["outcome"],
+        Manager::reload_certificates(&manager, "api").await.unwrap()["outcome"],
         "applied"
     );
-    assert!(manager.resolver().is_none());
-    assert_eq!(manager.generation, generation);
-    assert_eq!(manager.saved.as_ref().unwrap().revision, 1);
+    assert!(manager.get_mut().resolver().is_none());
+    assert_eq!(manager.get_mut().generation, generation);
+    assert_eq!(manager.get_mut().saved.as_ref().unwrap().revision, 1);
     assert_web_identity(web, &third).await;
-    assert_sampler(&manager.services, false, generation).await;
-    manager.terminal_shutdown().await;
+    assert_sampler(&manager.get_mut().services, false, generation).await;
+    manager.get_mut().terminal_shutdown(true).await;
+}
+
+#[tokio::test]
+async fn reload_recovers_missing_dns_certificate_and_starts_saved_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let cert = temp.path().join("cert.pem");
+    let key = temp.path().join("key.pem");
+    let store = Store::open(&temp.path().join("state")).unwrap();
+    store
+        .save(&Stored {
+            username: "admin".into(),
+            password_hash: super::super::store::hash_password("local-unit-test-password").unwrap(),
+            toml: format!(
+                "{}\n[dot]\nlisten='127.0.0.1:0'\ncert_file={}\nkey_file={}\n",
+                config(),
+                serde_json::json!(cert),
+                serde_json::json!(key)
+            ),
+            previous: None,
+            revision: 1,
+        })
+        .unwrap();
+    let active = Arc::new(Mutex::new(Active {
+        snapshot: Arc::new(Snapshot::initial()),
+        sessions: Vec::new(),
+    }));
+    let manager = Manager::open(store, "127.0.0.1:3000".parse().unwrap(), active)
+        .await
+        .unwrap();
+    let mut manager = tokio::sync::Mutex::new(manager);
+    assert!(manager.get_mut().resolver().is_none());
+    let error = Manager::reload_certificates(&manager, "api")
+        .await
+        .unwrap_err();
+    assert!(error.is::<super::super::transport::CertificateInvalid>());
+    assert_eq!(
+        manager.get_mut().certificate_status()["last_reload"]["outcome"],
+        "failed"
+    );
+
+    let identity = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
+    std::fs::write(&cert, identity.cert.pem()).unwrap();
+    std::fs::write(&key, identity.signing_key.serialize_pem()).unwrap();
+    assert_eq!(
+        Manager::reload_certificates(&manager, "signal")
+            .await
+            .unwrap()["outcome"],
+        "applied"
+    );
+    assert!(manager.get_mut().resolver().is_some());
+    assert_eq!(
+        manager.get_mut().certificate_status()["roles"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(manager.get_mut().saved.as_ref().unwrap().revision, 1);
+    manager.get_mut().terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -502,7 +626,7 @@ async fn client_auth_only_candidate_keeps_http_config_and_dns_active() {
         active.lock().unwrap().snapshot.scheme,
         super::super::transport::Scheme::Http
     );
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -572,6 +696,18 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     let services = manager.services.clone();
     let generation = manager.generation;
     let storage_revision = manager.services.storage.status().configured_revision;
+    let original = &manager.saved.as_ref().unwrap().toml;
+    assert!(manager.updates_only(original).unwrap());
+    assert!(
+        manager
+            .updates_only(&format!("{original}\n# formatting only"))
+            .unwrap()
+    );
+    assert!(
+        manager
+            .updates_only(&format!("{original}\n[updates]\n"))
+            .unwrap()
+    );
     let mut next = manager.saved.clone().unwrap();
     next.revision += 1;
     next.toml
@@ -622,7 +758,7 @@ async fn update_settings_change_only_management_state_even_with_dns_stopped() {
     assert!(!manager.apply(next).await.unwrap());
     assert!(manager.resolver().is_none());
     assert_eq!(manager.generation, generation);
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -691,7 +827,7 @@ async fn occupied_listener_degrades_only_itself_and_recovers_when_the_port_is_fr
             .iter()
             .all(|l| l["state"] == "running")
     );
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -737,7 +873,7 @@ async fn startup_retry_backs_off_to_sixty_seconds_and_clears_on_success() {
     assert!(manager.resolver().is_some());
     assert!(manager.startup.is_none());
     assert_eq!(manager.startup_retry_at(), None);
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -761,6 +897,11 @@ async fn unreadable_local_rules_keep_dns_stopped_after_a_failed_apply_rolls_back
         .await
         .unwrap();
     assert!(manager.resolver().is_none());
+    assert_eq!(manager.status()["dns_health"]["state"], "failed");
+    assert_eq!(
+        manager.status()["dns_health"]["code"],
+        "local_filter_invalid"
+    );
     let reason = manager.last_error.clone().expect("local rules failure");
     let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = holder.local_addr().unwrap().port();
@@ -781,12 +922,20 @@ async fn unreadable_local_rules_keep_dns_stopped_after_a_failed_apply_rolls_back
     assert_eq!(manager.saved.as_ref().unwrap().revision, 1);
     assert_eq!(manager.last_error.as_ref(), Some(&reason));
     assert_eq!(manager.status()["running"], false);
+    assert_eq!(
+        manager.status()["dns_health"]["code"],
+        "local_filter_invalid"
+    );
     assert!(manager.startup_retry_at().is_none());
     drop(holder);
     manager.apply(next).await.unwrap();
     assert!(manager.resolver().is_some());
     assert!(manager.last_error.is_none());
-    manager.terminal_shutdown().await;
+    assert_eq!(
+        manager.services.health.snapshot().state,
+        HealthState::Running
+    );
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -823,5 +972,5 @@ async fn an_unreadable_rollback_copy_keeps_management_and_marks_rollback_unavail
     next.toml.push_str("\n# changed\n");
     manager.apply(next).await.unwrap();
     assert_eq!(manager.status()["rollback_unavailable"], Value::Null);
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }

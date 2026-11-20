@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApiClient, ApiError, StaleRequest } from './client';
+import { ApiClient, StaleRequest } from './client';
 
 const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 const view = { setup_required: false, authenticated: true, session: { binding: 'binding-1' },
@@ -65,10 +65,13 @@ describe('management request ownership', () => {
       .mockResolvedValueOnce(json(409, { error: { code: 'SESSION_CHANGED', message: 'replaced' } }));
     const api = new ApiClient(fetcher as typeof fetch);
     const events: string[] = [];
-    api.setAuthEventHandler((event) => events.push(event));
+    api.setAuthEventHandler((event) => { events.push(event); api.replaceBinding(null); });
     api.replaceBinding('binding-1');
-    await expect(api.request('status')).rejects.toBeInstanceOf(ApiError);
-    await expect(api.request('config', 'PUT', { toml: '', revision: 1 })).rejects.toBeInstanceOf(ApiError);
+    await expect(api.request('status')).rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED', message: 'expired' });
+    expect(api.currentBinding).toBeNull();
+    api.replaceBinding('binding-2');
+    await expect(api.request('config', 'PUT', { toml: '', revision: 1 })).rejects.toMatchObject({ status: 409, code: 'SESSION_CHANGED', message: 'replaced' });
+    expect(api.currentBinding).toBeNull();
     expect(events).toEqual(['unauthorized', 'session-changed']);
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
@@ -77,10 +80,25 @@ describe('management request ownership', () => {
     const fetcher = vi.fn(async () => json(409, { error: { code: 'TRANSPORT_CHANGED', message: 'use new origin' } }));
     const api = new ApiClient(fetcher as typeof fetch);
     const events: string[] = [];
-    api.setAuthEventHandler((event) => events.push(event));
+    api.setAuthEventHandler((event) => { events.push(event); api.replaceBinding(null); });
     api.replaceBinding('old-binding');
     await expect(api.request('config', 'PUT', { toml: '', revision: 1 })).rejects.toMatchObject({ code: 'TRANSPORT_CHANGED' });
     expect(events).toEqual(['transport-changed']);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores an auth failure from a response that was stale before parsing', async () => {
+    let resolve!: (response: Response) => void;
+    const response = new Promise<Response>((done) => { resolve = done; });
+    const api = new ApiClient(vi.fn(() => response) as typeof fetch);
+    const event = vi.fn();
+    api.setAuthEventHandler(event);
+    api.replaceBinding('old');
+    const pending = api.request('status');
+    api.replaceBinding('new');
+    resolve(json(401, { error: { code: 'UNAUTHORIZED' } }));
+    await expect(pending).rejects.toBeInstanceOf(StaleRequest);
+    expect(event).not.toHaveBeenCalled();
+    expect(api.currentBinding).toBe('new');
   });
 });

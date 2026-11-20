@@ -86,6 +86,12 @@ describe("configuration form model", () => {
     expect(convertFieldValue(file, "")).toBeNull();
   });
 
+  it("checks the field bounds before converting an oversized byte count to a number", () => {
+    const field = settingPages.storage.groups.flatMap((group) => group.fields).find((field) => field.path === "storage.max_database_bytes")!;
+    expect(() => convertFieldValue(field, "72057594037927936")).toThrow(expect.objectContaining({ key: "settings.validation.rangeUnit" }));
+    expect(() => convertFieldValue({ ...field, max: undefined }, "72057594037927936")).toThrow(expect.objectContaining({ key: "settings.validation.integer" }));
+  });
+
   it("keeps numeric edits raw until conversion, then rejects partial or out-of-range input", () => {
     const field = settingPages.dns.groups.find((group) => group.id === "listeners")!.fields[1];
     expect(fieldDisplayValue(1000, field)).toBe("1000");

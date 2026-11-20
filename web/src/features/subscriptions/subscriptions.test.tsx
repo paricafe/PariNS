@@ -45,9 +45,31 @@ describe('subscription operations', () => {
     await waitFor(() => expect(hook.result.current.state).not.toBeNull());
     await act(async () => { await hook.result.current.refresh(null); await hook.result.current.load(); });
     expect(hook.result.current.unknown).toBe(true);
+    await act(async () => { await hook.result.current.load(true); });
+    expect(hook.result.current.unknown).toBe(false);
+    expect(hook.result.current.operation).toBeNull();
     expect(request.mock.calls.filter(([path]) => path.endsWith('/refresh'))).toHaveLength(1);
     expect(hook.result.current.error).toBeNull();
   });
+  it('recognizes a refresh that finishes between status reads after its response is lost', async () => {
+    const previous = { ...operation, kind: 'refresh' as const };
+    let state = { ...initial, recent_operation: previous };
+    const request = vi.fn(async (path: string) => {
+      if (path.endsWith('/refresh')) throw new ApiError(0, 'NETWORK', 'lost');
+      return state;
+    });
+    const api = { request } as unknown as ApiClient;
+    const hook = renderHook(() => useSubscriptions(api, 1));
+    await waitFor(() => expect(hook.result.current.state).toEqual(state));
+    await act(async () => { await hook.result.current.refresh('example'); });
+    expect(hook.result.current.unknown).toBe(true);
+    state = { ...state, recent_operation: { ...previous, id: 'op2' } };
+    await act(async () => { await hook.result.current.load(); });
+    expect(hook.result.current.operation).toEqual(state.recent_operation);
+    expect(hook.result.current.unknown).toBe(false);
+    expect(request.mock.calls.filter(([path]) => path.endsWith('/refresh'))).toHaveLength(1);
+  });
+
 });
 
 describe('subscription polling cadence', () => {
@@ -63,7 +85,7 @@ describe('subscription polling cadence', () => {
 });
 
 describe('subscription draft and console', () => {
-  function fixture(state: SubscriptionState = initial, savedSource = source) {
+  function fixture(state: SubscriptionState = initial, savedSource = source, prepareError = new ApiError(400, 'subscription_parse', '<img src=x onerror=alert(1)>')) {
     let settings = { filter_subscriptions: { ...subscriptionLimits, enabled: state.enabled, sources: [savedSource] }, cache: { rules: [] } };
     let previewSettings = settings;
     let revision = 1;
@@ -83,7 +105,10 @@ describe('subscription draft and console', () => {
       }
       if (path === 'config/validate') return { restart_required: false, transport_change: null };
       if (path === 'filter/subscriptions') return state;
-      if (path === 'filter/subscriptions/prepare') throw new ApiError(400, 'subscription_parse', '<img src=x onerror=alert(1)>');
+      if (path === 'filter/subscriptions/prepare') {
+        if (!state.recent_operation) throw prepareError;
+        return { operation_id: state.recent_operation.id };
+      }
       if (path === 'filter/subscriptions/refresh') return { operation_id: 'op-refresh' };
       throw new Error(path);
     });
@@ -95,6 +120,31 @@ describe('subscription draft and console', () => {
   const scheduled: SubscriptionState = { ...initial, sources: [{ id: source.id,
     fingerprint: 'hash', active: true, ready: true, input_rules: 12, bytes: 50,
     last_success: 1, last_attempt: 1, next_update: 1900000000, failures: 0, error: null }] };
+
+  it.each([[true, false], [false, true]] as const)('prepares a re-enabled source with saved global/source flags %s/%s', async (global, enabled) => {
+    const { request, wrapper } = fixture({ ...initial, enabled: global, recent_operation: operation }, { ...source, enabled });
+    const hook = renderHook(useConfig, { wrapper });
+    await waitFor(() => expect(hook.result.current.draft).not.toBeNull());
+    act(() => {
+      if (!global) hook.result.current.updateField('filter_subscriptions.enabled', true);
+      if (!enabled) hook.result.current.setSources([subscriptionDraft({ ...source, enabled: true })]);
+    });
+    await act(async () => { await hook.result.current.prepareSave(); });
+    expect(request.mock.calls.map(([path]) => path).slice(-3)).toEqual([
+      'filter/subscriptions/prepare', 'filter/subscriptions', 'config/validate',
+    ]);
+  });
+
+  it.each(['BUSY', 'update_in_progress', 'UNAUTHORIZED', 'FORBIDDEN', 'TRANSPORT_CHANGED', 'SESSION_CHANGED', 'NETWORK', 'BAD_RESPONSE'])(
+    'keeps %s a global error when preparing a subscription', async (code) => {
+      const error = new ApiError(409, code, 'Global failure');
+      const { wrapper } = fixture(initial, source, error);
+      const hook = renderHook(useConfig, { wrapper });
+      await waitFor(() => expect(hook.result.current.draft).not.toBeNull());
+      act(() => hook.result.current.setSources([subscriptionDraft({ ...source, enabled: true })]));
+      await act(async () => { await expect(hook.result.current.prepareSave()).rejects.toBe(error); });
+      expect(hook.result.current.error).toBe(error);
+    });
 
   it('changes the displayed schedule only after saving, and retains it across refresh and languages', async () => {
     const { wrapper } = fixture(scheduled, { ...source, enabled: true });

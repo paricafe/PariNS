@@ -12,11 +12,12 @@ use serde::Deserialize;
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     sync::{Semaphore, watch},
     task::JoinSet,
     time::{Instant, sleep_until, timeout},
@@ -40,8 +41,6 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE: Duration = Duration::from_secs(30);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
-
-type Socket = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
 
 pub(super) struct Hub {
     tasks: Mutex<Option<JoinSet<()>>>,
@@ -168,6 +167,7 @@ pub(super) async fn upgrade(
         services,
         queries: shared.live.queries.clone(),
         stop: shared.live.stop.subscribe(),
+        sending: AtomicBool::new(false),
     };
     drop(session);
     {
@@ -284,13 +284,6 @@ fn read_end(error: WsError) -> End {
     }
 }
 
-async fn send(socket: &mut Socket, text: String) -> Result<(), End> {
-    match timeout(SEND_TIMEOUT, socket.send(Message::text(text))).await {
-        Ok(Ok(())) => Ok(()),
-        _ => Err(None),
-    }
-}
-
 struct Live {
     binding: String,
     revoked: watch::Receiver<()>,
@@ -298,17 +291,20 @@ struct Live {
     services: Arc<RuntimeServices>,
     queries: Arc<Semaphore>,
     stop: watch::Receiver<bool>,
+    sending: AtomicBool,
 }
 
 impl Live {
-    async fn run(mut self, mut socket: Socket) {
+    async fn run(self, mut socket: WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>) {
         let mut stop = self.stop.clone();
         let end = tokio::select! {
             biased;
             _ = stop.wait_for(|stopping| *stopping) => Some(1001),
             end = self.serve(&mut socket) => end,
         };
-        if let Some(code) = end {
+        if let Some(code) = end
+            && (code != 4403 || !self.sending.load(Ordering::Relaxed))
+        {
             let frame = CloseFrame {
                 code: code.into(),
                 reason: "".into(),
@@ -317,7 +313,10 @@ impl Live {
         }
     }
 
-    async fn serve(&mut self, socket: &mut Socket) -> End {
+    async fn serve(
+        &self,
+        socket: &mut WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
+    ) -> End {
         match timeout(AUTH_TIMEOUT, socket.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str(&text) {
                 Ok(Incoming::Auth { binding }) if secret_matches(&binding, &self.binding) => {}
@@ -327,9 +326,19 @@ impl Live {
             Ok(Some(Err(error))) => return read_end(error),
             Ok(Some(Ok(_))) | Err(_) => return Some(4401),
         }
-        if self.revoked.has_changed().is_err() {
-            return Some(4403);
+        let mut revoked = self.revoked.clone();
+        tokio::select! {
+            biased;
+            _ = revoked.changed() => Some(4403),
+            _ = sleep_until(self.expires) => Some(4403),
+            end = self.subscribed(socket) => end,
         }
+    }
+
+    async fn subscribed(
+        &self,
+        socket: &mut WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
+    ) -> End {
         let mut idle = Instant::now() + IDLE;
         let mut subscription: Option<Subscription> = None;
         let mut sent: Option<State> = None;
@@ -337,8 +346,6 @@ impl Live {
         loop {
             let refresh = tokio::select! {
                 biased;
-                _ = self.revoked.changed() => return Some(4403),
-                _ = sleep_until(self.expires) => return Some(4403),
                 _ = sleep_until(idle) => return Some(4408),
                 _ = sleep_until(next.unwrap_or(idle)), if next.is_some() => false,
                 message = socket.next() => {
@@ -361,7 +368,7 @@ impl Live {
                     };
                     match serde_json::from_str(&text) {
                         Ok(Incoming::Ping {}) => {
-                            if let Err(end) = send(socket, r#"{"type":"pong"}"#.into()).await {
+                            if let Err(end) = self.send(socket, r#"{"type":"pong"}"#.into()).await {
                                 return end;
                             }
                             continue;
@@ -373,7 +380,7 @@ impl Live {
                                 return Some(4400);
                             };
                             let state = State::current(&self.services);
-                            if let Err(end) = send(
+                            if let Err(end) = self.send(
                                 socket,
                                 serde_json::json!({"type":"subscribed","log":state.log,"log_epoch":state.log_epoch}).to_string(),
                             ).await {
@@ -405,16 +412,33 @@ impl Live {
         }
     }
 
+    async fn send(
+        &self,
+        socket: &mut WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
+        text: String,
+    ) -> Result<(), End> {
+        if !matches!(self.revoked.has_changed(), Ok(false)) || Instant::now() >= self.expires {
+            return Err(Some(4403));
+        }
+        self.sending.store(true, Ordering::Relaxed);
+        let sent = timeout(SEND_TIMEOUT, socket.send(Message::text(text))).await;
+        self.sending.store(false, Ordering::Relaxed);
+        match sent {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(None),
+        }
+    }
+
     async fn send_state(
         &self,
-        socket: &mut Socket,
+        socket: &mut WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
         state: State,
         sent: &mut Option<State>,
     ) -> Result<(), End> {
         if *sent == Some(state) {
             return Ok(());
         }
-        send(
+        self.send(
             socket,
             serde_json::json!({"type":"state","log":state.log,"log_epoch":state.log_epoch})
                 .to_string(),
@@ -426,7 +450,7 @@ impl Live {
 
     async fn poll(
         &self,
-        socket: &mut Socket,
+        socket: &mut WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
         subscription: &mut Subscription,
         sent: &mut Option<State>,
         refresh: bool,
@@ -482,7 +506,7 @@ impl Live {
             subscription.cursor = Some(subscription.cursor.unwrap_or(0).max(newest.id));
         }
         let cursor = serde_json::to_string(&subscription.cursor).expect("cursor JSON");
-        send(
+        self.send(
             socket,
             format!(r#"{{"type":"entries","entries":[{body}],"cursor":{cursor},"more":{more}}}"#),
         )
@@ -493,6 +517,60 @@ impl Live {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn revoked_or_expired_session_closes_while_waiting_for_query_slot() {
+        for expire in [false, true] {
+            let mut settings = crate::storage::RuntimeSettings::default();
+            settings.query_log.enabled = true;
+            let services = RuntimeServices::ephemeral(settings);
+            let (server, client) = tokio::io::duplex(4096);
+            let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+            let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+            let (revoke, revoked) = watch::channel(());
+            let (_stop, stop) = watch::channel(false);
+            let live = Live {
+                binding: "test-binding".into(),
+                revoked,
+                expires: Instant::now() + Duration::from_secs(5),
+                services: services.clone(),
+                queries: Arc::new(Semaphore::new(0)),
+                stop,
+                sending: AtomicBool::new(false),
+            };
+            let task = tokio::spawn(live.run(server));
+            client
+                .send(Message::text(r#"{"type":"auth","binding":"test-binding"}"#))
+                .await
+                .unwrap();
+            client
+                .send(Message::text(r#"{"type":"subscribe","interval":1}"#))
+                .await
+                .unwrap();
+            let subscribed = client.next().await.unwrap().unwrap();
+            let state: serde_json::Value =
+                serde_json::from_str(subscribed.to_text().unwrap()).unwrap();
+            assert_eq!(state["type"], "subscribed");
+            assert_eq!(state["log"], "ok");
+            if expire {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(5)).await;
+            } else {
+                revoke.send(()).unwrap();
+            }
+            let frame = timeout(Duration::from_secs(1), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(frame, Message::Close(Some(frame)) if u16::from(frame.code) == 4403));
+            task.await.unwrap();
+            if expire {
+                tokio::time::resume();
+            }
+            services.storage.shutdown().await.unwrap();
+        }
+    }
 
     #[test]
     fn subscriptions_are_bounded() {

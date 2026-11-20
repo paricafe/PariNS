@@ -58,8 +58,8 @@ configuration helpers across file mode, management APIs, and the browser.
 Console translations and field metadata live in typed modules under `web/src/i18n/`
 and `web/src/model/`. React owns only presentation and one in-memory configuration
 draft. Language and appearance changes preserve controls, drafts, focus and session
-ownership; persist only language, appearance (theme, background) and the query log
-refresh interval in the browser, never credentials, session bindings, PEM, logs or drafts. Keep both languages complete; configuration values and raw
+ownership; persist only language, appearance (theme, background selection, custom image in IndexedDB,
+and overlay darkness) and the query log refresh interval in the browser, never credentials, session bindings, PEM, logs or drafts. Keep both languages complete; configuration values and raw
 diagnostics stay intact. Incomplete numeric and listener edits remain raw drafts
 until preview/validation.
 
@@ -71,7 +71,8 @@ until preview/validation.
   reuse. Only when one cache key received the same normalized answer from at least
   K disjoint networks (spanning two or more /16, IPv6 /32) with no contradiction may
   `[cache.ecs_sharing]` learn sharing within that ECS family; any different answer or
-  explicit nonzero scope revokes it at once, with a cooldown. No-ECS, privacy
+  explicit nonzero scope revokes it at once, with a cooldown. DNSSEC authority proofs
+  and negative SOA names and minimum TTL participate in this comparison. No-ECS, privacy
   fallback and the other family never share. Details: `src/cache/sharing.rs`.
   These rules describe upstream recursive resolvers. In recursive mode the scope
   comes from authoritative servers: an answer without an ECS option does not depend
@@ -98,7 +99,8 @@ until preview/validation.
 - Classify responses once for admission and snapshot restoration. A nonempty negative
   answer needs an unambiguous same-class CNAME chain and equivalent covering SOAs for
   its terminal name; it keeps the question, ECS namespace, negative budget and
-  bounded TTL, and is never stale or prefetch eligible.
+  bounded TTL, and is never stale or prefetch eligible. With DO set, its answer
+  section may include signatures covering CNAMEs at actual chain links.
 - Invalidation and replacement stop older in-flight work from refilling invalidated
   state. A newer successful answer, even uncacheable or carrying known EDE
   diagnostics (not admitted for replay), supersedes older overlapping answers.
@@ -106,7 +108,8 @@ until preview/validation.
   by the maximum DNS message size, never the EDNS UDP size. EDNS TCP keepalive is
   hop-local: ingress removes it from queries and the pool from answers. Upstream
   queries advertise at most 1232 bytes. Cookie/unknown options stay nonshared. Flight and refresh share one canonical key
-  that ignores Padding bytes but preserves request intent.
+  that ignores Padding bytes, AA, RA, AD and reserved EDNS flags but preserves
+  Padding presence, DO, CD and RD. The original query controls downstream AD.
 - Inspection and explanation are read-only: no upstream requests, recency or
   hit-counter changes. Filtering never contaminates cached upstream answers.
   Management invalidation uses an opaque token identifying both the cache instance
@@ -120,6 +123,8 @@ until preview/validation.
   block rule only when it can answer differently. Block answers carry EDE 15 for
   EDNS clients; their SOA owner is the rule name when the rule matched the question
   name, otherwise the question name. Details: `src/policy.rs`, `src/policy/response.rs`.
+- At the per-key variant limit, positive admissions evict the oldest negative
+  variant first. Negative admissions can evict only negative variants.
 - Cache byte accounting is not process RSS. Keep separate positive and negative
   budgets; document capacity/utilization trade-offs when changing them.
 - Consume a clean cache snapshot durably before serving; publish one only at
@@ -137,6 +142,9 @@ until preview/validation.
   and explicit cancellation; refresh and foreground coalescing never cross generations.
   Flight registries keep weak references and bound retained records; joining an
   active key must not scan other groups, while capacity admission reclaims dead work.
+- DoQ, DoH and DoH3 apply the transport timeout to request and response IO.
+  The resolver owns the DNS query deadline. HTTP/2 keeps driving the connection
+  while admitted requests finish and their responses flush.
 - Shutdown: only streams with a complete query can force a stop; others are
   cancelled at once. Peer close notification uses at most half the grace; a forced
   stop records its first bounded cause and logs it when no clean snapshot is
@@ -155,8 +163,11 @@ until preview/validation.
   coalescing group until it ends. Unsent work, work
   over that budget and work of a replaced or stopped generation cancel with the
   caller. Details: `src/resolver.rs` (`Waiting`).
-- Recursion rejects IPv4 multicast authority addresses in addition to Hickory’s
-  default destination filters. UDP rejection history is sampled before decoding.
+- Recursive mode refuses RD=0 before cache lookup. A secure negative answer
+  requires authenticated denial evidence in the authority section. In addition
+  to Hickory’s defaults, recursion excludes IPv4 multicast and benchmarking ranges,
+  IPv6 link-local, NAT64 and IPv4-mapped destinations, and its concrete port-53
+  listener address. UDP rejection history is sampled before decoding.
 - Recursion admits every authoritative query attempt through one global rate bucket
   and concurrency limit before the server's attempt timeout starts, so queueing never
   counts against or penalizes a server; a token is taken only when it is used, and
@@ -173,8 +184,8 @@ until preview/validation.
   A hostname endpoint tries its next address only when nothing was sent. A sent
   query is never resent or replayed, with one exception: when a reused idle DoT pool
   connection turns out to be closed by the server (EOF, reset, aborted, broken pipe
-  or not connected), the query is retried once on a new connection within its
-  deadline; cancelling an attempt releases only its stream. DoH transports normalize
+  or not connected) before the first response byte, the query is retried once within its
+  deadline on a new connection; cancelling an attempt releases only its stream. DoH transports normalize
   HTTP Age into RR TTLs; cache code has no HTTP policy. Details:
   `src/upstreams/h3.rs`, `src/upstreams/transport.rs`.
 - DNS terminal health is published once per generation to readiness and storage
@@ -205,8 +216,8 @@ until preview/validation.
 ## Management, runtime and security
 
 - Mutations keep authentication, Host/Origin checks, atomic persistence and failure
-  recovery. Cross-site entry permits only top-level GET navigation of the console
-  document after Host/Origin checks; APIs, assets and embedded requests stay blocked.
+  recovery. Requests marked same-site or cross-site may enter only through top-level
+  GET navigation of the console document after Host/Origin checks.
   The management entry point consumes a bound listener; callers never
   release a reserved address and race to rebind it during startup. Configuration
   saves and rollback carry the saved revision as an
@@ -247,8 +258,10 @@ until preview/validation.
   acknowledgement fences each filter change; spontaneous state updates never
   acknowledge a subscription. Details:
   `src/manage/live.rs`.
-- Validate and persist before publishing replacement state. Cache-only, storage-only
-  and updates-only changes preserve listeners; updates-only changes also keep caches,
+- Validate and persist before publishing replacement state. On a running generation, changes limited to
+  `[storage]`, `[query_log]`, `[statistics]`, `[updates]`, `[filter]`, `[filter_file]`,
+  `[filter_subscriptions]` and `[cache]` preserve listeners. A change to effective
+  cache settings outside `[cache.persistence]` replaces the cache. Updates-only changes also keep caches,
   RuntimeServices, certificates and sessions and leave stopped DNS stopped. One
   typed change-impact classification drives validation, restart reporting and apply.
   Updates-only validation checks the schema without reloading DNS material. Do not promise cache
@@ -275,8 +288,9 @@ until preview/validation.
   pages. Log searches yield the worker after 500 ms, and live polls skip SQLite
   when no new log ID was committed. Terminal shutdown flushes first, so the close
   only commits what arrived since and truncates the WAL. At shutdown the cache save and
-  the storage drain run in parallel with separate budgets; storage closes (releasing
-  the runtime lock) only after the save.
+  the storage drain run in parallel with separate budgets. Storage attempts a clean
+  close even if the save times out. The runtime directory lock stays held until both
+  the storage worker and the cache save have finished.
 - Refresh rejection reasons and useful/unused refresh counts belong to the cache
   generation, outside persisted statistics and snapshots. A refreshed entry settles
   once. A first foreground hit while fresh is useful. A first foreground hit
@@ -287,8 +301,8 @@ until preview/validation.
   and actual port over UDP. Management and DNS keep separate ports, ALPN and routes.
   A failed candidate or TLS fault never downgrades HTTPS to HTTP; disabling DoH needs
   downgrade confirmation. Rust owns `[web].public_host`, origin and protocol state.
-  Missing DoT/DoQ identities leave HTTP management available while DNS startup retries;
-  a successful start publishes the CertificateSet used by its listeners.
+  Missing DoT/DoQ identities leave HTTP management available while DNS startup retries.
+  Reloading restored identities publishes their CertificateSet and retries DNS immediately.
 - Manager/Active owns the atomic CertificateSet, reloaded by API or SIGHUP without
   changing revision, DNS/cache ownership or sessions. Pasted identities are validated
   before private persistence; only file references are returned, never private keys.
@@ -310,8 +324,9 @@ until preview/validation.
   older helpers require the complete installer before an online update.
 - Root launch verification has one 180-second monotonic budget, including ten
   seconds of fresh, identity-bound DNS and storage readiness. Installer rollback
-  waits with the packaged helper without committing, then the restored helper
-  validates its own units and completes the installation. Service timeouts cover
+  republishes restored status with the restored helper, waits with the packaged
+  helper, then validates the restored units and finishes with the restored helper.
+  Boot recovery precedes both managed DNS and the updater. Service timeouts cover
   candidate and rollback launches, with a separate recovery budget.
 - Managed `--check` is read-only and never opens Store/runtime, SQLite, cache
   persistence or listeners; it also validates the saved rollback copy. Candidate preflight runs as the app user; root never

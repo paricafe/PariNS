@@ -1,7 +1,8 @@
-//! DNSSEC-validating recursive resolution through the pinned Hickory recursor.
+//! DNSSEC-validating recursive resolution for RD queries through the pinned Hickory recursor.
+//! Authenticated negative answers require secure denial evidence from the authority section.
 
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -125,8 +126,28 @@ pub struct Recursion {
     counts: Counts,
 }
 
+fn restrict_authorities(options: &mut RecursorOptions, listen: SocketAddr) -> Result<()> {
+    for network in [
+        "224.0.0.0/4",
+        "fe80::/10",
+        "64:ff9b::/96",
+        "64:ff9b:1::/48",
+        "198.18.0.0/15",
+    ] {
+        options.deny_server.push(network.parse()?);
+    }
+    if listen.port() == 53 && !listen.ip().is_unspecified() {
+        let ip = listen.ip();
+        options.deny_server.push(ip.into());
+        if ip != ip.to_canonical() {
+            options.deny_server.push(ip.to_canonical().into());
+        }
+    }
+    Ok(())
+}
+
 impl Recursion {
-    pub fn new(settings: &Settings) -> Result<Self> {
+    pub fn new(settings: &Settings, listen: SocketAddr) -> Result<Self> {
         let bounds = outbound::Bounds::new(
             settings.max_outbound_per_second,
             settings.max_outbound_inflight,
@@ -140,7 +161,7 @@ impl Recursion {
             qname_minimization: QNameMinimization::Relaxed,
             ..RecursorOptions::default()
         };
-        options.deny_server.push("224.0.0.0/4".parse()?);
+        restrict_authorities(&mut options, listen)?;
         let mut roots: Vec<IpAddr> = ROOTS_V4.iter().copied().map(IpAddr::V4).collect();
         if settings.ipv6 {
             roots.extend(ROOTS_V6.iter().copied().map(IpAddr::V6));
@@ -152,7 +173,7 @@ impl Recursion {
             DnssecPolicy::ValidateWithStaticKey(DnssecConfig::default()),
             None,
             options,
-            outbound::Provider::new(bounds.clone()),
+            outbound::Provider::new(bounds.clone(), settings.ipv6),
         )
         .map_err(|e| anyhow!("recursion setup failed: {e}"))?;
         Ok(Self {
@@ -170,6 +191,7 @@ impl Recursion {
             !self.shutdown.load(Ordering::Acquire),
             "recursion is shut down"
         );
+        ensure!(query.recursion_desired, "recursive resolution requires RD");
         let question = query.queries[0].clone();
         let subnet = ecs::subnet(query);
         let dnssec_ok = query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
@@ -473,9 +495,10 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
             }
         },
     };
-    let answered = answers
-        .iter()
-        .any(|record| record.record_type() == query.queries[0].query_type());
+    let answered = code == ResponseCode::NoError
+        && answers
+            .iter()
+            .any(|record| record.record_type() == query.queries[0].query_type());
     let (authorities, proof) = if answered {
         let dnssec_ok = query.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
         let denials = authorities
@@ -488,7 +511,14 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
             .collect();
         (denials, validation(answers.iter()))
     } else {
-        let proof = validation(answers.iter().chain(&authorities));
+        let mut proof = validation(answers.iter().chain(&authorities));
+        if proof == Some(Validation::Secure)
+            && !authorities
+                .iter()
+                .any(|record| is_denial(record) && record.proof == Proof::Secure)
+        {
+            proof = Some(Validation::Insecure);
+        }
         (authorities, proof)
     };
     if proof == Some(Validation::Bogus) {
@@ -508,7 +538,7 @@ fn respond(query: &Message, result: Result<Message, RecursorError>, scope: EcsSc
     echo_scope(query, &mut response, scope);
     Outcome {
         response: Ok(response),
-        kind: if answered && code == ResponseCode::NoError {
+        kind: if answered {
             Kind::Answered
         } else {
             Kind::Negative
@@ -693,6 +723,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_authority_scope_cannot_be_cached_or_echoed() {
+        let q = query(Some("198.51.100.0/24"), true);
+        let (out, context) = ecs::Context::prepare(
+            &q,
+            "198.51.100.1".parse().unwrap(),
+            &crate::config::EcsConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut response = respond(&out, answer(vec![a(Proof::Secure)]), EcsScope::Scope(200))
+            .response
+            .unwrap();
+        assert_eq!(ecs::subnet(&response).unwrap().scope_prefix(), 200);
+        let scope = context.response_scope(&response);
+        assert_eq!(
+            scope,
+            ecs::ResponseScope {
+                cache: None,
+                supersede: None,
+                reply: None
+            }
+        );
+        let edns = response.edns.as_mut().unwrap();
+        edns.set_version(2);
+        edns.flags_mut().z = 42;
+        context.finish(&q, &mut response, scope.reply);
+        let decoded = crate::protocol::decode(&response.to_vec().unwrap()).unwrap();
+        assert_eq!(ecs::subnet(&decoded).unwrap().scope_prefix(), 24);
+        let edns = decoded.edns.unwrap();
+        assert_eq!((edns.version(), edns.flags().z), (0, 0));
+    }
+
+    #[test]
     fn secure_answer_sets_ad_and_echoes_authority_scope() {
         let q = query(Some("198.51.100.0/24"), true);
         let outcome = respond(&q, answer(vec![a(Proof::Secure)]), EcsScope::Scope(20));
@@ -805,6 +870,98 @@ mod tests {
             }
             assert_eq!(response.authorities, expected);
             assert_eq!(response.answers.len(), if dnssec_ok { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn nxdomain_with_matching_answer_requires_secure_denial() {
+        use hickory_proto::dnssec::rdata::NSEC;
+
+        let query = query(None, true);
+        let mut message = protocol::error_response(&query, ResponseCode::NXDomain);
+        let mut soa = soa().into_record_of_rdata();
+        soa.proof = Proof::Secure;
+        message.answers.push(a(Proof::Secure));
+        message.authorities.push(soa);
+
+        let outcome = respond(&query, Ok(message.clone()), EcsScope::NotSent);
+        assert_eq!(outcome.kind, Kind::Negative);
+        assert_eq!(outcome.proof, Some(Validation::Insecure));
+        let response = outcome.response.unwrap();
+        assert_eq!(response.response_code, ResponseCode::NXDomain);
+        assert!(!response.authentic_data);
+        assert_eq!(response.authorities, message.authorities);
+
+        let mut denial = Record::from_rdata(
+            message.authorities[0].name.clone(),
+            60,
+            RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                query.queries[0].name().clone(),
+                [RecordType::NS],
+            ))),
+        );
+        denial.proof = Proof::Secure;
+        message.authorities.push(denial);
+        let outcome = respond(&query, Ok(message.clone()), EcsScope::NotSent);
+        assert_eq!(outcome.kind, Kind::Negative);
+        assert_eq!(outcome.proof, Some(Validation::Secure));
+        let response = outcome.response.unwrap();
+        assert_eq!(response.response_code, ResponseCode::NXDomain);
+        assert!(response.authentic_data);
+        assert_eq!(response.authorities, message.authorities);
+    }
+
+    #[test]
+    fn signed_alias_requires_authenticated_terminal_denial() {
+        use hickory_proto::{
+            dnssec::{
+                Nsec3HashAlgorithm,
+                rdata::{NSEC, NSEC3},
+            },
+            rr::rdata::CNAME,
+        };
+        let query = query(None, true);
+        let target = Name::from_ascii("target.example.").unwrap();
+        let mut alias = Record::from_rdata(
+            query.queries[0].name().clone(),
+            60,
+            RData::CNAME(CNAME(target.clone())),
+        );
+        alias.proof = Proof::Secure;
+        let mut unsigned = soa().into_record_of_rdata();
+        unsigned.proof = Proof::Insecure;
+        let proofs = [
+            DNSSECRData::NSEC(NSEC::new(target.clone(), [RecordType::NS])),
+            DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                false,
+                0,
+                vec![],
+                vec![0; 20],
+                [RecordType::NS],
+            )),
+        ];
+        for code in [ResponseCode::NXDomain, ResponseCode::NoError] {
+            let mut message = protocol::error_response(&query, code);
+            message.answers.push(alias.clone());
+            for authorities in [vec![], vec![unsigned.clone()]] {
+                message.authorities = authorities;
+                let outcome = respond(&query, Ok(message.clone()), EcsScope::NotSent);
+                assert_eq!(outcome.kind, Kind::Negative);
+                assert_eq!(outcome.proof, Some(Validation::Insecure));
+                let response = outcome.response.unwrap();
+                assert_eq!(response.response_code, code);
+                assert!(!response.authentic_data);
+            }
+            for proof in &proofs {
+                let mut denial =
+                    Record::from_rdata(target.clone(), 60, RData::DNSSEC(proof.clone()));
+                denial.proof = Proof::Secure;
+                message.authorities = vec![denial];
+                let outcome = respond(&query, Ok(message.clone()), EcsScope::NotSent);
+                assert_eq!(outcome.proof, Some(Validation::Secure));
+                assert!(outcome.response.unwrap().authentic_data);
+            }
         }
     }
 
@@ -1012,7 +1169,8 @@ mod tests {
 
     #[tokio::test]
     async fn unfinished_resolutions_count_as_deadline_or_shutdown() {
-        let recursion = Recursion::new(&Settings::default()).unwrap();
+        let recursion =
+            Recursion::new(&Settings::default(), "127.0.0.1:53".parse().unwrap()).unwrap();
         drop(Pending(Some(&recursion)));
         drop(Pending(None));
         recursion.shutdown();
@@ -1020,6 +1178,29 @@ mod tests {
         let snapshot = recursion.diagnostics_snapshot();
         assert_eq!(snapshot["resolutions"]["deadline"], 1);
         assert_eq!(snapshot["resolutions"]["shutdown"], 1);
+    }
+
+    #[test]
+    fn restricted_authority_networks_and_dns_listener_are_denied() {
+        use hickory_proto::access_control::AccessControlSetBuilder;
+        for (listen, deny_self) in [
+            ("93.184.216.34:53", true),
+            ("[::ffff:93.184.216.34]:53", true),
+            ("93.184.216.34:5353", false),
+            ("0.0.0.0:53", false),
+        ] {
+            let mut options = RecursorOptions::default();
+            restrict_authorities(&mut options, listen.parse().unwrap()).unwrap();
+            let filter = AccessControlSetBuilder::new("authority")
+                .deny(options.deny_server.iter())
+                .build()
+                .unwrap();
+            for address in ["fe80:1::1", "64:ff9b::7f00:1", "64:ff9b:1::1", "198.18.0.1"] {
+                assert!(filter.denied(address.parse().unwrap()), "{address}");
+            }
+            assert_eq!(filter.denied("93.184.216.34".parse().unwrap()), deny_self);
+            assert!(!filter.denied("93.184.216.35".parse().unwrap()));
+        }
     }
 
     #[test]

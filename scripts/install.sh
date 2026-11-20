@@ -169,6 +169,7 @@ check_dropin() {
     check_path "$1"
     [ -f "$1" ] || fail "not a regular drop-in: $1"
     awk '
+        { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
         /^[[:space:]]*([#;]|$)/ { next }
         /^\[Service\]$/ { service=1; next }
         service && /^SupplementaryGroups=[A-Za-z0-9_. -]+$/ { next }
@@ -274,8 +275,9 @@ if [ -z "$root" ]; then
     "$helper" install-check <&9 9<&-
 fi
 backup=$(mktemp -d "$bin_dir/.install-backup.XXXXXX")
-had_binary=false had_unit=false was_active=false was_enabled=false changed=false committed=false stopped=false new_started=false lock_held=true installation_nonce=
-if [ -f "$binary_target" ]; then cp -p "$binary_target" "$backup/parins"; had_binary=true; fi
+had_unit=false was_active=false was_enabled=false changed=false committed=false stopped=false new_started=false lock_held=true installation_nonce=
+preflight= temporary= binary_tmp= unit_tmp=
+if [ -f "$binary_target" ]; then cp -p "$binary_target" "$backup/parins"; fi
 if [ -f "$unit_target" ]; then cp -p "$unit_target" "$backup/parins-managed.service"; had_unit=true; fi
 for item in parins-updater.service parins-updater.path parins-update-recovery.service; do
     [ ! -f "$unit_dir/$item" ] || cp -p "$unit_dir/$item" "$backup/$item"
@@ -290,6 +292,12 @@ fi
 rollback() {
     status=$?
     trap - EXIT HUP INT TERM
+    cleanup_staging() {
+        for staged in "${preflight:-}" "${temporary:-}" "${binary_tmp:-}" "${unit_tmp:-}"; do
+            [ -n "$staged" ] || continue
+            rm -f -- "$staged" || printf 'Could not remove installer staging file %s\n' "$staged" >&2
+        done
+    }
     if "$changed" && ! "$committed"; then
         if [ -z "$root" ]; then
             if ! "$lock_held"; then
@@ -306,34 +314,39 @@ rollback() {
                 [ "$(systemctl show --property=MainPID --value parins-managed.service 9>&-)" = 0 ] || exit "$status"
             fi
         fi
+        cleanup_staging
         printf 'Installation failed; restoring prior binary/unit from %s\n' "$backup" >&2
-        if "$had_binary"; then
-            restored=$(mktemp "$bin_dir/.rollback.XXXXXX")
-            cp -p "$backup/parins" "$restored" && mv -f "$restored" "$binary_target"
-        else rm -f "$binary_target"; fi
-        if "$had_unit"; then
-            restored=$(mktemp "$unit_dir/.rollback.XXXXXX")
-            cp -p "$backup/parins-managed.service" "$restored" && mv -f "$restored" "$unit_target"
-        else rm -f "$unit_target"; fi
+        restore_failed() {
+            printf 'Manual recovery required: %s failed while restoring %s. Backup retained at %s\n' "$1" "$2" "$backup" >&2
+            exit "$status"
+        }
+        restore_file() {
+            if [ ! -f "$backup/$1" ]; then
+                rm -f -- "$2" || restore_failed rm "$2"
+                return
+            fi
+            restored=$(mktemp "${2%/*}/.rollback.XXXXXX") || restore_failed mktemp "$2"
+            if ! cp -p "$backup/$1" "$restored"; then
+                rm -f -- "$restored" || true
+                restore_failed cp "$2"
+            fi
+            if ! mv -f "$restored" "$2"; then
+                rm -f -- "$restored" || true
+                restore_failed mv "$2"
+            fi
+        }
+        restore_file parins "$binary_target"
+        restore_file parins-managed.service "$unit_target"
         for item in parins-updater.service parins-updater.path parins-update-recovery.service; do
-            if [ -f "$backup/$item" ]; then
-                restored=$(mktemp "$unit_dir/.rollback.XXXXXX")
-                cp -p "$backup/$item" "$restored" && mv -f "$restored" "$unit_dir/$item"
-            else rm -f "$unit_dir/$item"; fi
+            restore_file "$item" "$unit_dir/$item"
         done
-        if [ -f "$backup/parins-updater" ]; then
-            restored=$(mktemp "$root/usr/libexec/.rollback.XXXXXX")
-            cp -p "$backup/parins-updater" "$restored" && mv -f "$restored" "$helper_target"
-        else rm -f "$helper_target"; fi
+        restore_file parins-updater "$helper_target"
         for item in install-build-info.json journal.json; do
-            if [ -f "$backup/$item" ]; then
-                restored=$(mktemp "$updater_private/.rollback.XXXXXX")
-                cp -p "$backup/$item" "$restored" && mv -f "$restored" "$updater_private/$item"
-            else rm -f "$updater_private/$item"; fi
+            restore_file "$item" "$updater_private/$item"
         done
         if [ -z "$root" ]; then
             if [ -f "$updater_private/journal.json" ]; then
-                "$helper" rebuild-status <&9 9<&- || { printf '%s\n' 'Manual recovery required: restored journal could not publish status.' >&2; exit "$status"; }
+                "$helper_target" rebuild-status <&9 9<&- || { printf '%s\n' 'Manual recovery required: restored journal could not publish status.' >&2; exit "$status"; }
             else
                 rm -f "$updater_dir/status.json"
             fi
@@ -350,9 +363,12 @@ rollback() {
                 if "$was_active" && ! "$new_started"; then systemctl start parins-managed.service || true; fi
             fi
         fi
-    elif ! "$committed" && [ -z "$root" ] && "$stopped" && "$was_active"; then
-        flock -u 9; exec 9>&-; lock_held=false
-        systemctl start parins-managed.service || true
+    elif ! "$committed"; then
+        cleanup_staging
+        if [ -z "$root" ] && "$stopped" && "$was_active"; then
+            flock -u 9; exec 9>&-; lock_held=false
+            systemctl start parins-managed.service || true
+        fi
     fi
     if "$request_path_stopped" && ! "$committed"; then
         if "$lock_held"; then flock -u 9; exec 9>&-; lock_held=false; fi
@@ -360,16 +376,31 @@ rollback() {
     fi
     exit "$status"
 }
+uninitialized_preflight() {
+    if "$was_active"; then
+        systemctl stop parins-managed.service 9>&-
+        stopped=true
+    fi
+    if "$had_unit" || "$stopped"; then
+        [ "$(systemctl show --property=MainPID --value parins-managed.service 9>&-)" = 0 ] || fail 'service has not exited'
+    fi
+    if "$stopped"; then
+        [ "$(systemctl show --property=Result --value parins-managed.service 9>&-)" = success ] || fail 'service did not stop cleanly'
+    fi
+    [ ! -f "$state_dir/state.json" ] || fail 'Web Setup completed before the old service exited. Re-run the installer for initialized preflight.'
+    printf 'null\n' > "$updater_private/install-preflight.json"
+}
 trap rollback EXIT
 trap 'exit 1' HUP INT TERM
 if [ -z "$root" ]; then
     install -d -m 0755 "$bin_dir/.update"
     check_path "$bin_dir/.update"
-    preflight="$bin_dir/.update/install-preflight"
-    check_path "$preflight"
+    check_path "$bin_dir/.update/install-preflight"
     temporary=$(mktemp "$bin_dir/.update/.install-preflight.XXXXXX")
     install -m 0755 "$binary" "$temporary"
+    preflight="$bin_dir/.update/install-preflight"
     mv -f "$temporary" "$preflight"
+    temporary=
     if [ -f "$state_dir/state.json" ]; then
         "$was_active" || fail 'existing initialized service must be running for an identity-preserving read-only preflight'
         original_pid=$(systemctl show --property=MainPID --value parins-managed.service 9>&-)
@@ -402,8 +433,7 @@ if [ -z "$root" ]; then
         exec 8<&-
         initialized=true
     else
-        printf 'null\n' > "$updater_private/install-preflight.json"
-        if "$was_active"; then systemctl stop parins-managed.service 9>&-; stopped=true; fi
+        uninitialized_preflight
     fi
 fi
 binary_tmp=$(mktemp "$bin_dir/.parins.XXXXXX")
@@ -412,18 +442,23 @@ install -m 0755 "$binary" "$binary_tmp"
 install -m 0644 "$unit_source" "$unit_tmp"
 changed=true
 mv -f "$binary_tmp" "$binary_target"
+binary_tmp=
 mv -f "$unit_tmp" "$unit_target"
+unit_tmp=
 for item in parins-updater.service parins-updater.path parins-update-recovery.service; do
     temporary=$(mktemp "$unit_dir/.updater-unit.XXXXXX")
     install -m 0644 "$deploy_source/$item" "$temporary"
     mv -f "$temporary" "$unit_dir/$item"
+    temporary=
 done
 temporary=$(mktemp "$root/usr/libexec/.parins-updater.XXXXXX")
 install -m 0755 "$helper" "$temporary"
 mv -f "$temporary" "$helper_target"
+temporary=
 temporary=$(mktemp "$updater_private/.install-build-info.XXXXXX")
 install -m 0600 "$build_info" "$temporary"
 mv -f "$temporary" "$updater_private/install-build-info.json"
+temporary=
 leftovers 2 | while IFS= read -r path; do
     if [ -n "$root" ]; then
         printf 'Would remove old installer data: %s\n' "$path"

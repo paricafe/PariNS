@@ -5,7 +5,15 @@ use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub async fn read_frame(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
-    let length = stream.read_u16().await? as usize;
+    let length = stream.read_u16().await?;
+    read_frame_body(stream, length).await
+}
+
+pub(crate) async fn read_frame_body(
+    stream: &mut (impl AsyncRead + Unpin),
+    length: u16,
+) -> io::Result<Vec<u8>> {
+    let length = usize::from(length);
     if length < 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

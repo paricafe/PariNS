@@ -14,10 +14,9 @@ use serde::Serialize;
 
 use super::store::{read_bounded, secret, sync_committed};
 use crate::private_files::{create_private, private_permissions};
+use crate::tls::{MAX_PEM_BYTES, validate_pem_identity};
 
-const MAX_PEM: usize = 64 * 1024;
 const MAX_IMPORTS: usize = 32;
-const MAX_IDENTITY: usize = 2 * MAX_PEM + 1024;
 
 #[derive(Serialize)]
 pub(super) struct ImportedCertificate {
@@ -31,16 +30,15 @@ pub(super) fn import(
     private_key_pem: &str,
 ) -> Result<ImportedCertificate> {
     ensure!(
-        !certificate_pem.is_empty() && certificate_pem.len() <= MAX_PEM,
+        !certificate_pem.is_empty() && certificate_pem.len() <= MAX_PEM_BYTES,
         "certificate PEM must contain 1 to 65536 bytes"
     );
     ensure!(
-        !private_key_pem.is_empty() && private_key_pem.len() <= MAX_PEM,
+        !private_key_pem.is_empty() && private_key_pem.len() <= MAX_PEM_BYTES,
         "private key PEM must contain 1 to 65536 bytes"
     );
-    let identity =
-        crate::tls::validate_pem_identity(certificate_pem.as_bytes(), private_key_pem.as_bytes())
-            .context("certificate and private key must be valid and match")?;
+    let identity = validate_pem_identity(certificate_pem.as_bytes(), private_key_pem.as_bytes())
+        .context("certificate and private key must be valid and match")?;
     let mut combined = String::new();
     for cert in &identity.cert {
         append_pem(&mut combined, "CERTIFICATE", cert.as_ref());
@@ -54,9 +52,11 @@ pub(super) fn import(
     };
     append_pem(&mut combined, label, key.secret_der());
     ensure!(
-        combined.len() <= MAX_IDENTITY,
-        "encoded identity is too large"
+        combined.len() <= MAX_PEM_BYTES,
+        "encoded identity exceeds the 64 KiB size limit"
     );
+    validate_pem_identity(combined.as_bytes(), combined.as_bytes())
+        .context("encoded identity must be valid")?;
 
     let directory = state_dir.join("certificates");
     match fs::DirBuilder::new().mode(0o700).create(&directory) {
@@ -82,7 +82,7 @@ pub(super) fn import(
         if entry.metadata()?.len() != combined.len() as u64 {
             continue;
         }
-        let existing = read_bounded(&entry.path(), MAX_IDENTITY).with_context(|| {
+        let existing = read_bounded(&entry.path(), MAX_PEM_BYTES).with_context(|| {
             format!(
                 "check imported identity {}",
                 entry.file_name().to_string_lossy()
@@ -199,11 +199,46 @@ mod tests {
             (cert.clone(), other_key),
             ("bad PEM".into(), key.clone()),
             (cert.clone(), format!("{key}{key}")),
-            (cert.clone(), "x".repeat(MAX_PEM + 1)),
-            ("x".repeat(MAX_PEM + 1), key),
+            (cert.clone(), "x".repeat(MAX_PEM_BYTES + 1)),
+            ("x".repeat(MAX_PEM_BYTES + 1), key),
         ] {
             assert!(import(&store.dir, &cert, &key).is_err());
         }
+        assert!(!store.dir.join("certificates").exists());
+    }
+
+    #[test]
+    fn rejects_individually_valid_pem_files_that_exceed_the_combined_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state")).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut key_pem = String::new();
+        append_pem(&mut key_pem, "PRIVATE KEY", &key.serialize_der());
+        let cert_pem = (47_000..49_152)
+            .step_by(32)
+            .map(|size| {
+                let mut params = rcgen::CertificateParams::new(vec!["dns.test".into()]).unwrap();
+                params
+                    .custom_extensions
+                    .push(rcgen::CustomExtension::from_oid_content(
+                        &[1, 2, 3, 4],
+                        vec![0; size],
+                    ));
+                let mut pem = String::new();
+                append_pem(
+                    &mut pem,
+                    "CERTIFICATE",
+                    params.self_signed(&key).unwrap().der().as_ref(),
+                );
+                pem
+            })
+            .find(|cert| cert.len() <= MAX_PEM_BYTES && cert.len() + key_pem.len() > MAX_PEM_BYTES)
+            .expect("valid certificate near the per-file limit");
+        validate_pem_identity(cert_pem.as_bytes(), key_pem.as_bytes()).unwrap();
+        let result = import(&store.dir, &cert_pem, &key_pem);
+        assert!(
+            matches!(result, Err(error) if error.to_string().contains("encoded identity exceeds"))
+        );
         assert!(!store.dir.join("certificates").exists());
     }
 

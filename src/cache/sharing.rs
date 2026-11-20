@@ -1,11 +1,14 @@
-//! Learns and revokes ECS answer sharing for forwarded responses.
+//! Learns and revokes ECS sharing by comparing normalized cached records.
 
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 
 use hickory_proto::{
     op::{Message, Query},
-    rr::{Name, RData, RecordType},
-    serialize::binary::BinEncodable,
+    rr::{Name, RData, Record, RecordType},
+    serialize::binary::{BinEncodable, BinEncoder, NameEncoding},
 };
 use ipnet::IpNet;
 use lru::LruCache;
@@ -63,7 +66,6 @@ struct Class {
 
 pub(super) struct Table {
     records: LruCache<Class, Phase>,
-    capacity: usize,
 }
 
 pub(super) struct Observation {
@@ -74,9 +76,29 @@ pub(super) struct Observation {
 impl Table {
     pub(super) fn new(capacity: usize) -> Self {
         Self {
-            records: LruCache::unbounded(),
-            capacity: capacity.max(1),
+            records: LruCache::new(NonZeroUsize::new(capacity.max(1)).unwrap()),
         }
+    }
+
+    pub(super) fn revoke(
+        &mut self,
+        key: &Key,
+        ipv4: bool,
+        now: Instant,
+        config: &EcsSharingConfig,
+    ) -> bool {
+        let class = Class {
+            key: key.clone(),
+            ipv4,
+        };
+        if matches!(self.records.get(&class), Some(Phase::Revoked { until }) if *until > now) {
+            return false;
+        }
+        let until = now + Duration::from_secs(config.revoke_cooldown_secs);
+        matches!(
+            self.records.put(class, Phase::Revoked { until }),
+            Some(Phase::Observing { .. } | Phase::Shared { .. })
+        )
     }
 
     pub(super) fn observe(
@@ -93,27 +115,8 @@ impl Table {
             revoked: false,
         };
         let revoke_until = now + Duration::from_secs(config.revoke_cooldown_secs);
-        let network = match scope {
-            Scope::ExactSource(network) => network,
-            Scope::Network(network) if network.prefix_len() > 0 => {
-                let class = Class {
-                    key: key.clone(),
-                    ipv4: network.addr().is_ipv4(),
-                };
-                return match self.records.get_mut(&class) {
-                    Some(phase) if !matches!(*phase, Phase::Revoked { until } if until > now) => {
-                        *phase = Phase::Revoked {
-                            until: revoke_until,
-                        };
-                        Observation {
-                            scope,
-                            revoked: true,
-                        }
-                    }
-                    _ => unchanged,
-                };
-            }
-            _ => return unchanged,
+        let Scope::ExactSource(network) = scope else {
+            return unchanged;
         };
         let class = Class {
             key: key.clone(),
@@ -134,9 +137,6 @@ impl Table {
                     samples: sample.into_iter().collect(),
                 },
             );
-            while self.records.len() > self.capacity {
-                self.records.pop_lru();
-            }
             return unchanged;
         };
         let revoke = |phase: &mut Phase| {
@@ -315,50 +315,42 @@ fn promotable(samples: &[Sample], min: usize) -> bool {
 
 pub(super) fn fingerprint(question: &Query, response: &Message) -> Option<Fingerprint> {
     let negative = super::is_negative(question, response);
-    let encode = |name: &Name, kind: RecordType, class: u16, data: Option<&RData>| {
-        let mut bytes = name.to_lowercase().to_bytes().ok()?;
-        bytes.extend_from_slice(&u16::from(kind).to_be_bytes());
-        bytes.extend_from_slice(&class.to_be_bytes());
-        if let Some(data) = data {
-            bytes.extend_from_slice(&data.to_bytes().ok()?);
+    let encode = |rr: &Record| {
+        let mut bytes = Vec::new();
+        let mut encoder = BinEncoder::new(&mut bytes);
+        encoder.set_canonical_form(true);
+        encoder.set_name_encoding(NameEncoding::UncompressedLowercase);
+        rr.name.emit(&mut encoder).ok()?;
+        rr.record_type().emit(&mut encoder).ok()?;
+        rr.dns_class.emit(&mut encoder).ok()?;
+        if let RData::SOA(soa) = &rr.data
+            && negative
+        {
+            soa.mname.emit(&mut encoder).ok()?;
+            soa.rname.emit(&mut encoder).ok()?;
+            encoder.emit_u32(soa.minimum).ok()?;
+        } else {
+            rr.data.emit(&mut encoder).ok()?;
         }
         Some(bytes)
     };
-    let mut answers = response
-        .answers
-        .iter()
-        .map(|rr| {
-            encode(
-                &rr.name,
-                rr.record_type(),
-                rr.dns_class.into(),
-                Some(&rr.data),
-            )
-        })
-        .collect::<Option<Vec<_>>>()?;
-    answers.sort_unstable();
-    answers.dedup();
-    let mut soa = Vec::new();
-    if negative {
-        for rr in &response.authorities {
-            if rr.record_type() == RecordType::SOA {
-                soa.push(encode(
-                    &rr.name,
-                    RecordType::SOA,
-                    rr.dns_class.into(),
-                    None,
-                )?);
-            }
-        }
-        soa.sort_unstable();
-        soa.dedup();
-    }
     let mut hash = Sha256::new();
     hash.update(u16::from(response.response_code).to_be_bytes());
     hash.update([u8::from(negative)]);
-    for section in [&answers, &soa] {
-        hash.update((section.len() as u32).to_be_bytes());
-        for record in section {
+    for section in [
+        &response.answers,
+        &response.authorities,
+        &response.additionals,
+    ] {
+        let mut records = section
+            .iter()
+            .filter(|rr| rr.record_type() != RecordType::OPT)
+            .map(encode)
+            .collect::<Option<Vec<_>>>()?;
+        records.sort_unstable();
+        records.dedup();
+        hash.update((records.len() as u32).to_be_bytes());
+        for record in records {
             hash.update((record.len() as u32).to_be_bytes());
             hash.update(record);
         }

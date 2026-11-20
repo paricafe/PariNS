@@ -238,9 +238,10 @@ async fn run() -> Result<()> {
         Ok(Ok(()))
     );
     let reload_drained = if let Some(task) = reload_task {
-        tokio::time::timeout(std::time::Duration::from_secs(5), task)
-            .await
-            .is_ok()
+        matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), task).await,
+            Ok(Ok(_))
+        )
     } else {
         true
     };

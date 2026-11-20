@@ -22,7 +22,9 @@ function platformName(target: string, language: Language): string {
 }
 function reasonText(reason: string, language: Language): string {
   const key = `updates.${reason}`;
-  return hasTranslation(key) ? translate(key, language) : translate('updates.reasonUnknown', language, { code: reason });
+  if (hasTranslation(key)) return translate(key, language);
+  const apiKey = `api.${reason}`;
+  return hasTranslation(apiKey) ? translate(apiKey, language) : translate('updates.reasonUnknown', language, { code: reason });
 }
 function phaseText(phase: string, language: Language) { return reasonText(phase === 'failed' ? 'operationFailed' : phase === 'aborted' ? 'operationAborted' : phase, language); }
 

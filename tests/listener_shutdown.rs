@@ -6,7 +6,7 @@ mod common;
 mod runtime_support;
 
 use common::Identity;
-use parins::{ecs, protocol, server::Server};
+use parins::{ecs, protocol, resolver::ForcedShutdown, server::Server};
 use runtime_support::{WAIT, answer, config, connect, finish, query, read, run, udp, write};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -92,7 +92,9 @@ async fn all_listeners_bind_together_and_udp_dot_tcp_share_peer_ecs_cache() {
     TcpListener::bind(admin).await.unwrap();
 }
 
-async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration) {
+async fn stop_with_silent_doh_peer(
+    mode: PeerMode,
+) -> (Option<ForcedShutdown>, std::time::Duration) {
     let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut config = config(upstream.local_addr().unwrap());
@@ -142,7 +144,7 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
             ))
             .body(())
             .unwrap();
-        let _response = sender.send_request(request, true).unwrap();
+        let (response, _) = sender.send_request(request, true).unwrap();
         let mut buffer = [0; 512];
         let (length, peer) = timeout(WAIT, async {
             tokio::select! {
@@ -152,29 +154,54 @@ async fn stop_with_silent_doh_peer(mode: PeerMode) -> (bool, std::time::Duration
         })
         .await
         .unwrap();
-        received = Some((protocol::decode(&buffer[..length]).unwrap(), peer));
+        received = Some((protocol::decode(&buffer[..length]).unwrap(), peer, response));
     }
     let started = std::time::Instant::now();
-    if mode == PeerMode::ClosesAfterStop {
-        let (query, peer) = received.unwrap();
+    if matches!(mode, PeerMode::ClosesAfterStop | PeerMode::ReadsAfterStop) {
+        let (query, peer, response) = received.unwrap();
+        let answer_delay_ms = if mode == PeerMode::ReadsAfterStop {
+            210
+        } else {
+            150
+        };
         let answering = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(answer_delay_ms)).await;
             upstream
                 .send_to(&answer(&query).to_vec().unwrap(), peer)
                 .await
                 .unwrap();
         });
         stop.send(()).unwrap();
-        let _ = timeout(std::time::Duration::from_millis(50), &mut connection).await;
-        drop((sender, connection));
+        if mode == PeerMode::ReadsAfterStop {
+            let driver = tokio::spawn(connection);
+            let reply = timeout(WAIT, response).await.unwrap().unwrap();
+            assert_eq!(reply.status(), 200);
+            let mut body = reply.into_body();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = timeout(WAIT, body.data()).await.unwrap() {
+                bytes.extend_from_slice(&chunk.unwrap());
+            }
+            let message = protocol::decode(&bytes).unwrap();
+            assert_eq!((message.id, message.answers.len()), (7, 1));
+            drop(sender);
+            let _ = timeout(WAIT, driver).await.unwrap();
+        } else {
+            let _ = timeout(std::time::Duration::from_millis(50), &mut connection).await;
+            drop((sender, connection));
+        }
         timeout(WAIT, task).await.unwrap().unwrap().unwrap();
         answering.await.unwrap();
-        return (resolver.is_quiescent(), started.elapsed());
+        if mode == PeerMode::ReadsAfterStop {
+            let counters = resolver.metrics().snapshot().counters;
+            assert_eq!(counters["completed"], 1);
+            assert_eq!(counters["cancelled"], 0);
+        }
+        return (resolver.forced_shutdown(), started.elapsed());
     }
     finish(stop, task).await;
     let elapsed = started.elapsed();
     drop((sender, connection));
-    (resolver.is_quiescent(), elapsed)
+    (resolver.forced_shutdown(), elapsed)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -182,24 +209,34 @@ enum PeerMode {
     Idle,
     Resolving,
     ClosesAfterStop,
+    ReadsAfterStop,
 }
 
 #[tokio::test]
 async fn silent_idle_doh_peer_keeps_shutdown_quiescent() {
-    let (quiescent, elapsed) = stop_with_silent_doh_peer(PeerMode::Idle).await;
-    assert!(quiescent, "idle DoH peer forced shutdown after {elapsed:?}");
+    let (cause, elapsed) = stop_with_silent_doh_peer(PeerMode::Idle).await;
+    assert_eq!(
+        cause, None,
+        "idle DoH peer forced shutdown after {elapsed:?}"
+    );
 }
 
 #[tokio::test]
 async fn doh_peer_closing_during_stop_lets_admitted_request_finish() {
-    let (quiescent, elapsed) = stop_with_silent_doh_peer(PeerMode::ClosesAfterStop).await;
-    assert!(quiescent, "closed peer forced shutdown after {elapsed:?}");
+    let (cause, elapsed) = stop_with_silent_doh_peer(PeerMode::ClosesAfterStop).await;
+    assert_eq!(cause, None, "closed peer forced shutdown after {elapsed:?}");
+}
+
+#[tokio::test]
+async fn doh_graceful_shutdown_delivers_admitted_response() {
+    let (cause, _) = stop_with_silent_doh_peer(PeerMode::ReadsAfterStop).await;
+    assert_eq!(cause, None);
 }
 
 #[tokio::test]
 async fn unfinished_doh_resolution_still_forces_shutdown() {
-    let (quiescent, _) = stop_with_silent_doh_peer(PeerMode::Resolving).await;
-    assert!(!quiescent);
+    let (cause, _) = stop_with_silent_doh_peer(PeerMode::Resolving).await;
+    assert_eq!(cause, Some(ForcedShutdown::DohDrain));
 }
 
 #[tokio::test]
@@ -462,7 +499,10 @@ async fn h3_post_with_partial_body_is_cancelled_at_stop() {
 async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
     let cert = Identity::new(&["localhost"]);
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let server = incomplete_query_server(&cert, &upstream, false, true).await;
+    let mut config = config(upstream.local_addr().unwrap());
+    config.shutdown_grace_ms = 600;
+    config.doq = Some(cert.listener());
+    let server = Server::bind(config).await.unwrap();
     let resolver = server.resolver().clone();
     let metrics = server.metrics().clone();
     let doq = encrypted(&server, "doq");
@@ -481,7 +521,7 @@ async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
         .unwrap();
     let forwarded = protocol::decode(&buffer[..length]).unwrap();
     let answering = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(380)).await;
         upstream
             .send_to(&answer(&forwarded).to_vec().unwrap(), peer)
             .await
@@ -493,6 +533,8 @@ async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
         .unwrap()
         .unwrap();
     assert_eq!(protocol::decode(&response[2..]).unwrap().answers.len(), 1);
+    assert!(matches!(timeout(WAIT, connection.closed()).await.unwrap(),
+        quinn::ConnectionError::ApplicationClosed(close) if close.error_code == 0u32.into()));
     timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     answering.await.unwrap();
     assert!(
@@ -504,4 +546,115 @@ async fn complete_doq_query_resolving_at_stop_completes_within_grace() {
         1
     );
     client.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn h3_goaway_preserves_admitted_response_in_the_second_half_of_grace() {
+    use bytes::{Buf, Bytes};
+    use std::time::Duration;
+    let cert = Identity::new(&["localhost"]);
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(upstream.local_addr().unwrap());
+    config.shutdown_grace_ms = 600;
+    let listener = cert.listener();
+    config.doh = Some(parins::config::DohConfig {
+        listen: listener.listen,
+        files: listener.files,
+        http3: true,
+    });
+    let server = Server::bind(config).await.unwrap();
+    let resolver = server.resolver().clone();
+    let address = encrypted(&server, "doh3");
+    let (stop, task) = run(server);
+    let client = quic_client(&cert, b"h3");
+    let connection = client.connect(address, "localhost").unwrap().await.unwrap();
+    let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(connection.clone()))
+        .await
+        .unwrap();
+    let driver =
+        tokio::spawn(async move { std::future::poll_fn(|cx| driver.poll_close(cx)).await });
+    let request = || {
+        http::Request::builder()
+            .method("POST")
+            .uri("https://localhost/dns-query")
+            .header("content-type", "application/dns-message")
+            .body(())
+            .unwrap()
+    };
+    let mut stream = sender.send_request(request()).await.unwrap();
+    stream
+        .send_data(Bytes::from(query(7).to_vec().unwrap()))
+        .await
+        .unwrap();
+    stream.finish().await.unwrap();
+    let mut buffer = [0; 512];
+    let (length, peer) = timeout(WAIT, upstream.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    let forwarded = protocol::decode(&buffer[..length]).unwrap();
+    stop.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(380)).await;
+    match sender.send_request(request()).await {
+        Err(h3::error::StreamError::RemoteClosing { .. }) => {}
+        Err(error) => panic!("expected GOAWAY while the response is held: {error}"),
+        Ok(mut late) => {
+            let rejected = timeout(Duration::from_millis(100), late.recv_response())
+                .await
+                .expect("the server must reject the new stream while draining");
+            assert!(matches!(
+                rejected,
+                Err(h3::error::StreamError::RemoteTerminate { code, .. })
+                    if code == h3::error::Code::H3_REQUEST_REJECTED
+            ));
+        }
+    }
+    upstream
+        .send_to(&answer(&forwarded).to_vec().unwrap(), peer)
+        .await
+        .unwrap();
+    let message = timeout(WAIT, async {
+        assert_eq!(stream.recv_response().await.unwrap().status(), 200);
+        let mut body = Vec::new();
+        while let Some(mut data) = stream.recv_data().await.unwrap() {
+            body.extend_from_slice(&data.copy_to_bytes(data.remaining()));
+        }
+        protocol::decode(&body).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!((message.id, message.answers.len()), (7, 1));
+    assert!(matches!(timeout(WAIT, connection.closed()).await.unwrap(),
+        quinn::ConnectionError::ApplicationClosed(close) if close.error_code == 0x100u32.into()));
+    timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    assert!(resolver.is_quiescent());
+    assert_eq!(resolver.metrics().snapshot().counters["completed"], 1);
+    driver.abort();
+}
+
+#[tokio::test]
+async fn unfinished_doq_resolution_reports_quic_drain() {
+    let cert = Identity::new(&["localhost"]);
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(upstream.local_addr().unwrap());
+    config.doq = Some(cert.listener());
+    let server = Server::bind(config).await.unwrap();
+    let resolver = server.resolver().clone();
+    let address = encrypted(&server, "doq");
+    let (stop, task) = run(server);
+    let client = quic_client(&cert, b"doq");
+    let connection = client.connect(address, "localhost").unwrap().await.unwrap();
+    let (mut send, _recv) = connection.open_bi().await.unwrap();
+    let query = query(0).to_vec().unwrap();
+    send.write_all(&(query.len() as u16).to_be_bytes())
+        .await
+        .unwrap();
+    send.write_all(&query).await.unwrap();
+    send.finish().unwrap();
+    timeout(WAIT, upstream.recv(&mut [0; 512]))
+        .await
+        .unwrap()
+        .unwrap();
+    finish(stop, task).await;
+    assert_eq!(resolver.forced_shutdown(), Some(ForcedShutdown::QuicDrain));
 }

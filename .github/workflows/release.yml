@@ -68,7 +68,7 @@ jobs:
           cargo test --locked --target "$TARGET" --all-targets
       - name: Installer and bootstrap fixture tests
         run: |
-          for script in scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh; do
+          for script in scripts/install.sh scripts/test-install.sh scripts/test-systemd.sh scripts/test-systemd-readiness.sh scripts/package.sh scripts/bootstrap.sh scripts/test-bootstrap.sh; do
             sh -n "$script"
           done
           sh scripts/test-install.sh

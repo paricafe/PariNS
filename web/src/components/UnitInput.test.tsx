@@ -41,6 +41,14 @@ describe('UnitInput', () => {
     expect(onChange).toHaveBeenLastCalledWith('1001');
   });
 
+  it('emits the exact base value even when a GB amount exceeds the safe integer range', () => {
+    const onChange = vi.fn();
+    render(<UnitInput id="size" label="Size" family="bytes" value={String(1024 ** 3)} language="en" onChange={onChange} />);
+    expect(screen.getByRole('radio', { name: 'GB' }).getAttribute('aria-checked')).toBe('true');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '67108864' } });
+    expect(onChange).toHaveBeenLastCalledWith('72057594037927936');
+  });
+
   it('offers only units whose one unit fits under the maximum, keeping the unit in use', () => {
     const units = () => screen.getAllByRole('radio').map((radio) => radio.textContent);
     const view = render(<UnitInput id="snapshot" label="Snapshot" family="bytes" max={512 * 1024 ** 2} value={String(32 * 1024 ** 2)} language="en" onChange={() => {}} />);

@@ -13,10 +13,34 @@ use std::{
 };
 
 const MAX_CATALOG: u64 = 256 * 1024;
+const HARD_DISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_OBJECT: u64 = 16 * 1024 * 1024;
 const MAX_INDEX: u64 = 512 * 1024 * 1024;
 const PREPARED_TTL: u64 = 24 * 60 * 60;
 const CATALOG: &str = "catalog.json";
+
+#[derive(Debug)]
+struct DiskLimit;
+
+impl std::fmt::Display for DiskLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("subscription disk budget exceeded")
+    }
+}
+impl std::error::Error for DiskLimit {}
+
+pub(super) fn is_disk_limit(error: &anyhow::Error) -> bool {
+    error.is::<DiskLimit>()
+        || error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error)
+                .is_some_and(|code| {
+                    code == rustix::io::Errno::NOSPC.raw_os_error()
+                        || code == rustix::io::Errno::DQUOT.raw_os_error()
+                })
+        })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,7 +70,7 @@ pub(crate) struct PreparedMetadata {
     pub validators: Validators,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Catalog {
     schema: u32,
@@ -180,7 +204,17 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn open(path: &Path, max_disk: u64) -> Result<Self> {
+        Self::open_preserving(path, max_disk, &[], &[])
+    }
+
+    pub(crate) fn open_preserving(
+        path: &Path,
+        max_disk: u64,
+        current: &[String],
+        previous: &[String],
+    ) -> Result<Self> {
         private_dir(path)?;
         let (dir, lock) = lock_private_dir(path, "subscription")?;
         let catalog = if let Some(file) = checked_open(&dir.join(CATALOG), false)? {
@@ -213,14 +247,14 @@ impl Store {
             private_dir(&store.dir.join(name))?;
         }
         ensure!(
-            store.disk_bytes()? <= 2 * 1024 * 1024 * 1024,
+            store.disk_bytes()? <= HARD_DISK_LIMIT,
             "subscription storage exceeds hard disk limit; manual recovery required"
         );
         store.cleanup_staging()?;
-        ensure!(
-            store.disk_bytes()? <= store.quota,
-            "subscription disk budget exceeded"
-        );
+        if store.disk_bytes()? > store.quota {
+            store.reclaim_expired(current, previous, None)?;
+        }
+        ensure!(store.disk_bytes()? <= store.quota, DiskLimit);
         Ok(store)
     }
 
@@ -228,11 +262,33 @@ impl Store {
         self.begin_reserved(reserve_bytes, MAX_OBJECT, "download")
     }
 
-    pub(crate) fn collect_for_download(&mut self, now: u64, needs_download: bool) -> Result<()> {
-        self.collect(now, false)?;
+    pub(crate) fn collect_for_download(
+        &mut self,
+        now: u64,
+        needs_download: bool,
+        prepare: Option<&str>,
+    ) -> Result<()> {
+        let preserve = |fingerprint: &str| prepare == Some(fingerprint);
+        self.collect_preserving(now, false, preserve)?;
         if needs_download && !self.has_staging_space(MAX_OBJECT)? {
-            self.collect(now, true)?;
+            self.collect_preserving(now, true, preserve)?;
         }
+        ensure!(
+            !self.uncertain,
+            "catalog durability requires reconciliation"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn reclaim_expired(
+        &mut self,
+        current: &[String],
+        previous: &[String],
+        prepare: Option<&str>,
+    ) -> Result<()> {
+        self.collect_preserving(crate::clock::unix_secs(), false, |fp| {
+            prepare == Some(fp) || current.iter().chain(previous).any(|root| root == fp)
+        })?;
         ensure!(
             !self.uncertain,
             "catalog durability requires reconciliation"
@@ -265,10 +321,7 @@ impl Store {
             !self.uncertain,
             "catalog durability requires reconciliation"
         );
-        ensure!(
-            self.has_staging_space(reserve_bytes)?,
-            "subscription disk budget exceeded"
-        );
+        ensure!(self.has_staging_space(reserve_bytes)?, DiskLimit);
         let path = self
             .dir
             .join("staging")
@@ -335,7 +388,7 @@ impl Store {
         stage.file.sync_all()?;
         let object = self.object_path(&metadata.sha256);
         if let Some(mut file) = checked_open(&object, false)? {
-            if verify_file(&mut file, &metadata).is_err() {
+            if !object_matches(&mut file, &metadata)? {
                 ensure!(
                     self.catalog
                         .records
@@ -409,22 +462,23 @@ impl Store {
         self.commit_selection_with_check(candidate, check)
     }
 
+    #[cfg(test)]
     pub(crate) fn set_references(
         &mut self,
         current: Vec<String>,
         previous: Vec<String>,
     ) -> Result<CommitOutcome> {
-        ensure!(
-            !self.uncertain,
-            "catalog durability requires reconciliation"
-        );
+        self.set_config(current, previous, self.quota)
+    }
+
+    fn target_catalog(&self, current: Vec<String>, previous: Vec<String>) -> Result<Catalog> {
         validate_references(&current)?;
         validate_references(&previous)?;
         let mut candidate = self.catalog.clone();
         candidate.current = current;
         candidate.previous = previous;
         self.trim_prepared(&mut candidate, &BTreeSet::new())?;
-        self.commit_selection(candidate)
+        self.with_content_revision(candidate)
     }
 
     pub(crate) fn update_status(
@@ -459,14 +513,15 @@ impl Store {
         Ok(())
     }
 
-    fn commit_selection(&mut self, candidate: Catalog) -> Result<CommitOutcome> {
-        self.commit_selection_with_check(candidate, || Ok(()))
-    }
     fn commit_selection_with_check(
         &mut self,
-        mut candidate: Catalog,
+        candidate: Catalog,
         check: impl FnOnce() -> Result<()>,
     ) -> Result<CommitOutcome> {
+        self.commit_catalog_with_check(self.with_content_revision(candidate)?, check)
+    }
+
+    fn with_content_revision(&self, mut candidate: Catalog) -> Result<Catalog> {
         let choices = |catalog: &Catalog| -> BTreeMap<String, String> {
             catalog
                 .records
@@ -480,7 +535,7 @@ impl Store {
                 .checked_add(1)
                 .context("catalog revision overflow")?;
         }
-        self.commit_catalog_with_check(candidate, check)
+        Ok(candidate)
     }
 
     pub(crate) fn discard(&mut self, mut stage: Staging) -> Result<()> {
@@ -506,13 +561,15 @@ impl Store {
         else {
             return Ok(None);
         };
+        let Some(mut file) = open_object(&self.dir, record)? else {
+            return Ok(None);
+        };
         if !referenced(&self.catalog, fingerprint)
             && now.saturating_sub(record.prepared_at) >= PREPARED_TTL
         {
             return Ok(None);
         }
-        let file = verified_object(&self.dir, record)?;
-        Ok(Some((record.clone(), file)))
+        Ok(object_matches(&mut file, record)?.then(|| (record.clone(), file)))
     }
 
     pub(crate) fn pin(&self, sha256: &str) -> Result<WorkPin> {
@@ -548,14 +605,24 @@ impl Store {
         input_digest: &str,
         max_bytes: u64,
         write: impl FnOnce(&mut dyn Write) -> Result<()>,
-    ) -> Result<CommitOutcome> {
+    ) -> Result<()> {
         ensure!(valid_hash(input_digest), "invalid index digest");
+        check_private_dir(&self.dir.join("indexes"))?;
+        check_private_dir(&self.dir.join("staging"))?;
+        let path = self.dir.join("indexes").join(format!("{input_digest}.bin"));
+        checked_open(&path, false)?;
         let mut stage = self.begin_reserved(max_bytes, MAX_INDEX, "index")?;
         stage.completed = true;
         let mut bounded = LimitedWriter {
             file: &mut stage.file,
             remaining: max_bytes,
         };
+        #[cfg(test)]
+        if self.fault == Some("index_full") {
+            return Err(
+                std::io::Error::from_raw_os_error(rustix::io::Errno::NOSPC.raw_os_error()).into(),
+            );
+        }
         write(&mut bounded)?;
         stage.file.flush()?;
         ensure!(
@@ -563,16 +630,16 @@ impl Store {
             "invalid derived index ownership"
         );
         stage.file.sync_all()?;
-        let path = self.dir.join("indexes").join(format!("{input_digest}.bin"));
         checked_open(&path, false)?;
         fs::rename(&stage.path, path)?;
-        let sync =
-            sync_dir(&self.dir.join("indexes")).and_then(|()| sync_dir(&self.dir.join("staging")));
-        Ok(if sync.is_ok() {
-            CommitOutcome::Durable
-        } else {
-            CommitOutcome::CommittedUncertain
-        })
+        sync_dir(&self.dir.join("indexes"))?;
+        sync_dir(&self.dir.join("staging"))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn simulate_index_disk_full(&mut self) {
+        self.fault = Some("index_full");
     }
 
     pub(crate) fn reconcile_sync(&mut self) -> Result<()> {
@@ -600,12 +667,17 @@ impl Store {
         validate_catalog(&candidate)?;
         let bytes = serde_json::to_vec(&candidate)?;
         ensure!(bytes.len() as u64 <= MAX_CATALOG, "catalog exceeds 256 KiB");
-        checked_open(&self.dir.join(CATALOG), false)?;
+        let current_len = checked_open(&self.dir.join(CATALOG), false)?
+            .map(|file| file.metadata())
+            .transpose()?
+            .map_or(0, |metadata| metadata.len());
         ensure!(
-            self.disk_bytes()?
-                .checked_add(bytes.len() as u64)
-                .is_some_and(|n| n <= self.quota),
-            "subscription disk budget exceeded"
+            bytes.len() as u64 <= current_len
+                || self
+                    .disk_bytes()?
+                    .checked_add(bytes.len() as u64)
+                    .is_some_and(|n| n <= self.quota),
+            DiskLimit
         );
         let temporary = self.dir.join(format!("catalog-{}.tmp", random_hex()));
         let result = (|| -> Result<CommitOutcome> {
@@ -637,19 +709,30 @@ impl Store {
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn collect(&mut self, now: u64, pressure: bool) -> Result<()> {
+        self.collect_preserving(now, pressure, |_| false)
+    }
+
+    fn collect_preserving(
+        &mut self,
+        now: u64,
+        pressure: bool,
+        preserve: impl Fn(&str) -> bool,
+    ) -> Result<()> {
         ensure!(
             !self.uncertain,
             "catalog durability requires reconciliation"
         );
         ensure!(
-            self.disk_bytes()? <= 2 * 1024 * 1024 * 1024,
+            self.disk_bytes()? <= HARD_DISK_LIMIT,
             "subscription storage exceeds hard disk limit; manual recovery required"
         );
         let mut candidate = self.catalog.clone();
         let pins = self.pins.lock().unwrap().clone();
         candidate.records.retain(|r| {
             referenced(&self.catalog, &r.fingerprint)
+                || preserve(&r.fingerprint)
                 || pins.contains_key(&r.sha256)
                 || (!pressure && now.saturating_sub(r.prepared_at) < PREPARED_TTL)
         });
@@ -747,12 +830,64 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn set_quota(&mut self, max_disk: u64) -> Result<()> {
+    pub(crate) fn quota_fits(
+        &self,
+        current: Vec<String>,
+        previous: Vec<String>,
+        max_disk: u64,
+    ) -> Result<bool> {
+        self.target_fits(&self.target_catalog(current, previous)?, max_disk)
+    }
+
+    fn target_fits(&self, target: &Catalog, max_disk: u64) -> Result<bool> {
+        validate_catalog(target)?;
+        let current = checked_open(&self.dir.join(CATALOG), false)?
+            .context("catalog missing")?
+            .metadata()?
+            .len();
+        let next = serde_json::to_vec(target)?.len() as u64;
+        ensure!(next <= MAX_CATALOG, "catalog exceeds 256 KiB");
+        let used = self.disk_bytes()?;
+        let steady = used.saturating_sub(current) + next;
+        let peak = if next > current { used + next } else { steady };
+        let required = if max_disk < self.quota {
+            peak.max(steady + MAX_CATALOG)
+        } else {
+            peak
+        };
+        Ok(required <= max_disk)
+    }
+
+    pub(crate) fn set_config(
+        &mut self,
+        current: Vec<String>,
+        previous: Vec<String>,
+        max_disk: u64,
+    ) -> Result<CommitOutcome> {
         ensure!(
-            self.disk_bytes()? <= max_disk,
-            "subscription disk budget exceeded"
+            !self.uncertain,
+            "catalog durability requires reconciliation"
         );
-        self.quota = max_disk;
+        let target = self.target_catalog(current, previous)?;
+        ensure!(self.target_fits(&target, max_disk)?, DiskLimit);
+        let quota = std::mem::replace(&mut self.quota, max_disk);
+        if target == self.catalog {
+            return Ok(CommitOutcome::Durable);
+        }
+        let result = self.commit_catalog(target);
+        if result.is_err() {
+            self.quota = quota;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_quota(&mut self, max_disk: u64) -> Result<()> {
+        self.set_config(
+            self.catalog.current.clone(),
+            self.catalog.previous.clone(),
+            max_disk,
+        )?;
         Ok(())
     }
 
@@ -834,23 +969,25 @@ impl Write for LimitedWriter<'_> {
 fn read_index(dir: &Path, input_digest: &str, max_bytes: u64) -> Result<Option<File>> {
     ensure!(valid_hash(input_digest), "invalid index digest");
     ensure!((1..=MAX_INDEX).contains(&max_bytes), "invalid index limit");
-    check_private_dir(&dir.join("indexes"))?;
-    let Some(mut file) = checked_open(
-        &dir.join("indexes").join(format!("{input_digest}.bin")),
-        false,
-    )?
+    let directory = dir.join("indexes");
+    match check_private_dir(&directory) {
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        result => result?,
+    }
+    let Some(mut file) = checked_open(&directory.join(format!("{input_digest}.bin")), false)?
     else {
         return Ok(None);
     };
-    ensure!(
-        file.metadata()?.len() <= max_bytes,
-        "derived index exceeds limit"
-    );
-    ensure!(
-        owned_index(&mut file, input_digest)?,
-        "invalid derived index ownership"
-    );
-    Ok(Some(file))
+    Ok(
+        (file.metadata()?.len() <= max_bytes && owned_index(&mut file, input_digest)?)
+            .then_some(file),
+    )
 }
 fn owned_index(file: &mut File, input_digest: &str) -> Result<bool> {
     if file.metadata()?.len() > MAX_INDEX {
@@ -914,22 +1051,23 @@ fn hash_file(file: &mut File) -> Result<String> {
 }
 fn verify_file(file: &mut File, record: &SourceRecord) -> Result<()> {
     ensure!(
-        file.metadata()?.len() == record.bytes,
-        "source object size mismatch"
-    );
-    ensure!(
-        hash_file(file)? == record.sha256,
-        "source object digest mismatch"
+        object_matches(file, record)?,
+        "source object size or digest mismatch"
     );
     Ok(())
 }
-fn verified_object(dir: &Path, record: &SourceRecord) -> Result<File> {
+fn object_matches(file: &mut File, record: &SourceRecord) -> Result<bool> {
+    Ok(file.metadata()?.len() == record.bytes && hash_file(file)? == record.sha256)
+}
+fn open_object(dir: &Path, record: &SourceRecord) -> Result<Option<File>> {
     check_private_dir(&dir.join("objects"))?;
-    let mut file = checked_open(
+    checked_open(
         &dir.join("objects").join(format!("{}.txt", record.sha256)),
         false,
-    )?
-    .context("subscription_material_missing")?;
+    )
+}
+fn verified_object(dir: &Path, record: &SourceRecord) -> Result<File> {
+    let mut file = open_object(dir, record)?.context("subscription_material_missing")?;
     verify_file(&mut file, record)?;
     Ok(file)
 }

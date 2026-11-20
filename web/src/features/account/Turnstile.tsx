@@ -17,8 +17,9 @@ function load(): Promise<TurnstileApi> {
     const script = document.createElement('script');
     script.src = SCRIPT;
     script.async = true;
-    script.onload = () => window.turnstile ? resolve(window.turnstile) : reject(new Error('Turnstile unavailable'));
-    script.onerror = () => { loading = null; script.remove(); reject(new Error('Turnstile unavailable')); };
+    const failed = () => { loading = null; script.remove(); reject(new Error('Turnstile unavailable')); };
+    script.onload = () => window.turnstile ? resolve(window.turnstile) : failed();
+    script.onerror = failed;
     document.head.appendChild(script);
   });
   return loading;

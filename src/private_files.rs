@@ -55,7 +55,7 @@ pub(crate) fn checked_open(path: &Path, writable: bool) -> Result<Option<File>> 
     options
         .read(true)
         .write(writable)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
     let file = options.open(path)?;
     let after = file.metadata()?;
     ensure!(after.is_file(), "private files must be regular files");

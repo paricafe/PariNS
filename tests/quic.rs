@@ -107,6 +107,9 @@ impl Fixture {
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::parse(include_str!("../parins.example.toml")).unwrap();
         config.upstreams.servers = vec![udp.local_addr().unwrap().to_string()];
+        if hold_answers {
+            config.query_timeout_ms = 1000;
+        }
         let calls = Arc::new(AtomicUsize::new(0));
         let upstream_calls = calls.clone();
         let answers = Arc::new(Semaphore::new(0));
@@ -140,7 +143,7 @@ impl Fixture {
             queries: queries.clone(),
             connections: connections.clone(),
             stop: receiver,
-            io_timeout: Duration::from_millis(500),
+            io_timeout: Duration::from_millis(if hold_answers { 100 } else { 500 }),
             shutdown_grace: Duration::from_millis(100),
             max_streams: 2,
         };
@@ -189,6 +192,14 @@ impl Fixture {
     }
 
     fn client(&self, protocol: Protocol) -> quinn::Endpoint {
+        self.client_with_transport(protocol, quinn::TransportConfig::default())
+    }
+
+    fn client_with_transport(
+        &self,
+        protocol: Protocol,
+        transport: quinn::TransportConfig,
+    ) -> quinn::Endpoint {
         let mut tls = rustls::ClientConfig::builder()
             .with_root_certificates(self.roots.clone())
             .with_no_client_auth();
@@ -198,7 +209,9 @@ impl Fixture {
         }];
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
         let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+        let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+        config.transport_config(Arc::new(transport));
+        endpoint.set_default_client_config(config);
         endpoint
     }
 
@@ -268,6 +281,19 @@ async fn doq_real_tls_round_trip_and_connection_reuse() {
         assert_eq!(message.response_code, ResponseCode::NoError);
     }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let metrics = fixture.resolver.metrics().quic.snapshot();
+            if metrics["doq"]["stream_response_handed_to_transport"] == 2
+                && metrics["doq"]["stream_inflight"] == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let counters = fixture.resolver.metrics().snapshot().counters;
     assert_eq!(counters["quic_doq_handshake_established"], 1);
     assert_eq!(counters["quic_doq_stream_full_frame"], 2);
@@ -443,6 +469,7 @@ async fn h3_real_get_post_and_http_errors() {
             415,
         ),
         ("GET", "/wrong".into(), None, Vec::new(), 404),
+        ("PUT", "/dns-query".into(), None, Vec::new(), 405),
         (
             "POST",
             "/dns-query".into(),
@@ -471,6 +498,9 @@ async fn h3_real_get_post_and_http_errors() {
             .unwrap();
         assert_eq!(response.status().as_u16(), expected);
         assert_eq!(response.headers()["cache-control"], "no-store");
+        if expected == 405 {
+            assert_eq!(response.headers()["allow"], "GET, POST");
+        }
         if expected == 200 {
             assert_eq!(
                 response.headers()["content-type"],
@@ -491,7 +521,7 @@ async fn h3_real_get_post_and_http_errors() {
         loop {
             let counters = fixture.resolver.metrics().snapshot().counters;
             if counters["quic_doh3_http_response_2xx"] == 2
-                && counters["quic_doh3_http_response_4xx"] == 3
+                && counters["quic_doh3_http_response_4xx"] == 4
             {
                 assert_eq!(counters["quic_doh3_stream_protocol_invalid"], 0);
                 break;
@@ -916,4 +946,206 @@ async fn unvalidated_initials_take_no_connection_slot_or_source_budget() {
         fixture.close().await;
         client.close(0u32.into(), b"done");
     }
+}
+
+async fn doq_exchange(connection: &quinn::Connection, wire: Vec<u8>) -> Message {
+    let (mut send, mut recv) = connection.open_bi().await.unwrap();
+    send.write_all(&(wire.len() as u16).to_be_bytes())
+        .await
+        .unwrap();
+    send.write_all(&wire).await.unwrap();
+    send.finish().unwrap();
+    let frame = recv.read_to_end(65537).await.unwrap();
+    assert_eq!(
+        usize::from(u16::from_be_bytes([frame[0], frame[1]])),
+        frame.len() - 2
+    );
+    protocol::decode(&frame[2..]).unwrap()
+}
+
+#[tokio::test]
+async fn doq_returns_formerr_for_invalid_ecs_while_a_sibling_resolves() {
+    let fixture = Fixture::with_held_answers(Protocol::Doq).await;
+    let client = fixture.client(Protocol::Doq);
+    let connection = client
+        .connect(fixture.address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let valid = tokio::spawn({
+        let connection = connection.clone();
+        async move { doq_exchange(&connection, query(0)).await }
+    });
+    fixture.wait_for_upstream_query().await;
+    let mut malformed = Message::from_vec(&query(0)).unwrap();
+    let mut edns = hickory_proto::op::Edns::new();
+    edns.options_mut()
+        .insert(hickory_proto::rr::rdata::opt::EdnsOption::Unknown(
+            8,
+            vec![0, 1, 24, 0, 192, 0, 2, 1],
+        ));
+    malformed.edns = Some(edns);
+    let reply = timeout(
+        Duration::from_secs(1),
+        doq_exchange(&connection, malformed.to_vec().unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!((reply.id, reply.response_code), (0, ResponseCode::FormErr));
+    fixture.answers.add_permits(1);
+    assert_eq!(valid.await.unwrap().response_code, ResponseCode::NoError);
+    assert_eq!(
+        fixture.resolver.metrics().snapshot().counters["requests"],
+        2
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn quic_sibling_resolutions_run_until_the_query_deadline() {
+    for protocol in [Protocol::Doq, Protocol::H3] {
+        let fixture = Fixture::with_held_answers(protocol).await;
+        let client = fixture.client(protocol);
+        let connection = client
+            .connect(fixture.address, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        let release = async {
+            while fixture.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            fixture.answers.add_permits(1);
+        };
+        let queries = async {
+            let first = named_query(0, "first.test.");
+            let second = named_query(0, "second.test.");
+            match protocol {
+                Protocol::Doq => {
+                    let (one, two) = tokio::join!(
+                        doq_exchange(&connection, first),
+                        doq_exchange(&connection, second)
+                    );
+                    [one.response_code, two.response_code]
+                }
+                Protocol::H3 => {
+                    let (mut driver, sender) =
+                        h3::client::new(h3_quinn::Connection::new(connection.clone()))
+                            .await
+                            .unwrap();
+                    let drive = tokio::spawn(async move {
+                        std::future::poll_fn(|cx| driver.poll_close(cx)).await
+                    });
+                    let exchange = |wire: Vec<u8>| {
+                        let mut sender = sender.clone();
+                        async move {
+                            let request = http::Request::builder()
+                                .uri(format!(
+                                    "https://localhost/dns-query?dns={}",
+                                    URL_SAFE_NO_PAD.encode(wire)
+                                ))
+                                .body(())
+                                .unwrap();
+                            let mut stream = sender.send_request(request).await.unwrap();
+                            stream.finish().await.unwrap();
+                            assert_eq!(stream.recv_response().await.unwrap().status(), 200);
+                            let mut bytes = Vec::new();
+                            while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+                                bytes.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+                            }
+                            protocol::decode(&bytes).unwrap().response_code
+                        }
+                    };
+                    let (one, two) = tokio::join!(exchange(first), exchange(second));
+                    drop(sender);
+                    drive.abort();
+                    let _ = drive.await;
+                    [one, two]
+                }
+            }
+        };
+        let ((), replies) = timeout(Duration::from_secs(3), async {
+            tokio::join!(release, queries)
+        })
+        .await
+        .unwrap();
+        assert!(replies.contains(&ResponseCode::NoError));
+        assert!(replies.contains(&ResponseCode::ServFail));
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn doq_peer_stop_during_write_is_not_a_deadline() {
+    let fixture = Fixture::new(Protocol::Doq).await;
+    let mut transport = quinn::TransportConfig::default();
+    transport.stream_receive_window(16u32.into());
+    let client = fixture.client_with_transport(Protocol::Doq, transport);
+    let connection = client
+        .connect(fixture.address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut send, mut recv) = connection.open_bi().await.unwrap();
+    send.write_all(&frame(0)).await.unwrap();
+    send.finish().unwrap();
+    assert!(
+        timeout(Duration::from_secs(1), recv.read_chunk(1, true))
+            .await
+            .unwrap()
+            .unwrap()
+            .is_some()
+    );
+    recv.stop(3u32.into()).unwrap();
+    timeout(Duration::from_secs(1), async {
+        while fixture.resolver.metrics().quic.snapshot()["doq"]["stream_peer_cancelled"] == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let counters = fixture.resolver.metrics().quic.snapshot();
+    assert_eq!(counters["doq"]["stream_write_deadline"], 0);
+    assert_eq!(counters["doq"]["stream_response_handed_to_transport"], 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn doq_write_timeout_resets_only_the_blocked_response() {
+    let fixture = Fixture::new(Protocol::Doq).await;
+    let mut transport = quinn::TransportConfig::default();
+    transport.stream_receive_window(16u32.into());
+    let client = fixture.client_with_transport(Protocol::Doq, transport);
+    let connection = client
+        .connect(fixture.address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut send, mut blocked) = connection.open_bi().await.unwrap();
+    send.write_all(&frame(0)).await.unwrap();
+    send.finish().unwrap();
+    let sibling = timeout(
+        Duration::from_secs(1),
+        doq_exchange(&connection, named_query(0, "other.test.")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sibling.response_code, ResponseCode::NoError);
+    timeout(Duration::from_secs(2), async {
+        while fixture.resolver.metrics().snapshot().counters["quic_doq_stream_write_deadline"] == 0
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(blocked.read_to_end(65537).await, Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))) if code == 3u32.into())
+    );
+    assert_eq!(
+        doq_exchange(&connection, query(0)).await.response_code,
+        ResponseCode::NoError
+    );
+    fixture.close().await;
 }

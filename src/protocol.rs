@@ -111,6 +111,15 @@ pub fn encode_upstream(message: &Message, encrypted: bool) -> Result<Vec<u8>> {
     encode_hop(message, encrypted, has_padding(message), 128, MAX_MESSAGE)
 }
 
+pub(crate) fn normalize_query_flags(query: &mut Message) {
+    query.metadata.authoritative = false;
+    query.metadata.recursion_available = false;
+    query.metadata.authentic_data = false;
+    if let Some(edns) = &mut query.edns {
+        edns.flags_mut().z = 0;
+    }
+}
+
 pub fn canonical_work_key(query: &Message) -> Option<Vec<u8>> {
     if query.queries.len() != 1
         || query.queries[0].query_class() != DNSClass::IN
@@ -120,6 +129,7 @@ pub fn canonical_work_key(query: &Message) -> Option<Vec<u8>> {
         return None;
     }
     let mut normalized = query.clone();
+    normalize_query_flags(&mut normalized);
     normalized.metadata.id = 0;
     normalized.queries[0].set_name(query.queries[0].name().to_lowercase());
     if has_padding(&normalized) {
@@ -137,6 +147,13 @@ pub enum Request {
     Forward(Message),
     Reply(Message, Padding),
     Drop,
+}
+
+pub(crate) fn has_tcp_keepalive(bytes: &[u8]) -> bool {
+    Message::read(&mut BinDecoder::new(bytes))
+        .ok()
+        .and_then(|message| message.edns)
+        .is_some_and(|edns| edns.option(EdnsCode::Keepalive).is_some())
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Message> {
@@ -352,6 +369,22 @@ mod tests {
         assert!(padded.len() > 512);
         assert_eq!(padded.len() % 468, 0);
         assert!(has_padding(&decode(&padded).unwrap()));
+    }
+
+    #[test]
+    fn work_key_ignores_response_flags_and_preserves_edns_parameters() {
+        let mut q = query();
+        let bare = canonical_work_key(&q).unwrap();
+        q.edns = Some(Edns::new());
+        let key = canonical_work_key(&q).unwrap();
+        assert_ne!(key, bare);
+        q.metadata.authoritative = true;
+        q.metadata.recursion_available = true;
+        q.metadata.authentic_data = true;
+        q.edns.as_mut().unwrap().flags_mut().z = 0x4567;
+        assert_eq!(canonical_work_key(&q).unwrap(), key);
+        q.edns.as_mut().unwrap().set_max_payload(4096);
+        assert_ne!(canonical_work_key(&q).unwrap(), key);
     }
 
     #[test]

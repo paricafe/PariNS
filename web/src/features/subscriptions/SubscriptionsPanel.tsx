@@ -5,7 +5,7 @@ import { useConfig } from '../../config/context';
 import { useSession } from '../../session/context';
 import { configList } from '../../model';
 import { subscriptionDraft, subscriptionId } from '../../model/subscriptions';
-import { formatBytes, formatNumber, translate, type Language } from '../../i18n';
+import { formatBytes, formatNumber, presentIssue, translate, type Language } from '../../i18n';
 import { useSubscriptions } from './useSubscriptions';
 import { SourceCard, failureText } from './SourceCard';
 import { DomainCheck } from './DomainCheck';
@@ -22,9 +22,9 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
   if (!draft) return <p role="status">{translate('app.connecting', language)}</p>;
   const saved = draft.savedSources;
   const sources = draft.sources ?? configList(draft.settings, 'filter_subscriptions.sources').map((source) => subscriptionDraft(source));
-  const observedOperation = view.operation ?? view.state?.operation ?? (view.unknown ? view.state?.recent_operation : null);
+  const observedOperation = view.operation ?? view.state?.operation;
   const sourceName = (id: string) => sources.find((item) => item.id === id)?.name || saved.find((item) => item.id === id)?.name || id;
-  const working = view.pending || view.state?.operation?.status === 'running' || locked || busy;
+  const working = view.pending || view.unknown || view.state?.operation?.status === 'running' || locked || busy;
   const add = (example: boolean) => {
     const key = `${keyPrefix}-${++nextKey.current}`;
     const name = example ? 'Natsuki List' : '';
@@ -33,10 +33,10 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
       format: 'domain_list', enabled: false, auto_update: true, update_interval_hours: 24 }, key), autoId: true }]);
   };
   return <><section className="panel subscription-panel"><div className="heading-row"><h2>{t('title')}</h2>
-    <div className="button-group"><button type="button" className="button quiet" onClick={() => void view.load()}>{t('refreshStatus')}</button>
+    <div className="button-group"><button type="button" className="button quiet" onClick={() => void view.load(true)}>{t('refreshStatus')}</button>
       <button type="button" className="button secondary" disabled={working || !view.state?.sources.length} onClick={() => void view.refresh(null)}>{t('refreshAll')}</button></div></div>
     <p className="muted small">{t('help')}</p>
-    {view.error && <p role="alert" className="notice error">{failureText(view.error, language)}</p>}
+    {view.error && <p role="alert" className="notice error">{presentIssue(view.error, language)}</p>}
     {view.state?.unavailable_reason === 'update_in_progress'
       ? <p className="notice" role="status">{translate('subscriptions.frozenStatus', language)}</p>
       : view.state?.unavailable_reason && <p className="notice error" role="alert">{failureText({ code: view.state.unavailable_reason, line: null }, language)}</p>}

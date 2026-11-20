@@ -4,7 +4,7 @@
 
 ### Upgrade
 
-- Installer preflight requires helper protocol 6. Run the complete installer
+- Update recovery and installer preflight require helper protocol 7. Run the complete installer
   to replace the program, root helper and service files; an online program-only
   update cannot supply the new helper behavior.
 

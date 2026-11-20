@@ -81,7 +81,7 @@ main() {
     printf 'Downloading PariNS %s for Linux %s\n' "$version" "$architecture"
     for name in "$asset" "$asset.sha256"; do
         curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-            --connect-timeout 15 --max-time 300 --output "$download_dir/$name" "$base_url/$name" || fail "download failed: $name"
+            --connect-timeout 15 --max-time 300 --max-filesize 536870912 --output "$download_dir/$name" "$base_url/$name" || fail "download failed: $name"
     done
     expected=$(awk -v asset="$asset" '
         NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ || $2 != asset { exit 1 }
@@ -104,7 +104,8 @@ main() {
     awk -v prefix="$archive/" '
         substr($0, 1, 1) == "d" && ($NF == prefix || $NF == prefix "deploy/") { next }
         substr($0, 1, 1) != "-" { exit 1 }
-    ' "$download_dir/types" || fail 'archive links and special files are forbidden'
+        { size = ($2 ~ /\// ? $3 : $5); if (size !~ /^[0-9]+$/ || (total += size) > 536870912) exit 1 }
+    ' "$download_dir/types" || fail 'invalid archive type or uncompressed size'
     package="$download_dir/$archive"
     mkdir -m 0700 "$package" "$package/deploy"
     for name in SHA256SUMS $files; do

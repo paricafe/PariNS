@@ -363,7 +363,7 @@ async fn turnstile_is_checked_before_the_password_except_from_loopback() {
     set(&shared, json!(null)).await.unwrap();
     assert!(!temp.path().join("state/turnstile.json").exists());
     assert!(login(&shared, "192.0.2.44:1", None).await.is_ok());
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -391,7 +391,7 @@ async fn changes_need_the_password_and_a_turnstile_change_voids_sign_ins_in_flig
         admitted.generation,
         shared.manager.lock().await.turnstile.generation
     );
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -465,7 +465,7 @@ async fn cloudflare_test_keys_are_accepted_only_as_a_pair() {
         store.atomic_write(FILE, text.as_bytes()).unwrap();
         assert!(read(&temp.path().join("state")).is_err(), "{text}");
     }
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -496,5 +496,5 @@ async fn only_a_configured_test_secret_relaxes_the_host_and_action_checks() {
         login(&shared, ANY, Some("token")).await.unwrap()["authenticated"],
         true
     );
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }

@@ -129,7 +129,7 @@ pub enum Diagnostic {
 const DIAGNOSTICS: [(&str, &str); 4] = [
     (
         "query_task_panics",
-        "Plain DNS query and connection tasks that panicked.",
+        "Plain and encrypted DNS query and connection tasks that panicked.",
     ),
     ("doh_tls_handshake_failures", "Failed DoH TLS handshakes."),
     (

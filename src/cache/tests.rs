@@ -381,6 +381,85 @@ fn cname_negative_proves_unordered_chains_using_dns_names() {
     }
 }
 
+fn signature(owner: &str, covered: RecordType) -> Record {
+    use hickory_proto::{
+        dnssec::{
+            Algorithm,
+            rdata::{RRSIG, SigInput},
+        },
+        rr::SerialNumber,
+    };
+    let input = SigInput {
+        type_covered: covered,
+        algorithm: Algorithm::ED25519,
+        num_labels: 2,
+        original_ttl: 60,
+        sig_expiration: SerialNumber::new(2),
+        sig_inception: SerialNumber::new(1),
+        key_tag: 1,
+        signer_name: name("test."),
+    };
+    Record::from_rdata(
+        name(owner),
+        60,
+        RData::DNSSEC(DNSSECRData::RRSIG(RRSIG::from_sig(input, vec![0; 64]))),
+    )
+}
+
+#[test]
+fn signed_cname_negative_requires_do_and_a_signature_for_a_chain_link() {
+    for code in [ResponseCode::NXDomain, ResponseCode::NoError] {
+        for (do_bit, owner, covered, class, admitted) in [
+            (
+                true,
+                "alias.source.test.",
+                RecordType::CNAME,
+                DNSClass::IN,
+                true,
+            ),
+            (
+                false,
+                "alias.source.test.",
+                RecordType::CNAME,
+                DNSClass::IN,
+                false,
+            ),
+            (true, "other.test.", RecordType::CNAME, DNSClass::IN, false),
+            (
+                true,
+                "alias.source.test.",
+                RecordType::A,
+                DNSClass::IN,
+                false,
+            ),
+            (
+                true,
+                "alias.source.test.",
+                RecordType::CNAME,
+                DNSClass::CH,
+                false,
+            ),
+        ] {
+            let cache = Cache::new(CacheConfig::default());
+            let mut q = query("alias.source.test.");
+            q.edns.get_or_insert_with(Edns::new).set_dnssec_ok(do_bit);
+            let mut response = cname_negative_answer(&q, code);
+            let mut sig = signature(owner, covered);
+            sig.dns_class = class;
+            response.answers.insert(0, sig);
+            let now = Instant::now();
+            assert_eq!(
+                cache.insert_if_epoch(&q, &response, Scope::NoEcs, now, cache.epoch()),
+                admitted
+            );
+            assert_eq!(
+                get(&cache, &q, None, now).map(|hit| hit.0.answers),
+                admitted.then_some(response.answers)
+            );
+        }
+    }
+}
+
 #[test]
 fn cname_negative_allows_duplicate_links_and_soa_with_other_sections() {
     for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
@@ -978,6 +1057,58 @@ fn outstanding_readers_remain_charged_after_invalidation() {
 }
 
 #[test]
+fn byte_limit_rejects_unplaceable_entries_without_evicting_hot_residents() {
+    let hot = query("hot.test.");
+    let held = query("held.test.");
+    let candidate = query("candidate.test.");
+    let hot_answer = answer(&hot, 1, 60);
+    let mut held_answer = answer(&held, 1, 60);
+    held_answer.answers = vec![held_answer.answers[0].clone(); 20];
+    let mut candidate_answer = answer(&candidate, 1, 60);
+    candidate_answer.answers = vec![candidate_answer.answers[0].clone(); 5];
+    let max_bytes = charge(&hot_answer.to_vec().unwrap(), &Key::of(&hot).unwrap())
+        + charge(&held_answer.to_vec().unwrap(), &Key::of(&held).unwrap());
+    let now = Instant::now();
+    for detached in [false, true] {
+        let cache = Cache::new(CacheConfig {
+            shards: 1,
+            negative_percent: 0,
+            max_bytes,
+            ..Default::default()
+        });
+        insert(&cache, &hot, &hot_answer, Scope::NoEcs, now);
+        insert(&cache, &held, &held_answer, Scope::NoEcs, now);
+        let reader = {
+            let shard = cache.shards[0].lock().unwrap();
+            Arc::clone(&shard.buckets[&Key::of(&held).unwrap()][0])
+        };
+        if detached {
+            assert_eq!(
+                cache.invalidate(Some(held.queries[0].name()), None, None),
+                1
+            );
+        }
+        assert!(cache.lookup(&hot, None, now, false).is_some());
+        let admit = || {
+            cache.insert_decision_if_epoch(
+                &candidate,
+                &candidate_answer,
+                Scope::NoEcs,
+                now,
+                cache.epoch(),
+            )
+        };
+        assert_eq!(admit(), StoreDecision::skipped(DecisionReason::Capacity));
+        assert!(cache.peek(&hot, None, now, false).is_some());
+        assert_eq!(cache.snapshot()["bytes"], max_bytes);
+        assert_eq!(cache.snapshot()["evictions"], 0);
+        drop(reader);
+        assert!(admit().admitted());
+        assert!(cache.snapshot()["bytes"].as_u64().unwrap() <= max_bytes as u64);
+    }
+}
+
+#[test]
 fn inspection_and_race_checks_do_not_make_an_entry_popular() {
     let mut cfg = CacheConfig::default();
     cfg.prefetch.enabled = true;
@@ -1033,6 +1164,100 @@ fn variant_ceiling_cannot_cross_partition_isolation() {
         cache.epoch()
     ));
     assert!(get(&cache, &q, None, now).is_some());
+}
+
+#[test]
+fn positive_variants_evict_the_least_recent_negative_first() {
+    let cache = Cache::new(CacheConfig {
+        max_variants: 2,
+        ..Default::default()
+    });
+    let now = Instant::now();
+    let q = query("variant.test.");
+    let failure_scope = Scope::ExactSource("192.0.2.0/24".parse().unwrap());
+    assert!(
+        cache
+            .insert_failure_if_epoch(
+                &q,
+                &protocol::error_response(&q, ResponseCode::ServFail),
+                failure_scope,
+                now,
+                cache.epoch(),
+                Failure::Final,
+            )
+            .admitted()
+    );
+    insert(
+        &cache,
+        &q,
+        &negative_answer(&q),
+        network("198.51.100.0/24"),
+        now,
+    );
+    assert_eq!(cache.snapshot()["negative_entries"], 2);
+    assert!(cache.insert_if_epoch(&q, &answer(&q, 1, 60), Scope::NoEcs, now, cache.epoch()));
+    assert!(get(&cache, &q, ecs("192.0.2.0/24"), now).is_none());
+    assert!(get(&cache, &q, ecs("198.51.100.0/24"), now).is_some());
+    assert_eq!(cache.snapshot()["servfail_entries"], 0);
+    assert_eq!(cache.snapshot()["negative_entries"], 1);
+    assert!(cache.insert_if_epoch(
+        &q,
+        &answer(&q, 2, 60),
+        network("203.0.113.0/24"),
+        now,
+        cache.epoch()
+    ));
+    assert!(get(&cache, &q, None, now).is_some());
+    assert_eq!(cache.snapshot()["positive_entries"], 2);
+    assert_eq!(cache.snapshot()["negative_entries"], 0);
+}
+
+#[test]
+fn exact_invalidation_covers_every_query_flag_combination_and_only_the_requested_type() {
+    let cache = Cache::new(CacheConfig::default());
+    let now = Instant::now();
+    let q = query("flags.test.");
+    for (edns, dnssec_ok) in [(false, false), (true, false), (true, true)] {
+        for cd in [false, true] {
+            for rd in [false, true] {
+                let mut variant = q.clone();
+                variant.metadata.checking_disabled = cd;
+                variant.metadata.recursion_desired = rd;
+                if edns {
+                    variant.edns = Some(Edns::new());
+                    variant.edns.as_mut().unwrap().set_dnssec_ok(dnssec_ok);
+                }
+                insert(
+                    &cache,
+                    &variant,
+                    &answer(&variant, 1, 60),
+                    Scope::NoEcs,
+                    now,
+                );
+            }
+        }
+    }
+    let mut other_type = q.clone();
+    other_type.queries[0].set_query_type(RecordType::AAAA);
+    let mut aaaa = protocol::error_response(&other_type, ResponseCode::NoError);
+    aaaa.add_answer(Record::from_rdata(
+        q.queries[0].name().clone(),
+        60,
+        RData::AAAA(AAAA("::1".parse().unwrap())),
+    ));
+    insert(&cache, &other_type, &aaaa, Scope::NoEcs, now);
+    let owner = q.queries[0].name();
+    assert_eq!(
+        cache.inspect(owner, Some(RecordType::A), now)["variants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        12
+    );
+    let epoch = cache.epoch();
+    assert_eq!(cache.invalidate(Some(owner), Some(RecordType::A), None), 12);
+    assert_eq!(cache.epoch(), epoch + 1);
+    assert!(get(&cache, &other_type, None, now).is_some());
 }
 
 #[test]

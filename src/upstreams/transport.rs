@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query},
+    op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{Name, RData, RecordType},
 };
 use rustls::{ClientConfig, pki_types::ServerName};
@@ -157,41 +157,61 @@ const H2_IDLE: Duration = Duration::from_secs(10);
 const H2_PING_INTERVAL: Duration = Duration::from_secs(1);
 const H2_PING_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
 pub(super) struct Usage {
-    active: std::sync::atomic::AtomicUsize,
-    last_used: std::sync::Mutex<Option<Instant>>,
+    activity: std::sync::Mutex<Activity>,
+}
+
+struct Activity {
+    active: usize,
+    last_used: Instant,
+}
+
+impl Default for Usage {
+    fn default() -> Self {
+        Self {
+            activity: std::sync::Mutex::new(Activity {
+                active: 0,
+                last_used: Instant::now(),
+            }),
+        }
+    }
+}
+
+impl Usage {
+    fn idle_time(&self) -> Option<Duration> {
+        let activity = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+        (activity.active == 0).then(|| activity.last_used.elapsed())
+    }
 }
 
 pub(super) struct InFlight(Arc<Usage>);
 impl InFlight {
     pub(super) fn new(usage: &Arc<Usage>) -> Self {
         usage
-            .active
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            .activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active += 1;
         Self(usage.clone())
     }
 }
 impl Drop for InFlight {
     fn drop(&mut self) {
-        *self.0.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-        self.0
-            .active
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        let mut activity = self.0.activity.lock().unwrap_or_else(|e| e.into_inner());
+        activity.last_used = Instant::now();
+        activity.active -= 1;
     }
 }
 
 pub(super) async fn idle(usage: Arc<Usage>, after: Duration) {
     loop {
-        let last = *usage.last_used.lock().unwrap_or_else(|e| e.into_inner());
-        let busy = usage.active.load(std::sync::atomic::Ordering::Acquire) > 0;
-        let wait = last.map_or(after, |last| {
-            (last + after).saturating_duration_since(Instant::now())
-        });
-        if !busy && wait.is_zero() {
+        let wait = usage
+            .idle_time()
+            .map_or(after, |idle| after.saturating_sub(idle));
+        if wait.is_zero() {
             return;
         }
-        tokio::time::sleep(if wait.is_zero() { after } else { wait }).await;
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -216,6 +236,22 @@ struct QuicConnection {
 impl Drop for QuicConnection {
     fn drop(&mut self) {
         self.endpoint.close(0u32.into(), b"upstream retired");
+    }
+}
+
+struct DoqStreamGuard {
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    completed: bool,
+}
+
+impl Drop for DoqStreamGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            let cancelled = quinn::VarInt::from_u32(3);
+            let _ = self.send.reset(cancelled);
+            let _ = self.recv.stop(cancelled);
+        }
     }
 }
 
@@ -272,21 +308,43 @@ impl Client {
         }
     }
 
-    async fn addresses(&self, deadline: Instant, attempt: &mut Attempt) -> Result<Vec<SocketAddr>> {
-        attempt.stage(Stage::Wait);
-        let mut cached = self.addresses.lock().await;
-        if let Some((_, addresses)) = cached
-            .as_ref()
-            .filter(|(expiry, _)| *expiry > Instant::now())
+    async fn addresses(&self, deadline: Instant, scope: &AttemptScope) -> Result<Vec<SocketAddr>> {
+        let fresh = |cached: &Option<(Instant, Vec<SocketAddr>)>| {
+            cached
+                .as_ref()
+                .filter(|(expiry, _)| *expiry > Instant::now())
+                .map(|(_, addresses)| addresses.clone())
+        };
+        if let Ok(cached) = self.addresses.try_lock()
+            && let Some(addresses) = fresh(&cached)
         {
-            return Ok(addresses.clone());
+            return Ok(addresses);
         }
-        attempt.stage(Stage::Bootstrap);
+        let mut cached = self.addresses.lock().await;
+        if let Some(addresses) = fresh(&cached) {
+            return Ok(addresses);
+        }
+        ensure!(scope.remaining(), "bootstrap deadline exhausted");
         let name = Name::from_ascii(format!("{}.", self.spec.host))?;
+        let mut attempt = scope.start(None);
+        attempt.stage(Stage::Bootstrap);
+        let result = self.bootstrap_addresses(name, deadline, &mut attempt).await;
+        attempt.finish(&result);
+        let (expiry, addresses) = result?;
+        *cached = Some((expiry, addresses.clone()));
+        Ok(addresses)
+    }
+
+    async fn bootstrap_addresses(
+        &self,
+        name: Name,
+        deadline: Instant,
+        attempt: &mut Attempt,
+    ) -> Result<(Instant, Vec<SocketAddr>)> {
         let mut addresses = Vec::new();
-        let mut ttl = 3600;
         let mut missing_reason = super::diagnostics::Reason::ProtocolInvalid;
         for server in &self.bootstrap {
+            let mut ttl = 3600;
             for qtype in [RecordType::A, RecordType::AAAA] {
                 ensure!(Instant::now() < deadline, "bootstrap deadline exhausted");
                 let mut query = Message::new(0, MessageType::Query, OpCode::Query);
@@ -313,6 +371,9 @@ impl Client {
                         continue;
                     }
                 };
+                if response.response_code != ResponseCode::NoError {
+                    continue;
+                }
                 let mut owner = name.clone();
                 for _ in 0..8 {
                     let alias = response.answers.iter().find_map(|rr| match &rr.data {
@@ -355,21 +416,14 @@ impl Client {
                 }
             }
             if !addresses.is_empty() {
-                break;
+                return Ok((
+                    Instant::now() + Duration::from_secs(u64::from(ttl)),
+                    addresses,
+                ));
             }
         }
-        if addresses.is_empty() {
-            attempt.reason(missing_reason);
-        }
-        ensure!(
-            !addresses.is_empty(),
-            "bootstrap returned no upstream addresses"
-        );
-        *cached = Some((
-            Instant::now() + Duration::from_secs(u64::from(ttl)),
-            addresses.clone(),
-        ));
-        Ok(addresses)
+        attempt.reason(missing_reason);
+        anyhow::bail!("bootstrap returned no upstream addresses")
     }
 
     pub async fn exchange(
@@ -381,12 +435,7 @@ impl Client {
         let mut error = anyhow::anyhow!("no upstream address");
         let addresses = match self.spec.host.parse::<IpAddr>() {
             Ok(address) => vec![SocketAddr::new(address, self.spec.port)],
-            Err(_) => {
-                let mut attempt = scope.start(None);
-                let result = self.addresses(deadline, &mut attempt).await;
-                attempt.finish(&result);
-                result?
-            }
+            Err(_) => self.addresses(deadline, scope).await?,
         };
         for address in addresses {
             ensure!(scope.remaining(), "upstream deadline exhausted");
@@ -426,7 +475,7 @@ impl Client {
                 }
                 Protocol::Quic => {
                     let mut attempt = scope.start(Some(ActualProtocol::Doq));
-                    let result = self.quic(query, address, &mut attempt).await;
+                    let result = self.quic(query, address, deadline, &mut attempt).await;
                     attempt.finish(&result);
                     result
                 }
@@ -504,12 +553,10 @@ impl Client {
             async move {
                 loop {
                     tokio::time::sleep(H2_PING_INTERVAL).await;
-                    let recent = usage
-                        .last_used
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .is_some_and(|last| last.elapsed() < H2_PING_INTERVAL);
-                    if usage.active.load(std::sync::atomic::Ordering::Acquire) == 0 && !recent {
+                    if usage
+                        .idle_time()
+                        .is_some_and(|idle| idle >= H2_PING_INTERVAL)
+                    {
                         continue;
                     }
                     let pong = timeout(H2_PING_TIMEOUT, ping_pong.ping(h2::Ping::opaque())).await;
@@ -540,33 +587,29 @@ impl Client {
         address: SocketAddr,
         attempt: &mut Attempt,
     ) -> Result<Message> {
-        let (connection, used) = self
-            .h2_connection(address, attempt)
-            .await
-            .map_err(not_sent)?;
-        attempt.connection(used);
-        match self.h2_request(&connection, query, attempt).await {
-            Err(error) if used == ConnectionUse::Reused && error.is::<NotSent>() => {
+        let mut retried = false;
+        loop {
+            let (connection, used) = self
+                .h2_connection(address, attempt)
+                .await
+                .map_err(not_sent)?;
+            attempt.connection(used);
+            let result = self.h2_request(&connection, query, attempt).await;
+            let Err(error) = &result else {
+                return result;
+            };
+            let unsent = error.is::<NotSent>();
+            if unsent
+                || error
+                    .downcast_ref::<h2::Error>()
+                    .is_some_and(|e| e.is_go_away() || e.is_io())
+            {
                 self.h2_retire(&connection);
-                drop(connection);
-                let (connection, used) = self
-                    .h2_connection(address, attempt)
-                    .await
-                    .map_err(not_sent)?;
-                attempt.connection(used);
-                self.h2_request(&connection, query, attempt).await
             }
-            Err(error) => {
-                let connection_failed = error.is::<NotSent>()
-                    || error
-                        .downcast_ref::<h2::Error>()
-                        .is_some_and(|e| e.is_go_away() || e.is_io());
-                if connection_failed {
-                    self.h2_retire(&connection);
-                }
-                Err(error)
+            if retried || used != ConnectionUse::Reused || !unsent {
+                return result;
             }
-            result => result,
+            retried = true;
         }
     }
 
@@ -606,13 +649,13 @@ impl Client {
         &self,
         address: SocketAddr,
         attempt: &mut Attempt,
-    ) -> Result<Arc<QuicConnection>> {
+    ) -> Result<(Arc<QuicConnection>, ConnectionUse)> {
         attempt.stage(Stage::Wait);
         let mut cached = self.quic.lock().await;
         if let Some(current) = cached.as_ref().filter(|c| {
             c.connection.remote_address() == address && c.connection.close_reason().is_none()
         }) {
-            return Ok(current.clone());
+            return Ok((current.clone(), ConnectionUse::Reused));
         }
         *cached = None;
         let bind = if address.is_ipv4() {
@@ -642,28 +685,62 @@ impl Client {
             connection,
         });
         *cached = Some(connection.clone());
-        Ok(connection)
+        Ok((connection, ConnectionUse::New))
+    }
+
+    async fn quic_retire(&self, connection: &Arc<QuicConnection>) {
+        let mut cached = self.quic.lock().await;
+        if cached
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, connection))
+        {
+            *cached = None;
+        }
     }
 
     async fn quic(
         &self,
         query: &Message,
         address: SocketAddr,
+        deadline: Instant,
         attempt: &mut Attempt,
     ) -> Result<Message> {
-        let connection = self
+        let (mut connection, used) = self
             .quic_connection(address, attempt)
             .await
             .map_err(not_sent)?;
+        attempt.connection(used);
         attempt.stage(Stage::Wait);
-        let (mut send, mut recv) = connection.connection.open_bi().await.map_err(not_sent)?;
+        let (send, recv) = match connection.connection.open_bi().await {
+            Err(_) if used == ConnectionUse::Reused && Instant::now() < deadline => {
+                self.quic_retire(&connection).await;
+                let (replacement, used) = self
+                    .quic_connection(address, attempt)
+                    .await
+                    .map_err(not_sent)?;
+                connection = replacement;
+                attempt.connection(used);
+                attempt.stage(Stage::Wait);
+                connection.connection.open_bi().await.map_err(not_sent)?
+            }
+            result => result.map_err(not_sent)?,
+        };
+        let mut stream = DoqStreamGuard {
+            send,
+            recv,
+            completed: false,
+        };
         let mut outbound = query.clone();
         outbound.metadata.id = 0;
         attempt.stage(Stage::RequestWrite);
-        tcp::write_frame(&mut send, &protocol::encode_upstream(&outbound, true)?).await?;
-        send.finish()?;
+        tcp::write_frame(
+            &mut stream.send,
+            &protocol::encode_upstream(&outbound, true)?,
+        )
+        .await?;
+        stream.send.finish()?;
         attempt.stage(Stage::ResponseRead);
-        let frame = recv.read_to_end(protocol::MAX_MESSAGE + 2).await?;
+        let frame = stream.recv.read_to_end(protocol::MAX_MESSAGE + 2).await?;
         attempt.stage(Stage::Validate);
         ensure!(
             frame.len() >= 14
@@ -683,7 +760,94 @@ impl Client {
                 .is_none()),
             "DoQ TCP keepalive prohibited"
         );
+        stream.completed = true;
         response.metadata.id = query.id;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn h2_retires_a_replacement_that_also_fails_before_sending() {
+        use super::super::diagnostics::{Diagnostics, Operation};
+
+        async fn closed_sender(address: SocketAddr) -> Arc<H2Connection> {
+            let (local, remote) = tokio::io::duplex(1024);
+            let (sender, connection) = h2::client::handshake(local).await.unwrap();
+            drop(remote);
+            let _ = connection.await;
+            assert!(sender.clone().ready().await.is_err());
+            Arc::new(H2Connection {
+                address,
+                sender,
+                streams: Arc::new(tokio::sync::Semaphore::new(1)),
+                usage: Arc::default(),
+                driver: tokio::spawn(std::future::pending()),
+            })
+        }
+
+        let address = "127.0.0.1:443".parse().unwrap();
+        let client = Client::new(
+            Endpoint::parse("https://127.0.0.1:443").unwrap(),
+            &Settings::default(),
+            vec![],
+        )
+        .unwrap();
+        let first = closed_sender(address).await;
+        let replacement = closed_sender(address).await;
+        *client.h2.lock().unwrap() = Some(first);
+        let connecting = client.h2_connecting.lock().await;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let scope = AttemptScope::new(
+            &Diagnostics::new(1),
+            &Operation::new(false, None),
+            0,
+            deadline,
+        );
+        let mut attempt = scope.start(Some(ActualProtocol::Doh2));
+        let query = Message::query();
+        let request = client.https(&query, address, &mut attempt);
+        tokio::pin!(request);
+        assert!(futures_util::poll!(&mut request).is_pending());
+        assert!(client.h2.lock().unwrap().is_none());
+        *client.h2.lock().unwrap() = Some(replacement);
+        drop(connecting);
+        let error = tokio::time::timeout_at(deadline, request)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is::<NotSent>());
+        assert!(client.h2.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unused_connection_reaches_idle_timeout() {
+        let limit = Duration::from_secs(10);
+        let usage = Arc::new(Usage::default());
+        let started = Instant::now();
+        idle(usage, limit).await;
+        assert_eq!(started.elapsed(), limit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn finishing_last_request_restarts_idle_timeout() {
+        let limit = Duration::from_secs(10);
+        let usage = Arc::new(Usage::default());
+        let request = InFlight::new(&usage);
+        let idle = idle(usage.clone(), limit);
+        tokio::pin!(idle);
+        assert!(futures_util::poll!(&mut idle).is_pending());
+        tokio::time::advance(limit).await;
+        assert!(futures_util::poll!(&mut idle).is_pending());
+        assert_eq!(usage.idle_time(), None);
+        drop(request);
+        assert_eq!(usage.idle_time(), Some(Duration::ZERO));
+        tokio::time::advance(limit - Duration::from_millis(1)).await;
+        assert!(futures_util::poll!(&mut idle).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(futures_util::poll!(&mut idle).is_ready());
     }
 }

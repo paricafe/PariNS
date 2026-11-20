@@ -476,6 +476,27 @@ async fn console_navigation_allows_reconnect_but_keeps_cross_site_api_and_embeds
         ),
         (
             "GET",
+            "/",
+            server.address.to_string(),
+            navigation.replace("cross-site", "same-site"),
+            200,
+        ),
+        (
+            "GET",
+            "/api/session",
+            server.address.to_string(),
+            navigation.replace("cross-site", "same-site"),
+            403,
+        ),
+        (
+            "HEAD",
+            "/assets/app.js",
+            server.address.to_string(),
+            "Sec-Fetch-Site: same-site\r\n".to_owned(),
+            403,
+        ),
+        (
+            "GET",
             "/api/session",
             server.address.to_string(),
             navigation.to_owned(),
@@ -919,6 +940,61 @@ async fn updates_only_validate_and_apply_keep_the_running_generation() {
     );
     assert_eq!(after["certificates"], before["certificates"]);
     assert_eq!(after["revision"], 2);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn identical_configuration_save_keeps_revision_cache_and_rollback_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let server = Management::start(&directory).await;
+    let source = configuration();
+    server.setup(&directory, &source).await;
+    let login = server
+        .request(
+            "POST",
+            "/api/login",
+            None,
+            Some(json!({"username":"admin","password":PASSWORD})),
+        )
+        .await;
+    login.expect(200);
+    let auth = login.auth();
+    let before = server
+        .request("GET", "/api/status", Some(&auth), None)
+        .await
+        .expect(200);
+    let state_path = directory.join("state.json");
+    let before_save = std::fs::read(&state_path).unwrap();
+    for (revision, expected) in [(0, 409), (1, 200)] {
+        let result = server
+            .request(
+                "PUT",
+                "/api/config",
+                Some(&auth),
+                Some(json!({"toml":source,"revision":revision})),
+            )
+            .await
+            .expect(expected);
+        if expected == 200 {
+            assert_eq!(
+                result,
+                json!({"revision":1,"restart_required":false,"transport_change":null})
+            );
+        }
+    }
+    let after = server
+        .request("GET", "/api/status", Some(&auth), None)
+        .await
+        .expect(200);
+    for path in ["/revision", "/generation", "/listen", "/cache/epoch"] {
+        assert!(
+            before.pointer(path).is_some_and(|value| !value.is_null()),
+            "{path}"
+        );
+        assert_eq!(before.pointer(path), after.pointer(path), "{path}");
+    }
+    assert_eq!(std::fs::read(state_path).unwrap(), before_save);
     server.finish().await;
 }
 
@@ -1771,7 +1847,7 @@ async fn saved_https_with_missing_identity_fails_startup_closed() {
 }
 
 #[tokio::test]
-async fn saved_http_keeps_management_available_and_retries_missing_dns_identities() {
+async fn saved_http_keeps_management_available_and_recovers_missing_dns_identities() {
     for role in ["dot", "doq"] {
         let temporary = tempfile::tempdir().unwrap();
         let directory = temporary.path().join("state");
@@ -1815,6 +1891,19 @@ async fn saved_http_keeps_management_available_and_retries_missing_dns_identitie
         assert_eq!(status["running"], false, "{role}: {status}");
         assert_eq!(status["dns_health"]["code"], "startup_failed");
         restore();
+        if role == "dot" {
+            let reload = server
+                .request(
+                    "POST",
+                    "/api/certificates/reload",
+                    Some(&auth),
+                    Some(json!({})),
+                )
+                .await
+                .expect(200);
+            assert_eq!(reload["outcome"], "applied");
+            assert_eq!(reload["certificates"]["last_reload"]["source"], "api");
+        }
         let status = timeout(DEADLINE, async {
             loop {
                 let status = server
@@ -1828,7 +1917,7 @@ async fn saved_http_keeps_management_available_and_retries_missing_dns_identitie
             }
         })
         .await
-        .expect("DNS retries after its identity is restored");
+        .expect("DNS resumes after its identity is restored");
         assert_eq!(status["certificates"]["roles"].as_array().unwrap().len(), 1);
         assert!(
             status["certificates"]["certificate_generation"]
@@ -1873,6 +1962,7 @@ async fn same_origin_certificate_reapply_changes_identity_without_revoking_sessi
     let second = rcgen::generate_simple_self_signed(vec!["dns.test".into()]).unwrap();
     std::fs::write(&cert_path, second.cert.pem()).unwrap();
     std::fs::write(&key_path, second.signing_key.serialize_pem()).unwrap();
+    let candidate = candidate.replace("max_inflight = 16", "max_inflight = 17");
     let apply = https_wire(
         server.address,
         "dns.test",
@@ -2469,7 +2559,7 @@ async fn request_body_and_configuration_sizes_are_bounded_before_mutation() {
     let token = server.setup(&directory, &configuration()).await;
     let (cookie, binding) = token.split_once('|').unwrap();
     let headers = format!(
-        "POST /api/config/validate HTTP/1.1\r\nHost: {}\r\nOrigin: http://{}\r\nCookie: parins_session_http={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST /api/config/validate HTTP/1.1\r\nHost: {}\r\nOrigin: http://{}\r\nCookie: parins_session_http={cookie}\r\nX-PariNS-Session: {binding}\r\nContent-Type: Application/JSON ; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         server.address,
         server.address,
         300 * 1024 + 1

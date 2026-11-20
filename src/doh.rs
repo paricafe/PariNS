@@ -5,7 +5,12 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use h2::{Reason, server::SendResponse};
 use http::{Request, Response};
-use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
+use tokio::{
+    net::TcpListener,
+    sync::Semaphore,
+    task::JoinSet,
+    time::{Instant, timeout},
+};
 use tokio_rustls::{TlsAcceptor, rustls};
 
 use crate::{
@@ -16,6 +21,8 @@ use crate::{
 };
 
 pub const PATH: &str = "/dns-query";
+
+mod flush;
 
 pub type H3Port = Arc<dyn Fn() -> Option<u16> + Send + Sync>;
 
@@ -77,6 +84,7 @@ pub async fn serve(
     let mut stop = ingress.stop.clone();
     let mut connections = JoinSet::new();
     let acceptor = TlsAcceptor::from(tls);
+    let mut accepting = crate::transport::accept::Acceptor::new(&listener);
     let outcome = loop {
         if *stop.borrow() {
             break Ok(());
@@ -84,7 +92,7 @@ pub async fn serve(
         tokio::select! {
             _ = stop.changed() => break Ok(()),
             Some(result) = connections.join_next(), if !connections.is_empty() => ingress.settle("DoH", result),
-            accepted = crate::transport::accept::accept(&listener) => {
+            accepted = accepting.accept() => {
                 let (socket, peer) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error.into()),
@@ -149,6 +157,8 @@ async fn connection(
         .max_concurrent_streams(ingress.max_streams as u32)
         .max_header_list_size(8192);
     let mut stop = ingress.stop.clone();
+    let responses = flush::Responses::default();
+    let tls = flush::Io::new(tls, responses.clone());
     let mut connection = tokio::select! {
         _ = stop.changed() => return Ok(()),
         handshake = timeout(ingress.io_timeout, builder.handshake(tls)) => handshake??,
@@ -156,34 +166,38 @@ async fn connection(
     let permits = Arc::new(Semaphore::new(ingress.max_streams));
     let mut requests = JoinSet::new();
     let close_window = ingress.shutdown_grace / 2;
-    let mut close_by = stop
-        .borrow()
-        .then(|| tokio::time::Instant::now() + close_window);
-    if close_by.is_some() {
+    let mut stop_at = stop.borrow().then(Instant::now);
+    let mut close_by = None;
+    if stop_at.is_some() {
         connection.graceful_shutdown();
     }
     loop {
-        if let Some(close_by) = close_by {
-            while requests.try_join_next().is_some() {}
-            if requests.is_empty() {
-                let _ = tokio::time::timeout_at(close_by, async {
-                    while let Some(Ok((_, mut respond))) = connection.accept().await {
-                        respond.send_reset(Reason::REFUSED_STREAM);
-                    }
-                })
-                .await;
-                break;
+        let stopping = stop_at.is_some();
+        let idle = requests.is_empty();
+        let now = Instant::now();
+        let deadline = match stop_at {
+            Some(stopped) if idle => {
+                *close_by.get_or_insert((now + close_window).min(stopped + ingress.shutdown_grace))
             }
-        }
-        let stopping = close_by.is_some();
+            Some(stopped) => stopped + ingress.shutdown_grace,
+            None => now + ingress.io_timeout,
+        };
         tokio::select! {
+            biased;
             _ = stop.changed(), if !stopping => {
-                close_by = Some(tokio::time::Instant::now() + close_window);
+                stop_at = Some(Instant::now());
                 connection.graceful_shutdown();
             }
-            Some(result) = requests.join_next(), if !requests.is_empty() => ingress.settle("DoH", result),
-            accepted = timeout(ingress.io_timeout, connection.accept()) => {
-                let Ok(Some(Ok((request, mut respond)))) = accepted else { break };
+            Some(result) = requests.join_next(), if !idle => ingress.settle("DoH", result),
+            _ = tokio::time::sleep_until(deadline), if idle || stopping => {
+                if !idle {
+                    ingress.resolver.force_shutdown(ForcedShutdown::DohDrain);
+                    requests.abort_all();
+                }
+                break;
+            }
+            accepted = connection.accept() => {
+                let Some(Ok((request, mut respond))) = accepted else { break };
                 if stopping { respond.send_reset(Reason::REFUSED_STREAM); continue }
                 let Ok(permit) = permits.clone().try_acquire_owned() else {
                     ingress.resolver.metrics().inc(Counter::EncryptedRejected);
@@ -192,18 +206,21 @@ async fn connection(
                 };
                 let ingress = ingress.clone();
                 let h3_port = h3_port.clone();
+                let responses = responses.clone();
                 requests.spawn(async move {
                     let _permit = permit;
-                    let _ = timeout(ingress.io_timeout, request_task(request, respond, peer, ingress, h3_port)).await;
+                    let _ = request_task(request, respond, peer, ingress, h3_port, responses).await;
                 });
             }
         }
     }
-    if *stop.borrow() {
-        while requests.join_next().await.is_some() {}
+    drop(connection);
+    if !*stop.borrow() {
+        requests.abort_all();
     }
-    requests.abort_all();
-    while requests.join_next().await.is_some() {}
+    while let Some(result) = requests.join_next().await {
+        ingress.settle("DoH", result);
+    }
     Ok(())
 }
 
@@ -213,11 +230,18 @@ async fn request_task(
     peer: IpAddr,
     ingress: Ingress,
     h3_port: Option<H3Port>,
+    responses: flush::Responses,
 ) -> anyhow::Result<()> {
     let (parts, mut stream) = request.into_parts();
     let (body, status) = tokio::select! {
         biased;
-        collected = collect(&mut stream) => collected?,
+        collected = timeout(ingress.io_timeout, collect(&mut stream)) => match collected {
+            Ok(collected) => collected?,
+            Err(_) => {
+                respond.send_reset(Reason::CANCEL);
+                return Ok(());
+            }
+        },
         () = ingress.stopped() => {
             respond.send_reset(Reason::REFUSED_STREAM);
             return Ok(());
@@ -228,21 +252,27 @@ async fn request_task(
         .headers
         .get(http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
-    let bytes = match status.map_or_else(
+    let parsed = status.map_or_else(
         || request_bytes(parts.method.as_str(), path, content_type, &body),
         Err,
-    ) {
-        Ok(bytes) => bytes,
-        Err(status) => return send(&mut respond, status, Vec::new(), h3_port).await,
+    );
+    let (status, bytes, delivery) = match parsed {
+        Ok(bytes) => match tokio::select! {
+            response = ingress.handle_for_delivery(&bytes, peer, "doh") => response,
+            _ = std::future::poll_fn(|cx| respond.poll_reset(cx)) => return Ok(()),
+        } {
+            (Some(bytes), delivery) => (200, bytes, delivery),
+            (None, delivery) => (400, Vec::new(), delivery),
+        },
+        Err(status) => (status, Vec::new(), None),
     };
-    let (response, delivery) = tokio::select! {
-        response = ingress.handle_for_delivery(&bytes, peer, "doh") => response,
-        _ = std::future::poll_fn(|cx| respond.poll_reset(cx)) => return Ok(()),
-    };
-    match response {
-        Some(bytes) => send(&mut respond, 200, bytes, h3_port).await,
-        None => send(&mut respond, 400, Vec::new(), h3_port).await,
-    }?;
+    timeout(ingress.io_timeout, async {
+        let flushed = responses.track(respond.stream_id());
+        send(&mut respond, status, bytes, h3_port).await?;
+        flushed.await?;
+        anyhow::Ok(())
+    })
+    .await??;
     if let Some(delivery) = delivery {
         delivery.delivered();
     }

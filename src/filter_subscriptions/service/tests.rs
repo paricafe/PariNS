@@ -362,7 +362,7 @@ async fn revision_change_rejects_late_publication_and_duplicate_work_is_coalesce
     assert!(same.work.is_none());
     let before = fs::read(dir.path().join("sources/catalog.json")).unwrap();
     let candidate = service.execute(begin.work.unwrap()).await.unwrap();
-    service.set_revision(2);
+    service.sync_updates_only(2);
     let error = service.commit(candidate).await.unwrap_err();
     assert_eq!(error_code(&error), "revision_conflict");
     service.fail(&begin.operation_id, &error);
@@ -579,6 +579,56 @@ async fn bootstrap_reclaims_young_removed_source_for_manual_only_download() {
 }
 
 #[tokio::test]
+async fn automatic_refresh_charges_only_eligible_sources_for_real_failures() {
+    let mut manual = source("manual");
+    manual.auto_update = false;
+    let (_dir, service) = fixture(vec![source("automatic"), manual]).await;
+    for (code, expected_failures) in [
+        ("subscription_cancelled", 0),
+        ("revision_conflict", 0),
+        ("subscription_download", 1),
+    ] {
+        let begin = service.begin(refresh(&service)).await.unwrap();
+        service.fail(&begin.operation_id, &Failure::new(code).into());
+        let sources = service.snapshot().sources;
+        assert_eq!(sources[0].failures, expected_failures);
+        assert_eq!(sources[1].failures, 0);
+        assert_eq!(sources[1].error, None);
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_reports_the_missing_source_that_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sources");
+    let existing = source("existing");
+    let mut store = Store::open(&path, Settings::default().max_disk_bytes).unwrap();
+    install(&mut store, &existing, b".existing.test\n");
+    drop(store);
+    let service = Service::open(
+        path,
+        Policy::default(),
+        Settings {
+            sources: vec![existing, source("missing")],
+            ..Default::default()
+        },
+        1,
+        vec![],
+        false,
+    )
+    .await
+    .unwrap();
+    respond(&service, &[b"bad name with spaces\n"]);
+    assert!(service.bootstrap_new().await.is_err());
+    let snapshot = service.snapshot();
+    assert_eq!(snapshot.sources[0].failures, 0);
+    assert_eq!(
+        snapshot.recent_operation.unwrap().source_id.as_deref(),
+        Some("missing")
+    );
+}
+
+#[tokio::test]
 async fn frozen_start_is_read_only_and_bootstrap_downloads_all_new_sources_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("frozen");
@@ -593,6 +643,8 @@ async fn frozen_start_is_read_only_and_bootstrap_downloads_all_new_sources_once(
     .await
     .unwrap();
     assert!(frozen.ready());
+    let error = frozen.begin(refresh(&frozen)).await.err().unwrap();
+    assert_eq!(error_code(&error), "update_in_progress");
     assert!(!path.exists());
     let mut a = source("one");
     a.auto_update = false;
@@ -846,6 +898,51 @@ async fn descriptor_reserve_is_charged_before_aggregate_allocation() {
 }
 
 #[tokio::test]
+async fn unchanged_active_material_still_needs_the_coordinator_reservation() {
+    let (_dir, service) = fixture(vec![source("one")]).await;
+    let (mut settings, local) = {
+        let state = service.state.lock().unwrap();
+        (state.settings.clone(), state.local.clone())
+    };
+    settings.max_memory_bytes = service.live_bytes(&local) + material::COORDINATOR_BYTES - 1;
+    let result = service.prepare_config(settings, local, 1).await;
+    assert!(matches!(result, Err(error) if error_code(&error) == "subscription_memory_limit"));
+    assert_eq!(service.config_revision(), 1);
+}
+
+#[tokio::test]
+async fn local_edits_use_small_budgets_until_subscriptions_are_effective() {
+    let (_dir, service) = fixture(vec![]).await;
+    let mut settings = service.state.lock().unwrap().settings.clone();
+    settings.max_memory_bytes = 1024 * 1024;
+    let mut disabled = source("disabled");
+    disabled.enabled = false;
+    settings.sources.push(disabled);
+    let local = || {
+        crate::policy::LocalPolicySource::Inline(
+            toml::from_str("enabled=true\nblock_exact=['small.local']").unwrap(),
+        )
+    };
+    let candidate = service
+        .prepare_config_from_source(settings.clone(), local(), 1)
+        .await
+        .unwrap();
+    service.publish_config(candidate, 2);
+    assert!(
+        service
+            .handle
+            .snapshot()
+            .policy
+            .blocks(&Name::from_ascii("small.local").unwrap())
+    );
+    settings.sources[0].enabled = true;
+    let result = service
+        .prepare_config_from_source(settings, local(), 2)
+        .await;
+    assert!(matches!(result, Err(error) if error_code(&error) == "subscription_memory_limit"));
+}
+
+#[tokio::test]
 async fn local_source_waits_for_worker_before_opening_file() {
     let (dir, service) = fixture(vec![]).await;
     let path = dir.path().join("missing-local.toml");
@@ -937,13 +1034,13 @@ async fn local_source_budget_counts_old_policy_and_preserves_generation() {
         toml::from_str("enabled=true\nblock_exact=['new.local']").unwrap(),
     );
     let mut settings = service.state.lock().unwrap().settings.clone();
-    settings.max_memory_bytes = material::COORDINATOR_BYTES + generation.policy.owned_bytes();
+    settings.max_memory_bytes = generation.policy.owned_bytes();
     source
         .compile(
             crate::policy::canonical::Limits {
                 max_rules: settings.max_rules,
                 max_memory_bytes: settings.max_memory_bytes,
-                retained_bytes: material::COORDINATOR_BYTES,
+                retained_bytes: 0,
             },
             || Ok(()),
         )
@@ -1014,4 +1111,348 @@ async fn source_block_method_publishes_from_stored_content_without_downloading()
         fs::read(dir.path().join("sources/catalog.json")).unwrap(),
         catalog
     );
+}
+
+#[tokio::test]
+async fn startup_uses_verified_memory_policy_when_index_does_not_fit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sources");
+    let mut store = Store::open(&path, 32 * 1024 * 1024).unwrap();
+    let mut active = source("one");
+    active.auto_update = false;
+    install(&mut store, &active, b".one.test\n");
+    store
+        .set_references(vec![active.identity().unwrap().fingerprint], vec![])
+        .unwrap();
+    let padding = crate::private_files::create_private(&path.join("unmanaged")).unwrap();
+    padding
+        .set_len(256 * 1024 - store.disk_bytes().unwrap() - 1024)
+        .unwrap();
+    drop(store);
+    let settings = Settings {
+        sources: vec![active],
+        max_disk_bytes: 256 * 1024,
+        ..Default::default()
+    };
+    let service = Service::open(
+        path.clone(),
+        Policy::default(),
+        settings.clone(),
+        1,
+        vec![],
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(service.ready());
+    assert!(
+        service
+            .handle
+            .snapshot()
+            .policy
+            .blocks(&Name::from_ascii("one.test").unwrap())
+    );
+    assert!(service.state.lock().unwrap().index_pin.is_none());
+    assert_eq!(fs::read_dir(path.join("indexes")).unwrap().count(), 0);
+    drop(service);
+
+    let object = fs::read_dir(path.join("objects"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(object, b"corrupt").unwrap();
+    let service = Service::open(path, Policy::default(), settings, 1, vec![], false)
+        .await
+        .unwrap();
+    assert!(!service.ready());
+    assert_eq!(
+        service.snapshot().unavailable_reason.as_deref(),
+        Some("subscription_material_missing")
+    );
+}
+
+#[tokio::test]
+async fn refresh_survives_index_enospc_and_drops_the_obsolete_pin() {
+    let (dir, service) = fixture(vec![source("one")]).await;
+    let indexes = dir.path().join("sources/indexes");
+    assert!(service.state.lock().unwrap().index_pin.is_some());
+    service
+        .store
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .simulate_index_disk_full();
+    respond(&service, &[b".changed.test\n"]);
+    let begin = service.begin(refresh(&service)).await.unwrap();
+    let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+    service.commit(candidate).await.unwrap();
+    let policy = service.handle.snapshot();
+    assert!(
+        policy
+            .policy
+            .blocks(&Name::from_ascii("changed.test").unwrap())
+    );
+    assert!(!policy.policy.blocks(&Name::from_ascii("one.test").unwrap()));
+    assert!(service.state.lock().unwrap().index_pin.is_none());
+    service
+        .store
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .collect(unix_secs(), false)
+        .unwrap();
+    assert_eq!(fs::read_dir(indexes).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_dir(dir.path().join("sources/staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn private_index_permission_errors_stay_hard() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, service) = fixture(vec![source("one")]).await;
+    assert!(service.ready());
+    let path = dir.path().join("sources");
+    let settings = service.state.lock().unwrap().settings.clone();
+    drop(service);
+    let index = fs::read_dir(path.join("indexes"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::set_permissions(index, fs::Permissions::from_mode(0o644)).unwrap();
+    let service = Service::open(path, Policy::default(), settings, 1, vec![], false)
+        .await
+        .unwrap();
+    assert!(!service.ready());
+    assert_eq!(
+        service.snapshot().unavailable_reason.as_deref(),
+        Some("subscription_storage_unavailable")
+    );
+}
+
+#[tokio::test]
+async fn deadline_during_download_backs_off_but_shutdown_does_not() {
+    for closing in [false, true] {
+        let (_dir, service) = fixture(vec![source("one")]).await;
+        let (started, wait) = tokio::sync::oneshot::channel();
+        let mut started = Some(started);
+        let mut reply = response(b".slow.test\n");
+        reply.body = Box::pin(futures_util::stream::poll_fn(move |_| {
+            if let Some(started) = started.take() {
+                let _ = started.send(());
+            }
+            std::task::Poll::Pending
+        }));
+        *service.responses.lock().unwrap() = Some(std::collections::VecDeque::from([vec![reply]]));
+        let begin = service.begin(refresh(&service)).await.unwrap();
+        let before = service.snapshot().sources.remove(0);
+        let work = begin.work.unwrap();
+        let owner = service.clone();
+        let task = tokio::spawn(async move { owner.execute(work).await });
+        tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .unwrap()
+            .unwrap();
+        if closing {
+            service.request_close();
+        } else {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(301)).await;
+        }
+        let error = match task.await.unwrap() {
+            Ok(_) => panic!("timed out or closed work is never committed"),
+            Err(error) => error,
+        };
+        if !closing {
+            tokio::time::resume();
+        }
+        service.fail(&begin.operation_id, &error);
+        let mut snapshot = service.snapshot();
+        let source = snapshot.sources.remove(0);
+        if closing {
+            assert_eq!(error_code(&error), "subscription_cancelled");
+            assert_eq!(
+                (source.failures, source.next_update),
+                (before.failures, before.next_update)
+            );
+            assert_eq!(snapshot.recent_operation.unwrap().status, "cancelled");
+        } else {
+            assert_eq!(error_code(&error), "subscription_download");
+            assert_eq!(source.failures, before.failures + 1);
+            assert!(source.next_update.unwrap() > unix_secs());
+            assert!(source.next_update.unwrap() > source.last_attempt.unwrap());
+            assert_eq!(snapshot.recent_operation.unwrap().status, "failed");
+        }
+    }
+}
+
+#[tokio::test]
+async fn prepare_repairs_missing_and_corrupt_objects_but_rejects_unsafe_paths() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sources");
+    let mut store = Store::open(&path, 32 * 1024 * 1024).unwrap();
+    let draft = source("one");
+    let fp = draft.identity().unwrap().fingerprint;
+    let content = b".one.test\n";
+    install(&mut store, &draft, content);
+    let hash = store.record(&fp).unwrap().sha256.clone();
+    let object = path.join("objects").join(format!("{hash}.txt"));
+    drop(store);
+    let service = Service::open(
+        path,
+        Policy::default(),
+        Settings::default(),
+        1,
+        vec![],
+        false,
+    )
+    .await
+    .unwrap();
+    let request = || WorkRequest::Prepare {
+        config_revision: 1,
+        source: DraftSource {
+            id: draft.id.clone(),
+            url: draft.url.clone(),
+            format: draft.format,
+        },
+    };
+    for damage in [
+        Some(b".bad.test\n".as_slice()),
+        Some(b"short".as_slice()),
+        None,
+    ] {
+        if let Some(damage) = damage {
+            fs::write(&object, damage).unwrap();
+        } else {
+            fs::remove_file(&object).unwrap();
+        }
+        respond(&service, &[content]);
+        let begin = service.begin(request()).await.unwrap();
+        let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+        service.commit(candidate).await.unwrap();
+        assert_eq!(
+            service.snapshot().recent_operation.unwrap().status,
+            "succeeded"
+        );
+        assert_eq!(fs::read(&object).unwrap(), content);
+    }
+    fs::set_permissions(&object, fs::Permissions::from_mode(0o644)).unwrap();
+    let result = service.begin(request()).await;
+    assert!(
+        matches!(result, Err(error) if error_code(&error) == "subscription_storage_unavailable")
+    );
+
+    let moved = dir.path().join("target.txt");
+    fs::rename(&object, &moved).unwrap();
+    symlink(&moved, &object).unwrap();
+    let result = service.begin(request()).await;
+    assert!(
+        matches!(result, Err(error) if error_code(&error) == "subscription_storage_unavailable")
+    );
+    assert_eq!(fs::read(&moved).unwrap(), content);
+}
+
+#[tokio::test]
+async fn config_quota_boundary_includes_new_catalog_references() {
+    let (dir, service) = fixture(vec![source("one")]).await;
+    let mut extra = source("two");
+    extra.enabled = false;
+    let quota_without_growth = {
+        let mut locked = service.store.lock().unwrap();
+        let store = locked.as_mut().unwrap();
+        install(store, &extra, b".two.test\n");
+        store.disk_bytes().unwrap() + 256 * 1024
+    };
+    let catalog = dir.path().join("sources/catalog.json");
+    let old_bytes = fs::read(&catalog).unwrap();
+    let mut target: serde_json::Value = serde_json::from_slice(&old_bytes).unwrap();
+    target["previous"] = target["current"].clone();
+    target["current"]
+        .as_array_mut()
+        .unwrap()
+        .push(extra.identity().unwrap().fingerprint.into());
+    let growth = (serde_json::to_vec(&target).unwrap().len() - old_bytes.len()) as u64;
+    assert!(growth > 0);
+    let mut settings = service.state.lock().unwrap().settings.clone();
+    settings.sources.push(extra.clone());
+    settings.max_disk_bytes = quota_without_growth;
+    let result = service
+        .prepare_config(settings.clone(), Policy::default(), 1)
+        .await;
+    assert!(matches!(result, Err(error) if error_code(&error) == "subscription_disk_limit"));
+    settings.max_disk_bytes = quota_without_growth + growth;
+    let candidate = service
+        .prepare_config(settings, Policy::default(), 1)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&catalog).unwrap(), old_bytes);
+    service.publish_config(candidate, 2);
+    let orphan = vec![b'x'; 256 * 1024 + 4096];
+    let orphan_path = dir
+        .path()
+        .join("sources/objects")
+        .join(format!("{:x}.txt", Sha256::digest(&orphan)));
+    crate::private_files::create_private(&orphan_path)
+        .unwrap()
+        .write_all(&orphan)
+        .unwrap();
+    let begin = service
+        .begin(WorkRequest::Prepare {
+            config_revision: 2,
+            source: DraftSource {
+                id: extra.id,
+                url: extra.url,
+                format: extra.format,
+            },
+        })
+        .await
+        .unwrap();
+    let candidate = service.execute(begin.work.unwrap()).await.unwrap();
+    service.commit(candidate).await.unwrap();
+    assert!(!orphan_path.exists());
+    assert_eq!(
+        service.snapshot().recent_operation.unwrap().status,
+        "succeeded"
+    );
+    let synced: serde_json::Value = serde_json::from_slice(&fs::read(catalog).unwrap()).unwrap();
+    assert_eq!(synced["current"], target["current"]);
+    assert_eq!(synced["previous"], target["previous"]);
+}
+
+#[tokio::test]
+async fn local_material_replacement_releases_the_old_index_pin() {
+    let (dir, service) = fixture(vec![source("one")]).await;
+    let indexes = dir.path().join("sources/indexes");
+    assert_eq!(fs::read_dir(&indexes).unwrap().count(), 1);
+    let mut settings = service.state.lock().unwrap().settings.clone();
+    let reused = service
+        .prepare_config(settings.clone(), Policy::default(), 1)
+        .await
+        .unwrap();
+    service.publish_config(reused, 2);
+    assert!(service.state.lock().unwrap().index_pin.is_some());
+    settings.enabled = false;
+    let local = toml::from_str("enabled=true\nblock_exact=['local.test']").unwrap();
+    let candidate = service.prepare_config(settings, local, 2).await.unwrap();
+    service.publish_config(candidate, 3);
+    assert!(service.state.lock().unwrap().index_pin.is_none());
+    service
+        .store
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .collect(unix_secs(), false)
+        .unwrap();
+    assert_eq!(fs::read_dir(indexes).unwrap().count(), 0);
 }

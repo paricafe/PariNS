@@ -1,7 +1,7 @@
 # PariNS updater contract v1
 [Unit]
 Description=PariNS update boot recovery
-Before=parins-managed.service
+Before=parins-managed.service parins-updater.service
 
 [Service]
 Type=oneshot

@@ -123,6 +123,7 @@ impl LocalRules {
         );
         let mut variants = Vec::new();
         for (group, kind, list) in rules.groups() {
+            let mut methods = HashMap::new();
             for (position, rule) in group.iter().enumerate() {
                 let invalid = |reason: &dyn std::fmt::Display| {
                     if quote {
@@ -132,8 +133,15 @@ impl LocalRules {
                     }
                 };
                 let (domain, method) = split_rule(rule, kind).map_err(|error| invalid(&error))?;
-                canonical::Key::rule(domain)
+                let key = canonical::Key::rule(domain)
                     .map_err(|_| invalid(&"expected ASCII DNS labels, not rule syntax"))?;
+                if matches!(kind, Group::BlockExact | Group::BlockSuffix)
+                    && methods
+                        .insert(key.as_slice().to_vec(), method.unwrap_or(global))
+                        .is_some_and(|previous| previous != method.unwrap_or(global))
+                {
+                    return Err(invalid(&"conflicting block method for the same domain"));
+                }
                 if let Some(method) = method
                     && !variants.contains(&method)
                 {

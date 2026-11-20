@@ -1,4 +1,4 @@
-//! TCP accept shared by the DNS TCP, DoT, DoH, admin and management listeners.
+//! Socket error recovery for DNS datagrams and TCP listener accepts.
 
 use std::{
     io,
@@ -9,29 +9,33 @@ use std::{
 
 use tokio::net::{TcpListener, TcpStream};
 
-const EXHAUSTED_PAUSE: Duration = Duration::from_millis(250);
+pub(crate) const EXHAUSTED_PAUSE: Duration = Duration::from_millis(250);
 const EXHAUSTED_LOG_INTERVAL: Duration = Duration::from_secs(60);
 static EXHAUSTED_LOGGED: Mutex<Option<Instant>> = Mutex::new(None);
 
-fn log_exhausted(error: &io::Error) {
+pub(crate) fn log_exhausted(operation: &str, error: &io::Error) {
     let mut logged = EXHAUSTED_LOGGED.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
     if logged.is_none_or(|at| now.duration_since(at) >= EXHAUSTED_LOG_INTERVAL) {
         *logged = Some(now);
-        eprintln!(
-            "PariNS accept paused: {error}; raise the open-file limit or lower max_tcp_connections"
-        );
+        if operation == "TCP accept" {
+            eprintln!(
+                "PariNS accept paused: {error}; raise the open-file limit or lower max_tcp_connections"
+            );
+        } else {
+            eprintln!("PariNS {operation} paused: {error}");
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Recovery {
+pub(crate) enum Recovery {
     Retry,
     Pause,
     Fatal,
 }
 
-fn recovery(error: &io::Error) -> Recovery {
+pub(crate) fn recovery(error: &io::Error) -> Recovery {
     use io::ErrorKind::*;
     if matches!(
         error.kind(),
@@ -57,11 +61,7 @@ fn recovery(error: &io::Error) -> Recovery {
             Errno::EMFILE | Errno::ENFILE | Errno::ENOBUFS => {
                 return Recovery::Pause;
             }
-            Errno::EPROTO
-            | Errno::ENOPROTOOPT
-            | Errno::EHOSTDOWN
-            | Errno::EOPNOTSUPP
-            | Errno::EPERM => return Recovery::Retry,
+            Errno::EPROTO | Errno::EHOSTDOWN => return Recovery::Retry,
             #[cfg(target_os = "linux")]
             Errno::ENONET => return Recovery::Retry,
             _ => {}
@@ -70,23 +70,56 @@ fn recovery(error: &io::Error) -> Recovery {
     Recovery::Fatal
 }
 
-pub(crate) async fn accept(listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
-    accept_with(|| listener.accept()).await
+fn accept_recovery(error: &io::Error) -> Recovery {
+    #[cfg(unix)]
+    if let Some(code) = error.raw_os_error() {
+        use nix::errno::Errno;
+        if matches!(
+            Errno::from_raw(code),
+            Errno::ENOPROTOOPT | Errno::EOPNOTSUPP | Errno::EPERM
+        ) {
+            return Recovery::Retry;
+        }
+    }
+    recovery(error)
+}
+
+pub(crate) struct Acceptor<'a> {
+    listener: &'a TcpListener,
+    retry_at: Option<tokio::time::Instant>,
+}
+
+impl<'a> Acceptor<'a> {
+    pub(crate) fn new(listener: &'a TcpListener) -> Self {
+        Self {
+            listener,
+            retry_at: None,
+        }
+    }
+
+    pub(crate) async fn accept(&mut self) -> io::Result<(TcpStream, SocketAddr)> {
+        accept_with(&mut self.retry_at, || self.listener.accept()).await
+    }
 }
 
 async fn accept_with<T, F: Future<Output = io::Result<T>>>(
+    retry_at: &mut Option<tokio::time::Instant>,
     mut next: impl FnMut() -> F,
 ) -> io::Result<T> {
     loop {
+        if let Some(at) = *retry_at {
+            tokio::time::sleep_until(at).await;
+            *retry_at = None;
+        }
         let error = match next().await {
             Ok(accepted) => return Ok(accepted),
             Err(error) => error,
         };
-        match recovery(&error) {
+        match accept_recovery(&error) {
             Recovery::Retry => {}
             Recovery::Pause => {
-                log_exhausted(&error);
-                tokio::time::sleep(EXHAUSTED_PAUSE).await;
+                log_exhausted("TCP accept", &error);
+                *retry_at = Some(tokio::time::Instant::now() + EXHAUSTED_PAUSE);
             }
             Recovery::Fatal => return Err(error),
         }
@@ -120,7 +153,7 @@ mod tests {
             }
             for errno in [Errno::ECONNABORTED, Errno::EPROTO, Errno::EPERM] {
                 let error = io::Error::from_raw_os_error(errno as i32);
-                assert_eq!(recovery(&error), Recovery::Retry, "{errno}");
+                assert_eq!(accept_recovery(&error), Recovery::Retry, "{errno}");
             }
             for errno in [Errno::EBADF, Errno::EINVAL, Errno::ENOTSOCK] {
                 let error = io::Error::from_raw_os_error(errno as i32);
@@ -141,7 +174,10 @@ mod tests {
             io::ErrorKind::ConnectionReset,
         ]);
         script.push_back(Ok(7));
-        let accepted = accept_with(|| std::future::ready(script.pop_front().unwrap())).await;
+        let accepted = accept_with(&mut None, || {
+            std::future::ready(script.pop_front().unwrap())
+        })
+        .await;
         assert_eq!(accepted.unwrap(), 7);
         assert_eq!(started.elapsed(), EXHAUSTED_PAUSE);
 
@@ -150,8 +186,29 @@ mod tests {
             io::ErrorKind::InvalidInput,
         ]);
         script.push_back(Ok(7));
-        let failed = accept_with(|| std::future::ready(script.pop_front().unwrap())).await;
+        let failed = accept_with(&mut None, || {
+            std::future::ready(script.pop_front().unwrap())
+        })
+        .await;
         assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert_eq!(script.len(), 1, "a fatal error ends accepting");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_accept_preserves_the_remaining_exhaustion_pause() {
+        let mut retry_at = None;
+        let mut script = [Err(io::ErrorKind::OutOfMemory.into()), Ok(7)].into_iter();
+        let start = tokio::time::Instant::now();
+        {
+            let attempt = accept_with(&mut retry_at, || std::future::ready(script.next().unwrap()));
+            tokio::pin!(attempt);
+            assert!(futures_util::poll!(&mut attempt).is_pending());
+        }
+        assert_eq!(retry_at, Some(start + EXHAUSTED_PAUSE));
+        tokio::time::advance(EXHAUSTED_PAUSE / 2).await;
+        let accepted =
+            accept_with(&mut retry_at, || std::future::ready(script.next().unwrap())).await;
+        assert_eq!(accepted.unwrap(), 7);
+        assert_eq!(start.elapsed(), EXHAUSTED_PAUSE);
     }
 }

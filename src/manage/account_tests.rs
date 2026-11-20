@@ -138,7 +138,7 @@ async fn reads_during_blocked_preparation() {
     assert_eq!(failed["dns_health"]["state"], "failed");
     assert!(failed["cache"].is_null());
     drop(manager);
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
     assert!(
         resolver.upgrade().is_none(),
         "observation must not retain a stopped Resolver"
@@ -166,7 +166,7 @@ async fn status_marks_an_in_progress_stop_without_reporting_an_exit_or_readiness
     let started = shared.observation.status();
     assert_eq!(started["lifecycle_phase"], "stable");
     assert_eq!(started["dns_health"]["ready"], true);
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -182,7 +182,7 @@ async fn status_does_not_report_an_exit_when_health_has_advanced_past_its_metada
     assert_eq!(status["lifecycle_phase"], "starting");
     assert_eq!(status["dns_health"]["ready"], false);
     assert!(status["last_error"].is_null());
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 async fn request(
@@ -317,7 +317,7 @@ async fn configuration_impact_matches_validation_and_runtime_ownership() {
             impact.restart_required()
         );
     }
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -357,7 +357,7 @@ async fn prepared_configuration_rechecks_revision_and_recovers_an_exited_hot_tar
     );
     assert!(manager.status()["generation"].as_u64().unwrap() > generation);
     assert_eq!(shared.observation.status()["lifecycle_phase"], "stable");
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -425,7 +425,7 @@ async fn credential_rotation_rejects_invalid_input_and_preserves_failed_save_and
             .unwrap(),
         json!({"username":"admin"})
     );
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -533,7 +533,7 @@ async fn credential_rotation_preserves_runtime_cache_and_configuration_envelope(
             .0,
         StatusCode::UNAUTHORIZED
     );
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -564,7 +564,7 @@ async fn credential_rotation_rejects_late_old_password_login_without_issuing_ses
     resume.send(()).unwrap();
     assert_eq!(login.await.unwrap().unwrap_err().1, "LOGIN_FAILED");
     assert!(shared.active.lock().unwrap().sessions.is_empty());
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -610,7 +610,7 @@ async fn credential_rotation_preserves_configuration_completed_during_password_w
     assert_eq!(saved.revision, 3);
     assert_eq!(saved.toml, next_source);
     assert_eq!(saved.previous.as_deref(), Some(source.as_str()));
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -671,7 +671,7 @@ async fn credential_rotation_rechecks_session_after_hash_and_obeys_freeze() {
         "update_in_progress"
     );
     assert_eq!(shared.active.lock().unwrap().sessions.len(), 1);
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -704,7 +704,7 @@ async fn credential_rotation_protected_admission_rechecks_session_and_transport_
             }
         );
         assert_eq!(shared.mutation.available_permits(), 1);
-        shared.manager.lock().await.terminal_shutdown().await;
+        shared.manager.lock().await.terminal_shutdown(true).await;
     }
 }
 
@@ -739,7 +739,7 @@ async fn credential_rotation_rejects_old_session_paused_before_mutation_admissio
         caller.await.unwrap().unwrap_err().0,
         StatusCode::UNAUTHORIZED
     );
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -770,7 +770,7 @@ async fn credential_rotation_same_values_still_replace_hash_and_revoke_sessions(
     assert_ne!(saved.password_hash, old_hash);
     assert!(store::verify_password(&saved.password_hash, PASSWORD));
     assert!(shared.active.lock().unwrap().sessions.is_empty());
-    manager.terminal_shutdown().await;
+    manager.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -823,7 +823,7 @@ async fn credential_rotation_keeps_admitted_filter_work_and_manual_update_reques
     }
     assert!(filters.snapshot().operation.is_none());
     assert_eq!(filters.snapshot().config_revision, 2);
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }
 
 #[tokio::test]
@@ -924,5 +924,5 @@ async fn operations_other_than_configuration_saves_need_no_client_revision() {
     .await
     .unwrap_err();
     assert_eq!((stale.0, stale.1), (StatusCode::CONFLICT, "REVISION"));
-    shared.manager.lock().await.terminal_shutdown().await;
+    shared.manager.lock().await.terminal_shutdown(true).await;
 }

@@ -388,6 +388,100 @@ async fn doq_authenticated_preserves_edns() {
     task.await.unwrap();
 }
 
+fn doq_client(transport: quinn::TransportConfig) -> (quinn::Endpoint, Arc<Pool>) {
+    let (_dir, ca, tls) = identity(b"doq");
+    let endpoint = quic_endpoint(&tls, transport);
+    let mut settings = config(
+        vec![format!("quic://{}", endpoint.local_addr().unwrap())],
+        Mode::Weighted,
+    );
+    settings.upstreams.ca_file = Some(ca);
+    (endpoint, client(&settings).unwrap())
+}
+
+async fn answer_doq(connection: &quinn::Connection) {
+    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+    let received = Message::from_vec(&read(&mut recv).await).unwrap();
+    let response = verify_forwarded(received, &query());
+    write(&mut send, &response.to_vec().unwrap()).await;
+    send.finish().unwrap();
+}
+
+#[tokio::test]
+async fn doq_partial_write_cancellation_resets_only_its_stream() {
+    let mut transport = quinn::TransportConfig::default();
+    transport.stream_receive_window(1024u32.into());
+    let (endpoint, pool) = doq_client(transport);
+    let mut large = query();
+    large
+        .edns
+        .as_mut()
+        .unwrap()
+        .options_mut()
+        .insert(EdnsOption::Unknown(65001, vec![7; 50_000]));
+    let mut pending = Box::pin(exchange(&pool, &large));
+    let (connection, mut recv, send) = tokio::select! {
+        result = &mut pending => panic!("large request finished early: {:?}", result.err()),
+        partial = async {
+            let connection = endpoint.accept().await.unwrap().await.unwrap();
+            let (send, mut recv) = connection.accept_bi().await.unwrap();
+            assert!(recv.read_u16().await.unwrap() > 50_000);
+            (connection, recv, send)
+        } => partial,
+    };
+    let q = query();
+    let sibling = async { tokio::join!(exchange(&pool, &q), answer_doq(&connection)).0 };
+    tokio::select! {
+        result = &mut pending => panic!("large request finished early: {:?}", result.err()),
+        result = sibling => assert_eq!(result.unwrap().message.id, q.id),
+    }
+    drop(pending);
+    let err = timeout(Duration::from_secs(2), recv.read_to_end(65537))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(err, quinn::ReadToEndError::Read(quinn::ReadError::Reset(code)) if code == 3u32.into())
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(2), send.stopped())
+            .await
+            .unwrap()
+            .unwrap(),
+        Some(3u32.into())
+    );
+    let (next, ()) = tokio::join!(exchange(&pool, &q), answer_doq(&connection));
+    assert_eq!(next.unwrap().message.id, q.id);
+}
+
+#[tokio::test]
+async fn doq_reconnects_when_reused_connection_closes_before_stream_open() {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(1u32.into());
+    let (endpoint, pool) = doq_client(transport);
+    let q = query();
+    let (first, connection) = tokio::join!(exchange(&pool, &q), async {
+        let connection = endpoint.accept().await.unwrap().await.unwrap();
+        connection.set_max_concurrent_bi_streams(0u32.into());
+        answer_doq(&connection).await;
+        connection
+    });
+    assert_eq!(first.unwrap().message.id, q.id);
+    let mut next = Box::pin(exchange(&pool, &q));
+    assert!(futures_util::poll!(&mut next).is_pending());
+    connection.close(0u32.into(), b"idle");
+    let (result, replacement) = tokio::join!(
+        next,
+        timeout(Duration::from_secs(2), async {
+            let replacement = endpoint.accept().await.unwrap().await.unwrap();
+            answer_doq(&replacement).await;
+            replacement
+        })
+    );
+    assert_eq!(result.unwrap().message.id, q.id);
+    assert!(replacement.is_ok());
+}
+
 #[tokio::test]
 async fn bootstrap_resolved_self_loop_is_rejected_before_dns_send() {
     use hickory_proto::rr::{RData, Record, rdata::A};
@@ -473,7 +567,11 @@ async fn encrypted_upstreams_reject_untrusted_certificate() {
 
 #[tokio::test]
 async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
-    use hickory_proto::rr::{RData, Record, rdata::A};
+    use hickory_proto::rr::{
+        RData, Record,
+        rdata::{A, CNAME},
+    };
+    use parins::upstreams::diagnostics::{Operation, Outcome, Stage};
     let (address, upstream) = udp().await;
     let bootstrap = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let bootstrap_address = bootstrap.local_addr().unwrap();
@@ -481,8 +579,27 @@ async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
         vec![format!("udp://resolver.test:{}", address.port())],
         Mode::Weighted,
     );
-    config.upstreams.bootstrap = vec![bootstrap_address];
+    let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    config.upstreams.bootstrap = vec![first.local_addr().unwrap(), bootstrap_address];
     let task = tokio::spawn(async move {
+        for _ in 0..2 {
+            let mut bytes = [0; 512];
+            let (n, peer) = first.recv_from(&mut bytes).await.unwrap();
+            let mut reply = Message::from_vec(&bytes[..n]).unwrap();
+            reply.metadata.message_type = MessageType::Response;
+            let owner = reply.queries[0].name().clone();
+            if reply.queries[0].query_type() == RecordType::A {
+                reply.metadata.response_code = ResponseCode::ServFail;
+                reply.add_answer(Record::from_rdata(owner, 0, RData::A(A::new(127, 0, 0, 2))));
+            } else {
+                reply.add_answer(Record::from_rdata(
+                    owner,
+                    0,
+                    RData::CNAME(CNAME(Name::from_ascii("alias.test.").unwrap())),
+                ));
+            }
+            first.send_to(&reply.to_vec().unwrap(), peer).await.unwrap();
+        }
         for _ in 0..2 {
             let mut bytes = [0; 65535];
             let (n, peer) = bootstrap.recv_from(&mut bytes).await.unwrap();
@@ -515,11 +632,34 @@ async fn explicit_bootstrap_resolves_hostname_and_caches_within_ttl() {
         );
     });
     let client = client(&config).unwrap();
-    for _ in 0..2 {
-        exchange(&client, &query()).await.unwrap();
-    }
+    let query = query();
+    let operations = std::array::from_fn::<_, 3, _>(|_| Operation::new(true, None));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let (first, second) = tokio::join!(
+        client.exchange_observed(&query, deadline, &operations[0]),
+        client.exchange_observed(&query, deadline, &operations[1]),
+    );
+    first.unwrap();
+    second.unwrap();
+    client
+        .exchange_observed(&query, deadline, &operations[2])
+        .await
+        .unwrap();
+    let traces = operations.map(|operation| operation.trace().unwrap());
+    assert_eq!(traces[2].attempts.len(), 1);
+    let attempts: Vec<_> = traces.iter().flat_map(|trace| &trace.attempts).collect();
+    assert_eq!(attempts.len(), 4);
+    let bootstrap: Vec<_> = attempts
+        .into_iter()
+        .filter(|attempt| attempt.protocol.is_none())
+        .collect();
+    assert_eq!(bootstrap.len(), 1);
+    assert_eq!(
+        (bootstrap[0].stage, bootstrap[0].outcome),
+        (Stage::Bootstrap, Outcome::Succeeded)
+    );
     task.await.unwrap();
-    assert_eq!(upstream.await.unwrap(), 2);
+    assert_eq!(upstream.await.unwrap(), 3);
 }
 
 #[test]
@@ -677,7 +817,11 @@ async fn large_doh_queries_use_post_and_preserve_unknown_edns_on_h2_and_h3() {
             .insert(EdnsOption::Unknown(65001, vec![7; 50_000]));
         let expected = q.clone();
         let (address, server) = if h3 {
-            let endpoint = h3_endpoint(&tls);
+            let endpoint = quic_endpoint(&tls, {
+                let mut transport = quinn::TransportConfig::default();
+                transport.stream_receive_window(2048u32.into());
+                transport
+            });
             let address = endpoint.local_addr().unwrap();
             let server = tokio::spawn(async move {
                 let connection = endpoint.accept().await.unwrap().await.unwrap();
@@ -691,6 +835,7 @@ async fn large_doh_queries_use_post_and_preserve_unknown_edns_on_h2_and_h3() {
                 assert_eq!(request.uri().path(), "/dns-query");
                 assert!(request.uri().query().is_none());
                 assert_eq!(request.headers()["content-type"], "application/dns-message");
+                tokio::time::sleep(Duration::from_millis(350)).await;
                 let mut wire = Vec::new();
                 while let Some(mut data) = stream.recv_data().await.unwrap() {
                     wire.extend_from_slice(&data.copy_to_bytes(data.remaining()));
@@ -774,12 +919,14 @@ async fn large_doh_queries_use_post_and_preserve_unknown_edns_on_h2_and_h3() {
 }
 
 fn h3_endpoint(tls: &rustls::ServerConfig) -> quinn::Endpoint {
+    quic_endpoint(tls, quinn::TransportConfig::default())
+}
+
+fn quic_endpoint(tls: &rustls::ServerConfig, transport: quinn::TransportConfig) -> quinn::Endpoint {
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls.clone()).unwrap();
-    quinn::Endpoint::server(
-        quinn::ServerConfig::with_crypto(Arc::new(crypto)),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .unwrap()
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    server.transport_config(Arc::new(transport));
+    quinn::Endpoint::server(server, "127.0.0.1:0".parse().unwrap()).unwrap()
 }
 
 async fn dual_endpoint(tls: &rustls::ServerConfig) -> (quinn::Endpoint, TcpListener) {
@@ -1116,6 +1263,17 @@ async fn dot_slot_wait_and_h3_connecting_wait_consume_original_deadline() {
     assert_eq!(trace.attempts[1].reason, Some(Reason::Deadline));
     first.abort();
     let _ = first.await;
+    let operation = Operation::new(true, None);
+    let _ = client
+        .exchange_observed(
+            &query(),
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            &operation,
+        )
+        .await;
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts[0].stage, Stage::QuicHandshake);
+    assert_eq!(trace.attempts[0].reason, Some(Reason::Deadline));
 }
 
 #[tokio::test]
@@ -2226,6 +2384,86 @@ async fn h2_silently_dead_connection_is_retired_by_keepalive() {
     );
     server.abort();
     relay.abort();
+}
+
+#[tokio::test]
+async fn h3_request_waiting_for_a_stream_has_the_full_deadline() {
+    use bytes::Bytes;
+    use parins::upstreams::diagnostics::{ActualProtocol, Operation, Outcome};
+    use tokio::sync::oneshot;
+
+    let (_dir, ca, tls) = identity(b"h3");
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(1u32.into());
+    let endpoint = quic_endpoint(&tls, transport);
+    let address = endpoint.local_addr().unwrap();
+    let (first_accepted, ready) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let connection = endpoint.accept().await.unwrap().await.unwrap();
+        let mut server = h3::server::builder()
+            .build::<_, Bytes>(h3_quinn::Connection::new(connection.clone()))
+            .await
+            .unwrap();
+        for start in [Some(first_accepted), None] {
+            let (request, mut stream) = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            if let Some(start) = start {
+                start.send(()).unwrap();
+                tokio::time::sleep(Duration::from_millis(375)).await;
+            }
+            let query = doh_get_query(request.uri());
+            let response = parins::protocol::error_response(&query, ResponseCode::NoError);
+            stream
+                .send_response(
+                    http::Response::builder()
+                        .header("content-type", "application/dns-message")
+                        .body(())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            stream
+                .send_data(Bytes::from(response.to_vec().unwrap()))
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+        }
+        let _ = server.accept().await;
+    });
+    let mut config = config(vec![format!("https://{address}")], Mode::Weighted);
+    config.upstreams.ca_file = Some(ca);
+    config.upstreams.prefer_h3 = true;
+    let client = client(&config).unwrap();
+    let first = tokio::spawn({
+        let client = client.clone();
+        async move { exchange(&client, &query()).await }
+    });
+    timeout(Duration::from_secs(1), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let operation = Operation::new(true, None);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    client
+        .exchange_observed(&query(), deadline, &operation)
+        .await
+        .unwrap();
+    first.await.unwrap().unwrap();
+    let trace = operation.trace().unwrap();
+    assert_eq!(trace.attempts.len(), 1);
+    assert_eq!(trace.attempts[0].protocol, Some(ActualProtocol::Doh3));
+    assert_eq!(trace.attempts[0].outcome, Outcome::Succeeded);
+    drop(client);
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

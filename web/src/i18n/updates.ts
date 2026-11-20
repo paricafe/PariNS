@@ -53,6 +53,7 @@ export const updatesMessages = {
   manual_recovery_required: ['自动更新和恢复都没有完成，配置修改已锁定。请先确认 DNS 服务状态，再用官方安装器重新安装当前或更新的版本；安装通过检查后会自动解锁。', "The automatic update and recovery didn't finish, so configuration changes are locked. Check the DNS service, then reinstall the current or a newer version with the official installer; changes unlock once the install passes its checks."],
   installation_pending: ['安装器正在检查新安装，完成后状态会自动更新。', 'The installer is checking the new installation; the status updates when it finishes.'],
   superseded_by_installation: ['已被一次通过检查的重新安装取代。', 'Superseded by a reinstall that passed its checks.'],
+  update_not_started: ['未查到这次更新的记录。请检查更新状态后重试。', 'No record of this update was found. Check the update status and try again.'],
   update_state_unavailable: ['无法可靠保存更新进度。请检查数据目录所在的磁盘。', "Update progress can't be saved reliably. Check the disk that holds the data directory."],
   network_error: ['无法连接官方发布服务。请检查服务器的网络后再试。', "Couldn't reach the official release service. Check the server's network and try again."],
   connect_timeout: ['连接官方发布服务超时。请检查服务器的网络后再试。', "Connecting to the official release service timed out. Check the server's network and try again."],

@@ -361,15 +361,18 @@ impl Index {
                             group == 0 || node.sources[0] == NONE,
                             "derived index redundant exact"
                         );
-                    } else {
+                    } else if group == 2 {
                         ensure!(
                             frame.block_suffix != *source,
                             "derived index redundant suffix child"
                         );
-                        ensure!(
-                            group == 2 || node.sources[2] != *source,
-                            "derived index redundant exact"
-                        );
+                    } else {
+                        let cover = if node.sources[2] == NONE {
+                            frame.block_suffix
+                        } else {
+                            node.sources[2]
+                        };
+                        ensure!(cover != *source, "derived index redundant exact");
                     }
                 }
                 visit(&key[..end], &node.sources)?;

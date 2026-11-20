@@ -60,13 +60,22 @@ fn source_input(settings: &SourceSettings, record: SourceRecord, file: File) -> 
         file,
     })
 }
-fn limits(settings: &Settings, retained: usize) -> Result<Limits> {
+pub(crate) fn policy_limits(settings: &Settings, retained_bytes: usize) -> Result<Limits> {
+    let retained_bytes = if settings.effective().next().is_some() {
+        retained_bytes
+            .checked_add(COORDINATOR_BYTES)
+            .context(Failure::new("subscription_memory_limit"))?
+    } else {
+        retained_bytes
+    };
+    ensure!(
+        retained_bytes <= settings.max_memory_bytes,
+        Failure::new("subscription_memory_limit")
+    );
     Ok(Limits {
         max_rules: settings.max_rules,
         max_memory_bytes: settings.max_memory_bytes,
-        retained_bytes: retained
-            .checked_add(COORDINATOR_BYTES)
-            .context(Failure::new("subscription_memory_limit"))?,
+        retained_bytes,
     })
 }
 fn input_limits(inputs: &[Input], local: &Policy, settings: &Settings) -> Result<()> {
@@ -94,6 +103,7 @@ fn compile_inputs(
     limits: Limits,
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<Policy> {
+    check()?;
     let mut builder = Builder::new(limits)?;
     local.append_to(&mut builder)?;
     let responses: Vec<_> = inputs.iter().map(|i| i.response).collect();
@@ -124,10 +134,11 @@ fn compile_inputs(
             kind: ErrorKind::Cancelled,
         })
     };
-    let index = builder
-        .prepare_with_check(&mut cancelled)?
-        .finish_radix_with_check(cancelled)?;
-    Ok(local.aggregate(index, ids, responses))
+    let built = builder
+        .prepare_with_check(&mut cancelled)
+        .and_then(|prepared| prepared.finish_radix_with_check(cancelled));
+    check()?;
+    Ok(local.aggregate(built?, ids, responses))
 }
 
 pub(super) fn local_material(local: &Policy, settings: &Settings) -> Result<Material> {
@@ -166,19 +177,10 @@ pub(super) fn compile(
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<Material> {
     check()?;
+    let budget = policy_limits(settings, retained)?;
     if settings.effective().next().is_none() {
-        ensure!(
-            retained <= settings.max_memory_bytes,
-            Failure::new("subscription_memory_limit")
-        );
         return local_material(local, settings);
     }
-    ensure!(
-        retained
-            .checked_add(COORDINATOR_BYTES)
-            .is_some_and(|n| n <= settings.max_memory_bytes),
-        Failure::new("subscription_memory_limit")
-    );
     let sources: Vec<_> = settings.effective().collect();
     let mut inputs = Vec::with_capacity(sources.len());
     let mut source_pins = Vec::with_capacity(sources.len());
@@ -203,8 +205,7 @@ pub(super) fn compile(
     let name = hex(index_digest);
     let ids = local.aggregate_ids(inputs.iter().map(|i| i.id.clone()));
     let responses: Vec<_> = inputs.iter().map(|i| i.response).collect();
-    let budget = limits(settings, retained)?;
-    if let Ok(Some(file)) = store.read_index(&name, settings.max_memory_bytes as u64)
+    if let Some(file) = store.read_index(&name, settings.max_memory_bytes as u64)?
         && let Ok(index) = Index::read_from_with_check(file, index_digest, &ids, budget, &mut check)
     {
         return Ok(Material {
@@ -227,10 +228,16 @@ pub(super) fn compile(
     let max_bytes = (policy.index_bytes() as u64)
         .checked_add(4096)
         .context(Failure::new("subscription_disk_limit"))?;
-    store.write_index(&name, max_bytes, |out| {
-        policy.write_index(out, index_digest)
-    })?;
-    let index_pin = Some(store.pin_index(&name)?);
+    let index_pin = match store
+        .write_index(&name, max_bytes, |out| {
+            policy.write_index(out, index_digest)
+        })
+        .and_then(|_| store.pin_index(&name))
+    {
+        Ok(pin) => Some(pin),
+        Err(error) if super::super::store::is_disk_limit(&error) => None,
+        Err(error) => return Err(error),
+    };
     Ok(Material {
         policy,
         material_digest: input_digest,
@@ -258,13 +265,7 @@ pub fn read_only(path: &Path, settings: &Settings, local: &Policy) -> Result<Mat
     if settings.effective().next().is_none() {
         return local_material(local, settings);
     }
-    ensure!(
-        local
-            .owned_bytes()
-            .checked_add(COORDINATOR_BYTES)
-            .is_some_and(|n| n <= settings.max_memory_bytes),
-        Failure::new("subscription_memory_limit")
-    );
+    let budget = policy_limits(settings, local.owned_bytes())?;
     let view = Store::read_only(path).map_err(|_| {
         Failure::new(if !path.exists() {
             "subscription_material_missing"
@@ -284,8 +285,7 @@ pub fn read_only(path: &Path, settings: &Settings, local: &Policy) -> Result<Mat
     let index_digest = index_digest(local, &inputs);
     let ids = local.aggregate_ids(inputs.iter().map(|i| i.id.clone()));
     let responses: Vec<_> = inputs.iter().map(|i| i.response).collect();
-    let budget = limits(settings, local.owned_bytes())?;
-    if let Ok(Some(file)) = view.read_index(&hex(index_digest), settings.max_memory_bytes as u64)
+    if let Some(file) = view.read_index(&hex(index_digest), settings.max_memory_bytes as u64)?
         && let Ok(index) = Index::read_from(file, index_digest, &ids, budget)
     {
         return Ok(Material {

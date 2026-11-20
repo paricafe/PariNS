@@ -197,3 +197,43 @@ async fn only_recursive_mode_exports_recursion_metrics() {
     let forward = Resolver::try_from_config(&config(ResolutionMode::Forward)).unwrap();
     assert!(forward.recursion_metrics().is_empty());
 }
+
+#[tokio::test]
+async fn recursive_mode_refuses_rd_zero_before_cache_or_recursion() {
+    let resolver = Resolver::try_from_config(&config(ResolutionMode::Recursive)).unwrap();
+    let mut query = query("cached.test.", Some(true), true);
+    query.metadata.recursion_desired = false;
+    let response = answer(&resolver, &query, None).await;
+    assert_eq!(response.response_code, ResponseCode::Refused);
+    assert_eq!(response.id, query.id);
+    assert!(!response.recursion_desired && response.answers.is_empty());
+    let diagnostics = resolver.recursion_diagnostics().unwrap();
+    assert_eq!(diagnostics["resolutions"]["started"], 0);
+    assert_eq!(diagnostics["outbound"]["sent"], 0);
+}
+
+#[tokio::test]
+async fn forward_mode_sends_rd_zero_to_the_upstream() {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let resolver = common::resolver(socket.local_addr().unwrap(), Duration::from_secs(1));
+    let mut query = query("forward.test.", None, false);
+    query.metadata.recursion_desired = false;
+    let upstream = async {
+        let mut packet = [0; 1232];
+        let (len, peer) = socket.recv_from(&mut packet).await.unwrap();
+        let request = protocol::decode(&packet[..len]).unwrap();
+        assert!(!request.recursion_desired);
+        let response = validated(&request, None);
+        socket
+            .send_to(&response.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    };
+    let (response, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(reply(&resolver, &query), upstream)
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.response_code, ResponseCode::NoError);
+    assert_eq!(response.answers.len(), 1);
+}

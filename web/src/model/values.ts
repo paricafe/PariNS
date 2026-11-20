@@ -28,16 +28,17 @@ export function convertFieldValue(field: SettingField, draft: RawFieldValue): un
   if (field.type === "nullable") return draft.trim() || null;
   if (field.type === "number") {
     const text = draft.trim();
-    if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(Number(text))) {
+    if (!/^[0-9]+$/.test(text)) {
       throw new ModelError("settings.validation.integer", field.path);
     }
-    const value = Number(text);
-    if ((field.min !== undefined && value < field.min) || (field.max !== undefined && value > field.max)) {
+    const value = BigInt(text);
+    if ((field.min !== undefined && value < BigInt(field.min)) || (field.max !== undefined && value > BigInt(field.max))) {
       const family = unitFamily(field.path);
       if (family) throw new ModelError("settings.validation.rangeUnit", field.path, { min: field.min ?? 0, max: field.max ?? 0, family });
       throw new ModelError("settings.validation.range", field.path, { min: field.min ?? 0, max: field.max ?? 0 });
     }
-    return value;
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new ModelError("settings.validation.integer", field.path);
+    return Number(value);
   }
   if (field.type === "select" && !field.options?.some(([value]) => value === draft)) {
     throw new ModelError("settings.validation.check", field.path);

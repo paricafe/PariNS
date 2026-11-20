@@ -560,6 +560,7 @@ if "$filter_subscriptions"; then
     fs_offline_remove
 fi
 
+acceptance_stage=interrupted-intent-abort-recovery
 old_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
 recovery_invocation=$(systemctl show --property=InvocationID --value parins-update-recovery.service)
 sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
@@ -680,6 +681,7 @@ sudo cmp "$binary" /opt/parins-managed/parins
 sudo cmp "$fixture/state-copy" /var/lib/parins-managed/state.json
 check_dns
 if "$filter_subscriptions"; then
+    acceptance_stage=filter-subscriptions-enospc-recovery
     "$fs_node" "$repo/scripts/test-filter-subscriptions-systemd.mjs" unfrozen "$fixture"
     fs_fault_pid=$(systemctl show --property=MainPID --value parins-managed.service)
     fs_fault_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
@@ -818,6 +820,7 @@ PY
     fs_fault_identity
     printf '%s\n' 'FS7 download, activation, DNS, DynamicUser, offline LKG, UP freeze and actual staging-write ENOSPC/recovery passed. Performance remains a separate gate.'
 fi
+acceptance_stage=online-commit
 online_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
 sudo systemctl stop parins-updater.path
 sudo python3 - "$online_invocation" "$revision" <<'PY'
@@ -893,6 +896,7 @@ http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: applicat
 binding=$(jq -er '.session.binding' "$fixture/response.json")
 check_dns
 printf '%s\n' 'Online Commit, swap, Type=simple start and readiness passed.'
+acceptance_stage=installer-wait-verify
 sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
 restore_nonce=33333333333333333333333333333333
 sudo python3 - "$restore_nonce" "$revision" <<'PY'
@@ -936,6 +940,7 @@ sudo /usr/libexec/parins-updater install-verify "$restore_nonce"
 sudo jq -e '.installation_pending == null and .operation.status.phase == "succeeded"' /var/lib/parins-updater/private/journal.json >/dev/null
 sudo systemctl start parins-updater.path
 printf '%s\n' 'Installer wait preserved the pending journal/status; verified completion passed.'
+acceptance_stage=manual-recovery-startup
 manual_invocation=$(systemctl show --property=InvocationID --value parins-managed.service)
 sudo systemctl stop parins-updater.path parins-managed.service parins-updater.service
 sudo python3 - "$manual_invocation" "$revision" <<'PY'
@@ -988,23 +993,30 @@ PY
 sudo /usr/libexec/parins-updater recover
 sudo systemctl start parins-managed.service
 attempt=0
-until sudo jq -e '.operation_id == "11111111111111111111111111111111" and .phase_nonce == "22222222222222222222222222222222" and .request.kind == "abort"' /var/lib/parins-managed/update-request.json >/dev/null 2>&1; do
+until session >/dev/null 2>&1; do
     attempt=$((attempt + 1))
-    [ "$attempt" -lt 30 ] || { printf '%s\n' 'Recovering service did not request abort arbitration.' >&2; exit 1; }
+    [ "$attempt" -lt 30 ] || { printf '%s\n' 'ManualRequired session API did not become ready.' >&2; exit 1; }
     sleep 1
 done
-sudo systemctl start parins-updater.path
-attempt=0
-until ! sudo test -e /var/lib/parins-managed/update-request.json; do
-    attempt=$((attempt + 1))
-    [ "$attempt" -lt 30 ] || { printf '%s\n' 'ManualRequired fixture did not settle.' >&2; exit 1; }
-    sleep 1
-done
+http --max-time 15 -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' \
+    --data-binary "@$fixture/credentials.json" http://127.0.0.1:3000/api/login > "$fixture/response.json"
+binding=$(jq -er '.session.binding' "$fixture/response.json")
+http --max-time 5 -H "X-PariNS-Session: $binding" http://127.0.0.1:3000/api/updates | \
+    jq -e '.frozen == true and .active_operation == null and
+        .last_operation.operation_id == "11111111111111111111111111111111" and
+        .last_operation.phase == "manual_required"' >/dev/null
+sleep 2
+! sudo test -e /var/lib/parins-managed/update-request.json || {
+    printf '%s\n' 'ManualRequired unexpectedly created an update request.' >&2; exit 1;
+}
 sudo jq -e '.capability.reason == "manual_recovery_required" and .last_operation.phase == "manual_required"' /var/lib/parins-updater/status.json >/dev/null
-sudo jq -e '.commit_intent == "11111111111111111111111111111111"' /var/lib/parins-managed/update-state.json >/dev/null
+sudo jq -e '.commit_intent == "11111111111111111111111111111111" and
+    .operation.phase == "committing" and .operation.finished == false' /var/lib/parins-managed/update-state.json >/dev/null
+sudo systemctl start parins-updater.path
 systemctl is-active --quiet parins-updater.path
 manual_since=$(date +%s)
 install_service
+acceptance_stage=manual-recovery-reinstallation
 grep -q '^Installed\. Backup: ' "$fixture/install.log"
 systemctl is-active --quiet parins-updater.path
 attempt=0
@@ -1025,5 +1037,6 @@ binding=$(jq -er '.session.binding' "$fixture/response.json")
 http --max-time 5 -H "X-PariNS-Session: $binding" http://127.0.0.1:3000/api/updates | jq -e '.frozen == false' >/dev/null
 check_dns
 printf '%s\n' 'ManualRequired recovery by reinstallation with an active request path passed.'
+acceptance_stage=certificate-renewal
 python3 "$repo/scripts/test-certificate-renewal-systemd.py" --ephemeral-ci "$fixture" "$installer" "$binary" "$helper" "$build_info"
 printf '%s\n' 'Linux systemd ownership, setup, UDP/TCP DNS, state-preserving install, preflight rejection and interrupted-intent Abort/fence recovery passed.'

@@ -38,8 +38,15 @@ pub(super) async fn recv(
     socket: &UdpSocket,
     bytes: &mut [u8],
 ) -> io::Result<Option<(usize, SocketAddr, ReplySource)>> {
-    socket
-        .async_io(Interest::READABLE, || {
+    loop {
+        let ready = socket.ready(Interest::READABLE | Interest::ERROR).await?;
+        tokio::task::consume_budget().await;
+        let interest = if ready.is_error() {
+            Interest::ERROR
+        } else {
+            Interest::READABLE
+        };
+        match socket.try_io(interest, || {
             let mut control = ControlBuffer {
                 alignment: [],
                 bytes: [0; cmsg_space::<in_pktinfo>() + cmsg_space::<in6_pktinfo>()],
@@ -91,8 +98,11 @@ pub(super) async fn recv(
                 }
             }
             Ok(source.map(|source| (message.bytes, peer, source)))
-        })
-        .await
+        }) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            result => return result,
+        }
+    }
 }
 
 pub(super) async fn send(

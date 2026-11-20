@@ -1114,10 +1114,14 @@ mod tests {
         udp.socket().connect(peer_address).await.unwrap();
         drop(peer);
         udp.socket().send(b"probe").await.unwrap();
-        timeout(Duration::from_secs(2), udp.socket().readable())
-            .await
-            .unwrap()
-            .unwrap();
+        timeout(
+            Duration::from_secs(2),
+            udp.socket()
+                .ready(tokio::io::Interest::READABLE | tokio::io::Interest::ERROR),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         let listeners = server.listeners();
         let metrics = server.metrics().clone();

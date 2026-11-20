@@ -73,6 +73,24 @@ mod tests {
     use tokio::time::timeout;
 
     #[tokio::test]
+    async fn recv_reports_a_socket_error_without_an_incoming_datagram() {
+        let socket = Socket::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.0.connect(peer.local_addr().unwrap()).await.unwrap();
+        drop(peer);
+        socket.0.send(b"probe").await.unwrap();
+
+        let mut bytes = [0; 64];
+        let Err(error) = timeout(Duration::from_secs(2), socket.recv(&mut bytes))
+            .await
+            .unwrap()
+        else {
+            panic!("expected a UDP socket error");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[tokio::test]
     async fn truncated_datagrams_and_cancelled_reads_do_not_corrupt_the_next_reply() {
         for (bind, client_bind, ip) in [
             ("0.0.0.0:0", "127.0.0.1:0", "127.0.0.1"),

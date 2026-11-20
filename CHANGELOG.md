@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Update `quinn-proto` to 0.11.19 and `quinn-udp` to 0.5.16 to address
+  RUSTSEC-2026-0523, RUSTSEC-2026-0524, and RUSTSEC-2026-0538.
 - Drop privileges and close inherited descriptors inside the trusted installer helper before
   executing the candidate.
 - Limit management connections per source, bound request body time separately, and keep

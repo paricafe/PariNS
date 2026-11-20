@@ -1,0 +1,49 @@
+src/transport/udp/packet_info.rs
+  675a43c17c085896 41-49,101-105
+src/transport/udp.rs
+  675a43c17c085896 76-92
+CHANGELOG.md
+  675a43c17c085896 15-16
+src/server.rs
+  675a43c17c085896 1117-1124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.10",
+  "base_commit_sha": "38374758ffa75c8bd3a705eadf9dcf6ae9ed447e",
+  "prompts": {
+    "675a43c17c085896": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f8c4-6c84-7c60-8030-004972647177",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "Natsuki-Kaede",
+      "messages": [],
+      "total_additions": 65,
+      "total_deletions": 31,
+      "accepted_lines": 51,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "src/transport/udp.rs": {
+          "additions": 18,
+          "accepted_lines": 18
+        },
+        "CHANGELOG.md": {
+          "additions": 2,
+          "accepted_lines": 2
+        },
+        "src/transport/udp/packet_info.rs": {
+          "additions": 14,
+          "deletions": 4,
+          "accepted_lines": 14
+        },
+        "src/server.rs": {
+          "additions": 31,
+          "deletions": 27,
+          "accepted_lines": 17
+        }
+      }
+    }
+  }
+}

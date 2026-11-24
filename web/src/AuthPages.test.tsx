@@ -137,6 +137,6 @@ describe('first-run setup wizard', () => {
     await submitted('The password needs at least 12 characters.');
     fireEvent.change(screen.getByLabelText('Admin password'), { target: { value: 'long-admin-password' } });
     fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'other-admin-password' } });
-    await submitted("The new passwords don't match.");
+    await submitted("The passwords don't match.");
   });
 });

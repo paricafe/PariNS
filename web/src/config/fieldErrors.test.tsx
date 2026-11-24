@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ModelError } from '../model';
-import { ConfigErrorNotice, fieldErrorTarget } from './fieldErrors';
+import { ConfigErrorNotice, fieldErrorTarget, formatFieldPath } from './fieldErrors';
 
 afterEach(cleanup);
 
@@ -15,6 +15,14 @@ describe('configuration field errors', () => {
   it('targets the matching listener endpoint input', () => {
     expect(fieldErrorTarget('dot.listen.port')).toMatchObject({ id: 'setting-dot-listen-port' });
     expect(fieldErrorTarget('dot.listen.address')).toMatchObject({ id: 'setting-dot-listen-address' });
+  });
+
+  it('maps subscription IPv4/IPv6 fields and formats readable paths', () => {
+    expect(fieldErrorTarget('filter_subscriptions.sources.0.block_ipv4')).toMatchObject({
+      page: 'filters', id: 'setting-filter_subscriptions-sources-0-block_ipv4', kind: 'source', index: 0,
+    });
+    expect(formatFieldPath('upstreams.max_parallel', 'en')).toBe('Parallel upstreams');
+    expect(formatFieldPath('filter_subscriptions.sources.1.block_ipv6', 'zh-CN')).toBe('订阅源 2 · IPv6 地址');
   });
 
   it('names the field and its page and links back from another page', () => {

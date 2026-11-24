@@ -50,11 +50,14 @@ function FieldRow({ field, language, value, onChange, disabled, issue }: { field
   </div>;
   if (field.type === 'endpoint') {
     const parts = typeof value === 'object' ? value : { address: '', port: '' };
+    const addressInvalid = issue && issue.path !== `${field.path}.port` ? true : undefined;
+    const portInvalid = issue && issue.path !== `${field.path}.address` ? true : undefined;
+    const defaultPort = field.path.startsWith('doh.') ? '443' : '853';
     return <div className="row" data-layout="wide">
       <div className="row-label"><span>{label}</span></div>
       <div className="row-control endpoint-grid">
-        <input id={`${id}-address`} aria-label={t('settings.listener.address.label')} value={parts.address} disabled={disabled} spellCheck={false} autoComplete="off" aria-invalid={invalid} aria-describedby={describedBy} placeholder={t('settings.listener.address.placeholder')} onChange={(event) => onChange({ ...parts, address: event.target.value })} />
-        <input id={`${id}-port`} aria-label={t('settings.listener.port.label')} className="port-input" value={parts.port} disabled={disabled} inputMode="numeric" spellCheck={false} autoComplete="off" aria-invalid={invalid} aria-describedby={describedBy} placeholder="853" onChange={(event) => onChange({ ...parts, port: event.target.value })} />
+        <input id={`${id}-address`} aria-label={t('settings.listener.address.label')} value={parts.address} disabled={disabled} spellCheck={false} autoComplete="off" aria-invalid={addressInvalid} aria-describedby={describedBy} placeholder={t('settings.listener.address.placeholder')} onChange={(event) => onChange({ ...parts, address: event.target.value })} />
+        <input id={`${id}-port`} aria-label={t('settings.listener.port.label')} className="port-input" value={parts.port} disabled={disabled} inputMode="numeric" spellCheck={false} autoComplete="off" aria-invalid={portInvalid} aria-describedby={describedBy} placeholder={defaultPort} onChange={(event) => onChange({ ...parts, port: event.target.value })} />
       </div>
       {/^0+$/.test(parts.port.trim()) && <small className="row-note">{t('settings.listener.port.automatic')}</small>}
       {errorNote}
@@ -199,7 +202,7 @@ export function CacheRules({ language }: { language: Language }) {
       </div>; })}</div>
       <div className="rule-actions"><button type="button" className="button quiet" aria-label={translate('views.moveRuleUp', language, number)} disabled={controlsLocked || index === 0} onClick={() => move(index, index - 1)}>↑</button>
         <button type="button" className="button quiet" aria-label={translate('views.moveRuleDown', language, number)} disabled={controlsLocked || index === rules.length - 1} onClick={() => move(index, index + 1)}>↓</button>
-        <button type="button" className="button quiet" disabled={controlsLocked} onClick={() => { keys.current = keys.current.filter((_, at) => at !== index); setRules(rules.filter((_, at) => at !== index)); }}>{t('removeRule')}</button></div>
+        <button type="button" className="button quiet danger-text" disabled={controlsLocked} onClick={() => { keys.current = keys.current.filter((_, at) => at !== index); setRules(rules.filter((_, at) => at !== index)); }}>{t('removeRule')}</button></div>
     </motion.fieldset>; })}</AnimatePresence></div>
   </section>;
 }
@@ -305,9 +308,9 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
   const variants = result?.inspection.variants ?? [];
   return <section className="panel"><h2>{t('inspectTitle')}</h2>{dirty && <p className="notice">{t('inspectActiveConfig')}</p>}
     <form onSubmit={(event) => void inspect(event)} className="fields-grid">
-      <label className="field">{t('name')}<input value={name} onChange={(event) => setName(event.target.value)} required spellCheck={false} /></label>
-      <label className="field">{t('inspectQtype')}<input value={qtype} onChange={(event) => setQtype(event.target.value)} required spellCheck={false} /></label>
-      <label className="field">{t('subnet')}<input value={subnet} onChange={(event) => setSubnet(event.target.value)} spellCheck={false} /></label>
+      <label className="field">{t('name')}<input value={name} placeholder={t('inspectNamePlaceholder')} onChange={(event) => setName(event.target.value)} required spellCheck={false} /></label>
+      <label className="field">{t('inspectQtype')}<input value={qtype} placeholder={t('inspectQtypePlaceholder')} onChange={(event) => setQtype(event.target.value)} required spellCheck={false} /></label>
+      <label className="field">{t('subnet')}<input value={subnet} placeholder={t('inspectSubnetPlaceholder')} onChange={(event) => setSubnet(event.target.value)} spellCheck={false} /></label>
       <details className="more-options wide"><summary>{translate('shell.moreOptions', language)}</summary>
         <div className="checkbox-row">
           <label><input type="checkbox" checked={edns} onChange={({ target }) => { setEdns(target.checked); if (!target.checked) setDnssec(false); }} />EDNS</label>
@@ -315,6 +318,7 @@ export function CacheInspect({ language, dirty }: { language: Language; dirty: b
           <label><input type="checkbox" checked={cd} onChange={({ target }) => setCd(target.checked)} />CD</label>
           <label><input type="checkbox" checked={rd} onChange={({ target }) => setRd(target.checked)} />RD</label>
         </div>
+        <small className="muted">{t('inspectFlagsHelp')}</small>
       </details>
       <button className="button primary" disabled={working} type="submit">{t('inspect')}</button>
     </form>
@@ -441,7 +445,7 @@ export function SettingsPage({ pageId, language }: { pageId: SettingPageId | 'ad
   return <div className="page-stack"><header className="page-head large-title"><div><h1>{title}</h1>{intro && <p className="muted">{intro}</p>}</div>
       <Menu label={t('shell.more')} icon={<Ellipsis size={17} aria-hidden="true" />} actions={actions} /></header>
     {error && <ConfigErrorNotice error={error} language={language} onDismiss={() => setError(null)} />}
-    {notice && <div className="notice" role="status">{notice}<button type="button" onClick={() => setNotice(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
+    {notice && <div className="notice" role="status">{notice}<button type="button" className="notice-close" onClick={() => setNotice(null)} aria-label={t('shell.dismissNotice')}>×</button></div>}
     {pageId === 'advanced' ? formPending ? <div className="notice"><p>{error ? presentIssue(error, language) : t('app.working')}</p><button type="button" className="button secondary" onClick={() => navigate(`/${errorPage}`)}>{t('app.returnToEdit')}</button></div> : <section className="panel"><div className="toml-tools button-group"><button type="button" className="button secondary" disabled={!draft || busy} onClick={check}>{t('ui.validate')}</button><TomlChanges language={language} /></div><label htmlFor="advanced-toml" className="sr-only">TOML</label><textarea id="advanced-toml" className="toml-editor" value={draft?.toml ?? ''} disabled={busy || draft?.unknownApply} spellCheck={false} onChange={(event) => setToml(event.target.value)} /></section>
       : pageId === 'cache' ? <>
         <Tabs label={title} items={cacheTabs.map((tab) => ({ value: tab, label: t(`views.cacheTab${tab[0].toUpperCase()}${tab.slice(1)}`) }))} value={cacheTab} onChange={(value) => setCacheTab(value as CacheTab)} />

@@ -13,7 +13,7 @@ export function UpstreamAttempts({ trace, language }: { trace: UpstreamTrace; la
       <p><Result value={attempt} language={language} /></p>
       {attempt.code && <p className="small"><span>{translate('reliability.code', language)}: </span><code>{attempt.code}</code></p>}
     </li>)}</ol>
-    {trace.omitted > 0 && <p className="small muted">{translate('reliability.omitted', language, { count: trace.omitted })}</p>}
+    {trace.omitted > 0 && <p className="small muted">{translate(trace.omitted === 1 ? 'reliability.omittedOne' : 'reliability.omitted', language, { count: trace.omitted })}</p>}
   </section>;
 }
 

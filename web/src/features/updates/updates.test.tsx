@@ -89,13 +89,15 @@ describe('software update presentation', () => {
     const update = screen.getByRole('button', { name: 'Update now' });
     update.focus(); fireEvent.click(update);
     expect(screen.getByRole('dialog', { name: 'Unsaved changes' }).textContent).toContain('Save or discard them before confirming the update.');
-    fireEvent.click(screen.getByRole('button', { name: 'Save my changes first' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Go back to save' }));
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(update);
     fireEvent.click(update);
     expect(mocks.confirm).not.toHaveBeenCalled();
     expect(mocks.request.mock.calls.some(([path]) => path === 'updates/apply')).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+    const discard = screen.getByRole('button', { name: 'Discard changes' });
+    expect(discard.className).toContain('destructive');
+    fireEvent.click(discard);
     await waitFor(() => expect(mocks.config.reload).toHaveBeenCalledTimes(1));
     expect(mocks.confirm).not.toHaveBeenCalled();
   });

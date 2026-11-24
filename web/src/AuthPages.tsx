@@ -134,7 +134,7 @@ export function SetupPage({ language }: { language: Language }) {
     <ol className="setup-steps" aria-label={t('setupProgress')}>{(['admin', 'network', 'review'] as const).map((key, index) => <li key={key} aria-current={step === index ? 'step' : undefined} data-done={step > index ? '' : undefined}><span>{`0${index + 1}`}</span> {t(key)}</li>)}</ol>
     <form onSubmit={(event) => void submit(event)} className="auth-form">
       {step === 0 && <>
-        <p className="muted small">{t('tokenIntro')}</p>
+        <p className="muted small">{t(window.location.protocol === 'https:' ? 'tokenIntroHttps' : 'tokenIntro')}</p>
         <label htmlFor="setup-token">{t('token')}</label><input id="setup-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} required autoComplete="off" />
         <label htmlFor="setup-username">{t('adminUsername')}</label><input id="setup-username" value={username} onChange={(event) => setUsername(event.target.value)} required maxLength={64} autoComplete="username" />
         <label htmlFor="setup-password">{t('adminPassword')}</label><input id="setup-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={12} autoComplete="new-password" aria-describedby="setup-password-help" />

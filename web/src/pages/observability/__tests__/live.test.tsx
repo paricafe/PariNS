@@ -248,7 +248,7 @@ describe('LogsPage live updates', () => {
     const { api, socket } = await mount();
     fireEvent.click(detailButton('example.test'));
     act(() => socket.push({ type: 'entries', entries: [row(43, 'buffered.test')], cursor: 43, more: false }));
-    expect(screen.getByRole('button', { name: '1 new queries' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '1 new query' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     let reject!: (reason: Error) => void;
     api.request.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
@@ -296,7 +296,7 @@ describe('LogsPage live updates', () => {
     let finish!: (value: object) => void;
     api.request.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     fireEvent.click(screen.getByRole('button', { name: 'Clear log…' }));
-    const confirm = screen.getByRole('dialog').querySelector<HTMLButtonElement>('.danger')!;
+    const confirm = screen.getByRole('dialog').querySelector<HTMLButtonElement>('.destructive')!;
     fireEvent.click(confirm);
     expect(api.request).toHaveBeenLastCalledWith('query-log/clear', 'POST', { log_epoch: 3 });
     fireEvent.click(screen.getByRole('radio', { name: 'Stale hit' }));
@@ -355,15 +355,16 @@ describe('LogsPage live updates', () => {
     await waitFor(() => expect(screen.getAllByText('older.test').length).toBeGreaterThan(0));
     act(() => socket.push({ type: 'entries', entries: [row(43, 'a.test')], cursor: 43, more: false }));
     expect(screen.queryByText('a.test')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '1 new queries' }));
+    fireEvent.click(screen.getByRole('button', { name: '1 new query' }));
     await waitFor(() => expect(screen.getAllByText('example.test').length).toBeGreaterThan(0));
     expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', expect.objectContaining({ before_id: null }));
 
     fireEvent.click(screen.getByRole('radio', { name: 'Stale hit' }));
     await waitFor(() => expect(socket.ofType('subscribe').at(-1)).toMatchObject({ filter: { search: null, status: null, cache: 'stale' } }));
+    expect(screen.getByText('Filter active; new queries pause auto-insert.')).toBeTruthy();
     act(() => socket.push({ type: 'entries', entries: [row(45, 'stale.test')], cursor: 45, more: false }));
     expect(screen.queryByText('stale.test')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '1 new queries' }));
+    fireEvent.click(screen.getByRole('button', { name: '1 new query' }));
     expect(screen.getAllByText('stale.test').length).toBeGreaterThan(0);
   });
 

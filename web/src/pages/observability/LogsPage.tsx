@@ -39,7 +39,7 @@ function LogDetail({ entry, language, sourceNames }: { entry: LogEntry; language
       <dl>
         <DetailRow label={translate("views.time", language)}>{formatDate(entry.time_ms, language, { dateStyle: "medium", timeStyle: "medium" })}</DetailRow>
         <DetailRow label={translate("views.name", language)}>{entry.name || translate("views.unreadableQuery", language)}</DetailRow>
-        <DetailRow label={translate("views.detailQtype", language)}>{entry.qtype || "—"}</DetailRow>
+        <DetailRow label={translate("views.inspectQtype", language)}>{entry.qtype || "—"}</DetailRow>
         <DetailRow label={translate("views.client", language)}>{entry.client}</DetailRow>
         <DetailRow label={translate("views.transport", language)}>{entry.transport}</DetailRow>
       </dl></section>
@@ -312,7 +312,13 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
     };
   }
   function cardKey(event: KeyboardEvent<HTMLElement>) {
-    if (event.key === 'Tab') { event.preventDefault(); closeDetail(true); }
+    if (event.key !== 'Tab') return;
+    const focusables = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), [tabindex]:not([tabindex="-1"])')];
+    const index = focusables.indexOf(document.activeElement as HTMLElement);
+    const leaving = !focusables.length
+      || (event.shiftKey && index <= 0)
+      || (!event.shiftKey && index === focusables.length - 1);
+    if (leaving) { event.preventDefault(); closeDetail(true); }
   }
 
   function submitFilter(event: FormEvent<HTMLFormElement>) {
@@ -376,7 +382,14 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
   const queryName = (entry: LogEntry) => entry.name || translate("views.unreadableQuery", language);
   const liveMessage = liveStopped ? 'views.liveStopped'
     : liveStatus === 'reconnecting' ? 'views.liveReconnecting'
-      : liveLog?.log === 'unavailable' ? 'views.liveUnavailable' : liveLog?.log === 'checking' ? 'views.liveChecking' : null;
+      : liveLog?.log === 'unavailable' ? 'views.liveUnavailable' : liveLog?.log === 'checking' ? 'views.liveChecking'
+        : interval !== null && isFiltered(applied) ? 'views.liveFilterPaused' : null;
+  const hasFilters = isFiltered(applied) || search.trim() !== '' || statusFilter !== '';
+  const clearFilters = () => {
+    setSearch('');
+    setStatusFilter('');
+    if (isFiltered(appliedRef.current)) applyFilter({ search: '', status: null, cache: null });
+  };
   const disabled = (page && !page.enabled) || liveLog?.log === 'disabled';
   const detailButton = (id: number) => <button type="button" className="icon-button log-detail-button" aria-label={translate("views.queryDetails", language)}
     aria-haspopup="dialog" aria-expanded={openId === id} aria-controls={openId === id ? detailId(id) : undefined} {...detailEvents(id)}>
@@ -396,12 +409,13 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
             options={statuses.map((status) => ({ value: status, label: translate(status ? `ui.${status}` : "ui.allResults", language) }))} /></div>
         <button type="submit" className="button primary">{translate("ui.filter", language)}</button>
       </form>
-      <Segmented label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} options={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
-        const filter = { ...appliedRef.current, cache: cache === 'all' ? null : cache as CacheFilter };
-        setSearch(filter.search);
-        setStatusFilter(filter.status ?? '');
-        applyFilter(filter);
-      }} />
+      <div className="log-filter-bar">
+        <Segmented label={translate('storage.cacheFilter', language)} value={applied.cache ?? 'all'} options={['all', 'cached', 'fresh', 'stale', 'non_cached'].map((cache) => ({ value: cache, label: translate(`storage.${cache === 'all' ? 'cacheAll' : cache}`, language) }))} onChange={(cache) => {
+          const filter = { search: search.trim(), status: statusFilter || null, cache: cache === 'all' ? null : cache as CacheFilter };
+          applyFilter(filter);
+        }} />
+        {hasFilters && <button type="button" className="button quiet" onClick={clearFilters}>{translate('ui.clearFilters', language)}</button>}
+      </div>
     </div>
     {disabled && <p className="notice">{translate('app.logsDisabled', language)}</p>}
 
@@ -426,7 +440,7 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
 
     <div ref={listTop} className="log-list-top" />
     {pending.count > 0 && <div className="log-new-wrap"><button type="button" className="log-new-pill" onClick={revealPending}>
-      {translate('views.newEntries', language, { count: `${formatNumber(pending.count, language)}${pending.more ? '+' : ''}` })}</button></div>}
+      {pending.count === 1 && !pending.more ? translate('views.newEntriesOne', language) : translate('views.newEntries', language, { count: `${formatNumber(pending.count, language)}${pending.more ? '+' : ''}` })}</button></div>}
 
     {page === null ? (failure
       ? <div className="panel empty-state" data-tone="bad"><CloudOff size={28} aria-hidden="true" /><p>{translate("app.loadFailed", language)}</p></div>
@@ -462,11 +476,11 @@ export function LogsPage({ api, language, onOpenSettings, sourceNames = {} }: Lo
     {page?.next_cursor && <button type="button" onClick={() => void load(page.next_cursor, applied)} disabled={loading}
       className="button secondary load-more">{translate("ui.earlier", language)}</button>}
 
-    <Drawer open={confirmation !== null} title={translate('app.clearLogsTitle', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => setConfirmation(null)}>
-      <p id="log-clear-help" className="muted">{translate("storage.confirmLogs", language)}</p>
-      <div className="button-group confirm-actions">
+    <Drawer open={confirmation !== null} variant="sheet" title={translate('app.clearLogsTitle', language)} closeLabel={translate('ui.closeDialog', language)} onClose={() => setConfirmation(null)}>
+      <p id="log-clear-help" className="sheet-message muted">{translate("storage.confirmLogs", language)}</p>
+      <div className="action-sheet">
+        <button type="button" onClick={() => void clearLogs()} className="button destructive">{translate("app.clearLogs", language)}</button>
         <button type="button" onClick={() => setConfirmation(null)} className="button secondary">{translate("ui.cancel", language)}</button>
-        <button type="button" onClick={() => void clearLogs()} className="button danger">{translate("app.clearLogs", language)}</button>
       </div>
     </Drawer>
   </div>;

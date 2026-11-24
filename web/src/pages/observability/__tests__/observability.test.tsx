@@ -230,10 +230,10 @@ describe("OverviewPage", () => {
     render(<OverviewPage api={{ request } as unknown as ApiClient} language="en" onOpenDns={() => {}} />);
     const chart = () => screen.getByRole('group', { name: /^Queries, cache hits and blocks/ });
     await waitFor(() => expect(request).toHaveBeenCalledWith('stats', 'GET', undefined, undefined, { query: { range: '1h' } }));
-    await waitFor(() => expect(chart().getAttribute('aria-label')).toContain('last 1 hours'));
+    await waitFor(() => expect(chart().getAttribute('aria-label')).toContain('last hour'));
     fireEvent.click(screen.getByRole("radio", { name: "Last 7 days" }));
     await waitFor(() => expect(finish).toBeTypeOf('function'));
-    expect(chart().getAttribute('aria-label')).toContain('last 1 hours');
+    expect(chart().getAttribute('aria-label')).toContain('last hour');
     await act(async () => { finish(recent); });
     expect(chart().getAttribute('aria-label')).toContain('last 168 hours');
   });
@@ -269,7 +269,10 @@ describe("LogsPage", () => {
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'typed.test' } });
     fireEvent.click(screen.getByRole('radio', { name: 'Stale hit' }));
     await waitFor(() => expect(screen.getAllByText('stale.test').length).toBeGreaterThan(0));
-    expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: 'stale', before_id: null, limit: 50 });
+    expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: 'typed.test', status: null, cache: 'stale', before_id: null, limit: 50 });
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    await waitFor(() => expect(api.request).toHaveBeenLastCalledWith('query-log/list', 'POST', { search: '', status: null, cache: null, before_id: null, limit: 50 }));
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
     await act(async () => { finishOld(page([{ ...entry, name: 'late.test' }])); });
     expect(screen.queryByText('late.test')).toBeNull();
     fireEvent.click(screen.getAllByRole('button', { name: 'Query details' })[0]);

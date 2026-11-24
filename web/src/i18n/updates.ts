@@ -16,7 +16,7 @@ export const updatesMessages = {
   confirm: ['将 PariNS {current} 更新到 {next}。期间 DNS 会短暂中断，完成后需要重新登录；更新完成前不能修改设置。如果新版本启动失败，会自动换回原来的程序并保留配置、查询记录和统计，缓存可能被清空。', "Update PariNS {current} to {next}. DNS stops briefly, you'll need to sign in again afterward, and settings can't be changed until the update finishes. If the new version fails to start, PariNS switches back to the previous program and keeps your configuration, query log and statistics; the cache may start empty."],
   draftsTitle: ['未保存的修改', 'Unsaved changes'],
   drafts: ['有未保存的修改。请先保存或放弃修改，再确认更新。', 'You have unsaved changes. Save or discard them before confirming the update.'],
-  keepDraft: ['先保存修改', 'Save my changes first'], discardDraft: ['放弃修改', 'Discard changes'],
+  keepDraft: ['返回并保存', 'Go back to save'], discardDraft: ['放弃修改', 'Discard changes'],
   draftChanged: ['修改或配置刚刚有变化，请处理后重新确认更新。', 'Your changes or the configuration just changed. Resolve them and confirm the update again.'],
   locked: ['正在更新，暂时不能修改设置。', "An update is in progress, so settings can't be changed."],
   unknown: ['无法确认更新请求是否已提交，正在读取状态核对。请不要重复提交。', "The update request couldn't be confirmed; checking the status now. Don't submit it again."],

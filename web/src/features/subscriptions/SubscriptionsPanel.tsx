@@ -13,7 +13,7 @@ import './subscriptions.css';
 
 export function SubscriptionsPanel({ language }: { language: Language }) {
   const { api } = useSession();
-  const { draft, setSources, locked, busy } = useConfig();
+  const { draft, setSources, locked, busy, error: configError } = useConfig();
   const keyPrefix = useId();
   const nextKey = useRef(0);
   const view = useSubscriptions(api, draft?.original);
@@ -46,14 +46,14 @@ export function SubscriptionsPanel({ language }: { language: Language }) {
       {observedOperation?.rules != null && <> · {formatNumber(observedOperation.rules, language)} {t('input')}</>}
       {observedOperation?.error && <> · {failureText(observedOperation.error, language)}</>}
     </p>}
-    {view.state && <p className="subscription-summary">{translate('subscriptions.summary', language, { rules: formatNumber(view.state.index_rules, language), memory: formatBytes(view.state.retained_bytes, language), disk: formatBytes(view.state.disk_bytes, language) })}</p>}
+    {view.state && <p className="subscription-summary">{translate(view.state.index_rules === 1 ? 'subscriptions.summaryOne' : 'subscriptions.summary', language, { rules: formatNumber(view.state.index_rules, language), memory: formatBytes(view.state.retained_bytes, language), disk: formatBytes(view.state.disk_bytes, language) })}</p>}
     {!sources.length && <p className="muted">{t('empty')}</p>}
     <div className="settings-stack"><AnimatePresence initial={false}>{sources.map((source, index) => {
       const baseline = saved?.find((item) => item.id === source.id && item.url === source.url && item.format === source.format);
       const status = baseline ? view.state?.sources.find((item) => item.id === source.id) : undefined;
       return <motion.div key={source.key} className="list-item" initial={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} animate={{ opacity: 1, height: 'auto', transitionEnd: { overflow: 'visible' } }}
         exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden' }} transition={reduced ? { duration: 0.12 } : SPRING_IOS}><SourceCard source={source} index={index} status={status} language={language} locked={locked || busy} working={working}
-        savedSource={baseline} subscriptionsEnabled={view.state?.enabled === true} takenIds={sources.filter((_, at) => at !== index).map((item) => item.id)}
+        savedSource={baseline} subscriptionsEnabled={view.state?.enabled === true} takenIds={sources.filter((_, at) => at !== index).map((item) => item.id)} error={configError}
         change={(next) => setSources(sources.map((item, at) => at === index ? next : item))} remove={() => setSources(sources.filter((_, at) => at !== index))}
         refresh={() => void view.refresh(source.id)} /></motion.div>;
     })}</AnimatePresence></div>

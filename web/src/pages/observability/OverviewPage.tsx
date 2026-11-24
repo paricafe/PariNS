@@ -171,8 +171,8 @@ export function OverviewPage({ api, language, onOpenDns, upstreamCount = null }:
       : !running || health === 'stopped' || health === 'unconfigured' ? t('shell.summaryStopped')
         : health === 'starting' || !status.dns_health.ready ? t('shell.summaryStarting')
           : troubled ? t(recursive ? 'shell.summaryRecursion' : 'shell.summaryUpstream')
-            : counters ? hitRate === null ? t('shell.summaryQueriesOnly', { count: value(counters.requests, language) })
-              : t('shell.summaryQueries', { count: value(counters.requests, language), percent: formatNumber(hitRate, language, { maximumFractionDigits: 0 }) }) : null;
+            : counters ? hitRate === null ? t(counters.requests === 1 ? 'shell.summaryQueriesOnlyOne' : 'shell.summaryQueriesOnly', { count: value(counters.requests, language) })
+              : t(counters.requests === 1 ? 'shell.summaryQueriesOne' : 'shell.summaryQueries', { count: value(counters.requests, language), percent: formatNumber(hitRate, language, { maximumFractionDigits: 0 }) }) : null;
   const kpis = [
     { key: "requests", icon: Search, label: t("ui.requests"), raw: counters?.requests ?? null, format: (n: number) => formatNumber(Math.round(n), language) },
     { key: "cache", icon: Zap, label: t("ui.hitRate"), tip: t('shell.hitRateHelp'), raw: hitRate, format: (n: number) => `${formatNumber(n, language, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` },

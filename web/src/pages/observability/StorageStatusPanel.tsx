@@ -37,7 +37,7 @@ export function StorageStatusPanel({ status, language, compact = false }: { stat
       <div className="row" data-layout="inline"><div className="row-label"><span>{r('coverage')}</span></div><div className="row-control"><span className="row-value">
         {coverage.earliest_time_ms === null || coverage.latest_time_ms === null ? r('coverageEmpty') : `${date(coverage.earliest_time_ms)} – ${date(coverage.latest_time_ms)}`}</span></div></div>
       <div className="row" data-layout="inline"><div className="row-label"><span>{t('losses')}</span></div><div className="row-control"><span className="row-value" data-tone={dropped ? 'warn' : undefined}>
-        {dropped ? translate('storage.lossesSome', language, { count: formatNumber(dropped, language) }) : t('lossesNone')}{lastDropText && ` · ${lastDropText}`}</span></div></div>
+        {dropped ? translate(dropped === 1 ? 'storage.lossesOne' : 'storage.lossesSome', language, { count: formatNumber(dropped, language) }) : t('lossesNone')}{lastDropText && ` · ${lastDropText}`}</span></div></div>
       {!compact && <ExpandRow label={t('detailedCounts')}>
         {counts.map(([label, value]) => <div className="row" data-layout="inline" key={label}><div className="row-label"><span>{label}</span></div><div className="row-control"><span className="row-value num">{value}</span></div></div>)}
         {status.cleanup.last_reason && status.cleanup.last_at_ms !== null && <p className="row-note">{translate('reliability.lastCleanup', language, { reason: diagnosticLabel(`cleanup_${status.cleanup.last_reason}`, language), time: date(status.cleanup.last_at_ms) })}</p>}

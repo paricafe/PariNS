@@ -39,4 +39,5 @@ export const subscriptionMessages = {
   subscription_disk_limit: ['规则超出磁盘上限，原有规则继续生效。', 'The rules exceed the disk limit; the previous rules stay in use.'],
   subscription_cancelled: ['操作已取消，原有规则继续生效。', 'Cancelled; the previous rules stay in use.'],
   summary: ['共 {rules} 条规则 · 内存 {memory} · 磁盘 {disk}', '{rules} rules · {memory} memory · {disk} disk'],
+  summaryOne: ['共 1 条规则 · 内存 {memory} · 磁盘 {disk}', '1 rule · {memory} memory · {disk} disk'],
 } as const;

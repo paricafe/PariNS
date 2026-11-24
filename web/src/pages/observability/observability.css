@@ -45,6 +45,7 @@
 .trend-tip [data-series="2"] dt::before { border-top: 2.5px dotted var(--danger); }
 .trend-tip dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
 
+.log-filter-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 .log-live-controls { align-items: center; }
 .log-live-note { margin: 0; }
 .log-list-top { scroll-margin-top: 80px; }
@@ -62,6 +63,7 @@
 .log-card-head .log-name, .log-card-head .muted { display: block; }
 .log-detail-cell { width: 1%; }
 .log-detail-button { width: 34px; min-height: 34px; padding: 0; color: var(--link); }
+@media (pointer: coarse) { .log-detail-button { width: 42px; min-height: 42px; } }
 .log-detail-button[aria-expanded="true"] { background: var(--hover); }
 .log-row[data-open] > td { background: var(--hover); }
 .popover.log-popover { position: fixed; top: auto; left: auto; display: flex; flex-direction: column; max-width: none; padding: 0; }

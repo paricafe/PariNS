@@ -102,9 +102,11 @@ export function UpdatePanel({ language }: { language: Language }) {
       {(updates.unknown || updates.disconnected || updates.pending || view?.active_operation) && <button type="button" className="button quiet" onClick={() => void updates.refresh()}>{t('checkResult')}</button>}
     </div>}
     <Drawer open={draftPrompt} variant="sheet" title={t('draftsTitle')} closeLabel={translate('ui.closeDialog', language)} onClose={() => setDraftPrompt(false)}>
-      <p>{t('drafts')}</p>{draftError && <p role="alert" className="error">{t('readFailed')}</p>}
-      <div className="button-group"><Button variant="secondary" onClick={() => setDraftPrompt(false)}>{t('keepDraft')}</Button>
-        <Button variant="primary" disabled={config.busy} onClick={() => { setDraftError(false); void config.reload().then(() => setDraftPrompt(false)).catch(() => setDraftError(true)); }}>{t('discardDraft')}</Button></div>
+      <p className="sheet-message">{t('drafts')}</p>{draftError && <p role="alert" className="error">{t('readFailed')}</p>}
+      <div className="action-sheet">
+        <button type="button" className="button primary" onClick={() => setDraftPrompt(false)}>{t('keepDraft')}</button>
+        <button type="button" className="button destructive" disabled={config.busy} onClick={() => { setDraftError(false); void config.reload().then(() => setDraftPrompt(false)).catch(() => setDraftError(true)); }}>{t('discardDraft')}</button>
+      </div>
     </Drawer>
   </section>;
 }

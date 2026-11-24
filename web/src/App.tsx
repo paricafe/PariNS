@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react';
-import { DURATION, SPRING_IOS, SPRING_IOS_FAST } from './components/beui/motion';
+import { SPRING_IOS, SPRING_IOS_FAST } from './components/beui/motion';
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
-import { Activity, BookOpenText, CircleArrowUp, Database, FileCode2, Filter, LockKeyhole, Menu, Network, Settings2, X } from 'lucide-react';
+import { Activity, BookOpenText, CircleArrowUp, Database, FileCode2, Filter, Layers, LockKeyhole, LogOut, Menu, Network, Settings2, X } from 'lucide-react';
 import { LoginPage, SetupPage } from './AuthPages';
 import { translate, presentIssue, type Language } from './i18n';
 import { useAppearance, type Appearance } from './appearance/useAppearance';
@@ -24,12 +24,12 @@ import { UpdateHint } from './features/updates/UpdatePanel';
 import { AccountControls } from './features/account/AccountControls';
 import { useAutoConfirm } from './components/useAutoConfirm';
 import { getPath } from './model/config';
-import { ConfigErrorNotice } from './config/fieldErrors';
+import { ConfigErrorNotice, formatFieldPath } from './config/fieldErrors';
 
 const navigation = [
   { path: '/overview', key: 'overview', icon: Activity, group: 'observe' },
   { path: '/logs', key: 'logs', icon: BookOpenText, group: 'observe' },
-  { path: '/cache', key: 'cache', icon: Database, group: 'observe' },
+  { path: '/cache', key: 'cache', icon: Layers, group: 'observe' },
   { path: '/dns', key: 'dns', icon: Network, group: 'config' },
   { path: '/filters', key: 'filters', icon: Filter, group: 'config' },
   { path: '/security', key: 'security', icon: LockKeyhole, group: 'config' },
@@ -88,7 +88,7 @@ export function SaveBar({ language }: { language: Language }) {
     ? draft.pendingRollback ? 'app.rollbackNeedsCheck' : 'app.saveUnknown' : 'shell.confirming')
     : conflict ? t('app.changedElsewhere') : progress ? t(progress) : changes === 1 ? t('shell.unsavedOne') : translate('shell.unsavedMany', language, { count: changes });
   const detail = conflict ? conflict.issue ? presentIssue(conflict.issue, language)
-    : conflict.paths.length ? translate('app.conflictFields', language, { fields: conflict.paths.join(', ') }) : t('app.conflictToml')
+    : conflict.paths.length ? translate('app.conflictFields', language, { fields: conflict.paths.map((path) => formatFieldPath(path, language)).join(', ') }) : t('app.conflictToml')
     : draft.merged && !draft.unknownApply ? t('app.mergedElsewhere') : null;
   return <motion.div className="save-bar" role="region" aria-label={t('ui.draft')} initial={reduced ? false : { opacity: 0, y: 40, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={reduced ? { duration: 0 } : SPRING_IOS}>
     <div className="save-bar-content"><div><strong role={conflict || draft.merged || progress || draft.unknownApply ? 'status' : undefined}>{status}</strong>
@@ -126,11 +126,9 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
   useEffect(() => {
     const element = routeContent.current;
     if (!element?.animate) return;
-    const phone = window.matchMedia?.('(max-width: 767px)').matches ?? false;
     const frames = reduced ? [{ opacity: 0 }, { opacity: 1 }]
-      : phone ? [{ opacity: 0.4, transform: 'translateX(30%)' }, { opacity: 1, transform: 'none' }]
-        : [{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }];
-    const animation = element.animate(frames, { duration: reduced ? 150 : phone ? 420 : DURATION.enter * 1000, easing: 'cubic-bezier(.2, .9, .25, 1)' });
+      : [{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }];
+    const animation = element.animate(frames, { duration: reduced ? 120 : 240, easing: 'cubic-bezier(.16, 1, .3, 1)' });
     return () => animation.cancel();
   }, [location.pathname, reduced]);
   const { scrollY } = useScroll();
@@ -162,6 +160,7 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
     try { await logout(); } catch (reason) { setLogoutError(toConfigIssue(reason)); }
   };
   const current = navigation.find((item) => item.path === location.pathname);
+  useEffect(() => { document.title = `${current ? t(current.key) : t('overview')} · PariNS`; }, [current, language]);
   const showNavigationHint = (element: HTMLElement, label: string) => {
     window.clearTimeout(hintTimer.current);
     if (!window.matchMedia?.('(min-width: 768px) and (max-width: 1023px)').matches) return;
@@ -203,7 +202,7 @@ function ReadyConsole({ appearance }: { appearance: Appearance }) {
     <div className="shell-main"><header className="topbar"><motion.span className="topbar-material" aria-hidden="true" style={{ opacity: barMaterial }} />
       <button type="button" className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label={t('showNavigation')}><Menu size={20} /></button>
       <motion.span className="topbar-title" style={{ opacity: titleOpacity }}>{current ? t(current.key) : t('overview')}</motion.span><span className="spacer" />
-      <Preferences appearance={appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" disabled={config.busy || config.locked} onClick={() => void signOut()}>{t('logout')}</button>
+      <Preferences appearance={appearance} /><AccountControls language={language} /><button type="button" className="button quiet logout-button" aria-label={t('logout')} title={t('logout')} disabled={config.busy || config.locked} onClick={() => void signOut()}><LogOut size={16} aria-hidden="true" /><span className="logout-label">{t('logout')}</span></button>
     </header><main id="main-content" tabIndex={-1} className="main-content">
       {logoutError && <p role="alert" className="notice error">{presentIssue(logoutError, language)}</p>}
       {config.error && (location.pathname === '/overview' || location.pathname === '/logs') && <ConfigErrorNotice error={config.error} language={language} onDismiss={() => config.setError(null)} />}
@@ -221,6 +220,11 @@ function RootView() {
   const appearance = useAppearance();
   const { state, recheck, retryLogout, confirmLogout, api } = useSession();
   const t = (key: string) => translate(key, appearance.language);
+  useEffect(() => {
+    if (state.phase === 'ready') return;
+    document.title = state.phase === 'login' ? `${t('ui.loginTitle')} · PariNS`
+      : state.phase === 'setup' ? `${t('ui.setupTitle')} · PariNS` : t('ui.title');
+  }, [state.phase, appearance.language]);
   const logoutCheck = useAutoConfirm(state.phase === 'logout-unknown' && state.logout === 'unconfirmed', confirmLogout, () => {});
   const stateText = state.phase === 'logout-unknown'
     ? state.logout === 'signed-in' ? 'app.stillSignedIn' : state.logout === 'unconfirmed' && logoutCheck.state === 'failed' ? 'app.logoutUnknown'

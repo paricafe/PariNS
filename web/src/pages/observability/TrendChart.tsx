@@ -143,11 +143,13 @@ export function TrendChart({ samples, hours, language, end }: { samples: readonl
     setActiveTime(stops[next].time);
   };
   const time = (value: number) => formatDate(value, language, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const axisTick = (value: number) => hours >= 24 ? time(value) : formatDate(value, language, { hour: "2-digit", minute: "2-digit" });
+  const label = hours === 1 ? translate("views.trendLabelOne", language) : translate("views.trendLabel", language, { hours });
 
-  return <div ref={container} className="trend-chart" tabIndex={0} role="group" aria-label={translate("views.trendLabel", language, { hours })}
+  return <div ref={container} className="trend-chart" tabIndex={0} role="group" aria-label={label}
     aria-describedby={active ? `${hintId} ${tipId}` : hintId} onKeyDown={onKeyDown} onBlur={() => setActiveTime(null)}>
     <p id={hintId} className="sr-only">{translate("views.chartKeys", language)}</p>
-    <svg ref={svg} role="img" aria-label={translate("views.trendLabel", language, { hours })} viewBox={`0 0 ${width} ${HEIGHT}`}
+    <svg ref={svg} role="img" aria-label={label} viewBox={`0 0 ${width} ${HEIGHT}`}
       className="trend-svg" onPointerMove={onPointer} onPointerDown={onPointer}
       onPointerLeave={(event) => { if (event.pointerType !== "touch") setActiveTime(null); }}>
       <defs><linearGradient id="parins-trend-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="var(--primary)" stopOpacity="0.28" /><stop offset="1" stopColor="var(--primary)" stopOpacity="0" /></linearGradient></defs>
@@ -177,8 +179,8 @@ export function TrendChart({ samples, hours, language, end }: { samples: readonl
           return value === null ? null : <circle key={trace.key} cx={x(active.time)} cy={y(value)} r="4.5" fill={trace.color} />;
         })}
       </g>}
-      <text x={x(start)} y="227" textAnchor="start" fill="currentColor" opacity="0.65" fontSize="11">{formatDate(start, language, { hour: "2-digit", minute: "2-digit" })}</text>
-      <text x={x(now)} y="227" textAnchor="end" fill="currentColor" opacity="0.65" fontSize="11">{formatDate(now, language, { hour: "2-digit", minute: "2-digit" })}</text>
+      <text x={x(start)} y="227" textAnchor="start" fill="currentColor" opacity="0.65" fontSize="11">{axisTick(start)}</text>
+      <text x={x(now)} y="227" textAnchor="end" fill="currentColor" opacity="0.65" fontSize="11">{axisTick(now)}</text>
     </svg>
     {active && <div ref={tip} id={tipId} role="tooltip" className="glass trend-tip">
       {active.kind === "gap"

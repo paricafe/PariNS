@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## v0.2.5 — 2026-11-24
+
+### Changed
+
+- Unify console card corners, update operation framing, solid-backdrop surface
+  contrast, dark input borders, narrow-screen top bar actions, touch targets,
+  and per-page document titles.
+- Show response counts alongside percentages on the overview and include dates
+  on multi-day trend chart axes.
+- Standardize Chinese and English console terminology (failed query status,
+  account labels, recursive delegation wording), singular/plural phrasing,
+  HTTPS first-run setup guidance, and cache inspection hints.
+
+### Fixed
+
+- Scope `.notice-close` styles so action buttons inside error notices keep their
+  button styling.
+- Give the Cache and Logs & storage navigation items distinct icons in collapsed
+  tablet navigation.
+- Preserve typed search and status filters when switching query log cache
+  filters, add a Clear filters action and paused-live indicator, use the shared
+  destructive sheet for clearing logs, and allow keyboard Tab navigation to
+  controls inside query detail popovers.
+- Make the unsaved-changes update dialog keep the safe return button primary and
+  style Discard changes as destructive.
+- Show inline validation errors on filter subscription source fields, map
+  subscription custom IPv4/IPv6 errors, distinguish DoH port 443 from DoT/DoQ
+  853 placeholders, target address and port invalid states separately, and format
+  configuration conflict field paths into readable labels.
+
 ## v0.2.4 — 2026-11-20
 
 ### Upgrade

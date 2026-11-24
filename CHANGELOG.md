@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Update `url` to 2.5.9 to address RUSTSEC-2026-0592.
 - Scope `.notice-close` styles so action buttons inside error notices keep their
   button styling.
 - Give the Cache and Logs & storage navigation items distinct icons in collapsed

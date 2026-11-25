@@ -1,8 +1,8 @@
 # Operations
 
-[Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md)
+[Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md) · [Architecture](architecture.md)
 
-This guide covers a running managed installation. Service commands:
+This guide covers operating a managed PariNS installation. Use standard systemd commands to inspect or restart the service:
 
 ```sh
 sudo systemctl status parins-managed.service
@@ -12,157 +12,52 @@ sudo systemctl restart parins-managed.service
 
 ## Console and accounts
 
-**Access.** The console answers on its listening port for literal IP addresses
-(including a public IP mapped by NAT), `localhost`, and `[web].public_host` when it is
-set. Other host names, other ports and cross-origin requests are rejected.
-Forwarding headers are ignored, so PariNS is not designed to sit behind a reverse
-proxy. Connections are limited per socket source (IPv6 by /64), and request
-bodies have a separate read deadline.
+- **Access.** The console answers on its listening port for literal IP addresses including a NAT-mapped public IP, `localhost`, and `[web].public_host` when configured. Other hostnames, ports, and cross-origin requests are rejected. Forwarding headers are ignored, so do not put a reverse proxy in front of PariNS. Connections are capped per socket peer with IPv6 grouped by `/64`, and request body reads have a separate deadline.
+- **Sessions.** Sign-in sessions last eight hours in an `HttpOnly`, `SameSite=Strict` cookie named `parins_session_http` over HTTP or Secure `__Host-parins_session` over HTTPS. A session ends at expiry, on sign-out, or when the service restarts. Sign-in and setup attempts are limited to 5 per minute per client address with IPv6 counted by `/64`, including failed [Turnstile checks](#human-verification-cloudflare-turnstile). Passwords are stored as Argon2id hashes.
+- **Admin account.** Open **Account & security** from the person icon to change the username or password. Usernames accept 1 to 64 ASCII letters, digits, `-`, or `_`, and passwords accept 12 to 256 bytes. Saving requires the current password, revokes every session including yours, and discards unsaved configuration drafts after asking you to confirm. If the connection drops before you see the response, test signing in with the new credentials instead of submitting again. Account credentials live outside configuration, so configuration rollback never restores an old password. There is no password recovery. Keep the password and a [state backup](#backups-and-the-state-directory) safe.
+- **Language and appearance.** Switch between Chinese and English or light, dark, and system themes on any page, including sign-in and setup. The browser saves only language, theme, background choice, overlay darkness, and query-log refresh interval. Uploaded custom background images stay in IndexedDB until you delete them. Credentials, session bindings, private keys, drafts, and query logs are never stored in browser storage.
+- **Applying configuration.** Settings pages and **Advanced (TOML)** edit one shared draft. **Save** validates and applies the draft at once and reports whether DNS restarted. The console asks for confirmation only when a change moves the console to a new address or protocol, which signs you out, or when disabling DoH downgrades the console from HTTPS to HTTP. Use **Advanced (TOML)** to compare changes against saved state, and **Undo last save** to roll back to the previous saved configuration.
+- **Concurrent edits and dropped connections.** Every save checks the saved revision so a stale tab cannot overwrite newer settings. On a conflict, the console reloads saved state while keeping your draft. Non-overlapping edits merge for review, and conflicting fields let you choose which value to keep. Actions such as subscription updates, certificate reloads, or clearing logs act on saved state without waiting for your draft. Starting a software update asks you to save or discard the draft first because updates restart PariNS. If the connection drops mid-action, the console reads server state to verify the outcome instead of replaying the request.
 
-**Sessions.** A sign-in lasts eight hours in an HttpOnly, SameSite=Strict cookie:
-`parins_session_http` over HTTP, or a Secure `__Host-parins_session` over HTTPS. It
-ends at expiry, at sign-out (which revokes that session on the server) or when the
-service restarts. Sign-in and setup attempts are limited to 5 per minute per client
-address (an IPv6 client counts by its /64 network), including attempts that fail
-[human verification](#human-verification-cloudflare-turnstile). Passwords are stored
-as Argon2id hashes.
-
-**Admin account.** **Account & security** (the person icon) changes the username
-(1–64 ASCII letters, digits, `-` or `_`) and password (at least 12 characters, at
-most 256 bytes); it asks for the current password. A successful change signs out every
-session, including the current one, and discards unsaved settings changes, so the
-console asks first when there are any. If the connection drops before you see
-the result, sign in with the intended new credentials to check; do not repeat the
-change. Account changes are separate from configuration, so a configuration
-rollback never restores an old password. There is no password recovery: keep the
-password and a [backup](#backups-and-the-state-directory) safe.
-
-**Language and appearance.** Chinese and English, and light, dark or system
-appearance, can be switched on every page, including sign-in and setup. The browser
-remembers your language, theme, background selection, overlay darkness and query
-log refresh interval. A saved custom background image stays in IndexedDB until you
-remove it, even when you select a preset. The console never saves credentials,
-session bindings, PEM keys, configuration drafts or query logs in browser storage.
-
-**Applying configuration.** Settings pages and **Advanced (TOML)** edit one draft.
-**Save** validates and applies it at once, then says whether DNS restarted. It asks
-first only when the change moves the console to another address or protocol, which
-signs you out, and asks explicitly before switching the console from HTTPS to HTTP.
-**Advanced (TOML)** can show the changes against the saved configuration, and **Undo
-last save** returns to the configuration before the last save.
-
-A tab with an older copy cannot overwrite newer settings. If the configuration was
-saved elsewhere meanwhile, the console reloads it and keeps your draft: edits to
-other settings are merged for you to review and save again; when both changed the
-same setting, you choose which to keep. Other actions (subscription updates,
-certificate reloads, clearing logs or statistics) work on the saved configuration
-and do not wait for your draft. A software update asks you to save or discard the
-draft first, because it restarts PariNS and reloads the console. If the connection
-drops before an action's result arrives, the console reads the server's state to
-confirm it and never sends the action again. What a change
-restarts:
+Every save falls into one of three restart tiers:
 
 | Change | Effect |
 | --- | --- |
-| Only `[storage]`, `[query_log]`, `[statistics]`, `[updates]`, `[cache.persistence]`, filtering or subscriptions | Listeners and the cache stay. |
-| Other `[cache]` settings | Listeners stay; the cache is replaced (emptied). |
-| Anything else, or re-applying an unchanged configuration | DNS restarts and the cache is emptied. Statistics and logs are kept. |
+| Only `[storage]`, `[query_log]`, `[statistics]`, `[updates]`, `[cache.persistence]`, filtering, or subscriptions | Listeners and the cache stay in place. |
+| Other `[cache]` settings | Listeners stay in place and the cache is replaced empty. |
+| Any other change, or re-applying an unchanged configuration | DNS restarts with an empty cache. Statistics and logs are preserved. |
 
-The first two rows apply while DNS is running; otherwise saving starts DNS with the
-new configuration, except that an `[updates]`-only change leaves a stopped DNS
-stopped.
-
-A new configuration must bind every listener before it is saved. If it cannot, or
-saving fails, the previous configuration keeps running and the console shows the
-error. If the connection drops during a save, the console checks the saved
-configuration to see whether it was applied. Hot changes do not reload certificates.
+The first two rows apply hot while DNS is running. When DNS is stopped, saving starts DNS except for an `[updates]`-only edit, which leaves DNS stopped. Every newly applied configuration must bind all configured listeners before PariNS saves it. If binding or saving fails, the previous configuration keeps running and the console displays the error. Hot changes do not reload certificates.
 
 ## Human verification (Cloudflare Turnstile)
 
-**Account & security** can turn on Cloudflare Turnstile for the sign-in page. It is
-off by default. Create a Turnstile widget for the console's host name in the
-Cloudflare dashboard, then enter its site key and secret key. Setting, changing or
-clearing the keys asks for the current password, is saved on its own and signs out
-every session.
+Open **Account & security** to enable Cloudflare Turnstile on the sign-in page. It is off by default. Create a Turnstile widget for your console hostname in the Cloudflare dashboard, then enter its site key and secret key. Setting, changing, or clearing keys requires the current password, saves independently of configuration, and revokes all active sessions.
 
-The secret key is kept only in the private state directory: it is never shown again,
-never written to the configuration TOML (which the console can export and roll back)
-and never logged. The sign-in page then shows the widget, and PariNS asks Cloudflare
-to confirm it (success, host name and the `login` action) before it checks the
-password; a failure or an unreachable Cloudflare refuses the sign-in, and every
-attempt counts toward the sign-in limit. Sign-ins whose connection comes from the
-server itself (a loopback address, such as an SSH tunnel to `localhost`) skip
-Turnstile, so you can always sign in that way, for example to fix wrong keys or when
-Cloudflare is unreachable. Only the connection's own source address counts;
-forwarding headers are ignored.
+PariNS keeps the secret key only in the private state directory. It is never displayed again, exported in TOML, or written to logs. When enabled, the sign-in page loads the widget and PariNS verifies the token with Cloudflare for success, hostname, and the `login` action before checking the password. Verification failures or unreachable Cloudflare endpoints reject the sign-in and count toward the attempt limit. Connections from loopback addresses such as an SSH tunnel to `localhost` skip Turnstile so you can always recover from wrong keys or Cloudflare outages. Only the socket peer counts because forwarding headers are ignored.
 
-Do not put a tunnel or proxy on the same server in front of the console (for
-example cloudflared, an nginx `stream` proxy or sslh). Every connection then comes
-from the server itself: all sign-ins skip Turnstile and share one attempt limit. The
-console warns about this when Turnstile is on and your connection is from this
-machine.
+Do not place a local proxy or tunnel such as `cloudflared`, an nginx `stream` proxy, or `sslh` on the same server in front of the console. That makes every remote client appear as loopback, bypassing Turnstile and forcing all clients onto one attempt budget. The console shows a warning when Turnstile is enabled and you connect from the same host.
 
-With Turnstile on, the sign-in page loads and runs Cloudflare's widget script
-(`challenges.cloudflare.com`) and frame; the rest of the console never does, and it
-reloads after signing in to drop that permission. Cloudflare's published test keys
-(site keys like `1x00000000000000000000AA`, secret keys like
-`1x0000000000000000000000000000000AA`) are accepted only as a pair. They make every
-sign-in pass (or fail) and give no protection, and the console says so while they
-are set; use them only to try the flow.
+Only the signed-out login document allows Cloudflare's script and frame from `challenges.cloudflare.com`. After sign-in, the console reloads to drop that permission. Cloudflare test keys such as `1x00000000000000000000AA` and `1x0000000000000000000000000000000AA` are accepted only as a pair. They always pass or always fail without protection and display a warning banner in the console.
 
 ## Online updates and recovery
 
-The **Software updates** page shows the installed version and checks the official
-GitHub releases (every `check_interval_hours`, or with **Check for updates**). Checks
-start only after setup, send no credentials, and never install anything by
-themselves. Online updates are offered only to official release installations made
-by the installer.
+The **Software updates** page displays the installed version and checks official GitHub releases every `check_interval_hours` or on demand with **Check for updates**. Checks start after first-run setup, send no credentials, and never install updates automatically. Online updates are available only for official release installations created by the installer.
 
-**Update now** replaces the program through the restricted root helper:
+Clicking **Update now** replaces the binary through the restricted root updater:
 
-1. The release is downloaded over HTTPS from public GitHub addresses only (proxy
-   settings are ignored) and checked against its SHA256 manifest.
-2. The new version checks the current configuration and the one from before your
-   last save (kept for **Undo last save**), read-only, as the service user
-   (`parins --manage --check`), and must have read the same inputs as the running
-   version: the saved configuration, rule files, the downloaded subscription lists,
-   certificates and the upstream CA. If either fails, the update stops with
-   `preflight_failed`, nothing changes, and the service log names the inputs that
-   differed. Check the configuration and certificates; if the current
-   configuration is fine, change and save a setting once, then update again.
-3. DNS stops briefly, the new program starts, and the update completes only when DNS
-   (every listener) and storage are ready. Each launch has up to three minutes,
-   including ten continuous seconds of fresh health reports from the verified
-   process. A large database may still be checking while DNS already serves;
-   DNS readiness alone does not complete the update. Otherwise the previous
-   program is put back automatically with its own launch budget. Sign in again
-   afterwards.
+1. PariNS downloads the release over verified HTTPS from public GitHub IP addresses only, ignoring proxy settings, and verifies its SHA256 manifest.
+2. The candidate binary runs read-only as the service user via `parins --manage --check` against both the current configuration and the rollback copy. It must read the same saved configuration, rule files, downloaded subscription lists, certificates, and upstream CA as the running version. If either check fails, the update stops with `preflight_failed`, changes nothing, and logs which input categories differed. Fix the flagged inputs, or if the current configuration is valid, save a change once to refresh the rollback copy and retry.
+3. DNS pauses briefly while the new binary starts. The update commits only after all DNS listeners and storage report ready, with up to three minutes per launch including ten continuous seconds of fresh health reports from the verified process. A large database still running its startup check prevents early commit even if DNS is already answering. If readiness fails, the updater automatically restores the previous binary under its own launch budget. Sign in again after the update completes.
 
-Settings are locked while an update runs. Only the program is replaced. A release
-that changes the updater itself says **This release must be installed manually with
-the installer**; run the [install command](deployment.md#install) again. Automatic
-rollback restores the program, not data: it never restores an old database or
-removes new history.
+Settings stay locked during an update, and only the main binary is replaced. If a release changes the root updater itself, the console reports **This release must be installed manually with the installer**, and you must run the [install command](deployment.md#install) again. Automatic rollback restores only the binary, never older database state or deleted history.
 
-Update recovery and installer preflight require helper protocol 7. Upgrade older
-helpers with the complete installer; it replaces the program, helper and service
-files. A program-only online update cannot upgrade the helper. During installer
-rollback the packaged helper waits for storage without completing the installation;
-the restored helper then validates the restored service files and fresh health
-before completing recovery.
+Update recovery and installer preflight require helper protocol 7. Upgrade older helpers with the full installer, which updates the binary, root helper, and systemd unit files together. During installer rollback, the packaged helper waits for storage without committing, and the restored helper verifies the restored unit files and fresh health before completing recovery. If PariNS cancels an update before replacing the binary, the console shows the reason and the root journal records `aborted`.
 
-If PariNS cancels an update before the program was replaced, the console shows its
-own reason and the root journal records the update as `aborted`.
+While an update runs, the subscription store stays closed and DNS keeps serving its loaded rules. When the update finishes, the store reopens automatically without a restart. If reopening fails, **Blocking rules** displays `subscription_storage_unavailable` and retries in the background.
 
-**Subscriptions after an update.** While an update is in progress, the subscription
-store stays closed and DNS uses the rules it already has. Once the update finishes,
-the store opens automatically; no restart is needed. If it cannot open, the
-**Blocking rules** page shows `subscription_storage_unavailable` and the opening is
-retried.
+### Manual recovery
 
-**Manual recovery.** If an update and its automatic rollback both fail to finish,
-the console shows **Manual recovery needed** and configuration changes stay locked.
-Check DNS first, then read the status:
+If an update and its automatic rollback both fail, the console shows **Manual recovery needed** and keeps configuration writes locked. Check DNS first, then inspect service and updater status:
 
 ```sh
 sudo systemctl status parins-managed.service parins-updater.service parins-update-recovery.service
@@ -170,48 +65,31 @@ sudo journalctl -u parins-managed.service -u parins-updater.service -u parins-up
 sudo cat /var/lib/parins-updater/status.json
 ```
 
-Do not edit or delete the updater journal or the update state, reset the database,
-or start an older program by hand. Fix the stated cause, then run the
-[install command](deployment.md#install) for the current or a newer release. When
-that installation passes its readiness check, the unfinished update is closed as
-superseded and settings unlock without a restart. The installer refuses if the
-installed program differs from the recorded digest. Follow the identity check below
-before retrying the installation.
+Do not edit or delete the updater journal, reset the database, or launch an older binary manually. Fix the reported cause, then run the [install command](deployment.md#install) for the current or a newer release. Once that installation passes readiness, the open operation closes as superseded and settings unlock without another restart. If the live binary digest differs from the recorded digest, the installer refuses to run until you restore the matching binary as shown below.
 
-**The update stays in progress.** If the updater cannot read its journal when it
-receives a request, it cannot record an outcome. The console then shows the update
-as in progress, and configuration changes stay locked. A restart does not change
-this. The service log shows `PariNS updater: journal unreadable`. To recover:
+### Update stuck in progress
 
-1. Read the cause with
-   `sudo journalctl -u parins-updater.service | grep 'journal unreadable'`.
-2. Correct the cause, for example a full disk or wrong permissions on
-   `/var/lib/parins-updater`.
-3. Do not edit or delete `/var/lib/parins-updater/private/journal.json`.
-4. Run the [install command](deployment.md#install) for the current or a newer
-   release.
+If the updater cannot read its journal when handling a request, it cannot record an outcome. The console stays stuck in progress, configuration stays locked across restarts, and the journal logs `PariNS updater: journal unreadable`. Recover with these steps:
 
-When that installation passes its readiness check, the update is closed and
-settings unlock. If the installer also cannot read the journal, restore
-`/var/lib/parins-updater` from a backup.
+1. Inspect the cause:
+   ```sh
+   sudo journalctl -u parins-updater.service | grep 'journal unreadable'
+   ```
+2. Fix the underlying problem, such as a full disk or wrong permissions on `/var/lib/parins-updater`.
+3. Leave `/var/lib/parins-updater/private/journal.json` untouched.
+4. Run the [install command](deployment.md#install) for the current or a newer release.
 
-**The service does not start after a restart.** Check the recovery service log
-and the phase in `/var/lib/parins-updater/status.json` before replacing any file.
+Once the installer passes readiness, the stuck update closes and settings unlock. If the installer still cannot read the journal, restore `/var/lib/parins-updater` from backup.
 
-- A non-terminal `staged` operation has downloaded the candidate. Boot recovery
-  marks the operation interrupted and starts the recorded installed program.
-  Let `parins-update-recovery.service` finish before starting the managed service.
-- A recorded `manual_required` operation is terminal. Recovery checks the live
-  binary against `installed.sha256`. If it matches, fix the reported cause and
-  run the complete installer as described above.
-- If recovery reports `unknown installed binary`, restore the exact recorded
-  program. When an operation ID is available, check its saved copy with
-  `sudo sha256sum /opt/parins-managed/.update/ID/previous`, replacing `ID`
-  with `last_operation.operation_id`. Use this copy only if its digest equals
-  `installed.sha256`. A terminal operation may have no usable copy. In that
-  case restore a binary with that digest from your backup.
+### Service fails to start after a reboot or crash
 
-To restore a verified `previous` copy and run the service checks:
+Check `parins-update-recovery.service` logs and the phase in `/var/lib/parins-updater/status.json` before touching any binary:
+
+- If the phase is a non-terminal `staged` operation, boot recovery marks it interrupted and starts the recorded installed binary. Wait for `parins-update-recovery.service` to finish before starting `parins-managed.service`.
+- If the phase is `manual_required`, recovery checks the live binary against `installed.sha256`. When they match, fix the stated cause and run the full installer.
+- If recovery reports `unknown installed binary`, restore a binary matching `installed.sha256`. When `last_operation.operation_id` is present, check `sudo sha256sum /opt/parins-managed/.update/ID/previous`, replacing `ID` with that operation ID. Use that copy only if its digest equals `installed.sha256`, or restore a matching binary from your backup.
+
+To restore a verified `previous` copy and re-run recovery checks:
 
 ```sh
 sudo install -m 0755 /opt/parins-managed/.update/ID/previous /opt/parins-managed/.parins.restore
@@ -220,12 +98,9 @@ sudo systemctl restart parins-update-recovery.service
 sudo systemctl start parins-managed.service
 ```
 
-If the journal already records `manual_required`, restoring the program lets it
-start. Run the complete installer to close the operation and unlock settings.
+If the journal already recorded `manual_required`, restoring the binary allows the service to start, and running the full installer closes the operation and unlocks settings.
 
-The installer pauses the update request path while it runs. If it reports that the
-program is installed but the request path is not enabled, the installation is
-complete; run the command it prints:
+The installer pauses `parins-updater.path` while running. If it reports that installation succeeded but the request path failed to re-enable, run the printed recovery command:
 
 ```sh
 sudo systemctl reset-failed parins-updater.path parins-updater.service && sudo systemctl enable --now parins-updater.path
@@ -233,54 +108,32 @@ sudo systemctl reset-failed parins-updater.path parins-updater.service && sudo s
 
 ## Certificates
 
-**Import.** Under **Encryption & certificates**, enable a listener and paste its PEM
-certificate chain and private key (up to 64 KiB each). PariNS checks that they match
-and stores them as a private file under `certificates/` in the state directory; only
-the file reference goes into the configuration, and the key is never shown again or
-exported. Up to 32 imported identities are kept; delete unused ones by hand only
-after checking the current and rollback configurations. Clients still check expiry,
-host name and trust.
+- **Import in the console.** Under **Encryption & certificates**, enable a listener and paste its PEM certificate chain and private key, up to 64 KiB each. PariNS verifies that they match and writes them privately under `certificates/` in the state directory. Configuration stores only the file reference, and the private key is never shown again or exported. PariNS keeps up to 32 imported identities. Delete unused files manually only after confirming neither the current nor rollback configuration references them. Clients still enforce expiry, hostname match, and trust chain.
+- **Extended Key Usage check.** Inbound validation accepts a leaf certificate with no Extended Key Usage extension. If the extension is present, it must allow server authentication. This check applies on load and reload.
+- **External certificate files.** You may reference files outside the state directory instead. Because the managed service runs as a dynamic user, grant read access through a group using a systemd drop-in that sets only `SupplementaryGroups=` under `[Service]`, such as `/etc/systemd/system/parins-managed.service.d/certs.conf`. That is the only drop-in the installer permits.
+- **Live renewal.** PariNS has no ACME client and does not watch files on disk. After your renewal tool replaces the files, click **Reload certificates** in the console or run:
 
-Inbound identity validation accepts a leaf without an Extended Key Usage
-extension. A leaf that includes the extension must permit server authentication.
-This check also applies when loading or reloading a referenced identity.
+  ```sh
+  sudo systemctl reload parins-managed.service
+  ```
 
-**External files.** You can reference certificate files elsewhere instead. The
-service runs as a dynamic user, so grant read access through a group: the only
-drop-in the installer accepts is one that sets `SupplementaryGroups=` under
-`[Service]`, for example `/etc/systemd/system/parins-managed.service.d/certs.conf`.
-
-**Renewal.** PariNS has no ACME client and does not watch files. After your issuer
-has replaced the certificate and key, reload them with **Reload certificates**, or:
-
-```sh
-sudo systemctl reload parins-managed.service
-```
-
-A reload checks every configured certificate first and swaps them all together; on
-any failure the previous ones stay. It keeps listeners, caches, sessions and the
-saved configuration. New handshakes use the new certificate; open connections
-continue. The console shows the result and the active fingerprints; check them,
-because a sent signal does not mean the reload succeeded. In managed mode SIGHUP
-reloads only certificates; in file mode it also reloads `filter_file`.
+  Reload validates every configured certificate first and swaps all listeners atomically. On any error, the previous certificates remain active. Listeners, caches, sessions, and saved configuration stay intact, while new handshakes present the updated certificates. Confirm the result and active fingerprints in the console, because sending `SIGHUP` alone does not guarantee reload succeeded. In managed mode `SIGHUP` reloads only certificates, whereas in file mode it also reloads `filter_file`.
 
 ## Backups and the state directory
 
-Managed state lives in `/var/lib/parins-managed` (stored under
-`/var/lib/private/parins-managed`), owned by the service's dynamic user with private
-permissions:
+Managed state lives in `/var/lib/parins-managed`, backed by `/var/lib/private/parins-managed`, owned by systemd's dynamic user with private permissions:
 
 | Path | Content |
 | --- | --- |
-| `state.json` | Administrator hash, current and previous (rollback) configuration, revision. If the rollback copy cannot be read, the service log and the status API (`rollback_unavailable`) give the reason, and rollback is unavailable until the next apply. |
-| `turnstile.json` | Turnstile site key and secret key, when human verification is on. |
-| `setup-token` | One-time setup token, before setup. |
+| `state.json` | Admin password hash, current and previous rollback configurations, and saved revision. If the rollback copy is unreadable, status reports `rollback_unavailable` and rollback stays disabled until the next save. |
+| `turnstile.json` | Turnstile site key and secret key when human verification is enabled. |
+| `setup-token` | One-time setup token before first-run setup completes. |
 | `certificates/` | Imported certificate identities. |
-| `filter-subscriptions/` | Downloaded lists and their catalog. |
-| `runtime/` | Statistics and query log database, cache snapshot. |
-| `update-state.json` | Online update progress. |
+| `filter-subscriptions/` | Downloaded blocklists and subscription catalog. |
+| `runtime/` | Statistics and query-log SQLite database plus the cache snapshot. |
+| `update-state.json` | Online update progress state. |
 
-Back up the whole directory while the service is stopped:
+Back up the entire state directory while the service is stopped:
 
 ```sh
 sudo systemctl stop parins-managed.service
@@ -288,202 +141,105 @@ sudo tar -C /var/lib/private -czf parins-managed-backup.tar.gz parins-managed
 sudo systemctl start parins-managed.service
 ```
 
-Do not edit live state, and do not start the managed service with `--config`.
-Exported TOML contains no account data. Restore a backup only onto the same or a
-newer PariNS version.
+Never edit live state files, and never start the managed service with `--config`. Exported TOML excludes account data. Restore a backup only onto the same or a newer PariNS version.
 
 ## Query log and storage
 
-**Query log.** Off by default; turn it on under **Logs & storage** (`[query_log]`).
-Each record has the client address, name and type, transport, response code,
-duration, cache and filter result, the upstream used, ECS in and out, EDNS flags and
-up to 16 answer records. The **Query log** page offers search, status filters,
-paging, clearing, and timed refresh (1, 3, 5 or 10 seconds) over an authenticated
-WebSocket (`/api/query-log/live`). Records appear after they are written, up to
-`storage.flush_interval_ms` late. Each session may hold 2 live connections and the
-service 16; idle ones close after 30 seconds. Treat the log as private browsing data.
-
-Rejected UDP queries are sampled in the log. The UDP drop metric counts all
-drops.
-
-The log keeps records until `max_entries`, `max_bytes`, `retention_secs` or the
-database limit is reached, whichever comes first; the page shows the actual oldest
-record and why older ones were removed. Queries cancelled after reaching the
-resolver are recorded as dropped, with the path **cancelled** and the cache lookup
-result made before the cancellation. This includes an answer that fails to write
-on any transport. Prefetch is not logged. Query data never appears
-in metrics or the service log.
-
-`query_log.max_bytes` accepts 1 MiB through 2 GiB and must not exceed
-`storage.max_database_bytes`; the default remains unchanged. A retention duration
-is an upper age limit, not a guaranteed coverage window. Size a desired window
-from its observed request rate and per-record charge, then allow for database
-indexes, WAL and filesystem headroom. Check actual coverage and cleanup reasons
-after the window has elapsed. Before downgrading to a version limited to 512 MiB,
-reduce the configured log byte budget to that version's supported range.
-
-**Statistics.** The **Overview** page shows totals, the cache hit rate, blocked
-queries, latency and response codes, plus trends sampled once a minute (7 days by
-default). The hit rate is the share of cache lookups that needed no upstream request
-of their own: fresh and stale cache hits plus queries that joined an identical query
-in progress. The **Cache** page lists those parts separately. Totals and trends
-survive restarts and contain no names or client addresses.
-
-**Storage.** One worker serializes records and owns the SQLite database; DNS sends
-its answer before it queues the completed record. When the bounded memory queue
-is full, new records are dropped and counted. Row-limit eviction shares the insert
-transaction. Other capacity trims run after a write when needed; periodic cleanup
-and reduced limits reclaim unused pages. An explicit flush also runs cleanup.
-Name searches have a 500 ms budget; an interrupted search uses the existing busy
-message so that writes can resume. At shutdown, the cache snapshot save and the storage
-drain run in parallel, each with its own time budget. Clearing logs, totals or trends
-affects only that kind of data.
-
-The database uses WAL with FULL synchronization. The private `observability.sqlite3-wal`
-and `observability.sqlite3-shm` files count toward the database limit. Keep them with
-the database while the service runs; do not copy or remove them separately. Normal
-shutdown checkpoints and truncates the WAL. The database format is unchanged, and
-the prior version can open it and return to its own journal mode.
-
-Refresh diagnostics reset when the cache generation changes and are not saved
-with statistics or snapshots. Inspection does not mark an entry as used; unused
-expired entries are counted when a lookup or cleanup encounters them.
-
-Authenticated status includes `diagnostics.cache.capacity.shards`: each shard's
-positive and negative resident entry/byte usage and limits, plus admission
-evictions by `entry_limit`, `byte_limit`, `entry_and_byte_limit` or `variant_limit`.
-Each cause separates victims that were `fresh`, `retained` past fresh lifetime
-but within retention, or `expired` past retention when evicted. These counters
-exclude expiry cleanup, replacement and explicit invalidation, and restart with
-the cache generation. Compare deltas only with the same cache `since_ms`.
-Reading this state does not expire entries or update recency, hits or refresh
-outcomes. Resident entry counts are not a census of fresh answers; byte charges
-can outlive eviction while a reader holds the entry.
-
-The storage status shows a low-space warning when free space falls below 10% or
-below the database limit plus twice the snapshot limit plus 64 MiB.
+- **Query log.** Disabled by default. Enable it under **Logs & storage** or `[query_log]`. Each entry records client address, query name and type, transport, response code, latency, cache and filter outcomes, upstream used, inbound and outbound ECS, EDNS flags, and up to 16 answer records. The **Query log** page supports search, status filters, paging, clearing, and live refresh every 1, 3, 5, or 10 seconds over an authenticated WebSocket at `/api/query-log/live`. New entries appear after flush, up to `storage.flush_interval_ms` later. Each session allows 2 live sockets up to 16 total, and idle sockets close after 30 seconds. Treat query logs as private browsing data.
+- **Sampling and cancellation.** Rejected UDP queries are sampled in the query log while `parins_udp_dropped_total` counts every drop. Queries cancelled after reaching the resolver are logged as dropped with path **cancelled** and their prior cache lookup result, including transport write failures. Prefetch traffic is never logged, and query details never enter metrics or service logs.
+- **Retention and sizing.** Records remain until `max_entries`, `max_bytes`, `retention_secs`, or `storage.max_database_bytes` is hit first. The console shows the oldest retained record and cleanup reasons. `query_log.max_bytes` accepts 1 MiB to 2 GiB and cannot exceed `storage.max_database_bytes`. Treat `retention_secs` as an upper age limit rather than guaranteed coverage, and size byte limits from observed query rate, per-record size, indexes, WAL files, and free disk headroom. Before downgrading to a version capped at 512 MiB, lower `query_log.max_bytes` into that range.
+- **Statistics.** **Overview** shows totals, cache hit rate, blocked counts, latency, and one-minute trends for 7 days by default. Hit rate counts fresh hits, stale hits, and queries that joined an in-flight coalesced query. **Cache** breaks those components out separately. Totals and trends survive restarts and store no domain names or client addresses.
+- **Storage worker and WAL.** One background worker serializes writes to SQLite after DNS sends each reply. When the memory queue fills, new entries drop and increment drop counters. Row-limit eviction shares the insert transaction, while periodic cleanup, lowered limits, and explicit flush reclaim unused pages. Name searches have a 500 ms budget and yield on timeout so writes continue. At shutdown, cache snapshot saving and storage draining run in parallel under separate budgets. Clearing logs, totals, or trends resets only that category.
+- **Database files.** SQLite runs in WAL mode with `FULL` synchronization. `observability.sqlite3-wal` and `observability.sqlite3-shm` count toward `max_database_bytes`. Keep them alongside the main database while running and never copy or delete them separately. Clean shutdown checkpoints and truncates the WAL.
+- **Cache diagnostics.** Refresh diagnostics reset on each cache generation and stay out of persisted statistics and snapshots. Cache inspection does not mark entries used, and unused expired entries are counted when lookup or cleanup encounters them. Authenticated `/api/status` includes `diagnostics.cache.capacity.shards` with per-shard positive and negative resident entry and byte counts, limits, and admission evictions by `entry_limit`, `byte_limit`, `entry_and_byte_limit`, or `variant_limit`. Evictions distinguish `fresh`, `retained`, and `expired` victims and exclude expiry cleanup, replacement, and manual invalidation. Compare counter deltas only within the same `since_ms`. Resident counts include expired entries not yet reaped, and byte charges stay alive while a reader holds an evicted entry.
+- **Low-space warning.** Storage status warns when free disk space drops below 10% or below `storage.max_database_bytes` plus twice `cache.persistence.max_bytes` plus 64 MiB.
 
 ## Metrics
 
-Set `admin_listen` to a loopback address (for example `127.0.0.1:9090`) to serve two
-read-only HTTP endpoints, with their own small connection budget:
+Set `admin_listen` to a loopback address such as `127.0.0.1:9090` to expose two read-only HTTP endpoints with their own small connection limit:
 
-- `GET /healthz` returns `ok` while the process runs. It does not mean DNS is ready.
-- `GET /metrics` returns Prometheus text. All values restart from zero with the
-  process; no names, client addresses or other unbounded labels are exported.
+- `GET /healthz` returns `ok` while the process is alive. It does not check DNS readiness.
+- `GET /metrics` returns Prometheus text format. All counters reset to zero on process start, and no domain names, client addresses, or unbounded labels are exported.
 
-For DNS readiness, use `dns_health` in the console's authenticated `GET /api/status`
-(`ready`, `state`, `code`); PariNS sends no alerts itself.
+For DNS readiness, read `dns_health` (`ready`, `state`, and `code`) from the authenticated console endpoint `GET /api/status`. PariNS does not send alerts itself.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `parins_requests_total`, `parins_completed_total`, `parins_cancelled_total` | counter | Queries entering the resolver; queries whose answer (any response code) was written to the transport; queries cancelled before that, including failed writes. |
-| `parins_responses_{noerror,nxdomain,servfail,refused,other}_total`, `parins_dropped_total` | counter | Responses by code; queries that ended without a response. |
-| `parins_cache_hits_total`, `parins_cache_misses_total` | counter | First cache lookup of a query (a miss includes a disabled or bypassed cache). |
-| `parins_cache_lookup_{fresh,stale,miss,bypass,disabled}_total` | counter | Cache lookups by outcome. |
-| `parins_cache_store_{admitted,replaced,skipped,superseded_only}_total` | counter | Cache store decisions. |
-| `parins_cache_reason_*_total` | counter | Why a lookup bypassed or a store skipped: `unsupported_query`, `unsupported_edns`, `ecs_unusable`, `ttl_zero`, `negative_without_soa`, `uncacheable_response`, `policy_disabled`, `capacity`, `variant_limit`, `epoch_changed`. |
-| `parins_query_blocked_total`, `parins_response_blocked_total` | counter | Blocked by query name; blocked by a name in the answer's CNAME chain. |
-| `parins_flight_{leaders,joined,rejected,bypassed}_total` | counter | Query coalescing: shared, joined, refused at a limit, not eligible. |
-| `parins_refresh_active` | gauge | Background refreshes and cache fills in progress in the current cache generation. |
-| `parins_refresh_{scheduled,success,failure}_total` | counter | Background work started; work that stored an answer; work that stored none. |
-| `parins_refresh_rejected_{duplicate,cooldown,budget}_total`, `parins_refresh_cancelled_fill_rejected_total` | counter | Prefetch refusals by reason; sent queries whose departed caller could not hand them to the background budget. |
-| `parins_refresh_{useful,unused}_total` | counter | Each refreshed entry settles once. Its first foreground hit counts as useful when fresh and unused when served stale. An entry that expires and is reaped or is otherwise removed before a foreground hit counts as unused. |
-| `parins_upstream_operations_total`, `parins_upstream_failures_total`, `parins_upstream_timeouts_total`, `parins_ecs_retries_total` | counter | Upstream operations (TCP fallback and ECS retry stay inside one), failed exchanges (transport failures and SERVFAIL answers from the upstream), timeouts, ECS `/0` retries. |
-| `parins_upstream_attempt_{succeeded,failed,cancelled,skipped}_total` | counter | Individual upstream attempts by outcome. |
-| `parins_upstream_attempt_reason_*_total` | counter | Attempt end reasons: `deadline`, `connect_io`, `tls`, `http_status`, `protocol_invalid`, `peer_closed`, `caller_cancelled`, `shutdown`, `internal`. |
-| `parins_udp_received_total`, `parins_tcp_received_total`, `parins_encrypted_received_total` | counter | Datagrams, TCP frames and encrypted DNS messages received. |
-| `parins_udp_dropped_total`, `parins_tcp_rejected_total`, `parins_encrypted_rejected_total`, `parins_connections_rejected_total` | counter | Admission rejections at the global limits. |
-| `parins_source_queries_rejected_total`, `parins_source_connections_rejected_total`, `parins_source_table_full_total` | counter | Per-client limit rejections; table-full is a subset. |
-| `parins_quic_{doq,doh3}_*_total` | counter | DoQ and DoH3 connection, handshake, stream and HTTP outcomes (for example `incoming`, `admission_global_rejected`, `handshake_established`, `handshake_tls`, `stream_cancelled`, `http_response_4xx`). `incoming` counts only validated client addresses. `stream_peer_cancelled` counts streams that the client stopped or reset; for DoH3 this includes an answer that fails to write for that reason. `http_request_failed` counts other DoH3 request failures. |
-| `parins_request_inflight`, `parins_upstream_inflight` | gauge | Queries and upstream operations in progress. |
-| `parins_request_duration_seconds`, `parins_upstream_duration_seconds` | histogram | Latency, with buckets at 1, 5, 10, 50, 100, 500, 1000 and 5000 ms. |
+| `parins_requests_total`, `parins_completed_total`, `parins_cancelled_total` | counter | Queries entering the resolver, queries whose answer wrote to the transport, and queries cancelled before write completion including write failures. |
+| `parins_responses_{noerror,nxdomain,servfail,refused,other}_total`, `parins_dropped_total` | counter | Responses by RCODE and queries that ended without a response. |
+| `parins_cache_hits_total`, `parins_cache_misses_total` | counter | First cache lookup per query, counting disabled or bypassed cache as a miss. |
+| `parins_cache_lookup_{fresh,stale,miss,bypass,disabled}_total` | counter | Cache lookup outcomes. |
+| `parins_cache_store_{admitted,replaced,skipped,superseded_only}_total` | counter | Cache admission outcomes. |
+| `parins_cache_reason_*_total` | counter | Bypass or skip reasons: `unsupported_query`, `unsupported_edns`, `ecs_unusable`, `ttl_zero`, `negative_without_soa`, `uncacheable_response`, `policy_disabled`, `capacity`, `variant_limit`, and `epoch_changed`. |
+| `parins_query_blocked_total`, `parins_response_blocked_total` | counter | Queries blocked by question name and answers blocked by a CNAME target. |
+| `parins_flight_{leaders,joined,rejected,bypassed}_total` | counter | Coalescing leaders, joiners, rejections at limits, and non-coalescable queries. |
+| `parins_refresh_active` | gauge | Background refreshes and cache fills running in the current cache generation. |
+| `parins_refresh_{scheduled,success,failure}_total` | counter | Background refreshes started, stored, and failed to store. |
+| `parins_refresh_rejected_{duplicate,cooldown,budget}_total`, `parins_refresh_cancelled_fill_rejected_total` | counter | Prefetch rejections by reason, plus sent queries whose departed caller could not hand them off to the background budget. |
+| `parins_refresh_{useful,unused}_total` | counter | Refreshed entries settled once as useful on a first fresh foreground hit, or unused if served stale or removed before a foreground hit. |
+| `parins_upstream_operations_total`, `parins_upstream_failures_total`, `parins_upstream_timeouts_total`, `parins_ecs_retries_total` | counter | Upstream operations including TCP fallback and ECS retry, failed exchanges, timeouts, and ECS `/0` retries. |
+| `parins_upstream_attempt_{succeeded,failed,cancelled,skipped}_total` | counter | Individual upstream attempt outcomes. |
+| `parins_upstream_attempt_reason_*_total` | counter | Attempt failure reasons: `deadline`, `connect_io`, `tls`, `http_status`, `protocol_invalid`, `peer_closed`, `caller_cancelled`, `shutdown`, and `internal`. |
+| `parins_udp_received_total`, `parins_tcp_received_total`, `parins_encrypted_received_total` | counter | Inbound UDP datagrams, TCP frames, and encrypted DNS messages received. |
+| `parins_udp_dropped_total`, `parins_tcp_rejected_total`, `parins_encrypted_rejected_total`, `parins_connections_rejected_total` | counter | Global admission rejections. |
+| `parins_source_queries_rejected_total`, `parins_source_connections_rejected_total`, `parins_source_table_full_total` | counter | Per-client limit rejections, where table-full is a subset. |
+| `parins_quic_{doq,doh3}_*_total` | counter | DoQ and DoH3 lifecycle counters such as `incoming`, `admission_global_rejected`, `handshake_established`, `handshake_tls`, `stream_cancelled`, `stream_peer_cancelled`, `http_request_failed`, and `http_response_4xx`. `incoming` counts only validated client addresses. |
+| `parins_request_inflight`, `parins_upstream_inflight` | gauge | Active DNS requests and upstream operations. |
+| `parins_request_duration_seconds`, `parins_upstream_duration_seconds` | histogram | Latency histograms with buckets at 1, 5, 10, 50, 100, 500, 1000, and 5000 ms. |
 
-In recursive mode `/metrics` adds:
+In recursive mode, `/metrics` adds these metrics:
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
 | `parins_recursion_started_total` | counter | Recursive resolutions started. |
-| `parins_recursion_answered_total`, `parins_recursion_negative_total`, `parins_recursion_bogus_total` | counter | Resolutions with an answer; ending in NXDOMAIN or NODATA; with DNSSEC Bogus data. |
-| `parins_recursion_deadline_total` | counter | Resolutions cancelled before finishing, by the query deadline or a cancelled request. |
-| `parins_recursion_shutdown_total` | counter | Resolutions ended by shutdown. |
-| `parins_recursion_failed_{timeout,referral,budget,other}_total` | counter | Failures: authoritative timeouts, an unfollowed referral, a query or depth budget, other causes. |
-| `parins_recursion_outbound_sent_total` | counter | Queries sent to authoritative servers. |
-| `parins_recursion_outbound_rate_waits_total`, `parins_recursion_outbound_rate_wait_ms_total` | counter | Queries that waited for a rate token, and the total wait in milliseconds. |
-| `parins_recursion_outbound_inflight` | gauge | Authoritative queries admitted and not finished, including those waiting for a rate token. |
+| `parins_recursion_answered_total`, `parins_recursion_negative_total`, `parins_recursion_bogus_total` | counter | Answered resolutions, NXDOMAIN or NODATA outcomes, and DNSSEC Bogus outcomes. |
+| `parins_recursion_deadline_total` | counter | Resolutions stopped by query deadline or client cancellation. |
+| `parins_recursion_shutdown_total` | counter | Resolutions stopped by shutdown. |
+| `parins_recursion_failed_{timeout,referral,budget,other}_total` | counter | Recursive failures by cause: authoritative timeout, unfollowed referral, query or depth budget, or other failure. |
+| `parins_recursion_outbound_sent_total` | counter | Authoritative queries sent. |
+| `parins_recursion_outbound_rate_waits_total`, `parins_recursion_outbound_rate_wait_ms_total` | counter | Authoritative queries that waited for a rate token and total wait time in milliseconds. |
+| `parins_recursion_outbound_inflight` | gauge | Admitted authoritative queries not yet finished, including those waiting for a rate token. |
 
-`[metrics] interval_secs` also prints the process counters, gauges and histograms
-as JSON lines on stderr (`"event": "parins_metrics"`), periodically and at shutdown.
+Setting `[metrics] interval_secs` also prints periodic and shutdown JSON snapshots to stderr with `"event": "parins_metrics"`.
 
 ## Running recursive mode
 
-Switching `[resolution] mode` restarts DNS with an empty cache, so answers are slower
-until it warms up. Before switching:
+Changing `[resolution] mode` restarts DNS with an empty cache, so initial queries are slower until caches warm up. Before switching:
 
-- Allow outbound UDP and TCP port 53 to the internet, and IPv6 only if you set
-  `[recursion] ipv6 = true`. These queries are plaintext and, with ECS on, carry the
-  client subnet to the answer's authoritative servers.
-- Size `max_outbound_per_second` and `max_outbound_inflight` for your cache-miss rate;
-  one cold miss usually needs several authoritative queries.
-- Only PariNS's own filtering applies; the old upstream's policies no longer do.
+- Allow outbound UDP and TCP port 53 to the internet, and allow IPv6 egress only if you enable `[recursion] ipv6 = true`. Authoritative queries are plaintext and carry the client subnet when ECS is on.
+- Size `max_outbound_per_second` and `max_outbound_inflight` for your cache-miss rate, because a cold lookup issues several authoritative queries.
+- Confirm that PariNS's own filter rules cover what you need, because upstream resolver filtering no longer applies.
 
-Rising `parins_recursion_outbound_rate_waits_total` or
-`parins_recursion_deadline_total` means the outbound limits or `query_timeout_ms`
-are too tight for the load. See [Resolution mode and recursion](configuration.md#resolution-mode-and-recursion).
+If `parins_recursion_outbound_rate_waits_total` or `parins_recursion_deadline_total` rises under load, increase the outbound limits or `query_timeout_ms`. See [Resolution mode and recursion](configuration.md#resolution-mode-and-recursion).
 
 ## Troubleshooting
 
 ### Port 53 is in use
 
-Setup or saving fails with `CONFIG_CONFLICT` and nothing is saved. Another service,
-often the systemd-resolved stub, holds the port. See
-[Port 53 conflicts](deployment.md#port-53-conflicts).
+Setup or save fails with `CONFIG_CONFLICT` and saves nothing because another process, often `systemd-resolved`, holds port 53. Follow [Port 53 conflicts](deployment.md#port-53-conflicts).
 
 ### DNS degraded
 
-`dns_health.state` is `degraded` with code `listener_unavailable` and `ready` is
-false: DNS is serving, but at least one listener is down. The `listeners` list in
-`/api/status` and the **Overview** page show each listener's state, address and last
-error, such as `Address in use`. The missing listener is rebound after 5 seconds,
-then at doubling intervals up to once a minute, until it works or DNS stops. The
-others, the cache and the upstreams keep working, and the journal repeats an
-unchanged error at most every ten minutes. An online update needs every listener up,
-so it rolls back while one is missing.
+`dns_health.state` is `degraded` with code `listener_unavailable` and `ready` is `false` when at least one listener is down while others still serve. Inspect `listeners` in `/api/status` or on **Overview** for each listener's address and error, such as `Address in use`. PariNS retries the failed listener after 5 seconds and doubles the interval up to 60 seconds, logging repeated errors at most once every ten minutes. Online updates require every listener up and roll back while degraded.
 
-If DNS fails to start for another reason (code `startup_failed`, for example an
-unreadable certificate), the service retries the saved configuration with the same
-backoff until it starts or you apply a new configuration.
+If DNS fails to start with code `startup_failed`, such as an unreadable certificate, PariNS retries the saved configuration on the same backoff until it succeeds or you apply a fixed configuration.
 
 ### DNS stopped after a rule problem
 
-If the saved local rules cannot be compiled, such as an unreadable `filter_file`, DNS
-stays stopped and the status shows `DNS unavailable:` with the reason. Fix the rules
-and apply the configuration again.
+If saved local rules cannot compile, such as an unreadable `filter_file`, DNS stays stopped and status displays `DNS unavailable` with the reason. Fix the rules and apply the configuration again.
 
 ### Subscriptions after an update
 
-During an online update, subscriptions keep their current rules and cannot be
-changed. They become available again automatically when the update finishes. If
-`subscription_storage_unavailable` persists, check the disk that holds the state
-directory.
+Subscriptions pause while an update runs and reopen automatically when it completes. If `subscription_storage_unavailable` persists on **Blocking rules**, check free space and permissions on the state directory disk.
 
 ### Storage shows "checking"
 
-At startup an existing database is integrity-checked in the background, and the
-storage status is `checking` meanwhile. DNS does not wait for it. New records wait in
-the bounded queue (overflow is dropped and counted), and the check may take a while
-for a large database. Only shutdown interrupts it. If the status ends as
-`unavailable`, its error says why.
+On startup, PariNS runs an integrity check on an existing database in the background while DNS serves immediately. During the check, storage reports `checking` and buffers new records in the bounded memory queue, where overflow drops and counts. Only shutdown cancels the check. If the check ends in `unavailable`, read the reported error.
 
 ### Accepts paused
 
-The log line `PariNS accept paused: ...; raise the open-file limit or lower
-max_tcp_connections` means the process ran out of file descriptors. Listeners keep
-serving after a short pause. Raise `LimitNOFILE` for the service or lower
-`max_tcp_connections`.
+The log line `PariNS accept paused: ...; raise the open-file limit or lower max_tcp_connections` means the process exhausted file descriptors. Listeners pause accepting briefly and keep serving. Raise `LimitNOFILE` for the service or lower `max_tcp_connections`.
 
 ### Cache snapshot not saved
 
-`cache snapshot not saved: shutdown not quiescent (<cause>)` means queries were still
-running when `shutdown_grace_ms` ran out, so the next start begins with an empty
-cache. This is safe; raise `shutdown_grace_ms` if it happens often.
+`cache snapshot not saved: shutdown not quiescent (<cause>)` means active queries outlived `shutdown_grace_ms` at shutdown, so the next start begins with an empty cache. Increase `shutdown_grace_ms` if this happens often.

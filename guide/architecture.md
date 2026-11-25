@@ -1,10 +1,8 @@
 # Architecture
 
-[Development](development.md) · [Configuration](configuration.md) · [Operations](operations.md)
+[Home](../README.md) · [Deployment](deployment.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Development](development.md) · [Architecture](architecture.md)
 
-PariNS is a modular Rust service. Its embedded React console and management API
-control the same process that owns DNS, while a separate fixed-purpose updater
-performs privileged installation work on Linux. Production needs no Node server.
+PariNS is a modular Rust DNS service. Its embedded React console and management API run inside the same process that owns DNS, while a separate fixed-purpose root binary performs privileged updates on Linux. Production needs no Node.js server.
 
 ## Request path
 
@@ -22,106 +20,47 @@ flowchart LR
     Delivery --> Runtime[Process metrics and bounded storage queue]
 ```
 
-`server` owns listeners, their supervisors and shutdown. Plain transports handle
-UDP packet information and TCP framing; encrypted adapters share admission through
-`ingress`. `protocol` and `ecs` validate and normalize the request at their owning
-boundaries.
+`server` owns listeners, per-listener supervisors, and shutdown. Plain transports handle UDP packet info and TCP framing, while encrypted adapters share admission through `ingress`. `protocol` and `ecs` validate and normalize each query at their boundaries.
 
-`resolver` captures the cache and policy owners for each request. It applies query
-filtering, looks up the cache, shares eligible misses through `flight`, and runs
-one source operation with one deadline. Forwarding and recursive modes share this
-outer behavior. `upstreams` owns endpoint scheduling and verified transport
-connections. `recursion` owns the pinned Hickory recursor, DNSSEC result mapping,
-infrastructure caches and global outbound bounds.
+`resolver` pins the cache and policy owners for the lifetime of one request. It evaluates query filtering, checks the cache, shares eligible misses through `flight`, and runs one source lookup under one deadline. Forwarding and recursive modes share this outer path. `upstreams` owns endpoint scheduling and verified transport connections. `recursion` owns the pinned Hickory recursor, DNSSEC result mapping, infrastructure caches, and global outbound limits.
 
-The cache keeps upstream answers before response filtering. Filtering, per-client
-ECS and AD handling run before delivery. Stale fallback belongs to each foreground
-consumer. A transport confirms delivery only after its write succeeds; dropping an
-unconfirmed delivery records cancellation. Cache code performs no network IO.
+The cache stores upstream answers before response filtering. Response filtering, per-client ECS echoing, and AD bit handling run before transport delivery. Each foreground caller owns its stale fallback decision. Transports confirm delivery only after a write succeeds, and dropping an unconfirmed delivery records a cancellation. Cache code performs no network IO.
 
-An answer that cannot be stored can still supersede an older overlapping
-answer. This includes complete, transaction-independent answers with zero TTL
-or Extended DNS Errors that make replay ineligible. The cache checks the epoch
-under the shard lock before learning ECS sharing or admitting a response.
-Capacity diagnostics copy bounded occupancy and eviction counters without
-scanning or touching entries. Resident occupancy includes entries beyond
-their fresh lifetime.
+An uncacheable answer can still supersede older overlapping cache entries. This covers complete, transaction-independent answers with zero TTL or Extended DNS Errors that disqualify replay. The cache verifies its epoch under the shard lock before learning ECS sharing or admitting an entry. Capacity diagnostics read bounded occupancy and eviction counters without scanning or touching entries, and resident occupancy includes entries past their fresh lifetime.
 
 ### Upstream transport
 
-DoH selects GET while the encoded URI fits and POST otherwise. Both HTTP
-versions account for HTTP `Age` in response TTLs before returning the DNS
-message. HTTP/3 can fall back to verified HTTP/2 only before sending the query.
-After the HEADERS frame is written, the attempt keeps the resolver deadline
-and any failure goes through normal upstream failure handling. The pool can
-advance to another bootstrap address only after an unsent attempt. DoT's
-bounded retry on a closed reused connection is described in
-[Configuration](configuration.md#upstreams).
+DoH sends GET when the encoded query fits in the client URI and POST otherwise. Both HTTP/2 and HTTP/3 subtract HTTP `Age` from answer TTLs before returning the DNS message. HTTP/3 falls back to verified HTTP/2 only before sending the query. After the `HEADERS` frame writes, the attempt uses the remaining resolver deadline and follows normal upstream failure handling. Hostname pools advance to the next bootstrap address only after an unsent attempt. DoT's single retry on a closed reused pool connection is documented in [Configuration](configuration.md#upstreams).
 
-HTTP/3 pre-send and connection failures start a cooldown from 2 to 30 seconds.
-A stream failure on an open connection leaves that cooldown alone, and an
-outcome from a replaced connection cannot modify its successor. An HTTP/3
-answer resets the cooldown. A definitive HTTP 4xx response disables HTTP/3
-until pool replacement. Statuses 408, 414, 421, 425, 429 and 431 are excluded
-from that rule.
+HTTP/3 pre-send and connection failures trigger an endpoint cooldown starting at 2 seconds and doubling up to 30 seconds. A stream failure on an open connection leaves the cooldown unchanged, and a replaced connection cannot alter its successor's cooldown. A successful HTTP/3 answer resets the cooldown. A definitive HTTP 4xx response other than 408, 414, 421, 425, 429, or 431 disables HTTP/3 until pool replacement.
 
-Recursive resolution acquires a global rate token and concurrency permit
-for every authoritative attempt before its server timeout starts. The
-recursor owns bounded delegation, name server and DNSSEC key caches. The
-Resolver's cache remains the answer cache for both resolution modes.
+In recursive mode, every authoritative query acquires a global rate token and concurrency permit before its per-server timeout starts. The recursor keeps bounded delegation, name server, and DNSSEC key caches, while the resolver's cache remains the answer cache for both modes.
 
 ## State ownership and lifetime
 
 | State | Owner | Lifetime or change boundary |
 | --- | --- | --- |
-| Saved configuration revision | Management Store and Manager | Each committed configuration save or rollback; rejects stale writes. |
-| DNS generation | Manager/Running and Server | Listener, Resolver and upstream lifecycle; health publications carry this generation. |
-| Cache instance | Resolver's cache generation | Replaced independently for cache behavior changes; old work retains its own instance. |
-| Cache epoch | Cache | Invalidation fences admission by older work inside that instance. |
-| Cache invalidation token | Cache | Opaque instance identity plus epoch; old tokens cannot clear a replacement instance. |
-| Policy generation | PolicyHandle and subscription service | Immutable publication; each request pins its rules, with at most one retained old generation. |
-| Metrics, log queue, SQLite and health | RuntimeServices | Shared across DNS generations in the process. |
-| Log, totals and history epochs | Storage worker | Independent durable clear/reset boundaries. |
-| Sessions and management transport | Active | Process-owned; credential or transport-realm changes revoke the appropriate sessions. |
+| Saved configuration revision | Management Store and Manager | Increments on each committed save or rollback and rejects stale writes. |
+| DNS generation | Manager and Server | Listener, Resolver, and upstream lifecycle. Health reports carry this generation. |
+| Cache instance | Resolver cache generation | Replaced independently on cache behavior edits while older in-flight work keeps its instance. |
+| Cache epoch | Cache | Invalidation fences admission from older work within the same cache instance. |
+| Cache invalidation token | Cache | Opaque pair of cache instance identity and epoch so old tokens cannot clear a replacement instance. |
+| Policy generation | PolicyHandle and subscription service | Immutable snapshot pinned per request, keeping at most one previous generation alive. |
+| Metrics, log queue, SQLite, and health | RuntimeServices | Shared across DNS generations for the process lifetime. |
+| Log, totals, and history epochs | Storage worker | Independent durable clear and reset boundaries. |
+| Sessions and management transport | Active runtime | Process-owned. Credential or transport-realm changes revoke matching sessions. |
 
-SQLite has one worker that owns the WAL database. DNS producers enqueue bounded
-structured entries without waiting for disk or serialization. Status reads use
-cached storage observations. Per-request logs are opt-in and bounded separately
-from aggregate metrics.
+One dedicated worker owns the WAL SQLite database. DNS tasks enqueue bounded structured log entries without waiting on disk IO or serialization. Status endpoints read cached storage snapshots instead of querying disk on the hot path. Per-request query logs remain opt-in and budgeted separately from aggregate metrics.
 
-The subscription catalog is the durable selection authority. Validators bind
-the final URL, request representation and accepted content. The worker
-persists source objects before selecting them and never reconstructs a
-missing or corrupt catalog by scanning objects. An uncertain directory sync
-after a rename keeps both catalog versions and pauses collection until
-reconciliation. Background work rechecks the saved configuration, selected
-content, local rules and update freeze before publishing. Configuration apply
-persists its configuration before the policy swap, while background refresh
-commits catalog selection before publishing its aggregate.
+The filter subscription catalog is the durable selection authority. Validators bind the final URL, request representation, and accepted content. The worker persists source objects before selecting them and never rebuilds a missing or corrupt catalog by scanning object files. If a directory sync after a rename is uncertain, PariNS keeps both catalog versions and pauses garbage collection until reconciliation. Background refreshes recheck saved configuration, selected content, local rules, and update freeze state before publishing. Configuration apply persists configuration before swapping policy, while background refresh commits catalog selection before publishing the aggregate rule set.
 
-Management observation has no configuration or credential authority. Manager
-publishes committed lifecycle metadata and weak Resolver references to a short
-read lock; status, statistics and query-log reads do not acquire the configuration
-mutex. Metrics, health, listeners, cache and storage are read from their owners.
-Status combines these observations rather than promising one atomic snapshot of
-all counters. It cannot keep a stopped Resolver alive or authorize a mutation.
-`lifecycle_phase` distinguishes stable state from starting and stopping. Status
-readiness additionally requires a stable matching generation; runtime readiness
-and history retain their existing health owner. A generation mismatch means a
-handover, not proof that a task exited. One status render pins one cache instance.
+Management observation holds no configuration or credential authority. `Manager` publishes committed lifecycle metadata and weak `Resolver` references behind a short read lock so status, statistics, and query-log reads never block on the configuration mutex. Metrics, health, listeners, cache, and storage are queried from their respective owners. Status combines those reads without promising one global atomic counter snapshot, cannot keep a stopped `Resolver` alive, and cannot authorize mutations. `lifecycle_phase` separates stable running or stopped states from starting and stopping transitions. Status readiness also requires a stable matching generation, so a generation mismatch signals handover rather than a crashed task. Each status render pins one cache instance.
 
 ## Configuration transactions
 
-The console keeps one in-memory draft. Rust owns parsing, preview, validation and
-the persisted configuration. A save carries the saved revision. The existing
-mutation permit serializes accepted changes; accepted transactions outlive their
-initiating HTTP connection. Network uncertainty is confirmed through reads rather
-than replaying a mutation.
+The console holds one in-memory draft while Rust owns parsing, preview, validation, and persistence. Every save submits the saved revision for optimistic concurrency. One mutation permit serializes accepted changes, and accepted transactions outlive their originating HTTP connection. When a network error hides the response, the console reads server state to confirm what happened rather than replaying the write.
 
-The task takes a short Manager lock to copy preparation input, releases it while
-reading material and building the candidate, and reacquires it to commit. The
-mutation permit remains held throughout. Commit rechecks the saved revision and
-the live hot-update target; failed preparation publishes no candidate state.
+An accepted transaction acquires `Manager` briefly to copy preparation inputs, releases it while loading files and building the candidate, and reacquires it to commit. The mutation permit stays held across all three steps. Commit rechecks the saved revision and verifies that a hot-update target is still running. Failed preparation publishes no state.
 
 ```mermaid
 flowchart LR
@@ -133,92 +72,32 @@ flowchart LR
     Persist --> Publish[Publish committed state and lifecycle phase]
 ```
 
-`ChangeImpact` names updates-only, hot (with explicit cache replacement), and
-restart changes. Validation and application use the same source-document
-classification; a stopped or exited runtime cannot receive a hot change.
+`ChangeImpact` classifies every edit as updates-only, hot with optional cache replacement, or restart. Validation and apply share this exact classification, and a stopped or exited runtime cannot accept a hot update.
 
-Updates-only changes preserve a stopped or running DNS service. Supported cache,
-storage, statistics and filtering changes preserve listeners, replacing only the
-state whose behavior changed. Candidate material is prepared before stopping DNS.
-Changes requiring a restart then stop the old generation, bind every candidate
-listener, persist the configuration, and start the new generation. Failure attempts
-to restore the saved configuration. Startup and
-recovery may serve degraded while individual listeners retry; a newly applied
-candidate must bind every listener before persistence.
+Updates-only changes preserve both running and stopped DNS states. Supported cache, storage, statistics, and filtering edits keep listeners running and replace only changed components. Candidate inputs are prepared before stopping DNS. Restart changes stop the previous generation, bind every candidate listener, persist the new configuration, and start the new generation. On failure, PariNS attempts to restore the saved configuration. Startup and recovery may run degraded while individual listeners retry, whereas a newly applied configuration must bind every listener before persistence.
 
-Read-only observation remains available during preparation and persistence. Its
-configuration revision advances only after the transaction commits. Credentials,
-session checks and update freeze keep their existing owners. Session and saved
-configuration reads remain available during candidate preparation; persistence
-and runtime replacement remain serialized by Manager.
+Read-only observation, session validation, and saved-configuration reads stay responsive during preparation and persistence. The observed configuration revision advances only after commit. Credentials, session checks, and update freeze keep their existing owners, while persistence and runtime replacement stay serialized under `Manager`.
 
 ## Startup and terminal shutdown
 
-File mode loads TOML directly and owns its subscription scheduler. The managed
-entry point takes ownership of a bound socket without releasing its address,
-opens the private Store and RuntimeServices, and starts the
-saved DNS configuration; process-owned schedulers manage subscriptions, startup
-retry and software checks.
+File mode loads TOML directly and owns its own subscription scheduler. Managed mode takes ownership of an already bound management socket without releasing its port, opens the private `Store` and `RuntimeServices`, and launches the saved DNS configuration alongside process-owned subscription, startup-retry, and update-check schedulers.
 
-A clean cache snapshot is durably consumed before serving. Its contents are
-restored only when the configuration and policy fingerprint matches. Only the
-terminal shutdown owner may publish another clean snapshot, after DNS and
-background work are quiescent. Configuration apply and rollback do not save one.
-Cache save and storage drain run in parallel with separate bounded budgets. The
-runtime directory lock stays held until the storage worker and cache save finish.
+A clean cache snapshot is durably consumed before DNS starts serving and loads only if its configuration and policy fingerprint matches. Only the terminal shutdown owner writes a new clean snapshot after DNS and background tasks reach quiescence. Apply and rollback never write snapshots. Cache saving and storage draining run concurrently under separate time budgets, and the runtime directory lock stays held until both complete.
 
-During listener shutdown, only streams that received a complete DNS query
-can force a stop. This requires the end of the request stream for DoH and FIN
-for DoQ. Unfinished handshakes and incomplete queries are cancelled promptly.
-Peer close notification uses at most half the shutdown grace. Outside a
-generation stop, an adapter exit drains independently and its supervisor
-rebinds the affected listener while the shared resolver and upstream pool stay
-available.
+During listener shutdown, only streams carrying a complete DNS query can trigger a forced stop, meaning end-of-stream for DoH or FIN for DoQ. Incomplete queries and unfinished handshakes cancel immediately. Peer close notification uses at most half of `shutdown_grace_ms`. Outside a generation stop, an exiting listener drains independently while its supervisor rebinds it and the shared resolver and upstream pool stay online.
 
-TCP admission pauses briefly on descriptor or buffer exhaustion. An error
-limited to a pending connection leaves the listener available. QUIC
-admission sends a stateless Retry to an unvalidated address before taking
-a connection slot or a source budget.
+TCP admission pauses briefly on descriptor or buffer exhaustion, and errors on a single pending connection never stop the listener. QUIC admission replies to unvalidated client addresses with a stateless Retry before allocating a connection slot or source budget.
 
 ## Updates and security boundaries
 
-The authenticated management API applies Host/Origin checks and an HttpOnly Cookie
-plus an in-memory session binding. The browser never persists that binding,
-credentials or configuration drafts. Live-log sockets have their own admission,
-authentication, resource limits and shutdown owner.
+The management API enforces `Host` and `Origin` checks plus an `HttpOnly` session cookie paired with an in-memory session binding. The browser never persists that binding, credentials, or drafts. Live query-log WebSockets have their own admission limits, authentication handshake, and shutdown owner.
 
-The live log endpoint requires Origin and the session Cookie before upgrade.
-The first message supplies the in-memory binding. Failure to authenticate
-closes with 4401, session revocation or expiration closes with 4403, and idle
-timeout closes with 4408. The management shutdown drain closes sockets with
-1001. The storage worker owns polls, and each accepted subscription receives
-a `subscribed` acknowledgement before its entries. Independent `state`
-updates cannot acknowledge a change of subscription.
+`/api/query-log/live` checks `Origin` and the session cookie before upgrade, then expects the in-memory binding in the first message. Authentication failures close with `4401`, session revocation or expiry closes with `4403`, idle timeout closes with `4408`, and management shutdown closes with `1001`. The storage worker executes polls, and every accepted filter change emits a `subscribed` acknowledgement before streaming records. Spontaneous `state` updates never acknowledge a subscription change.
 
-Authentication attempt budgets use the socket peer, grouping IPv6 addresses
-by /64 and treating IPv4-mapped peers as IPv4. Password hashing has a
-separate global concurrency budget. A cancelled caller's blocking hash
-holds its permit until the computation finishes. Credential changes
-preserve the saved configuration revision and revoke sessions at commit.
+Sign-in attempt budgets key by socket peer, grouping IPv6 peers by `/64` and mapping IPv4-mapped peers to IPv4. Password hashing uses a separate global concurrency permit, and a cancelled caller's blocking hash keeps its permit until hashing completes. Credential changes leave the saved configuration revision unchanged and revoke all sessions on commit.
 
-Changing the management origin navigates to the new console document and revokes
-existing sessions. Same-site and cross-site entry permits only a top-level `GET /` navigation
-(`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`) after Host/Origin checks.
-API, asset and embedded requests require same-origin access. The new document
-loads its assets and signs in through same-origin requests.
+Changing the management origin navigates the browser to the new console document and revokes existing sessions. Same-site and cross-site requests may enter only through top-level `GET /` document navigation with `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document` after `Host` and `Origin` checks. API, asset, and embedded subresource requests require same-origin access.
 
-The application update coordinator persists intent and uses the existing mutation
-permit for the update freeze. The root updater accepts only fixed operations and
-fixed installation paths; its journal is the installed-identity authority. It
-does not own DNS, configuration or runtime databases and never executes a
-candidate as root. Changes to this helper contract require separate release and
-installation compatibility decisions.
+The update coordinator persists update intent and uses the mutation permit to hold the update freeze. The root updater accepts only fixed operations against fixed installation paths, and its journal is the installed-identity authority. It owns no DNS logic, configuration, or runtime databases, and never executes a candidate binary as root. Changing this helper contract requires explicit release and installer compatibility handling.
 
-A matching terminal fence and installed identity resolve outstanding commit
-intent. A Stage refusal is recorded under its operation ID and phase nonce,
-including refusals before an operation begins. This lets the application
-reconcile without replaying Stage. A matching Commit that fails a
-pre-installation check records failure before returning. Boot rollback
-publishes the restored launch for readiness verification. A
-`manual_required` operation remains open until a reinstallation proves
-readiness, and the journal keeps its terminal fences across registration.
+A matching terminal fence and installed identity resolve outstanding commit intent. Stage refusals record under their operation ID and phase nonce even before an operation begins, so the application reconciles without replaying Stage. A matching Commit that fails pre-installation checks records failure before returning. Boot rollback publishes the restored launch for readiness verification. A `manual_required` operation remains open until a full reinstallation proves readiness, and the journal retains its terminal fences across registration.

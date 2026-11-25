@@ -553,9 +553,10 @@ meter { width: 100%; }
 .settings-stack { display: grid; gap: 26px; }
 .row-disclosure { width: 100%; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; font-size: 15px; }
 .row-disclosure:hover { background: var(--hover); }
-.grouped > :first-child { border-top-left-radius: calc(var(--radius) - 1px); border-top-right-radius: calc(var(--radius) - 1px); }
-.grouped > :last-child, .grouped > :last-child > div, .grouped > :last-child > div > :last-child,
-.grouped > .row-disclosure[aria-expanded="false"]:nth-last-child(2) { border-bottom-left-radius: calc(var(--radius) - 1px); border-bottom-right-radius: calc(var(--radius) - 1px); }
+.grouped > :first-child, .grouped > .settings-expand:first-child > div, .grouped > .settings-expand:first-child > div > :first-child { border-top-left-radius: calc(var(--radius) - 1px); border-top-right-radius: calc(var(--radius) - 1px); }
+.grouped > :last-child, .grouped > .settings-expand:last-child > div, .grouped > .settings-expand:last-child > div > :last-child,
+.grouped > .row-disclosure[aria-expanded="false"]:nth-last-child(2),
+.grouped > .settings-expand:last-child > div > .row-disclosure[aria-expanded="false"]:nth-last-child(2) { border-bottom-left-radius: calc(var(--radius) - 1px); border-bottom-right-radius: calc(var(--radius) - 1px); }
 .row-disclosure .chevron { display: inline-flex; color: var(--faint); }
 .row-action { width: 100%; justify-content: center; border: 0; background: transparent; color: var(--link); font: inherit; font-size: 15px; cursor: pointer; }
 .row-action[data-destructive] { color: var(--destructive); }
